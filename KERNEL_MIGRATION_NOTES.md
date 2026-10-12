@@ -588,6 +588,18 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   说明:这条只能单测钉住——e2e 触发需要「提交恰好落在两次读之间」,不可确定性复现;e2e 侧只保证
   正常路径不受影响(全量 `-p acts --lib --tests` 绿)。
 
+- **动作 intent 自带动作载荷(再上一片登记项;本片)**:客户端动作的 durable intent 原先只是
+  `OperationKind::ApplyAction`(无载荷),于是崩溃/租约过期后由 recovery 驱那条 hop 时走
+  `effect_plan(None)` = **自动完成**,而不是客户端原本的动作(Fail/Abort/Skip/Submit/Cancel 的
+  「决定」本身会漂)。修法:deciding 那一笔除了建 op,还把动作与 inputs 写成私有事实
+  `__action@<op-sequence>`(JSON 文本:`{"kind":{"action":"fail","code":…,"message":…},"inputs":[["k","v"],…]}`);
+  hop 处理 `ApplyAction` 时按**自己的 sequence** 读它 → 走同一个 `effect_plan(Some(kind), inputs)`
+  (与客户端路径同一条 planner,含 Cancel/Back 的 `ReenterTask` 接线);读不到(rewind 留下的惰性
+  carrier)才回落自动完成。key 带 op sequence:同一执行上后来的动作不会被当成这条 op 的。
+  实测:`a_recovered_action_intent_applies_the_action_not_a_completion` —— 按 deciding 的形状手工提交
+  Fail intent,deciding 调用不跑、只靠 `recover` 驱 hop:s1 → Failed、`error.code = E9`、s2 被错误
+  行走 Skip;同一测试后半段钉住**回落**(无 fact 的裸 `ApplyAction` op 仍走自动完成、run 正常结算)。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -597,11 +609,8 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. (登记,未排期)**动作 intent op 不携带动作载荷**:客户端动作的 durable intent 是
-   `OperationKind::ApplyAction`,不带动作类型与 inputs,于是崩溃/租约过期后由 recovery 驱那条 hop
-   时走的是 `effect_plan(None)` = **自动完成**,而不是客户端原本的动作(Fail/Abort/Skip/Submit/
-   Cancel 的「决定」本身没有 durable 载荷)。Cancel/Back 的重入已由同笔提交的 `ReenterTask` 兜住,
-   但决定本身仍会漂。修法:把动作类型 + inputs 编进操作(需要 codec 载荷,不是单纯追加 tag)。
+(空)`load()` 竞态(上一片登记)与动作 intent 载荷(再上一片登记)均已收口;新发现按上面「已完成」
+的惯例登记在前,再排期。
 
 ## 语义结论(已核实,勿再猜测)
 

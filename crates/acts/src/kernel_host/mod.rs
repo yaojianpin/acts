@@ -90,6 +90,76 @@ enum ActionResume {
     Retry,
 }
 
+/// The private variable a durable action intent pins its decision in, keyed by
+/// the intent operation's sequence so a later action on the same execution
+/// cannot be read in its place. A `__` fact: out of the expression space and
+/// the read model.
+fn action_fact_var(sequence: u64) -> String {
+    format!("__action@{sequence}")
+}
+
+/// The action a durable intent carries, as the JSON text its hop replays.
+fn action_fact(action: &crate::kernel::ActionKind, inputs: &[(String, String)]) -> String {
+    use crate::kernel::ActionKind as A;
+    let kind = match action {
+        A::Complete => serde_json::json!({ "action": "complete" }),
+        A::Submit => serde_json::json!({ "action": "submit" }),
+        A::Skip => serde_json::json!({ "action": "skip" }),
+        A::Cancel => serde_json::json!({ "action": "cancel" }),
+        A::Abort => serde_json::json!({ "action": "abort" }),
+        A::Back => serde_json::json!({ "action": "back" }),
+        A::Fail { code, message } => serde_json::json!({
+            "action": "fail",
+            "code": code,
+            "message": message,
+        }),
+    };
+    serde_json::json!({
+        "kind": kind,
+        "inputs": inputs
+            .iter()
+            .map(|(name, value)| serde_json::json!([name, value]))
+            .collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// Decode a durable action fact back into the decision it records.
+fn decode_action_fact(text: &str) -> Result<(crate::kernel::ActionKind, Vec<(String, String)>)> {
+    let fact: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| runtime(format!("corrupt action fact: {error}")))?;
+    let kind = &fact["kind"];
+    let action = match kind["action"].as_str().unwrap_or_default() {
+        "complete" => crate::kernel::ActionKind::Complete,
+        "submit" => crate::kernel::ActionKind::Submit,
+        "skip" => crate::kernel::ActionKind::Skip,
+        "cancel" => crate::kernel::ActionKind::Cancel,
+        "abort" => crate::kernel::ActionKind::Abort,
+        "back" => crate::kernel::ActionKind::Back,
+        "fail" => crate::kernel::ActionKind::Fail {
+            code: kind["code"].as_str().unwrap_or_default().to_string(),
+            message: kind["message"].as_str().unwrap_or_default().to_string(),
+        },
+        other => return Err(runtime(format!("corrupt action fact: action '{other}'"))),
+    };
+    let inputs = fact["inputs"]
+        .as_array()
+        .map(|pairs| {
+            pairs
+                .iter()
+                .filter_map(|pair| {
+                    let pair = pair.as_array()?;
+                    Some((
+                        pair.first()?.as_str()?.to_string(),
+                        pair.get(1)?.as_str()?.to_string(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok((action, inputs))
+}
+
 fn runtime(error: impl std::fmt::Display) -> ActError {
     ActError::Runtime(error.to_string())
 }
@@ -1279,6 +1349,38 @@ impl KernelHost {
         Ok(())
     }
 
+    /// The durable intent of one client action: the `ApplyAction` operation
+    /// that carries it, plus the action itself as the private fact its hop
+    /// replays. Without that fact a recovery driving the operation (a crash,
+    /// an expired lease) would plan the bare hop's auto completion instead of
+    /// the decision the client made.
+    fn action_intent(
+        process_id: &str,
+        execution: &crate::kernel::ExecutionId,
+        operation: &OperationId,
+        action: &crate::kernel::ActionKind,
+        inputs: &[(String, String)],
+        expected: crate::kernel::AggregateVersion,
+    ) -> TransitionPlan {
+        TransitionPlan {
+            process_id: process_id.into(),
+            expected,
+            execution_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: vec![VariableWrite {
+                scope: execution.clone(),
+                name: action_fact_var(operation.sequence),
+                value: action_fact(action, inputs),
+            }],
+            source_operation: None,
+            operations: vec![OperationIntent {
+                id: operation.clone(),
+                kind: OperationKind::ApplyAction,
+            }],
+            outbox: Vec::new(),
+        }
+    }
+
     /// Whether a retried action's pinned intent already carries its commit —
     /// the action applied, so the retry reports success — and the release of
     /// an intent whose effect never committed (the attempt lost its
@@ -1437,20 +1539,17 @@ impl KernelHost {
             )));
         }
 
-        // Durable intent.
-        let intent = TransitionPlan {
-            process_id: process_id.into(),
-            expected: snapshot.version.clone(),
-            execution_creates: Vec::new(),
-            state_changes: Vec::new(),
-            variable_writes: Vec::new(),
-            source_operation: None,
-            operations: vec![OperationIntent {
-                id: operation_id.clone(),
-                kind: OperationKind::ApplyAction,
-            }],
-            outbox: Vec::new(),
-        };
+        // Durable intent: the operation that carries the action *and* the
+        // action itself, as a private fact its hop replays (see
+        // `action_intent`).
+        let intent = Self::action_intent(
+            process_id,
+            &execution_id,
+            &operation_id,
+            &command.action,
+            &command.inputs,
+            snapshot.version.clone(),
+        );
         match self
             .aggregates
             .commit_transition(&intent)
@@ -1712,6 +1811,26 @@ impl KernelHost {
                         "completed",
                         "task.completed",
                     )?
+                } else if let Some(fact) = snapshot
+                    .variables
+                    .get(&(execution_id.clone(), action_fact_var(id.sequence)))
+                {
+                    // The operation carries a client decision (a durable intent
+                    // whose deciding call never applied it — a crash, an
+                    // expired lease): replay *that* action, exactly like the
+                    // deciding call would have. Its `effect_plan` arm is the
+                    // same one the client path uses.
+                    let (action, inputs) = decode_action_fact(fact)?;
+                    self.effect_plan(
+                        &snapshot,
+                        id,
+                        &execution_id,
+                        &execution,
+                        &commit_claim,
+                        Some(action),
+                        inputs,
+                    )
+                    .await?
                 } else {
                     // A container fans out instead of completing; a plain task
                     // completes and propagates.
@@ -8058,6 +8177,136 @@ mod tests {
                 id.generation == 0 && id.task_id != crate::utils::consts::TASK_ROOT_TID
             })
             .all(|(_, execution)| execution.state.is_terminal())
+    }
+
+    /// A client action's intent is durable *as the action*: when the deciding
+    /// call never applies it (a crash, an expired lease), the recovery-driven
+    /// hop replays the client's decision — not the auto completion a bare
+    /// `ApplyAction` hop would plan.
+    #[tokio::test]
+    async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
+        const PID: &str = "p-recovered-action";
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-recovered-action")
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act1"),
+                )
+            })
+            .with_step(|step| step.with_id("s2"));
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        // The client's intent, committed exactly as the deciding call does it —
+        // and then that call never runs (the hop below is all that is left).
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        let execution = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        let operation = OperationId {
+            process_id: PID.into(),
+            task_id: "s1".into(),
+            generation: 0,
+            sequence: snapshot
+                .operations
+                .keys()
+                .filter(|id| id.task_id == "s1" && id.generation == 0)
+                .map(|id| id.sequence)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        };
+        let intent = KernelHost::action_intent(
+            PID,
+            &execution,
+            &operation,
+            &ActionKind::Fail {
+                code: "E9".into(),
+                message: "recovered".into(),
+            },
+            &[],
+            snapshot.version.clone(),
+        );
+        host.aggregates.commit_transition(&intent).await.unwrap();
+        assert_eq!(
+            state_of(&host.snapshot(PID).await.unwrap().unwrap(), "s1"),
+            crate::kernel::ExecutionState::Waiting,
+            "the intent alone decides nothing"
+        );
+
+        host.recover(SystemClock.now_ms()).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Failed,
+            "the hop applied the client's failure, not a completion"
+        );
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(execution, "error.code".to_string()))
+                .map(String::as_str),
+            Some("E9"),
+            "the failure carries the client's code"
+        );
+        assert_eq!(
+            state_of(&snapshot, "s2"),
+            crate::kernel::ExecutionState::Skipped,
+            "the downstream is skipped by the error walk"
+        );
+
+        // The fallback stays: an `ApplyAction` operation with no action fact
+        // (the inert carrier a rewind leaves behind) is the bare hop — the
+        // auto completion.
+        let (bare_host, mut bare_wake) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("p-bare-action", &workflow, &|_| None).unwrap();
+        bare_host.start_process(&spec).await.unwrap();
+        bare_host
+            .run_until_quiescent(&mut bare_wake, 200)
+            .await
+            .unwrap();
+        let snapshot = bare_host.snapshot("p-bare-action").await.unwrap().unwrap();
+        let bare = TransitionPlan {
+            process_id: "p-bare-action".into(),
+            expected: snapshot.version.clone(),
+            execution_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: vec![OperationIntent {
+                id: OperationId {
+                    process_id: "p-bare-action".into(),
+                    task_id: "s1".into(),
+                    generation: 0,
+                    sequence: snapshot
+                        .operations
+                        .keys()
+                        .filter(|id| id.task_id == "s1" && id.generation == 0)
+                        .map(|id| id.sequence)
+                        .max()
+                        .unwrap_or(0)
+                        + 1,
+                },
+                kind: OperationKind::ApplyAction,
+            }],
+            outbox: Vec::new(),
+        };
+        bare_host.aggregates.commit_transition(&bare).await.unwrap();
+        bare_host.recover(SystemClock.now_ms()).await.unwrap();
+        bare_host
+            .run_until_quiescent(&mut bare_wake, 300)
+            .await
+            .unwrap();
+        let snapshot = bare_host.snapshot("p-bare-action").await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Completed,
+            "a fact-less operation keeps the bare hop"
+        );
+        assert!(bare_host.process_completed("p-bare-action").await.unwrap());
     }
 
     fn executions_of(snapshot: &Snapshot, task: &str) -> Vec<u64> {
