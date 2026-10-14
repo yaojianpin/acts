@@ -9,7 +9,7 @@ use crate::{
 /// The lifecycle row of one task instance: identity, node link graph, state
 /// and timing. Scope variables live in the paired [`TaskVars`] row so state
 /// transitions never rewrite variable bytes.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct Task {
     pub id: String,
     pub pid: String,
@@ -74,7 +74,7 @@ impl Task {
 /// task's own variable scope, `sealed` the resolver-written sealed scope.
 /// Rows are written when a scope's vars actually change and are dropped with
 /// the process.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct TaskVars {
     pub id: String,
     pub pid: String,

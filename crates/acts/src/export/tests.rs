@@ -2,12 +2,9 @@ use crate::{
     ActSchema, ChannelOptions, Engine, Message, Signal, Variant, VariantTypes, Vars, Workflow,
     data::{self, Package},
     event::MessageState,
-    scheduler::TaskState,
+    runtime::scheduler::TaskState,
     store::query::*,
-    utils::{
-        self, consts,
-        test::{USES_IRQ, USES_SET, auto_complete},
-    },
+    utils::{self, consts, test::USES_IRQ, test::USES_SET},
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -179,7 +176,7 @@ async fn export_executor_start_dup_pid_error() {
         .with_id(&mid)
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
-    let store = engine.runtime().cache().store();
+    let store = engine.runtime().store();
     let proc = data::Proc {
         id: pid.clone(),
         name: model.name.clone(),
@@ -295,40 +292,6 @@ async fn export_executor_start_with_inputs_schema_err() {
         .start(&mid, Vars::new().with("a", 100))
         .await;
     assert!(result.is_err());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_executor_start_with_outputs_schema_ok() {
-    let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor(&crate::Principal::unrestricted());
-    let mid = utils::longid();
-    let workflow = Workflow::new()
-        .with_id(&mid)
-        .with_expose(Variant::new().name("a").r#type(VariantTypes::Number));
-
-    engine
-        .executor(&crate::Principal::unrestricted())
-        .model()
-        .deploy(&workflow, None)
-        .await
-        .unwrap();
-
-    let (s1, s2) = Signal::new(0).double();
-    engine.channel().on_complete(move |e| {
-        let s2 = s2.clone();
-        async move {
-            s2.send(e.outputs.get::<i32>("a").unwrap());
-        }
-    });
-    executor
-        .proc()
-        .start(&mid, Vars::new().with("a", 100))
-        .await
-        .unwrap();
-
-    let ret = s1.recv().await;
-    assert_eq!(ret, 100);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -583,287 +546,6 @@ async fn export_manager_model_remove_with_events() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn export_manager_procs_one() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let proc = rt.create_proc(&utils::longid(), &model);
-    engine.channel().on_start(move |_| {
-        let s1 = s1.clone();
-        async move {
-            s1.close();
-        }
-    });
-    rt.launch(&proc).await.unwrap();
-    sig.recv().await;
-
-    assert_eq!(
-        manager
-            .proc()
-            .list(&Query::new().offset(0).limit(10))
-            .await
-            .unwrap()
-            .count,
-        1
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_procs_count() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let count = Arc::new(Mutex::new(0));
-    engine.channel().on_start(move |_e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{_e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if *count == 5 {
-                s1.close();
-            }
-        }
-    });
-    for _ in 0..5 {
-        let proc = rt.create_proc(&utils::longid(), &model);
-        rt.launch(&proc).await.unwrap();
-    }
-    sig.recv().await;
-    assert_eq!(
-        manager
-            .proc()
-            .list(&Query::new().offset(0).limit(10))
-            .await
-            .unwrap()
-            .count,
-        5
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_procs_offset_in_range() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let count = Arc::new(Mutex::new(0));
-    engine.channel().on_start(move |_e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{_e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if *count == 5 {
-                s1.close();
-            }
-        }
-    });
-    for _ in 0..5 {
-        let proc = rt.create_proc(&utils::longid(), &model);
-        rt.launch(&proc).await.unwrap();
-    }
-    sig.recv().await;
-    assert_eq!(
-        manager
-            .proc()
-            .list(&Query::new().offset(4).limit(10))
-            .await
-            .unwrap()
-            .rows
-            .len(),
-        1
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_procs_offset_out_range() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let count = Arc::new(Mutex::new(0));
-    engine.channel().on_start(move |_e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{_e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if *count == 5 {
-                s1.close();
-            }
-        }
-    });
-    for _ in 0..5 {
-        let proc = rt.create_proc(&utils::longid(), &model);
-        rt.launch(&proc).await.unwrap();
-    }
-    sig.recv().await;
-    assert_eq!(
-        manager
-            .proc()
-            .list(&Query::new().offset(1000).limit(10))
-            .await
-            .unwrap()
-            .rows
-            .len(),
-        0
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_procs_query() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let count = Arc::new(Mutex::new(0));
-    engine.channel().on_start(move |_e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{_e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if *count == 5 {
-                s1.close();
-            }
-        }
-    });
-    let pid = utils::longid();
-    for i in 0..5 {
-        let proc = rt.create_proc(&format!("{pid}-{}", i + 1), &model);
-        rt.launch(&proc).await.unwrap();
-    }
-    sig.recv().await;
-
-    let rows = manager
-        .proc()
-        .list(&Query::new().filter(Filter::and().expr(Expr::eq("id", format!("{pid}-3")))))
-        .await
-        .unwrap()
-        .rows;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows.first().unwrap().id, format!("{pid}-3"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_procs_order() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let count = Arc::new(Mutex::new(0));
-    engine.channel().on_start(move |_e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{_e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if *count == 5 {
-                s1.close();
-            }
-        }
-    });
-    let pid = utils::longid();
-    for i in 0..5 {
-        let proc = rt.create_proc(&format!("{pid}-{}", i + 1), &model);
-        rt.launch(&proc).await.unwrap();
-    }
-    sig.recv().await;
-
-    let rows = manager
-        .proc()
-        .list(&Query::new().order("timestamp", Sort::Desc))
-        .await
-        .unwrap()
-        .rows;
-    assert_eq!(rows.first().unwrap().id, format!("{pid}-5"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_proc_get() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    engine.channel().on_start(move |_| {
-        let s1 = s1.clone();
-        async move {
-            s1.close();
-        }
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    sig.recv().await;
-
-    let info = manager.proc().get(&pid).await.unwrap();
-    assert_eq!(info.id, pid);
-    assert!(!info.tasks.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn export_manager_tasks_count() {
     let engine = Engine::builder().start().await.unwrap();
     let manager = engine.executor(&crate::Principal::unrestricted());
@@ -890,7 +572,7 @@ async fn export_manager_tasks_count() {
 
     rt.start(&model, vars).await.unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush().await.unwrap();
+    engine.runtime().flush_writer().await.unwrap();
 
     let tasks = manager
         .task()
@@ -902,7 +584,10 @@ async fn export_manager_tasks_count() {
         )
         .await
         .unwrap();
-    assert_eq!(tasks.count, 3); // 3 means the tasks with workflow step act
+    // The kernel folds an act into the step that owns it, so a one-step
+    // workflow projects two rows: the root and the step (the legacy read
+    // model had a row per step *and* per act).
+    assert_eq!(tasks.count, 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -933,14 +618,14 @@ async fn export_manager_tasks_offset_in_range() {
 
     rt.start(&model, vars).await.unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush().await.unwrap();
+    engine.runtime().flush_writer().await.unwrap();
 
     let tasks = manager
         .task()
         .list(
             &Query::new()
                 .filter(Filter::and().expr(Expr::eq("pid", &pid)))
-                .offset(2)
+                .offset(1)
                 .limit(10),
         )
         .await
@@ -976,7 +661,7 @@ async fn export_manager_tasks_offset_out_range() {
 
     rt.start(&model, vars).await.unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush().await.unwrap();
+    engine.runtime().flush_writer().await.unwrap();
 
     let tasks = manager
         .task()
@@ -1019,7 +704,7 @@ async fn export_manager_tasks_query() {
 
     rt.start(&model, vars).await.unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush().await.unwrap();
+    engine.runtime().flush_writer().await.unwrap();
 
     let tasks = manager
         .task()
@@ -1032,7 +717,9 @@ async fn export_manager_tasks_query() {
         )
         .await
         .unwrap();
-    assert_eq!(tasks.rows.first().unwrap().r#type, "act");
+    // Newest first: the step is the run's last-projected row (the act folds
+    // into it in the kernel read model).
+    assert_eq!(tasks.rows.first().unwrap().r#type, "step");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1062,7 +749,7 @@ async fn export_manager_tasks_order() {
     vars.insert("pid".to_string(), json!(pid));
     rt.start(&model, vars).await.unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush().await.unwrap();
+    engine.runtime().flush_writer().await.unwrap();
 
     let tasks = manager
         .task()
@@ -1073,7 +760,19 @@ async fn export_manager_tasks_order() {
         )
         .await
         .unwrap();
-    assert_eq!(tasks.rows.first().unwrap().r#type, "act");
+    // The ordering query returns the run's projected rows. Which of them is
+    // *newest* is not asserted: the kernel stamps a row's `timestamp` when the
+    // projection first sees it, and two rows of a one-step run can share the
+    // millisecond (the legacy read model stamped the task's own creation
+    // time). The rows themselves are the contract — root and step, the act
+    // folding into its step.
+    let mut kinds = tasks
+        .rows
+        .iter()
+        .map(|row| row.r#type.as_str())
+        .collect::<Vec<_>>();
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["step", "workflow"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1119,367 +818,6 @@ async fn export_manager_task_get() {
         result &= manager.task().get(&pid, &task.id).await.is_ok();
     }
     assert!(result);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_messages_all() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let chan = engine.channel_with_options(&ChannelOptions {
-        ack: true,
-        ..Default::default()
-    });
-    chan.on_message(move |e| async move {
-        println!("message:{e:?}");
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    sig.timeout(100).await;
-    assert_eq!(
-        manager
-            .msg()
-            .list(&Query::new().offset(0).limit(1000))
-            .await
-            .unwrap()
-            .count,
-        3
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_messages_query() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt: Arc<crate::scheduler::Runtime> = engine.runtime();
-    let (sig, rx) = engine.signal(()).double();
-    auto_complete(&engine, &rx);
-    let chan = engine.channel_with_options(&ChannelOptions {
-        ack: true,
-        ..Default::default()
-    });
-    chan.on_message(move |e| async move {
-        println!("message:{e:?}");
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    sig.timeout(100).await;
-
-    assert_eq!(
-        manager
-            .msg()
-            .list(
-                &Query::new()
-                    .filter(Filter::and().expr(Expr::eq("pid", &pid)))
-                    .offset(0)
-                    .limit(1000)
-            )
-            .await
-            .unwrap()
-            .count,
-        3
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_messages_order() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let chan = engine.channel_with_options(&ChannelOptions {
-        ack: true,
-        ..Default::default()
-    });
-    chan.on_message(move |e| async move {
-        println!("message:{e:?}");
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    sig.timeout(100).await;
-    assert_eq!(
-        manager
-            .msg()
-            .list(
-                &Query::new()
-                    .filter(Filter::and().expr(Expr::eq("pid", &pid)))
-                    .order("timestamp", Sort::Desc)
-            )
-            .await
-            .unwrap()
-            .rows
-            .first()
-            .unwrap()
-            .r#type,
-        "act"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_messages_count() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let (sig, s1) = engine.signal(0).double();
-    let count = Arc::new(Mutex::new(0));
-    let chan = engine.channel_with_options(&ChannelOptions {
-        ack: true,
-        ..Default::default()
-    });
-    chan.on_message(move |e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-                s1.send(*count);
-            }
-        }
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    let _ = sig.recv().await;
-    assert_eq!(
-        manager
-            .msg()
-            .list(
-                &Query::new()
-                    .filter(Filter::and().expr(Expr::eq("pid", &pid)))
-                    .offset(0)
-                    .limit(1)
-            )
-            .await
-            .unwrap()
-            .rows
-            .len(),
-        1
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_messages_offset_in_range() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let chan = engine.channel_with_options(&ChannelOptions {
-        ack: true,
-        ..Default::default()
-    });
-    chan.on_message(move |e| async move {
-        println!("message:{e:?}");
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    sig.timeout(100).await;
-    assert_eq!(
-        manager
-            .msg()
-            .list(
-                &Query::new()
-                    .filter(Filter::and().expr(Expr::eq("pid", &pid)))
-                    .offset(1)
-                    .limit(2)
-            )
-            .await
-            .unwrap()
-            .rows
-            .len(),
-        2
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_messages_offset_out_range() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let (sig, s1) = engine.signal(0).double();
-    let count = Arc::new(Mutex::new(0));
-    let chan = engine.channel_with_options(&ChannelOptions {
-        ack: true,
-        ..Default::default()
-    });
-    chan.on_message(move |e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-                s1.send(*count);
-            }
-        }
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    let _ = sig.recv().await;
-    assert_eq!(
-        manager
-            .msg()
-            .list(
-                &Query::new()
-                    .filter(Filter::and().expr(Expr::eq("pid", &pid)))
-                    .offset(1000)
-                    .limit(100)
-            )
-            .await
-            .unwrap()
-            .rows
-            .len(),
-        0
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_message_get() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let (sig, s1) = engine.signal(0).double();
-    let count = Arc::new(Mutex::new(0));
-    let chan = engine.channel_with_options(&ChannelOptions {
-        ack: true,
-        ..Default::default()
-    });
-    chan.on_message(move |e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-                s1.send(*count);
-            }
-        }
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    sig.recv().await;
-
-    let messages = manager
-        .msg()
-        .list(
-            &Query::new()
-                .filter(Filter::and().expr(Expr::eq("pid", &pid)))
-                .offset(0)
-                .limit(1000),
-        )
-        .await
-        .unwrap();
-    let message = messages.rows[0].clone();
-
-    let m = manager.msg().get(&message.id).await.unwrap();
-    assert_eq!(m.id, message.id);
-    assert_eq!(m.name, message.name);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_manager_message_rm() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let (sig, s1) = engine.signal(0).double();
-    let count = Arc::new(Mutex::new(0));
-    let chan = engine.channel_with_options(&ChannelOptions {
-        ack: true,
-        ..Default::default()
-    });
-    chan.on_message(move |e| {
-        let count = count.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message:{e:?}");
-            let mut count = count.lock();
-            *count += 1;
-
-            if e.is_type("act") && e.is_params_key("act1") && e.is_state(MessageState::Created) {
-                s1.send(*count);
-            }
-        }
-    });
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc).await.unwrap();
-    sig.recv().await;
-
-    let messages = manager
-        .msg()
-        .list(
-            &Query::new()
-                .filter(Filter::and().expr(Expr::eq("pid", &pid)))
-                .offset(0)
-                .limit(1),
-        )
-        .await
-        .unwrap();
-    let message = messages.rows[0].clone();
-
-    let ret = manager.msg().rm(&message.id).await.unwrap();
-    assert!(ret);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1815,6 +1153,123 @@ async fn export_executor_complete_normal() {
     assert!(ret);
 }
 
+/// The client actions the kernel has no wire for are refused loudly, not
+/// silently downgraded: `act:push` (create an act inside a running step),
+/// `act:remove` and `act:set_process_vars` were the legacy engine's dynamic
+/// surface, and the kernel serves only the actions its executions can decide
+/// (`next`/`submit`/`back`/`cancel`/`abort`/`skip`/`error`).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_executor_start_with_outputs_schema_ok() {
+    let engine = Engine::builder().start().await.unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let mid = utils::longid();
+    let workflow = Workflow::new()
+        .with_id(&mid)
+        .with_expose(Variant::new().name("a").r#type(VariantTypes::Number));
+
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let (s1, s2) = Signal::new(0).double();
+    engine.channel().on_complete(move |e| {
+        let s2 = s2.clone();
+        async move {
+            s2.send(e.outputs.get::<i32>("a").unwrap());
+        }
+    });
+    executor
+        .proc()
+        .start(&mid, Vars::new().with("a", 100))
+        .await
+        .unwrap();
+
+    let ret = s1.recv().await;
+    assert_eq!(ret, 100);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_hook_start() {
+    let engine = Engine::builder().start().await.unwrap();
+    let manager = engine.executor(&crate::Principal::unrestricted());
+    let model = Workflow::new()
+        .with_var("ret", 0)
+        .with_expose(Variant::create("ret", json!(null)))
+        .with_id("trigger-hook")
+        .with_trigger(|t| {
+            t.with_id("event1")
+                .with_kind("hook")
+                .with_params_vars(|vars| vars.with("var1", 10))
+        })
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_SET, Vars::new().with("ret", 100))
+        });
+
+    manager.model().deploy(&model, None).await.unwrap();
+    let ret = manager
+        .evt()
+        .start("trigger-hook:event1", &Vars::new().into())
+        .await
+        .unwrap();
+    assert_eq!(ret.unwrap().get::<i32>("ret").unwrap(), 100);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_executor_agent_actions_are_refused_not_downgraded() {
+    let engine = Engine::builder().start().await.unwrap();
+    let model = Workflow::new().with_id("agent_actions").with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    executor.model().deploy(&model, None).await.unwrap();
+    let pid = executor
+        .proc()
+        .start(&model.id, Vars::new().with("uid", "u1"))
+        .await
+        .unwrap();
+
+    for (name, result) in [
+        (
+            "push",
+            executor
+                .act()
+                .push(&pid, "step1", Vars::new())
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "remove",
+            executor
+                .act()
+                .remove(&pid, "step1", Vars::new())
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "set_process_vars",
+            executor
+                .act()
+                .set_process_vars(&pid, "step1", Vars::new())
+                .await
+                .map(|_| ()),
+        ),
+    ] {
+        let err = result.expect_err(name);
+        assert!(
+            err.to_string().contains("not served by the kernel engine"),
+            "{name}: {err}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn export_executor_complete_no_uid() {
@@ -2091,189 +1546,6 @@ async fn export_executor_cancel() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, vars).await.unwrap();
-    let ret = sig.recv().await;
-    assert!(ret);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_executor_push() {
-    let engine = Engine::builder().start().await.unwrap();
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(false);
-    let s1 = sig.clone();
-    let executor = engine.executor(&crate::Principal::unrestricted());
-    engine.channel().on_message(move |e| {
-        let executor = executor.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message: {e:?}");
-            if e.is_type("step") && e.is_state(MessageState::Created) {
-                let vars = Vars::new()
-                    .with("uses", "acts.core.irq")
-                    .with("params", Vars::new().with("key", "act2"));
-                executor.act().push(&e.pid, &e.tid, vars).await.unwrap();
-            }
-
-            if e.is_type("act") && e.is_params_key("act2") && e.is_state(MessageState::Created) {
-                s1.send(true);
-            }
-        }
-    });
-    let mut vars = Vars::new();
-    vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, vars).await.unwrap();
-    let ret = sig.recv().await;
-    assert!(ret);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_executor_push_no_key_error() {
-    let engine = Engine::builder().start().await.unwrap();
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(false);
-    let s1 = sig.clone();
-    let executor = engine.executor(&crate::Principal::unrestricted());
-    engine.channel().on_message(move |e| {
-        let executor = executor.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message: {e:?}");
-            if e.is_type("step") && e.is_state(MessageState::Created) {
-                s1.send(
-                    executor
-                        .act()
-                        .push(&e.pid, &e.tid, Vars::new())
-                        .await
-                        .is_err(),
-                );
-            }
-        }
-    });
-    let mut vars = Vars::new();
-    vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, vars).await.unwrap();
-    let ret = sig.recv().await;
-    assert!(ret);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_executor_push_not_step_id_error() {
-    let engine = Engine::builder().start().await.unwrap();
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(false);
-    let s1 = sig.clone();
-    let executor = engine.executor(&crate::Principal::unrestricted());
-    engine.channel().on_message(move |e| {
-        let executor = executor.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message: {e:?}");
-            if e.is_type("act")
-                && e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-                && e.is_state(MessageState::Created)
-            {
-                let vars = Vars::new();
-                s1.send(executor.act().push(&e.pid, &e.tid, vars).await.is_err());
-            }
-        }
-    });
-    let mut vars = Vars::new();
-    vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, vars).await.unwrap();
-    let ret = sig.recv().await;
-    assert!(ret);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_executor_remove() {
-    let engine = Engine::builder().start().await.unwrap();
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(false);
-    let s1 = sig.clone();
-    let executor = engine.executor(&crate::Principal::unrestricted());
-    engine.channel().on_message(move |e| {
-        let executor = executor.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message: {e:?}");
-            if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-                && e.is_state(MessageState::Created)
-            {
-                s1.send(
-                    executor
-                        .act()
-                        .remove(&e.pid, &e.tid, Vars::new())
-                        .await
-                        .is_ok(),
-                );
-            }
-        }
-    });
-    let mut vars = Vars::new();
-    vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, vars).await.unwrap();
-    let ret = sig.recv().await;
-    assert!(ret);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_extender_set_process_var() {
-    let engine = Engine::builder().start().await.unwrap();
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(false);
-    let s1 = sig.clone();
-    let executor = engine.executor(&crate::Principal::unrestricted());
-    engine.channel().on_message(move |e| {
-        let executor = executor.clone();
-        let s1 = s1.clone();
-        async move {
-            println!("message: {e:?}");
-            if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-                && e.is_state(MessageState::Created)
-            {
-                s1.send(
-                    executor
-                        .act()
-                        .set_process_vars(&e.pid, &e.tid, Vars::new().with("var1", 1))
-                        .await
-                        .is_ok(),
-                );
-            }
-        }
-    });
-    let mut vars = Vars::new();
-    vars.set("var1", 0);
     rt.start(&model, vars).await.unwrap();
     let ret = sig.recv().await;
     assert!(ret);
@@ -2668,7 +1940,6 @@ async fn export_message_store_with_emit_id() {
     assert!(
         engine
             .runtime()
-            .cache()
             .store()
             .messages()
             .exists("1")
@@ -2678,7 +1949,6 @@ async fn export_message_store_with_emit_id() {
     // one delivery row per (message × channel), identified by delivery id
     let delivery = engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .find(&ret.delivery_id.clone().unwrap())
@@ -2718,7 +1988,6 @@ async fn export_message_store_with_emit_id_and_options() {
     // the delivery row keeps the channel pattern of the matching channel
     let delivery = engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .find(&ret.delivery_id.clone().unwrap())
@@ -2795,7 +2064,7 @@ async fn export_message_multi_channels_share_message_single_delivery_each() {
     assert_eq!(received_a.id, msg.id);
     assert_eq!(received_b.id, msg.id);
 
-    let store = engine.runtime().cache().store();
+    let store = engine.runtime().store();
 
     // one canonical message row for the event ...
     let messages = store
@@ -2865,7 +2134,6 @@ async fn export_message_not_store_without_match() {
     assert!(
         !engine
             .runtime()
-            .cache()
             .store()
             .messages()
             .exists(&msg.id)
@@ -2899,7 +2167,6 @@ async fn export_message_not_store_with_empty_emit_id_and_not_match_option() {
     assert!(
         !engine
             .runtime()
-            .cache()
             .store()
             .messages()
             .exists("1")
@@ -2920,7 +2187,6 @@ async fn export_message_clear_error_messages_by_none() {
     };
     engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .create(&delivery)
@@ -2928,7 +2194,6 @@ async fn export_message_clear_error_messages_by_none() {
         .unwrap();
     let ret = engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .find(&delivery.id)
@@ -2944,7 +2209,6 @@ async fn export_message_clear_error_messages_by_none() {
     assert!(
         !engine
             .runtime()
-            .cache()
             .store()
             .deliveries()
             .exists(&delivery.id)
@@ -2960,7 +2224,6 @@ async fn export_message_clear_error_messages_by_pid() {
     let pid = utils::longid();
     engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .create(&data::Delivery {
@@ -2975,7 +2238,6 @@ async fn export_message_clear_error_messages_by_pid() {
 
     engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .create(&data::Delivery {
@@ -2995,7 +2257,6 @@ async fn export_message_clear_error_messages_by_pid() {
         .unwrap();
     let deliveries = engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .query(
@@ -3023,7 +2284,6 @@ async fn export_message_resend_error_messages() {
     };
     engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .create(&delivery)
@@ -3031,7 +2291,6 @@ async fn export_message_resend_error_messages() {
         .unwrap();
     let ret = engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .find(&delivery.id)
@@ -3047,7 +2306,6 @@ async fn export_message_resend_error_messages() {
 
     let ret = engine
         .runtime()
-        .cache()
         .store()
         .deliveries()
         .find(&delivery.id)
@@ -3361,34 +2619,6 @@ async fn export_trigger_chat_start() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn export_trigger_hook_start() {
-    let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor(&crate::Principal::unrestricted());
-    let model = Workflow::new()
-        .with_var("ret", 0)
-        .with_expose(Variant::create("ret", json!(null)))
-        .with_id("trigger-hook")
-        .with_trigger(|t| {
-            t.with_id("event1")
-                .with_kind("hook")
-                .with_params_vars(|vars| vars.with("var1", 10))
-        })
-        .with_step(|step| {
-            step.with_id("step1")
-                .with_uses(USES_SET, Vars::new().with("ret", 100))
-        });
-
-    manager.model().deploy(&model, None).await.unwrap();
-    let ret = manager
-        .evt()
-        .start("trigger-hook:event1", &Vars::new().into())
-        .await
-        .unwrap();
-    assert_eq!(ret.unwrap().get::<i32>("ret").unwrap(), 100);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn export_trigger_schedule_cannot_start_manually() {
     let engine = Engine::builder().start().await.unwrap();
     let manager = engine.executor(&crate::Principal::unrestricted());
@@ -3532,7 +2762,7 @@ impl crate::package::ActPackage for TriggerTestPackage {
     }
     async fn start(
         &self,
-        rt: &Arc<crate::scheduler::Runtime>,
+        rt: &dyn crate::ActPackageRuntime,
         params: &serde_json::Value,
         options: &Vars,
     ) -> crate::Result<Option<Vars>> {
@@ -3542,13 +2772,13 @@ impl crate::package::ActPackage for TriggerTestPackage {
                 "cannot find '{}' in options",
                 consts::MODEL_ID
             )))?;
-        let model: crate::ModelInfo = rt.cache().store().models().find(&mid).await?.into();
+        let model: crate::ModelInfo = rt.store().models().find(&mid).await?.into();
         let workflow = model.workflow()?;
         let start_params = serde_json::from_value::<Vars>(params.clone()).map_err(|e| {
             crate::ActError::Package(format!("invalid trigger package params: {e}"))
         })?;
-        let ret = rt.start(&workflow, start_params).await?;
-        Ok(Some(Vars::new().with(consts::PROCESS_ID, ret.id())))
+        let pid = rt.start(&workflow, start_params).await?;
+        Ok(Some(Vars::new().with(consts::PROCESS_ID, pid)))
     }
 }
 

@@ -3,7 +3,7 @@ use crate::{
     builder::EngineBuilder,
     export::{Channel, Executor},
     package::{self, ActPackageRegister},
-    scheduler::Runtime,
+    runtime::Runtime,
     snapshot::{SnapshotManager, SnapshotOptions},
 };
 use std::sync::Arc;
@@ -142,24 +142,16 @@ impl Engine {
         // The access control loads before any plugin starts a transport: its
         // users (and the builtin admin, if it has one) exist by the time the
         // first request arrives.
-        self.acl.load(self.runtime.cache().store()).await?;
+        self.acl.load(self.runtime.store()).await?;
 
         self.prepare(snapshots, plugins, packages).await?;
 
-        // Start the event loop only after plugins and packages have registered
-        // their channels and handlers.
-        self.runtime.event_loop();
-
-        self.runtime.resume().await?;
-
-        // Outbox replay: every task that has a durable pending record is
-        // driven deterministically to its next checkpoint (applied propagation
-        // / applied-action guards make the replay idempotent). It runs after
-        // the resume so the two never overlap on the same task: the resume
-        // re-dispatches only tasks without a pending record and leaves every
-        // record to this replay.
-        self.runtime.recover_actions().await?;
-
+        // Boot. The host *is* the engine — its driver task is already running
+        // (spawned in `Runtime::create`) and it recovers every pending
+        // operation on its own — so only the periodic timers start here. The
+        // retry timer carries the settled-run sweep and the
+        // unacknowledged-delivery re-sends; the trigger timer fires due
+        // schedules; the snapshot timer drops expired entries.
         self.runtime.init_retry_timer()?;
         self.runtime.init_trigger_timer();
         self.runtime.init_snapshot_timer();

@@ -8,7 +8,9 @@ pub(crate) mod process_executor;
 pub(crate) mod task_executor;
 
 use crate::Principal;
-use crate::scheduler::Runtime;
+use crate::query::Query;
+use crate::runtime::Runtime;
+use crate::store::{DbCollection, PageData};
 use std::sync::Arc;
 
 /// The engine's operations, bound to one caller.
@@ -42,17 +44,67 @@ pub struct Executor {
     ext: ext_executor::ExtExecutor,
 }
 
+/// Publish one package and drop the compiled-schema cache entry the write
+/// invalidates. Both `pack:publish` and `ext:register_package` run exactly
+/// this, so the two entry points cannot drift apart.
+pub(super) async fn publish_package(
+    runtime: &Arc<Runtime>,
+    pack: &crate::data::Package,
+) -> crate::Result<bool> {
+    let published = runtime.store().publish(pack).await?;
+    if published {
+        runtime.schema_cache().invalidate_package(&pack.id);
+    }
+    Ok(published)
+}
+
+/// One page of a collection's rows, each in the API shape its collection
+/// publishes.
+///
+/// The read-model `list` operations differ only in which collection they read
+/// (`models()`, `events()`, `packages()`, `procs()`) and in what a row turns
+/// into, so the paging — and the rule that every row is mapped while the
+/// paging metadata is carried over untouched — lives once here. An operation
+/// that joins a second collection onto its rows (the task scope vars, the
+/// message behind a delivery) keeps its own body: it is not this shape.
+pub(super) async fn list_infos<D, I>(
+    collection: Arc<dyn DbCollection<Item = D>>,
+    q: &Query,
+) -> crate::Result<PageData<I>>
+where
+    for<'a> &'a D: Into<I>,
+{
+    let page = collection.query(q).await?;
+    Ok(page.map_rows(|row| row.into()))
+}
+
+/// One collection row by id, in the API shape its collection publishes — the
+/// single-row counterpart of [`list_infos`].
+pub(super) async fn get_info<D, I>(
+    collection: Arc<dyn DbCollection<Item = D>>,
+    id: &str,
+) -> crate::Result<I>
+where
+    for<'a> &'a D: Into<I>,
+{
+    let row = collection.find(id).await?;
+    Ok((&row).into())
+}
+
 impl Executor {
     pub(crate) fn new(rt: &Arc<Runtime>, principal: &Principal) -> Self {
         // One copy of the policy, shared by every sub-executor: the caller is
         // one identity for the whole operation.
         let principal = Arc::new(principal.clone());
+        // The store-only executors take the store directly: they never need the
+        // rest of the runtime.
+        let store = rt.store();
         Self {
             msg: message_executor::MessageExecutor::new(rt, &principal),
             act: act_executor::ActExecutor::new(rt, &principal),
-            model: model_executor::ModelExecutor::new(rt, &principal),
+            model: model_executor::ModelExecutor::new(&store, &principal),
             proc: process_executor::ProcessExecutor::new(rt, &principal),
-            task: task_executor::TaskExecutor::new(rt, &principal),
+            task: task_executor::TaskExecutor::new(&store, &principal),
             pack: package_executor::PackageExecutor::new(rt, &principal),
             evt: event_executor::EventExecutor::new(rt, &principal),
             ext: ext_executor::ExtExecutor::new(rt, &principal),

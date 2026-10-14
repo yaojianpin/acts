@@ -1,9 +1,9 @@
 use crate::Workflow;
-use crate::scheduler::Process;
+use crate::runtime::scheduler::Process;
 use crate::utils::consts;
 use crate::{
     ActError, ModelInfo, Principal, ProcInfo, Result, TaskInfo, Vars, query::Query,
-    scheduler::Runtime, store::PageData,
+    runtime::Runtime, store::PageData,
 };
 use std::sync::Arc;
 use tracing::instrument;
@@ -58,14 +58,7 @@ impl ProcessExecutor {
         // accepted from them) and is popped by `Runtime::start` so it cannot
         // leak into the workflow's user vars.
         options.set(consts::PROC_OWNER, owner);
-        let model: ModelInfo = self
-            .runtime
-            .cache()
-            .store()
-            .models()
-            .find(mid)
-            .await?
-            .into();
+        let model: ModelInfo = self.runtime.store().models().find(mid).await?.into();
         let workflow = model.workflow()?;
         // The model's resource must be within the owner's grants — the same
         // check a deploy runs, carried by the sealed policy so a subflow
@@ -104,22 +97,13 @@ impl ProcessExecutor {
     #[instrument(skip(self, q))]
     pub async fn list(&self, q: &Query) -> Result<PageData<ProcInfo>> {
         self.principal.check(LS)?;
-        match self.runtime.cache().store().procs().query(q).await {
-            Ok(procs) => Ok(PageData {
-                count: procs.count,
-                page_size: procs.page_size,
-                page_count: procs.page_count,
-                page_num: procs.page_num,
-                rows: procs.rows.iter().map(ProcInfo::from).collect(),
-            }),
-            Err(err) => Err(err),
-        }
+        super::list_infos(self.runtime.store().procs(), q).await
     }
 
     #[instrument(skip(self))]
     pub async fn get(&self, pid: &str) -> Result<ProcInfo> {
         self.principal.check(GET)?;
-        let proc = self.runtime.cache().store().procs().find(pid).await?;
+        let proc = self.runtime.store().procs().find(pid).await?;
         let mut info: ProcInfo = (&proc).into();
 
         if let Some(proc) = self.runtime.proc(pid).await? {

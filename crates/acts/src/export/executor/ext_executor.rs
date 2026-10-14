@@ -1,4 +1,4 @@
-use crate::{ActPackageDefinition, Principal, Result, env::ActUserVar, scheduler::Runtime};
+use crate::{ActPackageDefinition, Principal, Result, env::ActUserVar, runtime::Runtime};
 use std::sync::Arc;
 
 /// `ext:register_var` — install a user var module into the engine's
@@ -125,10 +125,7 @@ impl ExtExecutor {
     pub async fn register_package(&self, def: &ActPackageDefinition) -> Result<()> {
         self.principal.check(REGISTER_PACKAGE)?;
         let package = def.into_data()?;
-        let ret = self.runtime.cache().store().publish(&package).await?;
-        if ret {
-            self.runtime.schema_cache().invalidate_package(&package.id);
-        }
+        super::publish_package(&self.runtime, &package).await?;
 
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::{
     Event, Result, ShareLock,
     event::Message,
-    scheduler::{Process, Task},
+    runtime::scheduler::{Process, Task},
     utils::{LaneRouter, shared},
 };
 use parking_lot::RwLock;
@@ -85,12 +85,6 @@ impl ProcessGate {
             ),
             router,
         }
-    }
-
-    /// Number of lanes. The scheduler's queue pool is sized by this, so the
-    /// routing below always addresses a real lane.
-    pub(crate) fn lanes(&self) -> usize {
-        self.locks.len()
     }
 
     /// This intentionally uses the same lane mapping as the scheduler (the
@@ -318,17 +312,6 @@ impl Emitter {
         self.starts.write().clear();
         self.completes.write().clear();
         self.errors.write().clear();
-    }
-
-    /// Test hook: replace the worker entry of `pid` with a sender whose
-    /// receiver is already dropped — the state a worker leaves behind when its
-    /// task ends without running the re-home exit (e.g. the runtime aborted
-    /// it). `route` must replace that stale entry, not write into it.
-    #[cfg(test)]
-    pub(crate) fn abandon_worker(&self, pid: &str) {
-        let (tx, rx) = unbounded_channel();
-        drop(rx);
-        self.workers.write().insert(pid.to_string(), tx);
     }
 
     pub fn on_message<F, Fut>(&self, key: &str, f: F)

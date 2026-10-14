@@ -1,7 +1,7 @@
 use crate::{
     ActError, EventInfo, Principal, Result, TriggerKind, Vars, Workflow, data,
     query::Query,
-    scheduler::Runtime,
+    runtime::Runtime,
     store::PageData,
     utils::{self, consts},
 };
@@ -33,23 +33,13 @@ impl EventExecutor {
     #[instrument(skip(self))]
     pub async fn list(&self, q: &Query) -> Result<PageData<EventInfo>> {
         self.principal.check(LS)?;
-        match self.runtime.cache().store().events().query(q).await {
-            Ok(events) => Ok(PageData {
-                count: events.count,
-                page_size: events.page_size,
-                page_count: events.page_count,
-                page_num: events.page_num,
-                rows: events.rows.iter().map(|m| m.into()).collect(),
-            }),
-            Err(err) => Err(err),
-        }
+        super::list_infos(self.runtime.store().events(), q).await
     }
 
     #[instrument(skip(self))]
     pub async fn get(&self, id: &str) -> Result<EventInfo> {
         self.principal.check(GET)?;
-        let event = &self.runtime.cache().store().events().find(id).await?;
-        Ok(event.into())
+        super::get_info(self.runtime.store().events(), id).await
     }
 
     /// Fire a deployed trigger by its event id (`mid:trigger-id`).
@@ -70,7 +60,7 @@ impl EventExecutor {
     #[instrument(skip(self, params), fields(event_id = %event_id))]
     pub async fn start(&self, event_id: &str, params: &JsonValue) -> Result<Option<Vars>> {
         self.principal.check(START)?;
-        let store = self.runtime.cache().store();
+        let store = self.runtime.store();
         let event = store.events().find(event_id).await?;
 
         let kind = TriggerKind::parse(&event.kind);
@@ -134,13 +124,7 @@ impl EventExecutor {
     }
 
     async fn workflow(&self, event: &data::Event) -> Result<Workflow> {
-        let model = self
-            .runtime
-            .cache()
-            .store()
-            .models()
-            .find(&event.mid)
-            .await?;
+        let model = self.runtime.store().models().find(&event.mid).await?;
         let model: crate::ModelInfo = model.into();
         let workflow = model.workflow()?;
         // Firing a trigger starts the model's run, so the model's resource

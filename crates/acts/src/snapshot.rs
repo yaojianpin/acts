@@ -37,7 +37,7 @@
 //! read-path drop is revision-guarded: it only removes the exact expired entry
 //! the reader observed, never a refresh that landed while it was reading.
 
-use crate::{ActError, Vars, config::MissingParamAction, scheduler::Runtime};
+use crate::{ActError, Vars, config::MissingParamAction, runtime::Runtime};
 use parking_lot::RwLock;
 use std::{
     collections::HashMap,
@@ -364,8 +364,8 @@ pub(crate) fn join_scope(values: &[serde_json::Value]) -> String {
 /// Validate that every scope param of `options` resolves on the task chain,
 /// returning the raw values in order, or the missing names.
 pub(crate) fn resolve_scope_params(
-    task: &crate::scheduler::Task,
-    proc: &std::sync::Arc<crate::scheduler::Process>,
+    task: &crate::runtime::scheduler::Task,
+    proc: &std::sync::Arc<crate::runtime::scheduler::Process>,
     options: &SnapshotOptions,
 ) -> std::result::Result<Vec<serde_json::Value>, Vec<String>> {
     let mut values = Vec::with_capacity(options.scope.len());

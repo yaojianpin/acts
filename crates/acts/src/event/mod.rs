@@ -3,9 +3,6 @@ mod emitter;
 mod extra;
 mod message;
 
-#[cfg(test)]
-mod tests;
-
 use crate::{ActError, Result};
 pub use action::Action;
 pub(crate) use emitter::ActWorkflowMessageHandle;

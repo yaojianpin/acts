@@ -4,7 +4,7 @@ use serde_json::Value as JsonValue;
 use crate::Result;
 use crate::store::{DbCollectionIden, StoreIden};
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Proc {
     pub id: String,
     pub state: String,

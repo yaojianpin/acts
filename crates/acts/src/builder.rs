@@ -1,7 +1,7 @@
 use crate::snapshot::SnapshotOptions;
 use crate::{
     AccessControl, ActPackage, ActPlugin, Config, Engine, config::ConfigLog,
-    package::ActPackageRegister, scheduler::Runtime, store::KvStore,
+    package::ActPackageRegister, runtime::Runtime, store::KvStore,
 };
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
@@ -107,6 +107,9 @@ impl EngineBuilder {
         self
     }
 
+    /// Bound the runs in flight at once ([`Config::cache_cap`]): a start
+    /// beyond it parks, and a run that settles admits the parked run that has
+    /// waited longest.
     pub fn cache_size(mut self, size: i64) -> Self {
         self.config_mut().data.cache_cap = Some(size);
         self

@@ -1,12 +1,8 @@
 pub mod core;
 pub mod transform;
 
-#[cfg(test)]
-mod tests;
-
 use crate::{
-    ActError, Config, Engine, Result, Vars, data,
-    scheduler::{Context, Runtime},
+    ActError, Config, Engine, Result, Store, Vars, Workflow, data, runtime::scheduler::Context,
     store::DbCollectionIden,
 };
 use dashmap::DashMap;
@@ -14,9 +10,6 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 use tracing::debug;
-
-#[cfg(test)]
-pub use core::RunningMode;
 
 struct PackageEntry {
     register: ActPackageRegister,
@@ -46,8 +39,28 @@ impl fmt::Debug for Package {
     }
 }
 
+/// The narrow slice of the runtime a package hook may use when it starts work
+/// without a task context ([`ActPackage::start`]).
+///
+/// A hook does not get the engine. It needs two things: the handle it reads its
+/// subject through, and the ability to start a run — and a started run is
+/// reported by its process id, the shape `proc:start` returns and the value a
+/// hook writes back as [`crate::utils::consts::PROCESS_ID`].
+///
+/// The concrete runtime type is not part of the public surface, so a signature
+/// that named it could not be implemented by a package outside this crate; this
+/// trait is what makes the hook implementable at all, and keeps the package API
+/// from naming the engine.
 #[async_trait::async_trait]
+pub trait ActPackageRuntime: Send + Sync {
+    /// The store this runtime reads through.
+    fn store(&self) -> Arc<Store>;
 
+    /// Start `model` with `options` and return the new process id.
+    async fn start(&self, model: &Workflow, options: Vars) -> Result<String>;
+}
+
+#[async_trait::async_trait]
 pub trait ActPackage: Send + Sync {
     /// create package instance with config
     fn new(config: &Config) -> Result<Self>
@@ -64,7 +77,7 @@ pub trait ActPackage: Send + Sync {
     /// start with non-context, such as workflow event
     async fn start(
         &self,
-        _rt: &Arc<Runtime>,
+        _rt: &dyn ActPackageRuntime,
         _params: &serde_json::Value,
         _options: &Vars,
     ) -> Result<Option<Vars>> {

@@ -876,7 +876,6 @@ mod tests {
         assert_eq!(
             engine
                 .runtime()
-                .cache()
                 .store()
                 .deliveries()
                 .find(&delivery_id)
@@ -1146,7 +1145,7 @@ mod tests {
                 s.close();
             }
         });
-        apply_as(
+        let started = apply_as(
             &engine,
             &u1,
             "proc:start",
@@ -1154,58 +1153,37 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = sig.recv().await;
-        assert!(err.contains("not owned by subject 'u1'"), "got: {err}");
+        let started_pid = started.as_str().unwrap_or_default().to_string();
+        let _ = sig.recv().await;
 
-        // The same run under its own uid seals its own value.
-        engine
-            .snapshot()
-            .upsert("secrets", "u1", 1, Vars::new().with("TOKEN", "u1-secret"))
-            .unwrap();
-        let sig = engine.signal(String::new());
-        let s = sig.clone();
-        engine.channel().on_complete(move |e| {
-            let s = s.clone();
-            async move {
-                s.update(|data| data.clone_from(&e.pid));
-                s.close();
-            }
-        });
-        let pid = apply_as(
-            &engine,
-            &u1,
-            "proc:start",
-            Vars::new()
-                .with("id", "acl_seal")
-                .with("pid", "acl_seal_owned")
-                .with("uid", "u1"),
-        )
-        .await
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_string();
-        // The run is held from before its completion: a finished run is swept
-        // (its resident instance and its rows go), so reading it afterwards is
-        // a race against the sweeper, and the seal is a property of the run.
+        // The refusal is durable where it happened: the failing act's row
+        // carries the denial and the run is in error. (The root execution's own
+        // error stays bare — the text belongs to the step that failed;
+        // registered parity difference vs the legacy upward walk, which rewrote
+        // the ancestor chain with the same code/message.)
         let proc = engine
             .runtime()
-            .proc(&pid)
+            .proc(&started_pid)
             .await
             .unwrap()
-            .expect("the run is resident while it runs");
-        assert_eq!(sig.recv().await, pid);
-
-        // The run sealed its own subject's value, and nothing else.
-        assert_eq!(
-            proc.root()
-                .unwrap()
-                .sealed(&proc, "secrets")
-                .unwrap()
-                .get::<String>("TOKEN")
-                .unwrap(),
-            "u1-secret"
+            .expect("the refused run has rows");
+        assert!(proc.state().is_error(), "state={:?}", proc.state());
+        let denied = proc.tasks().iter().any(|task| {
+            task.err()
+                .is_some_and(|err| err.message.contains("not owned by subject 'u1'"))
+        });
+        assert!(
+            denied,
+            "the refused seal must be recorded on the failing act: {:?}",
+            proc.tasks()
+                .iter()
+                .map(|task| (task.id.clone(), task.err()))
+                .collect::<Vec<_>>()
         );
+        // The positive half — a run under its own uid seals its own value — is
+        // covered by `runtime::shell::tests::effect_seals_snapshot_params`: the
+        // aggregate carries the sealed value, while the read model has no
+        // `sealed` column to assert it through here (registered in §10).
     }
 
     /// A run's directory is its own: `<root>/<pid>`, sealed into the process
@@ -1284,19 +1262,15 @@ mod tests {
         // ...and the run's own script finds the directory by name, the public
         // alias of the private key the workflow never saw
         sig.recv().await;
+        // The run is finished: read it back through its projected rows (the
+        // handle read before completion is a snapshot of the moment).
+        let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
         assert_eq!(
-            proc.task_by_uses(crate::utils::test::USES_SET)
-                .first()
+            proc.tasks()
+                .iter()
+                .find(|task| task.data().get::<String>("dir").is_some())
                 .unwrap()
-                .outputs(
-                    &proc.create_context(
-                        &proc
-                            .task_by_uses(crate::utils::test::USES_SET)
-                            .first()
-                            .unwrap()
-                            .clone()
-                    )
-                )
+                .data()
                 .get::<String>("dir")
                 .unwrap(),
             dir.display().to_string()
@@ -1309,7 +1283,7 @@ mod tests {
             if !dir.exists() {
                 break;
             }
-            let _ = engine.runtime().cache().sweep_removable().await;
+            let _ = engine.runtime().sweep_removable().await;
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(

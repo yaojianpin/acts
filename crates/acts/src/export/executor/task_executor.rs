@@ -1,6 +1,4 @@
-use crate::{
-    Principal, Result, TaskInfo, query::Query, scheduler::Runtime, store::PageData, utils::Id,
-};
+use crate::{Principal, Result, TaskInfo, query::Query, store::PageData, store::Store, utils::Id};
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -11,14 +9,14 @@ pub(crate) const GET: &str = "task:get";
 
 #[derive(Clone)]
 pub struct TaskExecutor {
-    runtime: Arc<Runtime>,
+    store: Arc<Store>,
     principal: Arc<Principal>,
 }
 
 impl TaskExecutor {
-    pub(crate) fn new(rt: &Arc<Runtime>, principal: &Arc<Principal>) -> Self {
+    pub(crate) fn new(store: &Arc<Store>, principal: &Arc<Principal>) -> Self {
         Self {
-            runtime: rt.clone(),
+            store: store.clone(),
             principal: principal.clone(),
         }
     }
@@ -27,9 +25,7 @@ impl TaskExecutor {
     /// collection holds the task's own data, keyed by the same composite id.
     async fn join_vars(&self, info: &mut TaskInfo) {
         let Ok(vars) = self
-            .runtime
-            .cache()
-            .store()
+            .store
             .vars()
             .find(&Id::new(&info.pid, &info.id).id())
             .await
@@ -44,29 +40,19 @@ impl TaskExecutor {
     #[instrument(skip(self))]
     pub async fn list(&self, q: &Query) -> Result<PageData<TaskInfo>> {
         self.principal.check(LS)?;
-        match self.runtime.cache().store().tasks().query(q).await {
-            Ok(tasks) => {
-                let mut rows: Vec<TaskInfo> = tasks.rows.iter().map(|m| m.into()).collect();
-                for row in rows.iter_mut() {
-                    self.join_vars(row).await;
-                }
-                Ok(PageData {
-                    count: tasks.count,
-                    page_size: tasks.page_size,
-                    page_count: tasks.page_count,
-                    page_num: tasks.page_num,
-                    rows,
-                })
-            }
-            Err(err) => Err(err),
+        let tasks = self.store.clone().tasks().query(q).await?;
+        let mut rows: Vec<TaskInfo> = tasks.rows.iter().map(|m| m.into()).collect();
+        for row in rows.iter_mut() {
+            self.join_vars(row).await;
         }
+        Ok(tasks.with_rows(rows))
     }
 
     #[instrument(skip(self))]
     pub async fn get(&self, pid: &str, tid: &str) -> Result<TaskInfo> {
         self.principal.check(GET)?;
         let id = Id::new(pid, tid);
-        match self.runtime.cache().store().tasks().find(&id.id()).await {
+        match self.store.clone().tasks().find(&id.id()).await {
             Ok(t) => {
                 let mut info: TaskInfo = t.into();
                 self.join_vars(&mut info).await;

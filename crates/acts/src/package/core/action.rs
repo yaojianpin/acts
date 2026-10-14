@@ -71,13 +71,21 @@ impl ActPackage for ActionPackage {
                 ))
             })?;
 
-        ctx.set_action(&Action::new(
+        // The command is issued as an ordinary client action on the execution
+        // this act belongs to (`Runtime::do_action` → the kernel's action
+        // path), so the state it produces is exactly the one a client's
+        // `act:next`/`act:error`/… produces and the rest of the run already
+        // understands. The headless scope's own task id is minted per
+        // evaluation, so the *node* id — which is the execution's task id —
+        // is what names the target.
+        let tid = task.node().id().to_string();
+        let action = Action::new(
             &task.pid,
-            &task.id,
+            &tid,
             params.action.clone(),
-            params.options.unwrap_or_default().clone(),
-        ))?;
-        task.update(ctx).await?;
+            params.options.unwrap_or_default(),
+        );
+        ctx.runtime.do_action(&action).await?;
         Ok(None)
     }
 }

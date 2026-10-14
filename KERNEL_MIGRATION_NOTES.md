@@ -612,6 +612,9 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 (空)`load()` 竞态(上一片登记)与动作 intent 载荷(再上一片登记)均已收口;新发现按上面「已完成」
 的惯例登记在前,再排期。
 
+**第二轮(去 legacy:删 cache/scheduler、合并 kernel_host、全面切换)的计划、方案与提示词
+已移到 `KERNEL_CUTOVER_NOTES.md`;本文件的语义结论仍是那边的行为依据,勿删。**
+
 ## 语义结论(已核实,勿再猜测)
 
 - legacy `TaskState::Interrupt` ↔ kernel `ExecutionState::Waiting`;

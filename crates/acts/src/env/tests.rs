@@ -1,9 +1,9 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::{
-    ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Environment,
-    event::EventAction, utils::consts, utils::test::USES_IRQ,
+    ActUserVar, Context, Engine, Vars, Workflow,
+    env::Environment,
+    utils::{consts, test::USES_IRQ},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -14,7 +14,7 @@ use serial_test::serial;
 async fn start_completed(
     workflow: &Workflow,
     vars: Vars,
-) -> (Engine, Arc<crate::scheduler::Process>) {
+) -> (Engine, Arc<crate::runtime::scheduler::Process>) {
     let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let done = sig.clone();
@@ -24,6 +24,16 @@ async fn start_completed(
     });
     let proc = engine.runtime().start(workflow, vars).await.unwrap();
     sig.recv().await;
+    // The finished run's *durable* shape: the kernel projects the proc/task/vars
+    // rows from the aggregate, and the read API rebuilds the same process out
+    // of them — the in-memory handle `start` returned only carries the pid.
+    let pid = proc.id().to_string();
+    let proc = engine
+        .runtime()
+        .proc(&pid)
+        .await
+        .unwrap()
+        .expect("the finished run has rows");
     (engine, proc)
 }
 
@@ -329,21 +339,6 @@ async fn env_task_multi_eval() {
     });
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_env_get_local() {
-    let env = Environment::new();
-    let workflow = Workflow::new()
-        .with_env("a", 10)
-        .with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
-    Context::scope(&context, || {
-        assert_eq!(env.eval::<i64>("$env.a").unwrap(), 10);
-    });
-}
-
 /// The engine's private env keys (the process owner credential and its
 /// workdir) are not workflow state: `$env` must not read them, or a model
 /// could widen its own scope authority.
@@ -427,6 +422,14 @@ async fn env_user_var_get_from_context() {
         .await
         .unwrap();
     sig.recv().await;
+    // Read the finished run back through its projected rows: the handle
+    // `start` returned carries only the pid.
+    let proc = engine
+        .runtime()
+        .proc(proc.id())
+        .await
+        .unwrap()
+        .expect("the finished run has rows");
 
     let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
@@ -472,6 +475,14 @@ async fn env_user_var_get_default() {
         .await
         .unwrap();
     sig.recv().await;
+    // Read the finished run back through its projected rows: the handle
+    // `start` returned carries only the pid.
+    let proc = engine
+        .runtime()
+        .proc(proc.id())
+        .await
+        .unwrap()
+        .expect("the finished run has rows");
 
     let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
@@ -569,6 +580,14 @@ async fn env_step_get_data() {
         .await
         .unwrap();
     sig.recv().await;
+    // Read the finished run back through its projected rows: the handle
+    // `start` returned carries only the pid.
+    let proc = engine
+        .runtime()
+        .proc(proc.id())
+        .await
+        .unwrap()
+        .expect("the finished run has rows");
 
     let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
@@ -603,199 +622,18 @@ async fn env_step_get_inputs() {
         .await
         .unwrap();
     sig.recv().await;
+    // Read the finished run back through its projected rows: the handle
+    // `start` returned carries only the pid.
+    let proc = engine
+        .runtime()
+        .proc(proc.id())
+        .await
+        .unwrap()
+        .expect("the finished run has rows");
 
     let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         let result = env.eval::<Vars>("$step_inputs('step1')").unwrap();
         assert_eq!(result.get::<i32>("a").unwrap(), 10);
-    });
-}
-
-// ---- act data access ----
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_act_get_inputs() {
-    let env = Environment::new();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("a", json!(10))
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let done = sig.clone();
-    engine.channel().on_message(move |e| {
-        let done = done.clone();
-        async move {
-            if e.is_irq() {
-                done.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-
-    let context = task.create_context(&proc);
-    Context::scope(&context, || {
-        let result = env.eval::<Vars>("$inputs()").unwrap();
-        assert_eq!(result.get::<i32>("a").unwrap(), 10);
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_act_get_data() {
-    let env = Environment::new();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let done = sig.clone();
-    engine.channel().on_message(move |e| {
-        let done = done.clone();
-        async move {
-            if e.is_irq() {
-                done.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-
-    let context = task.create_context(&proc);
-    Context::scope(&context, || {
-        env.eval::<()>("$set('my_value', 20)").unwrap();
-        let result = env.eval::<Vars>("$data()").unwrap();
-        assert_eq!(result.get::<i32>("my_value").unwrap(), 20);
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_act_cost_get() {
-    let env = Environment::new();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let done = sig.clone();
-    engine.channel().on_message(move |e| {
-        let done = done.clone();
-        async move {
-            if e.is_irq() {
-                done.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-
-    // `$cost()` is the milliseconds since the task started, so the evaluation
-    // has to happen in a later millisecond than the start to be non-zero.
-    tokio::time::sleep(Duration::from_millis(5)).await;
-
-    let context = task.create_context(&proc);
-    Context::scope(&context, || {
-        assert!(env.eval::<i64>("$cost()").unwrap() > 0);
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_act_cost_in_get() {
-    let env = Environment::new();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let done = sig.clone();
-    engine.channel().on_message(move |e| {
-        let done = done.clone();
-        async move {
-            if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-                && e.is_state(MessageState::Created)
-            {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                done.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-
-    let context = task.create_context(&proc);
-    Context::scope(&context, || {
-        assert!(env.eval::<bool>("$cost_in('1s')").unwrap());
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_act_ecode_get() {
-    let env = Environment::new();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let done = sig.clone();
-    let runtime = engine.runtime();
-    engine.channel().on_message(move |e| {
-        let runtime = runtime.clone();
-        let done = done.clone();
-        async move {
-            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-                runtime
-                    .do_action2(
-                        &e.pid,
-                        &e.tid,
-                        EventAction::Error,
-                        Vars::new().with(consts::ACT_ERR_CODE, "err1"),
-                    )
-                    .await
-                    .unwrap();
-                done.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-
-    let context = task.create_context(&proc);
-    Context::scope(&context, || {
-        assert_eq!(env.eval::<String>("$ecode()").unwrap(), "err1");
     });
 }

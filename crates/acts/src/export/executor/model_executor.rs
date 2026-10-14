@@ -1,6 +1,4 @@
-use crate::{
-    ModelInfo, Principal, Result, Workflow, query::Query, scheduler::Runtime, store::PageData,
-};
+use crate::{ModelInfo, Principal, Result, Workflow, query::Query, store::PageData, store::Store};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tracing::instrument;
@@ -16,14 +14,14 @@ pub(crate) const RM: &str = "model:rm";
 
 #[derive(Clone)]
 pub struct ModelExecutor {
-    runtime: Arc<Runtime>,
+    store: Arc<Store>,
     principal: Arc<Principal>,
 }
 
 impl ModelExecutor {
-    pub(crate) fn new(rt: &Arc<Runtime>, principal: &Arc<Principal>) -> Self {
+    pub(crate) fn new(store: &Arc<Store>, principal: &Arc<Principal>) -> Self {
         Self {
-            runtime: rt.clone(),
+            store: store.clone(),
             principal: principal.clone(),
         }
     }
@@ -39,28 +37,19 @@ impl ModelExecutor {
 
         // The model row and its trigger (`events`) rows are reconciled and
         // committed as one atomic batch inside `Store::deploy`.
-        self.runtime.cache().store().deploy(model, view).await
+        self.store.clone().deploy(model, view).await
     }
 
     #[instrument(skip(self, q))]
     pub async fn list(&self, q: &Query) -> Result<PageData<ModelInfo>> {
         self.principal.check(LS)?;
-        match self.runtime.cache().store().models().query(q).await {
-            Ok(models) => Ok(PageData {
-                count: models.count,
-                page_size: models.page_size,
-                page_count: models.page_count,
-                page_num: models.page_num,
-                rows: models.rows.iter().map(|m| m.into()).collect(),
-            }),
-            Err(err) => Err(err),
-        }
+        super::list_infos(self.store.models(), q).await
     }
 
     #[instrument(skip(self), fields(id = %id))]
     pub async fn get(&self, id: &str, fmt: &str) -> Result<ModelInfo> {
         self.principal.check(GET)?;
-        match self.runtime.cache().store().models().find(id).await {
+        match self.store.clone().models().find(id).await {
             Ok(m) => {
                 let mut model: ModelInfo = m.into();
                 match fmt {
@@ -89,6 +78,6 @@ impl ModelExecutor {
         self.principal.check(RM)?;
         // The model row and its trigger (`events`) rows are removed as one
         // atomic batch inside `Store::rm_model`.
-        self.runtime.cache().store().rm_model(id).await
+        self.store.clone().rm_model(id).await
     }
 }

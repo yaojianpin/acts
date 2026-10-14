@@ -113,12 +113,11 @@ fn builtin(name: &str) -> Option<Value> {
             let name = str_arg("$set_process_var", args, 0)?;
             let value = json_arg("$set_process_var", args, 1)?;
             let vars = Vars::new().with(name.as_str(), value);
-            Context::with(|ctx| {
-                ctx.proc.set_data(&vars);
-                if let Some(root) = ctx.proc.root() {
-                    let _ = ctx.runtime.try_upsert_task(&root);
-                }
-            });
+            // The write lands in the headless scope's own data; what an
+            // effect scope writes is folded into the hop's commit (see
+            // `runtime::shell::effects`), and nothing else is persisted —
+            // the aggregate is the record.
+            Context::with(|ctx| ctx.proc.set_data(&vars));
 
             Ok(Value::Null)
         }),
@@ -211,7 +210,6 @@ fn builtin(name: &str) -> Option<Value> {
                         )));
                     }
                     task.update_data(&vars);
-                    let _ = ctx.runtime.try_upsert_task(task);
                 }
                 Ok(())
             });
@@ -329,7 +327,7 @@ fn env_map() -> Vars {
     map
 }
 
-fn current_cost(task: &crate::scheduler::Task) -> i64 {
+fn current_cost(task: &crate::runtime::scheduler::Task) -> i64 {
     if let Some(cost) = task.data().get::<i64>(consts::TASK_COST) {
         return cost;
     }

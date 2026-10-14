@@ -1,11 +1,14 @@
 mod collection;
 pub mod data;
+mod delivery_rows;
 mod lease;
 mod memory;
+mod process_rows;
 pub mod query;
 
 #[allow(clippy::module_inception)]
 mod store;
+pub(crate) mod writebehind;
 
 use data::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -59,6 +62,46 @@ pub struct PageData<T> {
     pub page_count: usize,
     pub page_size: usize,
     pub rows: Vec<T>,
+}
+
+impl<T> PageData<T> {
+    /// Rebuild the page with different rows, keeping its paging metadata.
+    pub fn with_rows<U>(self, rows: Vec<U>) -> PageData<U> {
+        let PageData {
+            count,
+            page_num,
+            page_count,
+            page_size,
+            ..
+        } = self;
+        PageData {
+            count,
+            page_num,
+            page_count,
+            page_size,
+            rows,
+        }
+    }
+
+    /// Map every row, keeping the paging metadata. The read-model executors
+    /// use this to turn stored rows into their API shapes without re-listing
+    /// the metadata fields at every call site.
+    pub fn map_rows<U>(self, mut f: impl FnMut(&T) -> U) -> PageData<U> {
+        let PageData {
+            count,
+            page_num,
+            page_count,
+            page_size,
+            rows,
+        } = self;
+        PageData {
+            count,
+            page_num,
+            page_count,
+            page_size,
+            rows: rows.iter().map(&mut f).collect(),
+        }
+    }
 }
 
 pub trait DbCollectionIden {

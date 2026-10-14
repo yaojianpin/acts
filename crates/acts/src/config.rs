@@ -39,8 +39,15 @@ impl ConfigLog {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ConfigData {
+    /// How many runs may be in flight at once. A start beyond the cap is
+    /// *parked*: its process row is persisted with the `None` state and
+    /// nothing of the workflow runs until a run settles and the freed slot
+    /// admits the parked run that has waited longest. The default is 1024.
+    ///
+    /// A negative value reads as "no bound" (`as usize`), exactly as it did
+    /// when this bounded the resident process set.
     pub cache_cap: Option<i64>,
     pub tick_interval_secs: Option<i64>,
 
@@ -83,14 +90,6 @@ pub struct ConfigData {
     /// control, and a process may touch whatever the server's own account
     /// can.
     pub workdir: Option<String>,
-    /// Run every process on the deterministic kernel host — the kernel *is*
-    /// the engine: it owns starts, client actions, package effects and
-    /// channel messages, and the regular scheduler is never launched. Off by
-    /// default (the legacy engine serves). The durable read model
-    /// (proc/task/msg rows) is not projected yet, so the row-reading APIs are
-    /// empty while this is on.
-    #[serde(default)]
-    pub kernel_engine: bool,
     // log config
     pub log: Option<ConfigLog>,
 }
@@ -217,6 +216,8 @@ impl Config {
         Ok(())
     }
 
+    /// How many runs may be in flight at once (see [`ConfigData::cache_cap`]).
+    /// Defaults to 1024.
     pub fn cache_cap(&self) -> i64 {
         self.data.cache_cap.unwrap_or(1024)
     }
@@ -283,12 +284,6 @@ impl Config {
             .map(str::trim)
             .filter(|dir| !dir.is_empty())
             .map(std::path::PathBuf::from)
-    }
-
-    /// Whether the deterministic kernel host shadow-runs every new process
-    /// (see [`ConfigData::kernel_engine`]).
-    pub fn kernel_engine(&self) -> bool {
-        self.data.kernel_engine
     }
 
     pub fn log(&self) -> ConfigLog {

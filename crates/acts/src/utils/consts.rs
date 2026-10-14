@@ -15,13 +15,11 @@ pub const ACT_ERR_CODE: &str = "ecode";
 pub const ACT_INDEX: &str = "$index";
 pub const ACT_VALUE: &str = "$value";
 
-pub const TASK_SIGN: &str = "__sign";
-pub const TASK_PROPAGATION: &str = "__propagation";
 pub const TASK_COST: &str = "__cost";
 
-/// Node ids of the timeout branches that already fired for one task
-/// (one-shot guard persisted with the task's vars row — see
-/// [`Task::claim_timeout`](crate::scheduler::Task::claim_timeout)).
+/// Node ids of the timeout branches that already fired for one task (the
+/// one-shot guard a timeout branch's evaluation keeps in the run's own
+/// state).
 pub const TASK_TIMEOUTS: &str = "__timeouts";
 
 pub const ACT_TO: &str = "to";
@@ -33,7 +31,6 @@ pub const MODEL_ID: &str = "mid";
 
 pub const ACT_RUN_AS_IRQ: &str = "acts.core.irq";
 pub const ACT_RUN_AS_MSG: &str = "acts.core.msg";
-pub const ACT_RUN_AS: &str = "__run_as";
 
 /// Process env key holding the owner's [`crate::acl::ScopePolicy`] as json.
 /// Private (see [`is_private_key`]): the JS `$env` proxy refuses it, so a

@@ -9,7 +9,7 @@ use tracing::trace;
 use crate::store::KvStore;
 use crate::{
     ActError, Result, Trigger, Workflow,
-    scheduler::{Process, Task, TaskState},
+    runtime::scheduler::TaskState,
     store::{Model, Package},
     utils,
 };
@@ -296,7 +296,7 @@ impl Store {
                         event
                             .schedule
                             .as_deref()
-                            .map(crate::scheduler::cron::Cron::next_fire_millis)
+                            .map(crate::runtime::scheduler::cron::Cron::next_fire_millis)
                             .unwrap_or(0)
                     };
                     ops.extend(events.update_ops(&event).await?);
@@ -304,7 +304,8 @@ impl Store {
                 None => {
                     // new trigger: arm `schedule` rows to their next cron fire
                     if let Some(schedule) = event.schedule.as_deref() {
-                        event.next_run = crate::scheduler::cron::Cron::next_fire_millis(schedule);
+                        event.next_run =
+                            crate::runtime::scheduler::cron::Cron::next_fire_millis(schedule);
                     }
                     ops.extend(events.create_ops(&event)?);
                 }
@@ -699,7 +700,7 @@ impl Store {
     /// writes of the process) and evicts them from memory.
     pub(crate) async fn sweep_settled_procs(&self, limit: usize) -> Result<Vec<String>> {
         use super::query::{Expr, Filter, Query};
-        use crate::scheduler::TaskState;
+        use crate::runtime::scheduler::TaskState;
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let terminal: Vec<String> = [
@@ -729,38 +730,6 @@ impl Store {
             .filter(|p| p.removable)
             .map(|p| p.id)
             .collect())
-    }
-
-    /// Persist a process and its root task row as ONE atomic batch (upsert:
-    /// an existing row is updated, a missing row is created). The first
-    /// persist of a freshly started process goes through here, so a crash can
-    /// never leave a durable proc row without its root task row (or a root
-    /// task row whose proc row is missing — the writer skips such orphans).
-    pub(crate) async fn upsert_proc_with_task(
-        &self,
-        proc: &Arc<Process>,
-        root: Option<&Arc<Task>>,
-    ) -> Result<()> {
-        let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
-        let tasks = KvCollection::<data::Task>::new(StoreIden::Tasks.as_ref(), self.kv.clone());
-
-        // Both rows are read-modify-writes committed as one batch: lock them
-        // (in key order) before reading either, and hold the locks until the
-        // batch is applied.
-        let proc_data = proc.into_data()?;
-        let task_data = root.map(|root| root.into_data()).transpose()?;
-        let _locks = lock_docs(
-            std::iter::once(procs.data_key(&proc_data.id))
-                .chain(task_data.iter().map(|task| tasks.data_key(&task.id))),
-        )
-        .await;
-
-        let mut ops = procs.update_ops(&proc_data).await?;
-        if let Some(task_data) = &task_data {
-            ops.extend(tasks.update_ops(task_data).await?);
-        }
-        self.kv.batch(&ops, &[]).await?;
-        Ok(())
     }
 }
 
@@ -1828,53 +1797,8 @@ mod tests {
         assert_eq!(state_in, 2, "state In finds both terminal procs");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn process_first_persist_commits_proc_and_root_task_in_one_batch() {
-        let kv = Arc::new(CountingKv::default());
-        let engine = crate::Engine::builder()
-            .set_store(kv.clone())
-            .start()
-            .await
-            .unwrap();
-        let rt = engine.runtime().clone();
-
-        let proc = rt.create_proc("p1", &trigger_model("m1"));
-        // scope the tree read guard: it must not live across the awaits below
-        let root = proc.tree().root.clone().expect("workflow root node");
-        let task = proc.create_task(&root, None).unwrap();
-
-        kv.batches.store(0, Ordering::SeqCst);
-        rt.cache().start_proc(&proc, Some(&task)).await.unwrap();
-
-        assert_eq!(
-            kv.batches.load(Ordering::SeqCst),
-            1,
-            "first persist must be a single atomic batch"
-        );
-        assert_eq!(
-            (
-                kv.puts.load(Ordering::SeqCst),
-                kv.deletes.load(Ordering::SeqCst)
-            ),
-            (0, 0),
-            "first persist must not fall back to raw per-key writes"
-        );
-
-        // proc row and root task row exist together — never one without the other
-        let store = rt.cache().store();
-        assert!(
-            store.procs().find("p1").await.is_ok(),
-            "proc row must exist"
-        );
-        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", "p1".to_string())));
-        let rows = store.tasks().query(&q).await.unwrap().rows;
-        assert_eq!(rows.len(), 1, "root task row must exist with the proc row");
-        assert_eq!(rows[0].tid, "$", "the single row is the root task");
-    }
-
     /// Recovery and cleanup must see every row of a match set larger than one
-    /// `Query::new()` page: a truncated crash-replay read silently drops
-    /// outbox records, and a truncated removal leaves task/vars/outbox rows
+    /// `Query::new()` page: a truncated removal leaves task/vars/outbox rows
     /// (with their index rows) behind as orphans. The set below crosses the
     /// 100000 page limit, so a limit-capped read or delete fails the count
     /// assertions.
@@ -1937,14 +1861,7 @@ mod tests {
             "the page limit must bound `query`"
         );
 
-        // the replay set is the whole set, not one page of it
-        assert_eq!(
-            store.load_pending_ops().await.unwrap().len(),
-            total,
-            "crash recovery must replay every pending outbox record"
-        );
-
-        // and the removal deletes all of them: no data row and no index row
+        // the removal deletes all of them: no data row and no index row
         // of the process may survive
         assert!(store.remove_proc_rows(pid).await.unwrap());
         assert!(

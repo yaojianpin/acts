@@ -1,5 +1,5 @@
 use crate::{
-    Event, Message, Result, Vars, event::ActWorkflowMessageHandle, scheduler::Runtime, utils,
+    Event, Message, Result, Vars, event::ActWorkflowMessageHandle, runtime::Runtime, utils,
 };
 use std::pin::Pin;
 use std::sync::Arc;
@@ -288,7 +288,7 @@ async fn deliver(
             // never successfully handed over (no handler / crash
             // mid-dispatch) and still needs a (re-)dispatch; `Delivered` ones
             // only wait for an ack or the task close.
-            if let Err(err) = runtime.cache().store().mark_delivered(&delivery_id).await {
+            if let Err(err) = runtime.store().mark_delivered(&delivery_id).await {
                 error!(error = %err, delivery_id = %delivery_id, "mark delivery succeeded failed");
             }
         }
@@ -326,7 +326,6 @@ async fn store_if(
         // each channel delivery gets its own delivery row
         let delivery = message.into_delivery(chan_id, pattern);
         match runtime
-            .cache()
             .store_delivery(&message.into_message(), &delivery)
             .await
         {

@@ -1,3 +1,11 @@
+//! The read model's write-behind path.
+//!
+//! Two writes must not happen inline in the engine's hop loop: a delivery row
+//! (created on the channel path, which must stay reactive) and a process
+//! removal (the sweeper). Both are ordered per pid — a removal must apply
+//! after every write still queued for that process — so they go through one
+//! sharded, bounded queue whose ops of one pid are applied in enqueue order
+//! while independent processes are applied concurrently.
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -6,81 +14,11 @@ use std::sync::{
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::{
-    ActError, Result,
-    scheduler::Task,
-    store::Store,
-    utils::{LaneRouter, consts},
-};
+use crate::{ActError, Result, store::Store, utils::LaneRouter};
 
 pub(crate) enum WriteOp {
-    /// Persist a task, its root task, and mark the process complete when needed.
-    /// Serialization happens on the writer thread, off the caller's hot path.
-    Task(Arc<Task>),
-    /// Deferred delivery close: settles every engine-owned delivery row of a
-    /// finished task (`Created`/`Delivered`/`Acked` → `Completed`; an `Error`
-    /// row stays for manual handling).
-    CloseDeliveries {
-        pid: String,
-        tid: String,
-    },
-    /// Durable outbox enqueue: record the task's `next` as pending. Ordered
-    /// after the task write queued by the same caller, so when this record
-    /// becomes durable the task state it depends on is durable too.
-    EnqueueNext {
-        pid: String,
-        tid: String,
-        target_tid: Option<String>,
-        source_version: i64,
-    },
-    /// Durable outbox enqueue: record a task execution as pending when the
-    /// in-memory scheduler queue is full. The task state is queued before this
-    /// record, so replay always finds a durable task.
-    EnqueueExec {
-        pid: String,
-        tid: String,
-    },
-    /// Mark an outbox record as handed to the in-memory scheduler. A crash can
-    /// still replay it: boot recovery treats `Dispatched` like `Pending`.
-    MarkOpDispatched {
-        pid: String,
-        tid: String,
-        r#type: String,
-    },
-    /// Mark a `next` record as overflowed after bounded queue rejection.
-    MarkOpOverflow {
-        pid: String,
-        tid: String,
-        r#type: String,
-    },
-    /// Advance an operation's public lifecycle phase without closing it. This
-    /// is ordered by the same process shard as the writes it observes.
-    MarkOpPhase {
-        pid: String,
-        tid: String,
-        r#type: String,
-        phase: crate::data::OpPhase,
-    },
-    /// Durable outbox enqueue: record a client action (event + options) as
-    /// pending, before the action is applied in memory, so a crash before the
-    /// task state write lands can replay the action on recovery.
-    EnqueueAction {
-        pid: String,
-        tid: String,
-        event: String,
-        options: String,
-    },
-    /// Durable outbox close: mark the task's in-flight records of `r#type`
-    /// `Done` — a `next` close must not sweep away a concurrent client-action
-    /// record (and vice versa). Ordered after the task state write (and the
-    /// message status), so `Done` is only durable once the effects are.
-    OpDone {
-        pid: String,
-        tid: String,
-        r#type: String,
-    },
     /// Drop a process and its rows (tasks, outbox ops, message/delivery rows).
     /// Queued on the writer after any pending writes of the process, so
     /// removal can never race them: the completion markers apply first, then
@@ -124,16 +62,7 @@ impl WriteOp {
     /// applied.
     fn pid(&self) -> Option<&str> {
         match self {
-            WriteOp::Task(task) => Some(task.pid.as_str()),
-            WriteOp::CloseDeliveries { pid, .. }
-            | WriteOp::EnqueueNext { pid, .. }
-            | WriteOp::EnqueueExec { pid, .. }
-            | WriteOp::MarkOpDispatched { pid, .. }
-            | WriteOp::MarkOpOverflow { pid, .. }
-            | WriteOp::MarkOpPhase { pid, .. }
-            | WriteOp::EnqueueAction { pid, .. }
-            | WriteOp::OpDone { pid, .. }
-            | WriteOp::RemoveProc { pid } => Some(pid.as_str()),
+            WriteOp::RemoveProc { pid } => Some(pid.as_str()),
             // the message's process is the shard its row must follow: the
             // task writes and the removal of that process
             WriteOp::StoreDelivery { delivery, .. } => Some(delivery.pid.as_str()),
@@ -221,29 +150,19 @@ impl Backlog {
 /// are applied concurrently — a slow write for one process no longer stalls
 /// every other process's writes behind it.
 ///
-/// Queues are bounded and nothing is ever buffered without limit. The path
-/// distinguishes work that is *being admitted* from the bookkeeping of work
-/// already in flight, and a saturated store changes what each does:
+/// Queues are bounded and nothing is ever buffered without limit:
 ///
-/// - [`Self::try_send`] admits new work (a task's own state write, or the
-///   durable outbox record that stands in for it). A saturated writer — or a
-///   shard with no room left — **refuses** the op with
-///   [`ActError::QueueFull`] instead of queueing or waiting: new tasks stop
-///   being written while the store is behind, so no backlog of doomed writes
-///   accumulates. The caller's [`ActError::QueueFull`] handling routes the
-///   work to its durable overflow path, or surfaces the overload.
-/// - [`Self::send`] queues the bookkeeping of work already admitted (task
-///   state transitions, outbox records and their closes, delivery closes,
-///   removals). These ops are what makes an admitted operation durable, so they
-///   are never refused — they wait for room, stalling the process they belong
-///   to rather than losing its durability.
+/// - [`Self::send`] queues the bookkeeping of work already admitted (delivery
+///   rows and process removals). These ops decide rows the engine has already
+///   committed to, so they are never refused — they wait for room, stalling the
+///   process they belong to rather than losing its durability. A wait latches
+///   the writer saturated, which is what keeps producers from piling more work
+///   behind a store that is already behind.
 /// - [`Self::flush`] queues a barrier on every shard and waits for room, so a
 ///   flush always completes once the backlog drains.
 ///
-/// The saturation latch is shared: a refusal (or a wait for room) latches it,
-/// and it releases once the backlog is back under half the capacity. While
-/// latched, new work is refused immediately even when the target shard has
-/// room, instead of being admitted into a writer that is clearly behind.
+/// The saturation latch is shared: a wait for room latches it, and it releases
+/// once the backlog is back under half the capacity.
 #[derive(Clone)]
 pub(crate) struct StoreWriter {
     /// One sender per shard, indexed by the writer's [`LaneRouter`]. `None`
@@ -322,30 +241,6 @@ impl StoreWriter {
             tasks: Arc::new(Mutex::new(tasks)),
             router,
             backlog,
-        }
-    }
-
-    /// Admit new work into its process's shard without waiting: a saturated
-    /// writer — or a shard with no room left — refuses with
-    /// [`ActError::QueueFull`] and latches the writer, so a backed-up store is
-    /// not fed more work and nothing accumulates waiting for room. The caller
-    /// turns the refusal into its durable overflow path (or reports the
-    /// overload); nothing is queued on its behalf.
-    pub(crate) fn try_send(&self, op: WriteOp) -> Result<()> {
-        if self.backlog.is_saturated() {
-            return Err(ActError::QueueFull);
-        }
-        let tx = self.route(&op)?;
-        match tx.try_send(op) {
-            Ok(()) => {
-                self.backlog.record_accepted();
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.backlog.latch();
-                Err(ActError::QueueFull)
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(Self::closed()),
         }
     }
 
@@ -480,62 +375,6 @@ impl StoreWriter {
 
     async fn apply(store: &Store, router: &LaneRouter, op: WriteOp) -> Result<()> {
         match op {
-            WriteOp::Task(task) => Self::apply_task(store, &task).await,
-            WriteOp::CloseDeliveries { pid, tid } => {
-                store.close_deliveries(&pid, &tid).await?;
-                // the task close may have settled the process's last open
-                // delivery — mark it removable when the process is finished
-                // and nothing is left open
-                let _ = store.try_mark_removable(&pid).await;
-                Ok(())
-            }
-            WriteOp::EnqueueNext {
-                pid,
-                tid,
-                target_tid,
-                source_version,
-            } => {
-                store
-                    .enqueue_next_op_details(&pid, &tid, target_tid, source_version)
-                    .await?;
-                Ok(())
-            }
-            WriteOp::EnqueueExec { pid, tid } => {
-                store.enqueue_exec_op(&pid, &tid).await?;
-                Ok(())
-            }
-            WriteOp::MarkOpDispatched { pid, tid, r#type } => {
-                store.mark_op_dispatched(&pid, &tid, &r#type).await?;
-                Ok(())
-            }
-            WriteOp::MarkOpOverflow { pid, tid, r#type } => {
-                store.mark_op_overflow(&pid, &tid, &r#type).await?;
-                Ok(())
-            }
-            WriteOp::MarkOpPhase {
-                pid,
-                tid,
-                r#type,
-                phase,
-            } => {
-                store.mark_op_phase(&pid, &tid, &r#type, phase).await?;
-                Ok(())
-            }
-            WriteOp::EnqueueAction {
-                pid,
-                tid,
-                event,
-                options,
-            } => {
-                store
-                    .enqueue_action_op(&pid, &tid, &event, &options)
-                    .await?;
-                Ok(())
-            }
-            WriteOp::OpDone { pid, tid, r#type } => {
-                store.complete_ops(&pid, &tid, &r#type).await?;
-                Ok(())
-            }
             WriteOp::RemoveProc { pid } => {
                 store.remove_proc(&pid).await?;
                 // The removal is durable: release the pid's shard assignment.
@@ -564,47 +403,6 @@ impl StoreWriter {
         }
     }
 
-    async fn apply_task(store: &Store, task: &Arc<Task>) -> Result<()> {
-        // A task write that reaches the writer after its process was already
-        // removed is dead data. Removal is queued on the writer too (FIFO
-        // within the process's shard), so every write enqueued before the
-        // removal has already been applied by now; skipping the late write
-        // keeps it from re-creating rows or failing (missing procs row) for a
-        // process that no longer exists.
-        if !store.procs().exists(&task.pid).await? {
-            return Ok(());
-        }
-        // lifecycle row + this task's own vars row when its scope diverged
-        // (scope vars are decoupled from task state writes; an ancestor's row
-        // is flushed by the ancestor's own persist). FIFO order keeps the
-        // scope vars (e.g. the applied propagation phase) durable before any
-        // outbox record queued after this write.
-        store.persist_task_rows(task).await?;
-        // The root task's terminal state is what the proc state mirrors (see
-        // `Task::set_state`): its own lifecycle row settles the proc row when
-        // the run finishes.
-        if task.id == consts::TASK_ROOT_TID && task.state().is_completed() {
-            store
-                .mark_proc_complete(&task.pid, task.end_time(), task.state())
-                .await?;
-        }
-        // A message is done when it has no delivery rows (its own state is
-        // terminal — the message state is a projection of the task state) or
-        // when every delivery of it has settled. The task's terminal write is
-        // the authoritative point for both:
-        //  1. close the task's own delivery rows `Completed` — the client is
-        //     not asked to act on a finished task (this covers tasks
-        //     completed by the engine itself, with no client action ever) —
-        //     except `Error` rows, which stay open for manual handling;
-        //  2. re-check the removable mark — a process with no delivery rows
-        //     (or all settled) is marked here, so the sweeper deletes it.
-        if task.state().is_completed() {
-            store.close_deliveries(&task.pid, &task.id).await?;
-            let _ = store.try_mark_removable(&task.pid).await;
-        }
-        Ok(())
-    }
-
     /// Flush every pending write, stop the writer consumers and wait until
     /// they have all fully exited. When this returns no writer task is left
     /// running: every op enqueued before the writer stopped has been applied.
@@ -620,6 +418,116 @@ impl StoreWriter {
         let tasks = std::mem::take(&mut *self.tasks.lock());
         for task in tasks {
             let _ = task.await;
+        }
+    }
+}
+
+/// Store one message's canonical row and one ack-channel delivery row through
+/// the write-behind queue, written on the process's shard so the create cannot
+/// land after the close (or the removal) that decides the row's fate — see
+/// [`WriteOp::StoreDelivery`]. `Ok(false)` means nothing was stored: the
+/// process is gone, so the message is delivered without a delivery row instead
+/// of re-creating rows behind its removal.
+pub(crate) async fn store_delivery(
+    writer: &StoreWriter,
+    message: &crate::data::Message,
+    delivery: &crate::data::Delivery,
+) -> Result<bool> {
+    let (tx, rx) = oneshot::channel();
+    writer
+        .send(WriteOp::StoreDelivery {
+            message: Box::new(message.clone()),
+            delivery: Box::new(delivery.clone()),
+            reply: tx,
+        })
+        .await?;
+    rx.await
+        .map_err(|_| ActError::Runtime("store writer dropped the delivery".to_string()))?
+}
+
+/// Evict one process's rows without waiting for them: `RemoveProc` is
+/// serialized through the writer (FIFO), so it can never race writes still
+/// queued for the process — its completion markers are applied first, then the
+/// rows are dropped once the shard reaches the op. Callers that need the
+/// removal to be durable when they return flush afterwards:
+/// [`sweep_removable`] once for the whole batch.
+pub(crate) async fn queue_removal(store: &Store, writer: &StoreWriter, pid: &str) -> Result<()> {
+    debug!("remove pid={pid}");
+    // Read before the writer drops the row: the directory lives in the
+    // process's env, and a swept process's instance is already gone.
+    let workdir = store.proc_workdir(pid).await;
+    // The directory is created by the start and holds nothing the rows depend
+    // on, so it goes with them — and goes FIRST: a crash between the two leaves
+    // the row still marked, which the next sweep converges on, while the
+    // reverse order would strand the directory with no row left to find it.
+    remove_workdir(pid, workdir);
+    writer
+        .send(WriteOp::RemoveProc {
+            pid: pid.to_string(),
+        })
+        .await
+}
+
+/// The sweeper: delete every finished process whose deliveries have all
+/// settled (see [`Store::sweep_settled_procs`]). Runs on the retry-timer tick;
+/// deletion is never synchronous with the process completion — it waits for
+/// the deliveries to settle. Removal goes through the writer (`RemoveProc`,
+/// FIFO after any still-queued writes of the process), so it cannot race them.
+pub(crate) async fn sweep_removable(
+    store: &Store,
+    writer: &StoreWriter,
+    router: &LaneRouter,
+) -> Result<usize> {
+    let pids = store.sweep_settled_procs(256).await?;
+    for pid in &pids {
+        queue_removal(store, writer, pid).await?;
+    }
+    // One barrier covers the whole sweep: each `RemoveProc` is already FIFO
+    // after its process's pending writes, so the batch flush only bounds how
+    // long the dropped rows can linger for readers — it must not pay one
+    // all-shard wait per process.
+    if !pids.is_empty() {
+        writer.flush().await?;
+        // Removals are durable: release the gate's lane assignments (the
+        // writer forgot its own shard assignments during apply).
+        for pid in &pids {
+            router.forget(pid);
+        }
+    }
+    Ok(pids.len())
+}
+
+/// Delete the directory a process's filesystem access was confined to —
+/// `<workdir>/<pid>`, as carried in the process's env — when the process named
+/// `pid` has one.
+///
+/// The shape is checked: only a directory whose last component is the pid
+/// itself is removed, the only shape a start ever creates, so a row that names
+/// something else cannot delete it. Removal is best-effort — a directory holds
+/// no engine state, so a failure is reported and never blocks the removal it
+/// belongs to (pinning a dead process's rows, and its pid, on a filesystem
+/// error would be the worse outcome).
+fn remove_workdir(pid: &str, dir: Option<std::path::PathBuf>) {
+    let Some(dir) = dir else {
+        return;
+    };
+    if dir.file_name().and_then(|name| name.to_str()) != Some(pid) {
+        warn!(
+            pid = %pid, dir = %dir.display(),
+            "not removing a workdir that is not named after its process"
+        );
+        return;
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => debug!(pid = %pid, "removed the process workdir"),
+        // Already gone (an interrupted removal that was retried, or an
+        // operator cleaning up): nothing to do.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            warn!(
+                pid = %pid, dir = %dir.display(), error = %err,
+                "failed to remove the process workdir"
+            );
         }
     }
 }
@@ -803,25 +711,39 @@ mod tests {
         ("pids-a".to_string(), "pids-b".to_string())
     }
 
-    async fn enqueue(writer: &StoreWriter, pid: &str) {
-        writer
-            .send(WriteOp::EnqueueNext {
+    /// The canonical-row + delivery-row pair the channel path writes — the
+    /// write the writer still applies besides a removal, so it is what every
+    /// test here drives the shards with. `tid` stays empty: a delivery that
+    /// names a task is dropped unless that task's process row exists, and the
+    /// tests here are about the write path, not the read model.
+    fn delivery(pid: &str, mid: &str) -> WriteOp {
+        let (reply, _rx) = oneshot::channel();
+        WriteOp::StoreDelivery {
+            message: Box::new(crate::store::data::Message {
+                id: mid.to_string(),
                 pid: pid.to_string(),
-                tid: "t1".to_string(),
-                target_tid: None,
-                source_version: 0,
-            })
-            .await
-            .unwrap();
+                ..Default::default()
+            }),
+            delivery: Box::new(crate::store::data::Delivery {
+                id: format!("delivery-{mid}"),
+                msg_id: mid.to_string(),
+                pid: pid.to_string(),
+                ..Default::default()
+            }),
+            reply,
+        }
+    }
+
+    async fn enqueue(writer: &StoreWriter, pid: &str) {
+        writer.send(delivery(pid, &message_id(pid))).await.unwrap();
+    }
+
+    fn message_id(pid: &str) -> String {
+        format!("msg-{pid}")
     }
 
     async fn durable(store: &Store, pid: &str) -> bool {
-        store
-            .load_pending_ops()
-            .await
-            .unwrap()
-            .iter()
-            .any(|op| op.pid == pid)
+        store.messages().find(&message_id(pid)).await.is_ok()
     }
 
     /// `flush` acks `Ok` only when every write queued before the barrier was
@@ -948,15 +870,7 @@ mod tests {
 
         writer.close().await; // no-op
 
-        let send_err = writer
-            .send(WriteOp::EnqueueNext {
-                pid: "p2".to_string(),
-                tid: "t1".to_string(),
-                target_tid: None,
-                source_version: 0,
-            })
-            .await
-            .unwrap_err();
+        let send_err = writer.send(delivery("p2", "msg-p2")).await.unwrap_err();
         assert!(
             matches!(send_err, ActError::Shutdown),
             "a post-close send must report the structured shutdown error: {send_err}"
@@ -969,10 +883,10 @@ mod tests {
     }
 
     /// `RemoveProc` is applied after the writes queued before it, then
-    /// deletes the process's outbox records; one flush covers both and
-    /// reports no failure. Removing an absent process is a no-op.
+    /// deletes the process's rows; one flush covers both and reports no
+    /// failure. Removing an absent process is a no-op.
     #[tokio::test]
-    async fn remove_proc_deletes_outbox_rows_after_pending_writes() {
+    async fn remove_proc_drops_rows_after_pending_writes() {
         let (store, _, writer) = test_writer();
 
         // the enqueue is queued before the removal: it applies first, then
@@ -1023,86 +937,41 @@ mod tests {
         assert!(writer.high_watermark() >= 1);
     }
 
-    /// The per-shard queue is bounded, and the two producer classes react
-    /// differently to no room: admitting new work is refused (so a backed-up
-    /// store is not fed more work), while the bookkeeping of work already in
-    /// flight waits for room instead of being dropped.
+    /// A full shard makes the bookkeeping wait for room (never drop it) and
+    /// latches the writer saturated, so producers can see that the store is
+    /// behind instead of piling more work onto it.
     #[tokio::test]
-    async fn a_full_shard_refuses_new_work_and_stalls_bookkeeping() {
+    async fn a_full_shard_stalls_bookkeeping_and_latches_saturation() {
         let kv = Arc::new(TestKv::new());
         let store = Arc::new(Store::new(kv.clone()));
         // one shard with one op of room, so the bound is observable
         let writer = StoreWriter::spawn(store.clone(), 1, 1, shared(1));
-        let op = |tid: &str| WriteOp::EnqueueNext {
-            pid: "p1".to_string(),
-            tid: tid.to_string(),
-            target_tid: None,
-            source_version: 0,
-        };
 
         // park the consumer inside a write: the op it took is off the queue,
         // leaving the single slot free again
         kv.arm_gate();
         enqueue(&writer, "p1").await;
         kv.wait_entered().await;
-        writer.try_send(op("t2")).unwrap();
+        enqueue(&writer, "p1").await;
+        assert_eq!(writer.depth(), 1, "the second op fills the shard");
 
-        // no room: the next new work is refused, not queued and not awaited
-        let err = writer.try_send(op("t3")).unwrap_err();
-        assert!(matches!(err, ActError::QueueFull), "{err}");
-        assert!(writer.saturated(), "a refusal must latch the writer");
-
-        // bookkeeping waits for room rather than being refused
-        let stalled = tokio::time::timeout(Duration::from_millis(200), writer.send(op("t3"))).await;
+        // no room: the next bookkeeping write waits for room instead of being
+        // dropped, and the wait latches the writer
+        let stalled = tokio::time::timeout(
+            Duration::from_millis(200),
+            writer.send(delivery("p1", "m3")),
+        )
+        .await;
         assert!(
             stalled.is_err(),
             "bookkeeping must wait for room while the shard is full"
         );
+        assert!(writer.saturated(), "a wait for room must latch the writer");
 
         kv.disarm_gate();
         writer.flush().await.unwrap();
         assert_eq!(writer.depth(), 0);
-    }
-
-    /// The saturation latch is shared: while one shard is out of room, new work
-    /// for *any* process is refused — even one whose own shard is idle — and
-    /// the writer re-opens once the backlog drains.
-    #[tokio::test]
-    async fn saturation_refuses_new_work_even_on_an_idle_shard() {
-        let kv = Arc::new(TestKv::new());
-        let store = Arc::new(Store::new(kv.clone()));
-        // two shards with one op of room each
-        let writer = StoreWriter::spawn(store.clone(), 2, 2, shared(2));
-        let (busy, idle) = pids_on_distinct_shards(2);
-        let op = |pid: &str, tid: &str| WriteOp::EnqueueNext {
-            pid: pid.to_string(),
-            tid: tid.to_string(),
-            target_tid: None,
-            source_version: 0,
-        };
-
-        // fill the busy shard: its consumer is parked inside a write, so the op
-        // it took left the queue and the one queued behind it is the last slot
-        kv.arm_gate();
-        enqueue(&writer, &busy).await;
-        kv.wait_entered().await;
-        enqueue(&writer, &busy).await;
-
-        let err = writer.try_send(op(&busy, "t2")).unwrap_err();
-        assert!(matches!(err, ActError::QueueFull), "{err}");
-        assert!(writer.saturated(), "a refusal must latch the writer");
-
-        // the idle shard has room, but new work is refused while latched
-        let err = writer.try_send(op(&idle, "t1")).unwrap_err();
-        assert!(matches!(err, ActError::QueueFull), "{err}");
-
-        // once the backlog drains the latch releases and new work is admitted
-        kv.disarm_gate();
-        writer.flush().await.unwrap();
         assert!(!writer.saturated(), "a drained backlog re-opens the writer");
-        writer.try_send(op(&idle, "t1")).unwrap();
-        writer.flush().await.unwrap();
-        assert!(durable(&store, &idle).await);
     }
 
     /// The write path is sharded by pid: ops of independent pids are applied
@@ -1139,53 +1008,5 @@ mod tests {
             .unwrap();
         writer.flush().await.unwrap();
         assert!(!durable(&store, &a).await, "one pid's ops must stay FIFO");
-    }
-
-    /// The deferred delivery close queued for a finished task settles the
-    /// engine-owned rows and leaves an `Error` row for manual handling.
-    #[tokio::test]
-    async fn delivery_close_preserves_error_rows() {
-        use crate::store::data::{Delivery, DeliveryStatus};
-
-        let (store, _, writer) = test_writer();
-        for (id, status) in [
-            ("d-error", DeliveryStatus::Error),
-            ("d-delivered", DeliveryStatus::Delivered),
-            ("d-acked", DeliveryStatus::Acked),
-        ] {
-            store
-                .deliveries()
-                .create(&Delivery {
-                    id: id.to_string(),
-                    pid: "p1".to_string(),
-                    tid: "t1".to_string(),
-                    status,
-                    ..Default::default()
-                })
-                .await
-                .unwrap();
-        }
-
-        writer
-            .send(WriteOp::CloseDeliveries {
-                pid: "p1".to_string(),
-                tid: "t1".to_string(),
-            })
-            .await
-            .unwrap();
-        writer.flush().await.unwrap();
-
-        assert_eq!(
-            store.deliveries().find("d-error").await.unwrap().status,
-            DeliveryStatus::Error
-        );
-        assert_eq!(
-            store.deliveries().find("d-delivered").await.unwrap().status,
-            DeliveryStatus::Completed
-        );
-        assert_eq!(
-            store.deliveries().find("d-acked").await.unwrap().status,
-            DeliveryStatus::Completed
-        );
     }
 }
