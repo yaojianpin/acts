@@ -9,7 +9,7 @@ use tracing::trace;
 use crate::store::KvStore;
 use crate::{
     ActError, Result, Trigger, Workflow,
-    runtime::scheduler::TaskState,
+    scheduler::TaskState,
     store::{Model, Package},
     utils,
 };
@@ -296,7 +296,7 @@ impl Store {
                         event
                             .schedule
                             .as_deref()
-                            .map(crate::runtime::scheduler::cron::Cron::next_fire_millis)
+                            .map(crate::scheduler::Cron::next_fire_millis)
                             .unwrap_or(0)
                     };
                     ops.extend(events.update_ops(&event).await?);
@@ -304,8 +304,7 @@ impl Store {
                 None => {
                     // new trigger: arm `schedule` rows to their next cron fire
                     if let Some(schedule) = event.schedule.as_deref() {
-                        event.next_run =
-                            crate::runtime::scheduler::cron::Cron::next_fire_millis(schedule);
+                        event.next_run = crate::scheduler::Cron::next_fire_millis(schedule);
                     }
                     ops.extend(events.create_ops(&event)?);
                 }
@@ -729,7 +728,7 @@ impl Store {
     /// terminal states (`state` is indexed), capped at `limit`.
     async fn terminal_proc_rows(&self, limit: usize) -> Result<Vec<data::Proc>> {
         use super::query::{Expr, Filter, Query};
-        use crate::runtime::scheduler::TaskState;
+        use crate::scheduler::TaskState;
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let terminal: Vec<String> = [

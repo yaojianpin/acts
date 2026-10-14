@@ -6,7 +6,7 @@
 //! kernel's row projection; nothing here drives a run.
 use crate::{
     ActError, Error, Result, Vars, Workflow,
-    runtime::scheduler::{Node, NodeData, Runtime, TaskState},
+    scheduler::{Node, NodeData, Runtime, TaskState},
     store::{Store, query::*},
     utils,
 };
@@ -22,13 +22,13 @@ impl Store {
         &self,
         pid: &str,
         rt: &Arc<Runtime>,
-    ) -> Result<Option<Arc<crate::runtime::scheduler::Process>>> {
+    ) -> Result<Option<Arc<crate::scheduler::Process>>> {
         debug!("load process pid={}", pid);
         let Some(p) = self.procs().find_opt(pid).await? else {
             return Ok(None);
         };
         let model = Workflow::from_json(&p.model)?;
-        let proc = crate::runtime::scheduler::Process::new(pid, rt);
+        let proc = crate::scheduler::Process::new(pid, rt);
         let env_local: serde_json::Value =
             serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
 
@@ -72,7 +72,7 @@ impl Store {
     /// half).
     async fn load_tasks(
         &self,
-        proc: &Arc<crate::runtime::scheduler::Process>,
+        proc: &Arc<crate::scheduler::Process>,
         rt: &Arc<Runtime>,
     ) -> Result<()> {
         debug!("load_tasks pid={}", proc.id());
@@ -100,7 +100,7 @@ impl Store {
                 };
 
                 let state: TaskState = t.state.into();
-                let mut task = crate::runtime::scheduler::Task::new(proc, &t.tid, node, rt);
+                let mut task = crate::scheduler::Task::new(proc, &t.tid, node, rt);
                 task.set_pure_state(state.clone());
                 task.set_start_time(t.start_time);
                 task.set_end_time(t.end_time);

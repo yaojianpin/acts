@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::runtime::scheduler::Process;
+use crate::scheduler::Process;
 
 #[derive(Debug, Clone, Default)]
 pub struct TaskExtra {

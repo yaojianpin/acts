@@ -2,7 +2,7 @@ use crate::{
     ActSchema, ChannelOptions, Engine, Message, Signal, Variant, VariantTypes, Vars, Workflow,
     data::{self, Package},
     event::MessageState,
-    runtime::scheduler::TaskState,
+    scheduler::TaskState,
     store::query::*,
     utils::{self, consts, test::USES_IRQ, test::USES_SET},
 };

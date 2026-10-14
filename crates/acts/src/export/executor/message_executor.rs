@@ -1,4 +1,4 @@
-use crate::{MessageInfo, Principal, Result, query::Query, runtime::Runtime, store::PageData};
+use crate::{MessageInfo, Principal, Result, query::Query, scheduler::Runtime, store::PageData};
 use std::sync::Arc;
 use tracing::{debug, instrument};
 

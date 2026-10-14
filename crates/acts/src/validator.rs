@@ -1,8 +1,8 @@
 //! A bounded cache of compiled JSON Schema validators.
 //!
 //! Both caches in this crate that hold compiled [`Validator`]s — the runtime's
-//! package-schema cache (`crate::runtime::scheduler::validation`) and the process-wide
-//! `ActSchema` cache (`model::var`) — are keyed by the schema's *serialized
+//! package-schema cache (behind `crate::scheduler::Runtime::schema_cache`) and
+//! the process-wide `ActSchema` cache (`model::var`) — are keyed by the schema's *serialized
 //! text*, and an engine that keeps publishing workflows or packages mints a
 //! new key on every schema revision: with the maps left unbounded they grow
 //! with every revision the process has ever seen, not with the schemas it

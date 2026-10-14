@@ -1,4 +1,4 @@
-use crate::{ActPackageDefinition, Principal, Result, env::ActUserVar, runtime::Runtime};
+use crate::{ActPackageDefinition, Principal, Result, env::ActUserVar, scheduler::Runtime};
 use std::sync::Arc;
 
 /// `ext:register_var` — install a user var module into the engine's

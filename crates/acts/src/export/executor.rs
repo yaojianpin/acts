@@ -9,7 +9,7 @@ pub(crate) mod task_executor;
 
 use crate::Principal;
 use crate::query::Query;
-use crate::runtime::Runtime;
+use crate::scheduler::Runtime;
 use crate::store::{DbCollection, PageData};
 use std::sync::Arc;
 

@@ -14,7 +14,7 @@ use serial_test::serial;
 async fn start_completed(
     workflow: &Workflow,
     vars: Vars,
-) -> (Engine, Arc<crate::runtime::scheduler::Process>) {
+) -> (Engine, Arc<crate::scheduler::Process>) {
     let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let done = sig.clone();

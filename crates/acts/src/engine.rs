@@ -3,7 +3,7 @@ use crate::{
     builder::EngineBuilder,
     export::{Channel, Executor},
     package::{self, ActPackageRegister},
-    runtime::Runtime,
+    scheduler::Runtime,
     snapshot::{SnapshotManager, SnapshotOptions},
 };
 use std::sync::Arc;

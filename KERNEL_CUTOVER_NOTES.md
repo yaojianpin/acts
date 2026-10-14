@@ -253,6 +253,11 @@ P0 是 P3 的前置(见下)。
 `Runtime` 的 legacy 字段与三个 timer、`utils/lane.rs`(若无消费者)。
 移出被 host 复用的基座到更合适的位置(建议 `scheduler/` 保留为无头基座 `runtime/` 或直接并入 `kernel/host/scope/`;择一并在本文件登记结论)。
 
+> **结论(2026-10-14,用户裁决,已完成)**:不保留 `scheduler/` 这个模块名 —— 旧基座按依赖拆开(`state`/`tree`/`cron` 进 `core`,`health`/`validation`/`process`/`context`/`task_tree` 进 `shell`),
+> 而**整个 runtime 目录改名为 `scheduler/`**、`Runtime` 落到 `scheduler/runtime.rs`。理由:用户可见的配置词汇本就把它叫 scheduler
+> (`Config::scheduler_workers`/`scheduler_queue_cap`/`acts.toml`);且改名顺带消掉 P1a 的 `clippy::module_inception` 约束。
+> 逐项与实测见 §10「P5(名与形)完成」。
+
 - 删 `scheduler/tests/**` 的常驻引擎测试(≈31 文件);保留 `tree.rs`/`health.rs` 等纯子系统测试
   (若 `health.rs` 随 timer 删除,则其测试一并删除并在本文件登记)。
 - 验收:`cargo test -p acts` 绿;`cargo build --workspace` 绿。
@@ -1791,6 +1796,74 @@ kernel 期版本,只有 2 处 `cache()` reach-through 待改)+ 重新施加本�
   3. **历史**:行被回收后,聚合是那条 run **唯一**残存记录(变量、outbox 收据全在里面);删即丢历史 → 政策要在"磁盘"与"审计/回溯"之间取舍(或先归档再删)。
 - 实现要点:新增 `AsyncAggregateRepository::remove(process_id, expected_version)`,在**一个守卫批**里删聚合 + recovery index + outbox index(三者今日同批写入,半删必须不可能);GC 只考虑"`settled` 且 `operations` 为空 且 行已回收"的 run;崩溃幂等(行回收与聚合删除之间崩掉,重启后仍是可回收态)。
 - 验收:回收只按政策发生;pid 复用按所选语义(含墓碑方案)有测试;对"聚合已删但索引项仍在"的库恢复扫描不报错(本轮已改成跳过旧项,该测试骨架可复用);全量门禁绿。
+
+---
+
+### P5(名与形)完成(2026-10-14):`runtime/` → `scheduler/` + 旧 `scheduler/` 基座解散 + `Runtime` 独立
+
+**用户指令(三条,一次做完)**:①`runtime/` 改名 `scheduler/` —— 这个模块实际就是工作流的调度与执行,结果经 `shell/` 对外、经 `durable/` 落字节;②`runtime/scheduler/`(旧无头基座)按依赖拆进 `core`/`shell`;③`mod.rs` 里的 `Runtime` 独立到 `scheduler/runtime.rs`。
+**执行顺序**:先解散、再改名、最后抽 `runtime.rs` —— 否则中间态会出现 `crate::scheduler::scheduler::…`,同一批路径要动两遍。
+
+**改名后的目录**:
+
+```
+src/scheduler/
+├── mod.rs      # 仅 doc + 私有 mod 声明 + 显式 `pub use` 门面(见下)
+├── runtime.rs  # Runtime + SnapshotRegistry + TEST_TICK_MS + SWEEP_RECONCILE_LIMIT + prepare_workdir/is_workdir_segment + ActPackageRuntime impl
+├── core/       # 纯层:model/plan/commit/recovery/outbox + architecture.rs/coverage.rs
+│   ├── model/task_state.rs                               ← scheduler/state.rs
+│   ├── model/view/{mod,node,node_tree,visit,build}.rs     ← scheduler/tree/*(task_tree 除外)
+│   └── plan/cron.rs                                      ← scheduler/cron.rs
+├── durable/    # 字节层(未动)
+├── shell/      # 异步外壳
+│   ├── context.rs / health.rs / validation.rs             ← scheduler/{context,health,validation}.rs
+│   ├── process/{mod,process,task}.rs                      ← scheduler/process/*
+│   ├── task_tree.rs                                       ← scheduler/tree/task_tree.rs
+│   └── tests/{mod,health,state,tree}.rs                    ← shell/tests.rs 转目录 + scheduler/tests/*
+└── tests/      # 可靠性矩阵(白盒跨层套件,见下;`#[cfg(test)] mod tests;`)
+    └── reliability/**                                     ← crate::tests::reliability(13 文件)
+```
+
+**落位判据**(不是按文件名分):`tree/task_tree.rs` 持 `Arc<Task>`、`process/*` 与 `context.rs` 持 `Arc<Runtime>` → 只能进 `shell/`;`tree` 其余件 + `state` + `cron` 零 `tokio`/`store` → 进 `core/`(守卫扫描通过);`validation.rs` 用 `store::Store` → `shell/`(**不**进 `durable/`:那里只放字节编解码 + 已声明的 `KvStore` 适配器)。
+
+**守卫同步**(`core/architecture.rs`):`runtime_root()` → `scheduler_root()`(`src/scheduler`);`RUNTIME_ROOT` 改为 `{core:Pure, durable:Byte, shell:Shell, mod.rs:Root, runtime.rs:Root, tests:Tests}`(`scheduler` 条目删、`runtime.rs` 条目加、可靠性套件搬进来后加 `Tier::Tests` 一档);`SHELL_MODULES` 由两条收成 `["crate::scheduler::shell"]`(**那个自指条目消失**);测试 `every_runtime_entry_is_classified` → `every_scheduler_entry_is_classified`。
+另:新增 `names()`/`names_segment()`,让"文件是否命名某依赖"在**分组导入**下依然成立 —— 目录现在写成 `use crate::{…, store::KvStore}`,`crate::` 前缀落在组上,原来的 `source.contains("crate::store")` 会漏判(**实测**:导入分组后 `store_coupling_is_explicit_and_minimal` 立刻红,断言文本 `declared adapter ... no longer names crate::store`);单段尾巴按**路径段边界**匹配(`store::` 命中,`document_store::` 不命中)。
+
+**`lib.rs`**:`mod runtime;` → `mod scheduler;`;`pub use crate::scheduler::shell::Context;` 的内部路径变了,但 `acts::Context`(被 `packages/acts-package-nats`、`packages/acts-package-state`、`examples/custom_package` 消费)不变;`Runtime` 仍不导出(外部只经 `Engine`)。
+
+**对外面(用户第二/第三条指令,三轮收敛)**:`mod.rs` 不再写 `pub(crate) mod core; …` —— 四层改为**私有 `mod`**,对外只留**显式 `pub use` 门面**(逐个列出)。门面即全部契约:层可以重塑而消费者无感。
+- `Context` 是唯一 `pub use`(crate 根 `acts::Context` 要公开再导出);服务路径要用的名字(`Runtime`/`Process`/`Task`/`TaskState`/`Node`/`NodeData`/`NodeKind`/`NodeTree`/`Cron` + `prepare_workdir`)是 `pub(crate) use`;
+- **第一版把可靠性套件要观察的 14 个内核名字也塞进了门面(带 `#[cfg(test)]`)** —— 用户指出这不是门面该有的东西:为**一个白盒套件**放宽模块契约。可选方案有三:①把套件搬回模块内;②`#[cfg(test)]` 下开放层本身;③照旧但压 lint(`#[allow(unused_imports)]`,会把真死的导出一起盖住)。**取 ①**,理由见下一条;
+- 剩下的**唯一**测试例外:`NodeContent` —— 消费方是 `model/tests/info.rs`(模型自己的行转换测试要构造一个视图节点)。它 test-only、也不属于任何层,故留在门面并写清理由;
+- 迁移面:`scheduler/` 之外的 **28 个文件**由 `crate::scheduler::{core,shell}::…` 改为门面名;`validator.rs` 的一处 doc 引用 `shell::validation` 改为 `Runtime::schema_cache`(该模块已私有)。
+
+**可靠性矩阵搬回模块内(用户第三问的答案)**:`crate::tests::reliability/**`(13 文件 / 11,245 行)→ `scheduler/tests/reliability/**`(`scheduler/mod.rs` 加 `#[cfg(test)] mod tests;`,crate 根 `tests.rs` 去掉 `mod reliability;`)。
+- 依据:该套件是**白盒**的 —— 它驱动 `Engine`,直接断言聚合/执行状态/操作状态/outbox/行键。按"白盒测试跟着被测模块走"的惯例(本仓自己的先例:`shell/tests/**`、`core/coverage.rs`),而且 `git log -- crates/acts/src/tests/reliability` 显示它**本来就在** `src/scheduler/tests/reliability/`(`9b4f02b` 才挪到 crate 根);
+- 搬回后它作为 `scheduler` 的**后代**直接用真路径(`crate::scheduler::core::model::execution_graph::ExecutionState`、`…::durable::document_store::aggregate_key` …),门面不必为它开口子;
+- **效果**:模块对外面从 25 条降到 **11 条**(10 条服务路径真在用 + 1 条如实标注的 `NodeContent`);`scheduler/tests/mod.rs` 写明"这套是跨层观察耐久性契约,所以住在层旁边"。
+- 守卫新增一档 **`Tier::Tests`**(`tests` 成为运行期根的第五个条目):测试树跨层观察,层规则一概不适用。
+
+**导入分组**(用户指令):`crates/acts/src/scheduler/**` 的 **30 个文件**把 `use crate::…` 合并成单条嵌套组(`use crate::{ …, scheduler::{core::{…}, shell::{…}} }`);`cargo fmt` 归一。
+
+**两处偏差(登记)**:
+1. **`SchedulerHealth` → `LoopHealth` 的改名作废**:该名字与既有的单循环类型 `LoopHealth`(`SchedulerHealth` 的两个字段就是它)撞名 —— 实测 8 处 E0119/E0428 → **回退保留 `SchedulerHealth`**,`Runtime::scheduler_health()` 不变。换来的是零语义改动;代价是 `scheduler::shell::health::SchedulerHealth` 轻微口吃。
+2. **失效文档链接未修**:`shell/mod.rs` 的 `[`crate::scheduler::PARK_CHILDREN`]` 在改名前就指向库里不存在的项,本轮只同步前缀,登记待清(与本轮无关)。
+
+**影响面实测**:`crate::runtime` 出现 **943 次 / 67 文件**,全部在 `crates/acts` 内;**跨 crate 引用 0**;`git mv` 保留历史(21 条 R 记录);本轮工作树共 **110 文件**变更。
+
+**验收(实测)**:
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = **EXIT 0**(全 workspace,含 examples);
+- `cargo fmt` 已跑,`cargo fmt --check` = 干净;
+- `cargo test -p acts --lib --tests` = **858 passed / 0 failed**(383 s);
+  可靠性矩阵**搬进模块后**同一命令复跑 = **858 passed / 0 failed**(332 s);两次之间出现过 1 例失败(§1.8/§10 已登记的"并行负载翻转族",单跑即绿)—— 故记为 flake,不是搬迁回归;
+- `cargo test -p acts-acl`、`-p acts-expr --all-features`、`-p acts-store --features sled,sqlite`、`-p acts-cli` = 全绿;
+  `cargo test -p acts-server -j 2` = **EXIT 0**(按 §10 该机的页面文件现象,`acts-server` 逐 target 跑);
+- **未绿(与本轮无关,已在基线上复现)**:`cargo test -p acts-package-shell` 的 `bounds`(6)/`policy`(2)/`vars`(1) 失败,
+  断言形如 `the failure must name the deadline, got: {}` —— 失败 act 的**输出文本为空**,属 §10 已登记的"失败文本/子执行 outputs 通道"同一族语义差距。
+  **实测对照**:`git worktree add --detach` 取 HEAD(60806c0)、独立 `--target-dir` 全新构建后,同一批用例**同样** 1/6、1/2、3/1 → 非本轮引入。
+  `acts-store` 的 postgres 套件(需 localhost:5433)与 `acts-channel`/`acts-plugin-nats` 的 broker 套件(需 127.0.0.1:4222)本机无服务,未跑(AGENTS.md 已声明该前提)。
+
+**与后续的关系**:P1a 当初把 `Runtime` 写进 `mod.rs` 的唯一理由是 `runtime/runtime.rs` 会触发 `clippy::module_inception`;目录改名后该约束消失,`scheduler/runtime.rs` 合法。§10「待决:`host` 与 `Runtime` 是否冗余」的"最后合并"不受影响 —— 合并后 `impl Runtime` 正好分在 `runtime.rs`(组合根/门面)与 `shell/`(驱动)两处。
 
 ---
 

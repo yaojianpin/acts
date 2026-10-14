@@ -1181,7 +1181,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         // The positive half — a run under its own uid seals its own value — is
-        // covered by `runtime::shell::tests::effect_seals_snapshot_params`: the
+        // covered by `scheduler::shell::tests::effect_seals_snapshot_params`: the
         // aggregate carries the sealed value, while the read model has no
         // `sealed` column to assert it through here (registered in §10).
     }

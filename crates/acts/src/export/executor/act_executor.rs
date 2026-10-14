@@ -1,5 +1,5 @@
 use crate::event::EventAction;
-use crate::{Action, Principal, Result, Vars, runtime::Runtime};
+use crate::{Action, Principal, Result, Vars, scheduler::Runtime};
 use std::sync::Arc;
 
 /// `act:submit` — submit an IRQ task's work for review.

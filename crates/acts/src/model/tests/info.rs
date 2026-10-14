@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     ActRunAs, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo, TaskState, Workflow, data,
-    package::ActPackageCatalog, runtime::scheduler::NodeData, utils,
+    package::ActPackageCatalog, scheduler::NodeData, utils,
 };
 
 #[test]
@@ -72,7 +72,7 @@ fn model_info_task() {
     let workflow = Workflow::new();
     let node_data = NodeData {
         id: "nid".to_string(),
-        content: crate::runtime::scheduler::NodeContent::Workflow(Arc::new(workflow)),
+        content: crate::scheduler::NodeContent::Workflow(Arc::new(workflow)),
         level: 0,
         parent_id: None,
         prev_id: None,
@@ -239,7 +239,7 @@ fn model_info_task_arr_to_value() {
     let workflow = Workflow::new();
     let node_data = NodeData {
         id: "nid".to_string(),
-        content: crate::runtime::scheduler::NodeContent::Workflow(Arc::new(workflow)),
+        content: crate::scheduler::NodeContent::Workflow(Arc::new(workflow)),
         level: 0,
         parent_id: None,
         prev_id: None,

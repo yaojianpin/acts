@@ -115,7 +115,7 @@ fn builtin(name: &str) -> Option<Value> {
             let vars = Vars::new().with(name.as_str(), value);
             // The write lands in the headless scope's own data; what an
             // effect scope writes is folded into the hop's commit (see
-            // `runtime::shell::effects`), and nothing else is persisted —
+            // `scheduler::shell::effects`), and nothing else is persisted —
             // the aggregate is the record.
             Context::with(|ctx| ctx.proc.set_data(&vars));
 
@@ -327,7 +327,7 @@ fn env_map() -> Vars {
     map
 }
 
-fn current_cost(task: &crate::runtime::scheduler::Task) -> i64 {
+fn current_cost(task: &crate::scheduler::Task) -> i64 {
     if let Some(cost) = task.data().get::<i64>(consts::TASK_COST) {
         return cost;
     }

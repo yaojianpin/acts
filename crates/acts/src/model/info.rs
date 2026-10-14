@@ -1,6 +1,6 @@
 use crate::{
     ActError, ActRunAs, MessageState, Result, Workflow, package::ActPackageCatalog,
-    runtime::scheduler::NodeData, store::data,
+    scheduler::NodeData, store::data,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -212,8 +212,8 @@ impl From<&data::Task> for TaskInfo {
     }
 }
 
-impl From<&Arc<crate::runtime::scheduler::Task>> for TaskInfo {
-    fn from(t: &Arc<crate::runtime::scheduler::Task>) -> Self {
+impl From<&Arc<crate::scheduler::Task>> for TaskInfo {
+    fn from(t: &Arc<crate::scheduler::Task>) -> Self {
         Self {
             id: t.id.clone(),
             prev: t.prev_id(),

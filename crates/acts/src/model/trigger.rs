@@ -155,7 +155,7 @@ impl Trigger {
         if self.builtin_kind() == Some(TriggerKind::Schedule) {
             match &self.schedule {
                 Some(schedule) if !schedule.trim().is_empty() => {
-                    if let Err(err) = crate::runtime::scheduler::cron::Cron::parse(schedule) {
+                    if let Err(err) = crate::scheduler::Cron::parse(schedule) {
                         return Err(ActError::Model(format!(
                             "workflow event({}) invalid schedule '{schedule}': {err}",
                             self.id

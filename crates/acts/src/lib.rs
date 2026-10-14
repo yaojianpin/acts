@@ -18,7 +18,7 @@ mod export;
 mod model;
 mod package;
 mod plugin;
-mod runtime;
+mod scheduler;
 mod signal;
 mod snapshot;
 mod store;
@@ -31,7 +31,7 @@ mod tests;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-pub use crate::runtime::scheduler::Context;
+pub use crate::scheduler::Context;
 pub use acl::{
     ACTION_LOGIN, ACTION_LOGOUT, ACTION_REFRESH, ACTION_SETUSER, ACTION_SUBSCRIBE, ACTION_WHOAMI,
     ANONYMOUS_ALLOW, ANONYMOUS_ROLE, AccessControl, AclError, AnonymousAcl, CATALOG_GROUPS,
@@ -56,7 +56,6 @@ pub use store::*;
 pub use tokio_util::sync::CancellationToken;
 pub type Result<T> = std::result::Result<T, ActError>;
 
-pub(crate) use crate::runtime::scheduler::NodeKind;
+pub(crate) use crate::scheduler::{NodeKind, TaskState};
 pub(crate) type ShareLock<T> = Arc<RwLock<T>>;
-pub(crate) use crate::runtime::scheduler::TaskState;
 pub(crate) use package::Package;

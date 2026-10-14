@@ -1,7 +1,7 @@
 use crate::{
     Event, Result, ShareLock,
     event::Message,
-    runtime::scheduler::{Process, Task},
+    scheduler::{Process, Task},
     utils::{LaneRouter, shared},
 };
 use parking_lot::RwLock;
