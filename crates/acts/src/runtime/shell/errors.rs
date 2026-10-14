@@ -88,19 +88,25 @@ pub(super) fn is_conflict(error: &ActError) -> bool {
 /// Map a repository failure: a *stale plan* — the aggregate moved between the
 /// load a plan was formed from and its commit — is the same retryable race as
 /// a lost compare-and-swap, so a caller can re-plan against the fresh
-/// snapshot. A store-side failure keeps its own typed error (a lost database
-/// lease must stay `LeaseLost`: the server stops the engine and the export
-/// layer refuses the call on it, neither of which can read it out of a
-/// flattened message). Everything else is an engine error.
+/// snapshot. A plan that would create an operation already standing is that
+/// same race, seen from the other side: operation ids are derived from the
+/// snapshot (`max(sequence) + 1`, and a hop's own successor), so two writers
+/// that loaded the same state mint the same ids, and the second one must
+/// re-plan rather than fail (a hard error there leaves a client action refused
+/// for a race it never lost). A store-side failure keeps its own typed error (a
+/// lost database lease must stay `LeaseLost`: the server stops the engine and
+/// the export layer refuses the call on it, neither of which can read it out of
+/// a flattened message). Everything else is an engine error.
 pub(super) fn repository_error(
     error: crate::runtime::durable::async_document_store::AsyncRepositoryError,
 ) -> ActError {
+    use crate::runtime::core::commit::aggregate::CommitError;
     match &error {
         crate::runtime::durable::async_document_store::AsyncRepositoryError::Store(error) => {
             error.clone()
         }
         crate::runtime::durable::async_document_store::AsyncRepositoryError::Domain(
-            crate::runtime::core::commit::aggregate::CommitError::VersionConflict { .. },
+            CommitError::VersionConflict { .. } | CommitError::OperationAlreadyExists(_),
         ) => conflict(format!("stale plan: {error}")),
         _ => runtime(error),
     }

@@ -5,6 +5,7 @@ use crate::runtime::core::outbox::outbox_dispatch::DeliveryOutcome;
 use crate::runtime::core::outbox::records::OutboxRecord;
 use crate::runtime::core::outbox::records::OutboxState;
 use crate::store::MemoryStore;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct CountingTransport {
     delivered: Arc<parking_lot::Mutex<usize>>,
@@ -105,6 +106,281 @@ async fn wake_loss_is_recovered_by_the_scan() {
     );
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     assert!(host.process_completed("p2").await.unwrap());
+}
+
+/// A store that parks a hop inside its *plan* commit and lets a test commit a
+/// rival transition while it waits there.
+///
+/// The parked batch is the hop's own plan commit — the aggregate write that
+/// follows its durable claim — and it is held *before* the guard is evaluated,
+/// so the test's rival write lands in the window between the hop's `load` and
+/// its compare-and-swap. The plan commit therefore loses its guard on demand
+/// instead of by a race, which is what makes the regression below deterministic.
+///
+/// The batch is recognised by its content, not by counting: it writes
+/// [`Self::aggregate`] while the hop's own operation is already durably
+/// `CommitPrepared`, which is exactly the state the claim leaves behind and the
+/// plan commit consumes.
+struct ConflictKv {
+    inner: MemoryStore,
+    aggregate: String,
+    operation: OperationId,
+    armed: AtomicBool,
+    parks: AtomicUsize,
+    parked: tokio::sync::Notify,
+    released: parking_lot::Mutex<bool>,
+    open: tokio::sync::Notify,
+}
+
+impl ConflictKv {
+    /// A store ready to park `operation`'s plan commit in `process_id`'s
+    /// aggregate — armed from construction, so no hop can slip past before the
+    /// owning test has driven it.
+    fn new(process_id: &str, operation: OperationId) -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryStore::new(),
+            aggregate: crate::runtime::durable::document_store::aggregate_key(process_id)
+                .expect("a process id the aggregate key derives from"),
+            operation,
+            armed: AtomicBool::new(true),
+            parks: AtomicUsize::new(0),
+            parked: tokio::sync::Notify::new(),
+            released: parking_lot::Mutex::new(false),
+            open: tokio::sync::Notify::new(),
+        })
+    }
+
+    /// Whether this batch is the hop's plan commit: it writes the aggregate
+    /// while the hop's own operation already stands `CommitPrepared`, i.e. the
+    /// claim landed and the plan is about to.
+    async fn is_plan_commit(&self, ops: &[crate::StoreBatchOp]) -> bool {
+        let writes_aggregate = ops.iter().any(|op| match op {
+            crate::StoreBatchOp::Put { key, .. } => key == &self.aggregate,
+            crate::StoreBatchOp::Delete { .. } => false,
+        });
+        if !writes_aggregate {
+            return false;
+        }
+        let Ok(Some(bytes)) = self.inner.one(&self.aggregate).await else {
+            return false;
+        };
+        let Ok(snapshot) =
+            crate::runtime::durable::document::AggregateDocumentCodec::decode(&bytes)
+        else {
+            return false;
+        };
+        matches!(
+            snapshot
+                .operations
+                .get(&self.operation)
+                .map(|record| &record.state),
+            Some(OperationState::CommitPrepared(_))
+        )
+    }
+
+    /// Hold this batch until [`Self::release`]. The arm is spent here: the
+    /// rival writer's own batch must pass the gate.
+    async fn hold(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+        self.parks.fetch_add(1, Ordering::SeqCst);
+        self.parked.notify_waiters();
+        while !*self.released.lock() {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(10), self.open.notified())
+                    .await;
+        }
+    }
+
+    /// Wait until the hop is parked inside its plan commit.
+    async fn wait_parked(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while self.parks.load(Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hop never reached its plan commit"
+            );
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(10), self.parked.notified())
+                    .await;
+        }
+    }
+
+    /// Let the parked plan commit proceed (into the guard the rival has made
+    /// stale).
+    fn release(&self) {
+        *self.released.lock() = true;
+        self.open.notify_waiters();
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStore for ConflictKv {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::StoreBatchOp],
+        guards: &[crate::StoreGuard],
+    ) -> Result<bool> {
+        if self.armed.load(Ordering::SeqCst) && self.is_plan_commit(ops).await {
+            self.hold().await;
+        }
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::ScanOptions,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// A hop whose *plan* commit loses its compare-and-swap must hand its claim
+/// back to recovery — and recovery must be able to claim it again.
+///
+/// The plan commit is the commit that carries the hop's whole durable
+/// remainder (the task's start, the act's effect, the propagation); when
+/// another writer advances the aggregate between that hop's `load` and its
+/// guard, the guard refuses and *nothing* is applied — so the hop's claim is
+/// provably effect-free and must be released. This test forces exactly that
+/// window with [`ConflictKv`]: it parks the hop inside its own plan commit and
+/// commits a rival (a harmless marker variable) on the same aggregate, so the
+/// hop's compare-and-swap is lost on demand rather than by a race — the
+/// sibling-completion cell that found the defect only reproduces it
+/// intermittently.
+///
+/// What it pins, and what either missing half of the fix did instead:
+///
+/// - the hop reports the conflict and the operation is `RetryScheduled`, the
+///   state the recovery scan classifies `Wake`. Without the release the hop
+///   returned the same conflict error but left the operation `CommitPrepared`:
+///   its only recovery disposition is `AwaitOwner` until the claim's lease
+///   expires, then `ReclaimExpired` — and because the conflict applied
+///   nothing, the store cannot tell a commit that did not happen from one
+///   whose external effect was interrupted, so the operation ended
+///   `EffectUnknown` and its only disposition is `ManualReconciliation`. The
+///   operation (and the run with it) was stranded for good, with nothing
+///   drivable left for the engine.
+/// - the recovery scan re-derives the released hop (`woken`, never
+///   `reconciliation_required`).
+/// - the re-drive claims cleanly and settles the run, the operation
+///   `Completed`. A released claim can only be *re*-claimed by a fenced one:
+///   the state machine requires `fence > attempt` to leave `RetryScheduled`, so
+///   the driver must claim with the operation's own attempt + 1. Without that
+///   the released operation was `RetryScheduled{attempt: 1}` and every hop
+///   refused it with `InvalidOperationState`, stranding the run exactly as the
+///   missing release did.
+#[tokio::test]
+async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
+    const PID: &str = "p-conflict-release";
+    let root = OperationId {
+        process_id: PID.into(),
+        task_id: "root".into(),
+        generation: 0,
+        sequence: 0,
+    };
+    let stored = ConflictKv::new(PID, root.clone());
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1);
+    let spec = ProcessSpec::linear(PID, "root", &["only"]);
+    host.start_process(&spec).await.unwrap();
+
+    // The root hop runs to its plan commit and parks there. The rival commits
+    // on the same aggregate while the hop is between its load and its guard:
+    // the hop's plan commit must then lose the aggregate's compare-and-swap.
+    let hop = host.execute_one(&root);
+    let rival = async {
+        stored.wait_parked().await;
+        let current = host.snapshot(PID).await.unwrap().expect("aggregate exists");
+        assert!(
+            matches!(
+                current.operations.get(&root).map(|record| &record.state),
+                Some(OperationState::CommitPrepared(_))
+            ),
+            "the parked batch is the hop's plan commit, not its claim: {:?}",
+            current.operations.get(&root).map(|record| &record.state)
+        );
+        let plan = TransitionPlan {
+            process_id: PID.into(),
+            expected: current.version.clone(),
+            execution_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: vec![VariableWrite {
+                scope: crate::runtime::core::model::execution_graph::ExecutionId::new("root", 0)
+                    .unwrap(),
+                name: "rival.marker".into(),
+                value: "1".into(),
+            }],
+            source_operation: None,
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        };
+        host.aggregates.commit_transition(&plan).await.unwrap();
+        stored.release();
+    };
+    let (outcome, ()) = tokio::join!(hop, rival);
+    let error = outcome.expect_err("a lost compare-and-swap must surface as an error");
+    assert!(
+        error.to_string().contains("commit conflict"),
+        "the hop reports its own lost compare-and-swap: {error}"
+    );
+
+    // The pin: the claim went back, so the operation is drivable *now* — not
+    // left `CommitPrepared` for the lease to expire into `EffectUnknown`.
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[&root].state,
+            OperationState::RetryScheduled { .. }
+        ),
+        "the conflicted hop must hand its claim back, not stay {:?}",
+        snapshot.operations[&root].state
+    );
+
+    let report = host.recover(SystemClock.now_ms()).await.unwrap();
+    assert!(
+        report.woken.contains(&root),
+        "the released hop must be re-derived by the recovery scan: {report:?}"
+    );
+    assert!(
+        !report.reconciliation_required.contains(&root),
+        "a lost compare-and-swap applied nothing, so it is not an unknown effect: {report:?}"
+    );
+
+    let driven = host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert_eq!(
+        driven.retried, 0,
+        "the released hop must claim cleanly on its next drive: {driven:?}"
+    );
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[&root].state,
+            OperationState::Completed(_)
+        ),
+        "the re-driven hop completes its operation: {:?}",
+        snapshot.operations[&root].state
+    );
+    assert!(
+        host.process_completed(PID).await.unwrap(),
+        "the re-driven hop must settle the run"
+    );
 }
 
 /// The slot cap (`Config::cache_cap`): with one slot the first run owns it, the

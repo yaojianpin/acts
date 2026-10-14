@@ -176,35 +176,34 @@ impl AsyncAggregateRepository {
         for entry in entries {
             let process_id = entry.operation_id.process_id.clone();
             if !aggregates.contains_key(&process_id) {
-                let loaded = self.load(&process_id).await?.ok_or_else(|| {
-                    AsyncRepositoryError::Domain(CommitError::CorruptAggregate(format!(
-                        "recovery index references missing aggregate {process_id:?}",
-                    )))
-                })?;
-                aggregates.insert(process_id.clone(), loaded);
+                // The aggregates are loaded at a later instant than the index
+                // documents the entries came from, so the two can disagree: a
+                // run swept (or a commit landing) in between leaves the index
+                // the older view. That is the scan being stale, not damage —
+                // and the projection is written atomically with its aggregate,
+                // so a disagreement can only be this race. The entry is
+                // skipped; the next pass re-reads the index.
+                match self.load(&process_id).await? {
+                    Some(loaded) => {
+                        aggregates.insert(process_id.clone(), loaded);
+                    }
+                    None => continue,
+                }
             }
             let aggregate = aggregates.get(&process_id).ok_or_else(|| {
                 AsyncRepositoryError::Domain(CommitError::CorruptAggregate(format!(
                     "aggregate cache lost process {process_id:?}",
                 )))
             })?;
-            let operation = aggregate
-                .snapshot
-                .operations
-                .get(&entry.operation_id)
-                .ok_or_else(|| {
-                    AsyncRepositoryError::Domain(CommitError::CorruptAggregate(format!(
-                        "recovery index references missing operation {:?}",
-                        entry.operation_id,
-                    )))
-                })?;
+            let Some(operation) = aggregate.snapshot.operations.get(&entry.operation_id) else {
+                // The operation left the aggregate (it settled, and a terminal
+                // operation is dropped from the index in the same commit) after
+                // the index doc was scanned: stale, not damage.
+                continue;
+            };
             if operation.revision != entry.revision || operation.is_terminal() {
-                return Err(AsyncRepositoryError::Domain(CommitError::CorruptAggregate(
-                    format!(
-                        "recovery index entry is stale for operation {:?}",
-                        entry.operation_id
-                    ),
-                )));
+                // Same: the operation moved on after the index was scanned.
+                continue;
             }
             operations.push(operation.clone());
         }
@@ -304,8 +303,13 @@ impl AsyncAggregateRepository {
             let index = OutboxIndexCodec::decode(&document).map_err(|error| {
                 OutboxRepositoryError::CorruptData(format!("outbox index {key:?}: {error}"))
             })?;
-            entries.extend(index.entries.into_iter().filter(|entry| {
-                matches!(entry.state, OutboxIndexState::Pending { available_at_ms } if now_ms >= available_at_ms)
+            entries.extend(index.entries.into_iter().filter(|entry| match entry.state {
+                OutboxIndexState::Pending { available_at_ms } => now_ms >= available_at_ms,
+                // A claim whose lease expired is work again: its owner never
+                // confirmed it, and the record would otherwise sit `Claimed`
+                // forever (see `OutboxState::is_dispatchable`).
+                OutboxIndexState::Claimed { lease_until_ms } => now_ms >= lease_until_ms,
+                OutboxIndexState::DeliveryUnknown => false,
             }));
         }
         entries.sort_by(|left, right| left.id.cmp(&right.id));

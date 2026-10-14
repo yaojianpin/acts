@@ -93,6 +93,11 @@ pub struct Runtime {
 #[cfg(test)]
 pub(crate) const TEST_TICK_MS: u64 = 800;
 
+/// How many terminal-but-unmarked runs one sweep re-projects before selecting
+/// (see [`Runtime::sweep_removable`]): the same order as the sweep's own page,
+/// so one pass over the collection can repair and then reclaim.
+const SWEEP_RECONCILE_LIMIT: usize = 256;
+
 /// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
 pub(crate) struct SnapshotRegistry {
     stores: ShareLock<HashMap<String, Arc<SnapshotStore>>>,
@@ -222,7 +227,22 @@ impl Runtime {
 
     /// The sweeper: delete every finished process whose deliveries settled
     /// (see [`writebehind::sweep_removable`]).
+    ///
+    /// A settled run's `removable` mark is re-derived here first. The mark is
+    /// written by the projection of the run's own commits, and a settled run
+    /// has none left: its last commit can predate the delivery that settled
+    /// its outbox records (the delivery pass refreshes the row only for the
+    /// runs it delivered for, and nothing repairs a settled run's row), so a
+    /// terminal row that still reads not-removable would otherwise keep the
+    /// run's rows — and the directory swept with them — forever.
     pub(crate) async fn sweep_removable(&self) -> Result<usize> {
+        for pid in self
+            .store
+            .unmarked_settled_procs(SWEEP_RECONCILE_LIMIT)
+            .await?
+        {
+            self.kernel.refresh_projection(&pid).await;
+        }
         writebehind::sweep_removable(&self.store, &self.writer, &self.router).await
     }
 

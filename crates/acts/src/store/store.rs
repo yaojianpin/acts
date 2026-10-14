@@ -699,6 +699,35 @@ impl Store {
     /// (through the writer, so removal is ordered after any still-queued
     /// writes of the process) and evicts them from memory.
     pub(crate) async fn sweep_settled_procs(&self, limit: usize) -> Result<Vec<String>> {
+        Ok(self
+            .terminal_proc_rows(limit)
+            .await?
+            .into_iter()
+            .filter(|p| p.removable)
+            .map(|p| p.id)
+            .collect())
+    }
+
+    /// The finished processes whose `removable` mark is *not* set: the runs a
+    /// sweep has to re-derive before it can decide them. The mark is written
+    /// by the projection of the run's own commits, and a settled run has no
+    /// later commit to rewrite it — its last one can predate the delivery that
+    /// settled its outbox records, and nothing repairs a settled run's row —
+    /// so a stale `false` here is what a leaking run (rows, and the directory
+    /// swept with them) looks like.
+    pub(crate) async fn unmarked_settled_procs(&self, limit: usize) -> Result<Vec<String>> {
+        Ok(self
+            .terminal_proc_rows(limit)
+            .await?
+            .into_iter()
+            .filter(|p| !p.removable)
+            .map(|p| p.id)
+            .collect())
+    }
+
+    /// Every finished process's row, `removable` or not: one scan over the
+    /// terminal states (`state` is indexed), capped at `limit`.
+    async fn terminal_proc_rows(&self, limit: usize) -> Result<Vec<data::Proc>> {
         use super::query::{Expr, Filter, Query};
         use crate::runtime::scheduler::TaskState;
 
@@ -722,14 +751,7 @@ impl Store {
         let q = Query::new()
             .limit(limit)
             .filter(Filter::and().expr(Expr::r#in("state", terminal)));
-        Ok(procs
-            .query(&q)
-            .await?
-            .rows
-            .into_iter()
-            .filter(|p| p.removable)
-            .map(|p| p.id)
-            .collect())
+        Ok(procs.query(&q).await?.rows)
     }
 }
 

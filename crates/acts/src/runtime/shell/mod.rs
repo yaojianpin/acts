@@ -627,8 +627,20 @@ impl KernelHost {
                 _ = shutdown.cancelled() => break,
                 _ = ticker.tick() => {
                     let now = SystemClock.now_ms();
-                    if let Err(error) = self.recover(now).await {
-                        tracing::warn!(error = %error, "kernel recovery scan failed");
+                    match self.recover(now).await {
+                        Ok(report) if !report.reconciliation_required.is_empty() => {
+                            // An operation whose effect outcome is unknown is
+                            // never re-driven automatically (`ManualReconciliation`),
+                            // so the run that owns it stops here. Nothing else
+                            // reports it: without this line a stranded run is
+                            // silent.
+                            tracing::warn!(
+                                operations = ?report.reconciliation_required,
+                                "kernel recovery needs manual reconciliation for these operations; the runs that own them will not settle on their own"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(error = %error, "kernel recovery scan failed"),
                     }
                     if let Err(error) = self.dispatch_outbox().await {
                         tracing::warn!(error = %error, "kernel outbox pass failed");
@@ -872,11 +884,19 @@ impl KernelHost {
                         return Err(error);
                     }
                     if let Some(intent) = &pinned {
-                        match self.resume_action_intent(intent).await? {
+                        match self.resume_action_intent(intent, &action, &inputs).await? {
                             ActionResume::Applied => return Ok(()),
                             ActionResume::Retry => {}
                         }
                     }
+                    // Two clients acting on one execution mint their operation
+                    // ids from the same snapshot, so a tight retry loop has
+                    // each attempt invalidate the other's plan (and both can
+                    // exhaust the attempts as spurious failures). A short pause
+                    // lets the racing decision land: the next attempt plans
+                    // against the state it left and answers with the refusal
+                    // the loser actually earned.
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                     tracing::debug!(
                         pid = %process_id,
                         tid = %task_id,
@@ -950,6 +970,93 @@ impl KernelHost {
         Ok(())
     }
 
+    /// The identity one action attempt decides under: the pinned one while it
+    /// is still ours, otherwise a freshly minted one.
+    ///
+    /// The minted id is `max(sequence) + 1` over the execution's own
+    /// operations, so two client actions that loaded the same state mint the
+    /// *same* one. An operation already standing there belongs to another
+    /// client's decision: the next free sequence is taken instead, so the
+    /// attempt re-plans *our* decision — the preflight then decides whether it
+    /// still applies to the state the other decision moved, or is legitimately
+    /// refused — and never resumes an operation whose outcome another client
+    /// was already told.
+    fn action_identity(
+        snapshot: &crate::runtime::core::commit::aggregate::AggregateSnapshot,
+        process_id: &str,
+        task_id: &str,
+        action: &crate::runtime::core::commit::command::ActionKind,
+        inputs: &[(String, String)],
+        pinned: &mut Option<ActionIntent>,
+    ) -> Result<ActionIntent> {
+        if let Some(intent) = pinned.as_ref()
+            && Self::action_intent_is_mine(snapshot, intent, action, inputs)
+        {
+            return Ok(ActionIntent {
+                execution: intent.execution.clone(),
+                operation: intent.operation.clone(),
+            });
+        }
+        let execution_id = snapshot
+            .executions
+            .keys()
+            .filter(|id| id.task_id == task_id)
+            .max_by_key(|id| id.generation)
+            .cloned()
+            .ok_or_else(|| ActError::Runtime(format!("execution {task_id} not found")))?;
+        let mut sequence = snapshot
+            .operations
+            .keys()
+            .filter(|id| {
+                id.process_id == process_id
+                    && id.task_id == task_id
+                    && id.generation == execution_id.generation
+            })
+            .map(|id| id.sequence)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        loop {
+            let candidate = ActionIntent {
+                execution: execution_id.clone(),
+                operation: OperationId {
+                    process_id: process_id.into(),
+                    task_id: task_id.into(),
+                    generation: execution_id.generation,
+                    sequence,
+                },
+            };
+            if !snapshot.operations.contains_key(&candidate.operation) {
+                *pinned = Some(ActionIntent {
+                    execution: candidate.execution.clone(),
+                    operation: candidate.operation.clone(),
+                });
+                return Ok(candidate);
+            }
+            sequence += 1;
+        }
+    }
+
+    /// Whether the operation at `intent` carries *this* decision: it exists and
+    /// the fact committed with it (the same batch) encodes the same action and
+    /// inputs. An operation without that fact, or with another decision's, is
+    /// not ours to resume.
+    fn action_intent_is_mine(
+        snapshot: &crate::runtime::core::commit::aggregate::AggregateSnapshot,
+        intent: &ActionIntent,
+        action: &crate::runtime::core::commit::command::ActionKind,
+        inputs: &[(String, String)],
+    ) -> bool {
+        snapshot.operations.contains_key(&intent.operation)
+            && snapshot
+                .variables
+                .get(&(
+                    intent.execution.clone(),
+                    action_fact_var(intent.operation.sequence),
+                ))
+                .is_some_and(|fact| fact == &action_fact(action, inputs))
+    }
+
     /// The durable intent of one client action: the `ApplyAction` operation
     /// that carries it, plus the action itself as the private fact its hop
     /// replays. Without that fact a recovery driving the operation (a crash,
@@ -987,10 +1094,24 @@ impl KernelHost {
     /// an intent whose effect never committed (the attempt lost its
     /// compare-and-swap mid-sequence), so the next attempt re-drives the same
     /// operation instead of stranding it.
-    async fn resume_action_intent(&self, intent: &ActionIntent) -> Result<ActionResume> {
+    ///
+    /// The pin is only consulted for *our* decision: an operation at the
+    /// pinned id that carries another action's fact is a racer's, and `Retry`
+    /// sends the caller to an attempt that drops the pin and re-mints (see
+    /// [`Self::action_identity`]). Reporting `Applied` for it would hand this
+    /// client the other one's outcome.
+    async fn resume_action_intent(
+        &self,
+        intent: &ActionIntent,
+        action: &crate::runtime::core::commit::command::ActionKind,
+        inputs: &[(String, String)],
+    ) -> Result<ActionResume> {
         let Some(snapshot) = self.load(&intent.operation.process_id).await? else {
             return Ok(ActionResume::Retry);
         };
+        if !Self::action_intent_is_mine(&snapshot.snapshot, intent, action, inputs) {
+            return Ok(ActionResume::Retry);
+        }
         let Some(operation) = snapshot.snapshot.operations.get(&intent.operation) else {
             return Ok(ActionResume::Retry);
         };
@@ -1045,42 +1166,14 @@ impl KernelHost {
             .await?
             .ok_or_else(|| ActError::Runtime(format!("aggregate {process_id} not found")))?
             .snapshot;
-        let (execution_id, operation_id) = match pinned {
-            Some(intent) => (intent.execution.clone(), intent.operation.clone()),
-            None => {
-                let execution_id = snapshot
-                    .executions
-                    .keys()
-                    .filter(|id| id.task_id == task_id)
-                    .max_by_key(|id| id.generation)
-                    .cloned()
-                    .ok_or_else(|| ActError::Runtime(format!("execution {task_id} not found")))?;
-                let next_sequence = snapshot
-                    .operations
-                    .keys()
-                    .filter(|id| {
-                        id.process_id == process_id
-                            && id.task_id == task_id
-                            && id.generation == execution_id.generation
-                    })
-                    .map(|id| id.sequence)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                let operation_id = OperationId {
-                    process_id: process_id.into(),
-                    task_id: task_id.into(),
-                    generation: execution_id.generation,
-                    sequence: next_sequence,
-                };
-                let intent = ActionIntent {
-                    execution: execution_id.clone(),
-                    operation: operation_id.clone(),
-                };
-                *pinned = Some(intent);
-                (execution_id, operation_id)
-            }
-        };
+        // The identity this attempt decides under. A pinned identity stands
+        // only while it is still *ours*: the minted id is `max(sequence) + 1`,
+        // so a concurrent client action can hold the same one, and resuming a
+        // foreign operation would report the other client's outcome to this
+        // one.
+        let intent =
+            Self::action_identity(&snapshot, process_id, task_id, &action, &inputs, pinned)?;
+        let (execution_id, operation_id) = (intent.execution.clone(), intent.operation.clone());
         let now = SystemClock.now_ms();
         let claim = crate::runtime::core::model::operation::ClaimToken {
             owner: OWNER.into(),
@@ -1152,27 +1245,32 @@ impl KernelHost {
 
         // Durable intent: the operation that carries the action *and* the
         // action itself, as a private fact its hop replays (see
-        // `action_intent`).
-        let intent = Self::action_intent(
-            process_id,
-            &execution_id,
-            &operation_id,
-            &command.action,
-            &command.inputs,
-            snapshot.version.clone(),
-        );
-        match self
-            .aggregates
-            .commit_transition(&intent)
-            .await
-            .map_err(repository_error)?
-        {
-            crate::runtime::durable::async_document_store::TransitionCommitOutcome::Committed { .. }
-            | crate::runtime::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { .. } => {}
-            crate::runtime::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
-                return Err(conflict(format!(
-                    "action intent conflict on {process_id}/{task_id}"
-                )));
+        // `action_intent`). Written once per decision, not once per attempt: a
+        // retry whose intent already landed goes straight to the claim, and an
+        // operation already standing at the id (a racer's, or our own from a
+        // released attempt) is a retryable race, never a domain error.
+        if !Self::action_intent_is_mine(&snapshot, &intent, &command.action, &command.inputs) {
+            let plan = Self::action_intent(
+                process_id,
+                &execution_id,
+                &operation_id,
+                &command.action,
+                &command.inputs,
+                snapshot.version.clone(),
+            );
+            match self
+                .aggregates
+                .commit_transition(&plan)
+                .await
+                .map_err(repository_error)?
+            {
+                crate::runtime::durable::async_document_store::TransitionCommitOutcome::Committed { .. }
+                | crate::runtime::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { .. } => {}
+                crate::runtime::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
+                    return Err(conflict(format!(
+                        "action intent conflict on {process_id}/{task_id}"
+                    )));
+                }
             }
         }
 
@@ -1348,9 +1446,21 @@ impl KernelHost {
             }
         }
 
+        // The claim's fence must advance past the operation's own attempt: the
+        // state machine refuses a claim that does not (`RetryScheduled{attempt}`
+        // and `EffectUnknown{attempt}` require `fence > attempt`), and the
+        // driver used to claim with a fixed fence of 1 — so a hop whose claim
+        // recovery had released for a retry (`RetryScheduled{attempt: 1}`, the
+        // state both a lease expiry and a lost commit produce) could never be
+        // claimed again, and its run was stranded for good.
+        let attempt = match &record.state {
+            OperationState::RetryScheduled { attempt }
+            | OperationState::EffectUnknown { attempt } => u64::from(*attempt),
+            _ => 0,
+        };
         let claim = crate::runtime::core::model::operation::ClaimToken {
             owner: OWNER.into(),
-            fence: 1,
+            fence: attempt + 1,
             lease_until_ms: now + LEASE_MS,
             heartbeat_revision: 0,
         };
@@ -1414,56 +1524,86 @@ impl KernelHost {
                 let execution = execution.ok_or_else(|| {
                     ActError::Runtime(format!("execution {execution_id:?} not found"))
                 })?;
-                if !matches!(
-                    execution.state,
-                    crate::runtime::core::model::execution_graph::ExecutionState::Running
-                        | crate::runtime::core::model::execution_graph::ExecutionState::Waiting
-                ) {
-                    // A decision landed while this hop was in flight (the
-                    // cascade skipped the execution, a cancel closed it): the
-                    // durable remainder is the empty plan, not an error.
-                    self.task_hop_plan(
-                        &snapshot,
-                        id,
-                        &execution_id,
-                        Some(&execution),
-                        &commit_claim,
-                        "completed",
-                        "task.completed",
-                    )?
-                } else if let Some(fact) = snapshot
+                // A durable client decision is what this hop replays: the
+                // `__action` fact is committed *before* the claim and the
+                // effect, so a decision whose deciding call never applied it (a
+                // crash, an expired lease) is re-planned exactly like that call
+                // would have. The execution's own state is not the verdict — a
+                // `Cancel`'s target is terminal by construction
+                // (`Completed|Submitted` -> `Backed`) — so reading the state
+                // first would silently drop a cancel the client was already
+                // told about.
+                let fact = snapshot
                     .variables
                     .get(&(execution_id.clone(), action_fact_var(id.sequence)))
-                {
-                    // The operation carries a client decision (a durable intent
-                    // whose deciding call never applied it — a crash, an
-                    // expired lease): replay *that* action, exactly like the
-                    // deciding call would have. Its `effect_plan` arm is the
-                    // same one the client path uses.
-                    let (action, inputs) = decode_action_fact(fact)?;
-                    self.effect_plan(
-                        &snapshot,
-                        id,
-                        &execution_id,
-                        &execution,
-                        &commit_claim,
-                        Some(action),
-                        inputs,
-                    )
-                    .await?
-                } else {
-                    // A container fans out instead of completing; a plain task
-                    // completes and propagates.
-                    self.effect_plan(
-                        &snapshot,
-                        id,
-                        &execution_id,
-                        &execution,
-                        &commit_claim,
-                        None,
-                        Vec::new(),
-                    )
-                    .await?
+                    .cloned();
+                match fact {
+                    Some(fact) => {
+                        let (action, inputs) = decode_action_fact(&fact)?;
+                        if crate::runtime::core::commit::command::action_allowed(
+                            execution.state,
+                            &action,
+                        ) {
+                            self.effect_plan(
+                                &snapshot,
+                                id,
+                                &execution_id,
+                                &execution,
+                                &commit_claim,
+                                Some(action),
+                                inputs,
+                            )
+                            .await?
+                        } else {
+                            // The state moved past the decision while the
+                            // intent was in flight (an earlier decision won, a
+                            // cascade closed the execution): the durable
+                            // remainder is the empty plan, not an error.
+                            self.task_hop_plan(
+                                &snapshot,
+                                id,
+                                &execution_id,
+                                Some(&execution),
+                                &commit_claim,
+                                "completed",
+                                "task.completed",
+                            )?
+                        }
+                    }
+                    None if !matches!(
+                        execution.state,
+                        crate::runtime::core::model::execution_graph::ExecutionState::Running
+                            | crate::runtime::core::model::execution_graph::ExecutionState::Waiting
+                    ) =>
+                    {
+                        // A decision landed while this hop was in flight (the
+                        // cascade skipped the execution, a cancel closed it):
+                        // the durable remainder is the empty plan, not an
+                        // error.
+                        self.task_hop_plan(
+                            &snapshot,
+                            id,
+                            &execution_id,
+                            Some(&execution),
+                            &commit_claim,
+                            "completed",
+                            "task.completed",
+                        )?
+                    }
+                    None => {
+                        // A container fans out instead of completing; a plain
+                        // task completes and propagates.
+                        self.effect_plan(
+                            &snapshot,
+                            id,
+                            &execution_id,
+                            &execution,
+                            &commit_claim,
+                            None,
+                            Vec::new(),
+                        )
+                        .await?
+                    }
                 }
             }
             OperationKind::SkipTask => {
@@ -1880,7 +2020,30 @@ impl KernelHost {
             | crate::runtime::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { receipt, snapshot } => (receipt, snapshot),
             crate::runtime::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
                 // Another writer advanced the aggregate; the wake stays open
-                // and recovery re-derives the hop against the new state.
+                // and recovery re-derives the hop against the new state. A
+                // conflict applies nothing, so the plan definitely did not
+                // commit: the claim is released back here rather than left
+                // `CommitPrepared` until its lease expires — that route ends in
+                // `EffectUnknown`, whose only disposition is manual
+                // reconciliation, so a hop that merely lost a compare-and-swap
+                // would be stranded for good (and the run with it).
+                if let Err(error) = self
+                    .operation_event(
+                        id,
+                        prepared.revision,
+                        OperationEvent::ScheduleRetry {
+                            claim: claim.clone(),
+                            attempt: claim.fence as u32,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        id = ?id,
+                        error = %error,
+                        "releasing a conflicted hop's claim failed; recovery's lease expiry decides it"
+                    );
+                }
                 return Err(ActError::Runtime(format!(
                     "commit conflict on operation {id:?}"
                 )));

@@ -35,7 +35,16 @@ impl OutboxState {
         matches!(self, Self::Delivered { .. } | Self::Quarantined { .. })
     }
     pub(crate) fn is_dispatchable(&self, now_ms: i64) -> bool {
-        matches!(self, Self::Pending { available_at_ms } if now_ms >= *available_at_ms)
+        match self {
+            Self::Pending { available_at_ms } => now_ms >= *available_at_ms,
+            // An expired claim is dispatchable again: whoever held it never
+            // confirmed (a crash mid-delivery, or a confirmation whose guarded
+            // write lost to a concurrent commit), and nobody else ever
+            // revisits the record — so its message would never be delivered
+            // again and the run whose rows wait on it would never settle.
+            Self::Claimed(claim) => now_ms >= claim.lease_until_ms,
+            _ => false,
+        }
     }
 }
 
@@ -157,6 +166,20 @@ impl OutboxRecord {
         let state = match (&self.state, event) {
             (S::Pending { available_at_ms }, E::Claim { claim, now_ms })
                 if now_ms >= *available_at_ms
+                    && claim.lease_until_ms > now_ms
+                    && valid_initial_claim(&claim, self.last_fence) =>
+            {
+                attempt = attempt.checked_add(1).ok_or(OutboxError::AttemptOverflow)?;
+                last_fence = claim.fence;
+                S::Claimed(claim)
+            }
+            // Taking over a claim whose lease expired: its owner is gone (or
+            // its confirmation lost its commit), so the record moves to the
+            // next fenced claim. The delivery may repeat — at-least-once is
+            // the contract the transport already has, and the alternative is a
+            // record no one ever revisits.
+            (S::Claimed(current), E::Claim { claim, now_ms })
+                if now_ms >= current.lease_until_ms
                     && claim.lease_until_ms > now_ms
                     && valid_initial_claim(&claim, self.last_fence) =>
             {
@@ -295,6 +318,47 @@ mod tests {
             heartbeat_revision: 0,
         }
     }
+    /// A claim whose lease expired is work again — the only way a record whose
+    /// owner never confirmed it (a crash mid-delivery, a confirmation that
+    /// lost its own commit) is ever delivered, and what keeps the run whose
+    /// rows wait on it from leaking forever. A live claim stays exclusive.
+    #[test]
+    fn an_expired_claim_is_taken_over_and_a_live_one_is_not() {
+        let held = record()
+            .evolve(OutboxEvent::Claim {
+                claim: claim("a", 1),
+                now_ms: 0,
+            })
+            .unwrap();
+        assert!(matches!(held.state, OutboxState::Claimed(_)));
+        assert!(
+            !held.state.is_dispatchable(99),
+            "a live claim is not work again"
+        );
+        assert!(held.state.is_dispatchable(100), "the expiry instant is due");
+
+        // a live claim refuses the take-over …
+        assert!(
+            held.evolve(OutboxEvent::Claim {
+                claim: claim("b", 2),
+                now_ms: 99,
+            })
+            .is_err()
+        );
+        // … an expired one takes it, at the next fence
+        let mut successor = claim("b", 2);
+        successor.lease_until_ms = 200;
+        let taken = held
+            .evolve(OutboxEvent::Claim {
+                claim: successor,
+                now_ms: 100,
+            })
+            .unwrap();
+        assert!(matches!(&taken.state, OutboxState::Claimed(current) if current.owner == "b"));
+        assert_eq!(taken.attempt, 2);
+        assert_eq!(taken.last_fence, 2);
+    }
+
     #[test]
     fn unknown_delivery_is_not_automatically_dispatchable() {
         let claim = claim("a", 1);

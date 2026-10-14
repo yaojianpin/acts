@@ -203,6 +203,14 @@ fn action_target(
     }
 }
 
+/// Whether `action` is admissible on an execution in `state` — the guard
+/// `action_target` applies, exposed so a recovering hop can tell a *live*
+/// durable decision (which it must replay) from a stale one whose target moved
+/// past it while the intent was in flight.
+pub(crate) fn action_allowed(current: ExecutionState, action: &ActionKind) -> bool {
+    action_target(current, action).is_ok()
+}
+
 fn action_name(action: &ActionKind) -> &'static str {
     match action {
         ActionKind::Complete => "completed",
