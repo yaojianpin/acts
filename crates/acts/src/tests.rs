@@ -1,3 +1,5 @@
+mod reliability;
+
 use crate::Config;
 use crate::event::EventAction;
 use crate::{
