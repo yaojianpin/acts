@@ -1694,6 +1694,106 @@ kernel 期版本,只有 2 处 `cache()` reach-through 待改)+ 重新施加本�
 3. `cargo test -p acts-plugin-*` / `-p acts-package-*` 的完整复核(本机把全部 target 放在一条命令里构建会撞
    环境 rlib flavor 问题,见 §7;逐 target 跑是绿的)。
 
+### 可靠性矩阵回归(2026-10-14):12 文件移植 + 内核缺陷修复 + 边界登记
+
+**1) 做了什么**
+
+- 新目录 `crates/acts/src/tests/reliability/`(12 个 feature 模块 + `mod.rs` harness),由 `crates/acts/src/tests.rs` 挂 `mod reliability;`。legacy
+  的 `scheduler/tests/reliability/**`(切换时删除,13 文件约 9.5k 行)按 cell 逐条移植:每个 feature 行 × {store fault, restart, duplicate
+  delivery, concurrency}。**61 cells** 全部绿。
+- harness(`mod.rs`,`#![allow(dead_code)]` 有理由):`engine_on/engine_with/restart`(restart = close + 在新引擎上重开同一 store)、
+  read-model/聚合读取(`read_proc`/`proc_row`/`tasks_of`/`wait_waiting_task`/`wait_completed`/`sweep_until_gone`/`dump_state`/
+  `aggregate_key`)、消息捕获(`capture_created`/`capture_complete`)、动作封装、以及四个故障后端:`FaultKv`(匹配命中的下一次写失败一次)、
+  `OutageKv`(ars 全读写失败)、`CutKv`(第 n 次写起全拒 = 精确写边界处的崩溃)、`GateKv`(停住匹配读以制造交错)。
+- 断言口径(与 legacy 的关键差异,已写进各 cell 文档):不动点一律钉**聚合**(executions/generation + 确定性 outbox key
+  `action:<pid>:<tid>:…`/`propagate:<pid>:<tid>:…`),行(proj/task/vars)只作参考——行是投影,会滞后一次提交,且已结算 run 的行会被 sweeper 回收。
+  每个 cell 都证明注入故障确实命中(`fired()/failed_key()/refused()/parks()`),用 poll 到 deadline 代替 sleep。
+- 机制已消失的 cell 改为"内核实际持有的性质",并在文档里明说:`Remove` 未服务(`kernel_kind` 返回 `None`)、rewind 是 generation 而非第二个 act、
+  effect 内联在 hop 上且 host 从不取消在飞 effect(故 `ProbePackage` 一组 cell 改写)、subflow 回灌为本文「已知边界」所载、
+  容器 `{in,acts}` fan-out 见 §3。
+
+**2) 修掉的三处内核缺陷(全部由矩阵暴露)**
+
+- **(a) 恢复时丢弃目标已终态的客户端决策**:`execute_one` 的 `ApplyAction` 分支先判执行状态、后读 `__action` fact,而 `Cancel`/`Back` 的目标
+  按构造就是终态(`Completed|Submitted -> Backed`),于是崩溃恢复会把客户端决策换成裸 hop 的自动完成——正是 durable intent 要防的丢失。
+  现改为 fact 优先,仅当 `command::action_allowed(state, action)` 为假(决策确实被别的写者越过)才走空余量。
+- **(b) 并发 action 的意图 id 撞车**:意图 op id 由 `max(sequence)+1` 从"已加载快照"派生且无预留,两个客户端会 mint 同一个 id;第二次 intent
+  commit 报 `OperationAlreadyExists`(不在重试白名单)→ 双方都被拒且 run 悬空,重试还可能读到对方的 op 并把它当成自己的成功上报。
+  修:`action_identity` 顺延到第一个空 sequence 并重新 preflight;intent 提交幂等(自己的 fact 已在则跳过);`repository_error` 把
+  `OperationAlreadyExists` 映射为可重试冲突(所有提交点);`resume_action_intent` 只认自己的 fact;丢失的 attempt 之间停 2ms,避免两个 racer
+  互相作废到耗尽 `ACTION_ATTEMPTS`。
+- **(c) 丢一次 CAS 即永久搁浅**:plan commit 报 `Conflict` 时 op 留在 `CommitPrepared`,lease(60s)过期后 recovery 把它释放成
+  `EffectUnknown`,而 `EffectUnknown` 只归 `ManualReconciliation`——不再有唤醒路径,hop 与整个 run 永久停住(该 arm 的注释却写着"recovery 会重新推导")。
+  修:该分支先释放自己的 claim(`ScheduleRetry`,被扫描归类为 `Wake`)再报错;**并且** `execute_one` 的 claim fence 改为按 op 自身 attempt 递增
+  (`attempt + 1`),原来恒为 1——状态机要求 `fence > attempt` 才接受 claim,故 lease 过期路径(`Claimed → RetryScheduled{attempt:1}`)同样永远无法再被 claim。
+- **(d) 附带**:driver tick 现在把 recovery report 的 `reconciliation_required` 打 warn(此前被丢弃,搁浅完全静默)。
+- 确定性回归测试:`runtime::shell::tests::a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery`(在 hop 自己的 plan commit 内把它
+  停住、在同一聚合上提交一个 rival transition,然后断言 op 落 `RetryScheduled` 而非留在 `CommitPrepared`、`recover` 唤醒它且不进
+  `reconciliation_required`、run 最终 settle)。把 (c) 的两半分别回退,该测试各自转红(证据已复现)。
+
+**3) 本轮新登记的边界(未修,均有实测证据)**
+
+- **容器包的参数式 fan-out 没有内核表示**:`acts.core.parallel` / `acts.core.block` / `acts.core.sequence` 的 `{in, acts}` 不会展开成子执行——
+  `Runtime::fanout_command` → `container_shape`(`runtime/shell/planning.rs:200`)只认显式 `branches` 与嵌套 `steps`,`ctx.build_acts` 写的是
+  effect seam 用完即弃的无头 process(`EffectOutcome` 只带 outputs/data/env)。故这些内置包在 kernel 下"解析成功但无子节点、直接完成"。
+  矩阵对此的处理:`parallel.rs` 的可靠性 cell 改用内核真正支持的显式 `branches` 容器,另加 1 条 conformance cell 钉住现状(其文档写明:将来补齐必须改这条)。
+  本文「已知边界」此前只登记了 subflow 与 Push/Remove/SetProcessVars,本条为新登记。
+- **claim 之后才失败 → `EffectUnknown`**:任何非 `Conflict` 的失败(operation 记录的 CAS 冲突、store 错误)会以 `CommitPrepared` 挂到 lease 过期,再归
+  `EffectUnknown`,此后只由人工对账(现至少会 warn)。"效果可能已落地"的不确定态保守不自动重试是设计选择。
+- **`Runtime::close` 不 join driver task**:`close` 返回后仍可能有一次 hop 提交落库(测试侧用 stop 屏障绕开)。**不要改成 join**:
+  `packages/acts-package-shell/tests/reliability.rs::a_waiting_script_does_not_hold_the_shutdown` 明确要求 close 不等在飞 effect。
+- **测试侧**:`DELIVERY_LEASE_MS = 30s` 与 harness `WAIT = 30s` 相等,投递档位的等待接近抛硬币(stall 的对应 cell 已加容差并在文档写明)。
+
+**4) 全量门禁又暴露并修掉的三处(都是"已结算 run 永久泄漏 / 良性竞态被判成损坏"这一类)**
+
+- **已结算 run 的 `removable` 不会被修复**:该标志只由"该 run 自己的某次提交"的投影写入,而最后一个提交可能早于"最后一条 outbox 记录被投递"的那次 pass
+  (`dispatch_outbox` 只为本次真正投递过的 pid 调 `refresh_proc_row`),此后没有任何路径重新投影。实测:executions 全终态、outbox 全 `Delivered`、无 delivery 行,
+  proc 行仍 `removable=false`,sweeper 永远选不中 → 行 + workdir 永久泄漏(subflow 的 cell 在 6 路并发下 5/6 复现)。
+  修:`Store::unmarked_settled_procs`(终态但未标记的行,复用 `sweep_settled_procs` 的扫描)+ `Runtime::sweep_removable` 先按聚合逐个 `refresh_projection` 再选择
+  (每次上限 `SWEEP_RECONCILE_LIMIT = 256`,与 sweep 同页大小;对真的不可回收的 run 只是一次读 + 内容未变则跳过写的重投影)。
+- **outbox 的 `Claimed` 记录没有回收路径**:原状态机里 `Claimed` 只能 `ConfirmDelivered`/`Reschedule`(且都要求 `now_ms < lease`)/`MarkDeliveryUnknown`/`Quarantine`,
+  `dispatchable_outbox_page` 也只取 `Pending{due}` —— 投递途中崩掉、或确认的守卫写输给并发提交(记录与 run 同聚合!)的记录会永远停在 `Claimed`:
+  消息不再重投,`settled()` 恒假,该 run 的行与 workdir 永不回收。
+  修:`OutboxState::is_dispatchable` 计入"租约已过期";`evolve` 新增 `(Claimed, Claim)` 且旧租约已过期、fence 递增的接管转换(at-least-once,与 transport 既有契约一致);
+  outbox 分页把 `OutboxIndexState::Claimed{lease 已过期}` 也纳入。新增单测 `an_expired_claim_is_taken_over_and_a_live_one_is_not`。
+  这两处修掉后:6 路并发 subflow cell 由 5/6 失败 → **6/6 通过**(其中一次因卡住的投递等满 30s 租约用了 31.7s),12 路并发(subflow+stall)全绿。
+- **恢复扫描把良性竞态判成损坏**:`load_recovery_page` 在一瞬间扫 recovery 索引文档,再在稍后载入它引用的聚合并校验 `operation.revision`/终态;两次读之间若有提交落地,索引就是"较旧的一侧",
+  于是整趟 `recover()` 以 `CorruptAggregate("recovery index entry is stale for operation …")` 失败(实测:timeout 的并发 cell 在全量负载下把这个错误冒到调用者)。而索引与聚合是同一次守卫批写入的,
+  所以二者的不一致只可能是这个竞态。修:该 entry 直接跳过(聚合已消失 / operation 已消失 / revision 变了 / 已终态),下一趟扫描重新读索引;只有"文档读不出/解不开"才算损坏(仍报错)。
+- harness 相应调整(只为让"读的量"与真实收敛口径一致,断言强度不变):`dump_state` 增打原始 proc 行(`state/removable`)与 outbox 记录状态标签(正是诊断上面三处的依据);
+  `sweep_until_gone` 改用自己的 `SWEEP_WAIT = 120s`(必须长于 `DELIVERY_LEASE_MS = 30s`,原 30s 是在抛硬币);`WAIT` 30s → **90s**、`bounded` 240s → **600s**、
+  `EXPECT_WAIT` 20s → 60s —— 这些是"要在多载机器上活下来"的界限而非快路径时延:全量跑里有 ~850 个别的用例(很多自己就是引擎用例、各有 driver tick)在同时抢机器;
+  cancel/back 的人工驱动上限 `WAIT * 3`,失败时带 dump。(抬高界限前,连续三次全量跑各随机翻一个不同的 cell:cancel → back/error/timeout → remove,均为等待超时;抬高后连续两次全绿。)
+
+**5) 门禁实测(本轮结束)**
+
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = **EXIT 0**(先修 3 个测试侧 lint:stall 的嵌套 `if`、timer 的 `needless_borrow`/`len_zero`);
+  `cargo fmt --check` 干净。
+- `cargo test -p acts --lib --tests --jobs 2` = **858 passed / 0 failed**(327s;含本轮新增的 12 模块 61 cells 与 `runtime::shell::tests::a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery`)。
+  修复前的两次同命令:856/857(cancel 超时)、855/858(back/error/timeout),三次失败各自对应上面 §4 的三处;修完后该方法与本条命令均绿。
+
+**6) 规划到未来的任务(本轮只规划,不实现;已同步进 §11 的任务清单)**
+
+**T1 清掉死掉的 `ops` 族(legacy durable outbox 遗留)**
+
+- 现状(已核实):内核 outbox 记录在聚合里(`kernel/aggregates/*` + `kernel/indexes/outbox/*`);`ops` 集合生产侧**无 writer 无 reader**,仅剩引用:`Store::ops()`(`store/store.rs:81`)、`remove_proc_rows` 的家族清单(`store/store.rs:365`)、`StoreIden::Ops`、`store/data/op.rs`(`data::Op`)、以及 store/collection 单测把它当"示例集合"(`store.rs:1835/1875/1890`、`collection.rs:1604/1771/1811`)。
+- 范围:删 `Store::ops()`、`StoreIden::Ops`、`store/data/op.rs` 及其 `data/mod.rs` 再导出、`remove_proc_rows` 里那一行;单测的示例集合换成 messages/deliveries。
+- **必须先决定**:`lib.rs` 的 `pub use store::*` 让 `Store::ops()`/`data::Op` 属公开 API → 这是一笔 **BREAKING**(外部 crate 若读 ops 会断),CHANGELOG 要写 BREAKING 行。
+- 老库问题:切换前的库里已有 `ops-*` 行;家族删掉后它们成为永久孤儿(无人读、只占空间)。三选一:(i) 接受;(ii) 在 `remove_proc_rows` 保留"只删不建"的那一行;(iii) 加一次性清理入口(boot 时或 `rebuild_indexes` 旁按前缀删)。
+- 验收:`grep -rn "data::Op\|StoreIden::Ops\|\.ops()" src/` 生产侧为 0;全量门禁绿;CHANGELOG 记 BREAKING。
+
+**T2 给聚合文档加回收/归档(现在**永不**删除)**
+
+- 现状(已核实):`kernel/aggregates/<hex pid>` + 两个派生索引**没有任何删除路径**(`document_store.rs` 里只有 create/replace/load);sweeper 只删六族行 + workdir(`store/writebehind.rs:476`)。`Runtime::start` 用 `kernel.exists(pid)`(= 聚合是否存在)拒绝 pid 复用 → 已结算 run 的行被扫掉而聚合留下,于是 **pid 终身不可复用**,聚合也**无界增长**(按 §5i:30 步 run 的 16 MB 里 14.7 MB 是聚合,字节大头)。
+- **必须决定的三个**:
+  1. **保留策略**:何时可删?候选——行已回收 + 静默 N 时间 / 显式运维归档命令 / 容量触发。
+  2. **pid 复用语义**:删聚合 = 释放 pid(同 pid 可再启)。若"pid 永久唯一"这条保证要保留,就不能再拿聚合当锚点,须另存一条**墓碑/pid-epoch 小记录**。
+  3. **历史**:行被回收后,聚合是那条 run **唯一**残存记录(变量、outbox 收据全在里面);删即丢历史 → 政策要在"磁盘"与"审计/回溯"之间取舍(或先归档再删)。
+- 实现要点:新增 `AsyncAggregateRepository::remove(process_id, expected_version)`,在**一个守卫批**里删聚合 + recovery index + outbox index(三者今日同批写入,半删必须不可能);GC 只考虑"`settled` 且 `operations` 为空 且 行已回收"的 run;崩溃幂等(行回收与聚合删除之间崩掉,重启后仍是可回收态)。
+- 验收:回收只按政策发生;pid 复用按所选语义(含墓碑方案)有测试;对"聚合已删但索引项仍在"的库恢复扫描不报错(本轮已改成跳过旧项,该测试骨架可复用);全量门禁绿。
+
+---
+
 ## 11. P5 提示词(下一轮,可整段复制)
 
 ```
@@ -1759,6 +1859,15 @@ P4a/P4b 与 P4 收尾续已完成并实测验证(逐项见 KERNEL_CUTOVER_NOTES.
    会红,逐 target 跑并在 §10 记录该环境现象。
 4. **文档**:`lib.rs` 顶部注释、`CHANGELOG.md`(配置开关已删:`kernel_engine` 不存在;`cache_cap` 语义 =
    在飞 run 数上限)、`README` 里可能残留的 legacy 说法;§10 追加本轮记录,并把本节提示词更新为 P6(如仍需)。
+5. **删死掉的 `ops` 族(BREAKING,见 §10「可靠性矩阵回归」§6 T1)**:内核 outbox 记录在聚合里,`ops` 集合生产侧无
+   writer/reader,仅剩 `remove_proc_rows` 的家族清单 + 单测借用。删 `Store::ops()`/`StoreIden::Ops`/`store/data/op.rs`
+   与那一行,单测示例集合换成 messages/deliveries;先决定老库遗留 `ops-*` 孤儿行的处理(接受/保留只删不建/一次性清理),
+   并记 CHANGELOG BREAKING。验收:`grep` 生产侧为 0 + 全量门禁绿。
+6. **聚合文档的回收/归档(见 §10「可靠性矩阵回归」§6 T2)**:`kernel/aggregates/<hex pid>` 现在无删除路径,
+   sweeper 只删行 + workdir,导致 pid 终身不可复用且聚合无界增长(§5i:字节大头)。先定三件事:保留策略(静默 N 时间 /
+   运维归档 / 容量触发)、pid 复用语义(若要保留"pid 永久唯一"就另存墓碑/pid-epoch)、历史取舍(行回收后聚合是唯一记录)。
+   实现:新增 `AsyncAggregateRepository::remove(pid, expected_version)`,一个守卫批删聚合 + 两个索引;GC 只取
+   "`settled` 且 `operations` 为空 且 行已回收"的 run,崩溃幂等。验收见 §10 T2。
 
 # 硬性约束
 - 守卫 `runtime/core/architecture.rs` 不可删;`core/`/`durable/` 不得命名 `crate::runtime::{shell,scheduler}`;
