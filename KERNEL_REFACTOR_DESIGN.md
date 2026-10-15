@@ -116,9 +116,11 @@
 - **第 ② 条的铁律**:实例 id 必须是 `(node, generation)` 的**纯函数**。理由见 §1.2 的 `AlreadyCommitted` 条目 —— 这不是风格问题,是"会不会多造一个实例"的问题。
 - **第 ③ 条**:不改"投影已存在"这件事,真实改动只有"一行一实例",且它**依赖第 ② 条**。
 
-### 2.2 待拍(4 项)
+### 2.2 待拍(D1 已拍,余 3 项)
 
-**D1 —— 命名词汇:取 `{Process, Task, Operation}`(推荐),不取 `{Action, Task}`。**
+**D1 —— 命名词汇:取 `{Process, Task, Operation}`(推荐),不取 `{Action, Task}`。
+→ 已拍(2026-10-16,用户裁决):`{Process, Task, Operation}`。执行见 `KERNEL_CUTOVER_NOTES.md` §11 C2 / §10「C2 完成」
+(`Aggregate* → Process*` 已落地;C3 的 `Execution* → Task*` 是本裁决的第二半)。**
 
 - `Action` 已三义(§1.1),扩成第四义会同时污染公共面 `acts::Action`、内核 `ActionKind`、ACL 动词面。
 - `Operation → Task*` 会把 `DeliverMessage/FireTrigger/RunPostCommit` 变成"Task 的一种"(§1.1)。
@@ -226,6 +228,10 @@ pub(crate) struct OperationId {                              // task_id 换类�
 | `ExecutionGraph`/`ExecutionNode` | `TaskGraph`/`TaskNode` | |
 | `Operation*` | **不变** | 它是 hop,不是 task |
 | shell `Process`/`Task` | 不动,等删 | 与 `ProcessSnapshot` 临时并存 |
+
+> **C2 已落地(2026-10-16)**:上表第一行(`Aggregate*` 全族)已按其"终态"列执行 —— `AggregateSnapshot → ProcessSnapshot`
+> 及同族全部改名,模块也随之成了 `core::commit::process`。逐项映射与边界(字面量/散文不动)见
+> `KERNEL_CUTOVER_NOTES.md` §10「C2 完成」;下表其余各行仍在待做。
 
 ### 3.3 投影(第 ③ 条)
 

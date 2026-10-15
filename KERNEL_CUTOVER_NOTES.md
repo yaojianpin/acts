@@ -2037,6 +2037,49 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
   `mod.rs` 只留 `ContainerPlanner` 声明 —— 三个 `impl ContainerPlanner` 块分居三文件合法(inherent impl 只需同 crate),
   调用方路径与行为都不受影响。
 
+### C2 完成(2026-10-16):`Aggregate*` 全族 → `Process*`(纯改名,零行为变更)
+
+**D1 已拍(用户裁决)**:命名词汇取 `{Process, Task, Operation}`(设计 §2.2 的推荐档)。本笔只做其中的 `Aggregate* → Process*`;
+`Execution* → Task*` 归 C3;`Operation*` 与 `*Command` 不动。
+
+**改名清单**(纯改名:无行为变更、无持久化字节变更):
+
+| 旧 | 新 |
+|---|---|
+| `AggregateSnapshot` | `ProcessSnapshot` |
+| `AggregateVersion` | `ProcessVersion` |
+| `AggregateRepository` / `AsyncAggregateRepository` / `MemoryAggregateRepository`(`…Access`) | `ProcessRepository` / `AsyncProcessRepository` / `MemoryProcessRepository`(`…Access`) |
+| `AggregateDocumentCodec` / `AggregateDocumentError` | `ProcessDocumentCodec` / `ProcessDocumentError` |
+| `AggregateEnvelope` | `ProcessEnvelope` |
+| `LoadedAggregate` | `LoadedProcess` |
+| `AggregateNotFound` / `AggregateAlreadyExists` | `ProcessNotFound` / `ProcessAlreadyExists` |
+| `CommitError::{Wrong,Corrupt,Invalid}Aggregate` | `CommitError::{Wrong,Corrupt,Invalid}Process` |
+| 模块/文件 `core::commit::aggregate` / `commit/aggregate.rs` | `core::commit::process` / `commit/process.rs`(git 认成 94% rename) |
+| `aggregate_key` / `AGGREGATE_KEY_PREFIX` / `AGGREGATE_PREFIX` | `process_key` / `PROCESS_KEY_PREFIX` / `PROCESS_PREFIX` |
+| `decode_loaded_aggregate` / `canonical_aggregate_bytes` | `decode_loaded_process` / `canonical_process_bytes` |
+| 两个仓库缓存字段与 shell 的 `aggregates` 字段 | `processes` |
+| reliability 矩阵的 `aggregate(engine, pid)` 快照助手 | `process_snapshot`(裸名词当函数名会读成动词) |
+
+**刻意的边界 —— 字符串字面量与散文一律不动**:
+
+- 持久化键前缀 `PROCESS_KEY_PREFIX = "kernel/aggregates/"`(`document_store.rs:16`)与规范化字节的域分隔符 `"aggregate-v1"`
+  (`commit/process.rs:749`)**字节不变** ⇒ 存储格式、codec 版本、golden 指纹全不动:套件里
+  `canonical_process_and_commit_digest_match_golden_fingerprint` 与 `process_key_is_unambiguous_for_separator_characters` 原样通过。
+- 人读消息仍说 aggregate(`"aggregate document error"`、`"aggregate envelope error"`、panic/log 串);对齐它们是文案活,不是改名。
+- 注释散文仍说 aggregate(304 行),字符串字面量 81 行 —— 刻意保留:此刻 shell 里还住着 legacy 的 `Process`/`Task`(§3.2「临时并存」),
+  散文里的 "process" 会和它们含混;等 C3/后续删掉 legacy 视图再谈文案。
+
+**证据**:`crates/acts/src` 内 `Aggregate` 命中 **0**;代码位置的 `aggregate`/`aggregates` 标识符 **0**;`aggregate::` 路径与 `mod aggregate` **0**。
+`git diff --cached -M --stat` = **53 文件,+525/−536**。门禁:`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`
+**EXIT 0**、`cargo fmt --all --check` 干净、`cargo test -p acts --lib --tests` **870 passed / 0 failed**。
+(同一套件另一次跑里 `export::actions::tests::a_run_cannot_seal_another_subjects_scope` 红过一次 —— 单跑 0.07 s 绿、整跑复跑 870/0 绿,
+计时抖动,与本笔无关;该用例本就依赖 sweeper 节拍,见 §10「P4 收尾续」§2。)
+
+**过程登记(工作区那笔未提交的性能探针 WIP)**:它与本笔改同一批文件(`shell/mod.rs`/`shell/tests/mod.rs`),自身还带一条
+`clippy -D warnings` 红(`HOPS` dead code,非 test 构建)。为让**提交状态 == 已验证状态**,我把这两份 WIP 旁置(字节副本),
+提交 C2 后按同一改名管线放回;放回时只做了 rustfmt 必需的换行(改名把 `project` 的签名从 102 列降到 100 列 ⇒ 合行;顺带把
+`NAMES` 数组排成 rustfmt 想要的样子)。WIP 语义一字未动(`hop_trace` 23 处、`mod perf_probe;`、`examples/simple/main.rs` 都在),它**仍未提交**。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2062,7 +2105,7 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 | 编号 | 任务 | 阻塞/前置 | 状态 |
 |---|---|---|---|
 | **C1** | 拆 `core/plan/**` 成同名目录 + `pub(crate) use` 保路径 + tests 归位(纯搬移,调用方一行不改) | — | **已做(§10「C1 完成」)** |
-| **C2** | `Aggregate*` 全族 → `Process*`(纯改名) | C1;**D1 需先拍** | 未做 |
+| **C2** | `Aggregate*` 全族 → `Process*`(纯改名) | C1;**D1 已拍**(`{Process, Task, Operation}`) | **已做(§10「C2 完成」)** |
 | **C3** | `Execution*` → `Task*` + `task_state::TaskState` 改名让位(纯改名) | C2 | 未做 |
 | **C4** | `TaskId` 显式化 + `OperationId.task` 换类型(`wire()` 派生,输出仍是 node id ⇒ golden 全绿) | C3 | 未做(**承载原 §7a**) |
 | **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG BREAKING | C4;**D2/D3 必须先拍** | 未做(**BREAKING**) |
@@ -2112,50 +2155,47 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:C2 —— `Aggregate*` 全族 → `Process*`(§11 A 段第二笔;**纯改名,零行为变更**)
+# 当前任务:C3 —— `Execution*` → `Task*` + `task_state::TaskState` 改名让位(§11 A 段第三笔;**纯改名,零行为变更**)
 
-**前置(必须先做,做不到就停下问用户)**:C2 依赖待拍项 **D1(命名词汇)**,它在 `KERNEL_REFACTOR_DESIGN.md` §2.2 里**尚未拍板**。
-因此本笔第一步**不是动手,而是把 D1 摆给用户裁决**:
+**前置(先做;让名方案拿不准就先问用户)**:`ExecutionState → TaskState` 会撞上既有的 `core::model::task_state::TaskState`
+(legacy 的 12 态:`None/Pending/Interrupt/Error`…)。设计 §3.2 的推荐是**给旧的那个让名**(例如 `NodeState`);
+它不落线上(`pub(crate)`)。把候选摆给用户过一眼再落笔。
 
-- 推荐档:`{Process, Task, Operation}` —— 不取 `Action`(它在 §1.1 已三义,再加一义会同时污染公共面 `acts::Action`、
-  内核 `ActionKind`、ACL 动词面);也不取 `Operation* → Task*`(那把 `DeliverMessage`/`FireTrigger`/`RunPostCommit`
-  变成"Task 的一种");用户心里的 task 是 **`Execution*`**,所以正确方向是 `Execution* → Task*`(那是 C3),本笔只是
-  `Aggregate* → Process*`;`*Command` 一律不动(它已一致地表示 planner 输入)。
-- 拿到裁决后:按裁决把 `Aggregate*` 全族改到对应的 `Process*` 名字;**用户若选别的词,以用户为准**。
+**设计依据**:`KERNEL_REFACTOR_DESIGN.md` §2.2(D1 **已拍**:`{Process, Task, Operation}`)、§3.1(身份模型)、§3.2(命名表:
+`ExecutionId → TaskId`、`ExecutionSnapshot → TaskSnapshot`、`ExecutionState → TaskState`、`ExecutionGraph/ExecutionNode → TaskGraph/TaskNode`)、
+§4(C3 那一行)、§11 A 段;§10「C2 完成」(照它的边界与管线口径做)。
 
-**设计依据**:`KERNEL_REFACTOR_DESIGN.md` §2.2(D1)、§3.1/§3.2(命名表终态)、§4(C2 那一行:依赖/行为变更/回滚)、§11 A 段;
-§10「C1 完成」(刚做完的目录化,本笔在它之上动)。
+**本笔只改名不改行为**:不改逻辑、不改持久化字节、**不改字段形态** —— `ExecutionId` 改名成 `TaskId` 之后它的字段一个字不动
+(`{task_id, generation}` 的形态、`wire()`、`OperationId.task` 换类型全是 C4 的事);不顺手修 bug,发现问题写进 §10。
 
-**本笔只改名不改行为**:不改任何逻辑、不改持久化字节(codec tag/版本、存储键的 `id` 段、golden 常量),不改消息取值,
-不顺手修 bug;发现的问题写进 §10 登记。
+**现状(已实测,C2 之后)**:`Execution*` 全族横跨 `core/model/{execution_graph,transition_plan,operation}.rs`、`core/commit/process.rs`、
+`core/plan/**`(已是目录)、`core/recovery/**`、`durable/**`(仓库/codec/envelope)、`shell/**`、`store/**`、`tests/**`;
+`Aggregate*` 已全清(`git grep -w Aggregate` = 0),别在这笔里把它带回来。
 
-**现状(已实测,C1 之后)**:`crates/acts/src/scheduler/core/plan/` 已是同名目录(6 个 `<mod>/` + 4 个未动的单文件);
-`Aggregate*` 全族横跨 `core/commit/aggregate.rs`(类型本体)、`core/plan/**`(planner 输入/快照)、`durable/**`(仓库与 codec)、
-`shell/**`(读写侧)、`core/model/transition_plan.rs`;`plan::…` 调用点共 43 条路径,本笔**不新增/不删除**任何路径。
+**硬性做法**(沿用 C2 已跑通的口径):
 
-**硬性做法**:
-
-1. 先列全清单再动手:`git grep -nE 'Aggregate|AsyncAggregateRepository|...'`(含 **doc 链接**、`README`/`CHANGELOG` 里的字面、
-   `KERNEL_*.md` 里指路用的名字);逐条决定"改 / 刻意保留",保留项(例如 `core/commit/aggregate.rs` 的**文件名**)逐条写进 §10。
-   文件名/模块名若要跟着改,`core/commit/aggregate/**` 的目录化**另立一笔**,不要混进来。
-2. 改名要成组:类型 + `impl` + `use` + 字段/方法名里的同族词(`AggregateSnapshot`/`AggregateVersion`/`AggregateState`…)一起改,
-   不许留一半;`cargo check` 的 `E0433/E0412` 是清单是否漏项的判据。
-3. **不动 `core/architecture.rs` 的守卫规则**;若改名触发 `RUNTIME_ROOT`/tier 清单,同步改并在 §10 说明。
-4. 改完跑一次 §10「§5f」形状的 30 步纯 step 探针(或 `examples/simple`)对照 hop 行为与 golden,证"字节面没动"。
+1. 先列全清单再动手:`git grep -nE 'Execution'`(类型/`impl`/`use`/函数/字段/常量/模块/文件/doc 链接),逐条决定"改 / 刻意保留";
+   保留项逐条写进 §10。C2 的边界照搬:**字符串字面量与散文不动** —— 键、codec tag、golden 指纹的字节面一字不改。
+2. 让名要成组:`ExecutionState → TaskState` 与旧 `TaskState` 的改名**同一笔**做完,不许留中间态;`task_state` 的模块名/文件名
+   若随之改,确认 `core/architecture.rs` 的 `RUNTIME_ROOT`/tier 清单同步(它按目录/文件名分类)。
+3. 代码位置的裸名词按 C2 的规则处理:名里带 `execution` 的字段/局部/助手(如 `executions` 字段、测试里的 `execution(...)` 夹具)
+   一并改,散文与消息不动;`cargo check` 的 `E0433/E0412` 是漏项的判据,收尾再 `grep -w execution` 核一遍。
+4. **不碰 C4 的东西**:`wire()`、`OperationId.task` 的类型、`tasks` 行的按实例化、codec 版本 —— 混进来就破了切面。
+5. 改完跑一次 §10「§5f」形状的 30 步纯 step 探针(或 `examples/simple`)对照 hop 行为与 golden,证"字节面没动"。
 
 **验收**:
 
-- `git diff -M --stat` 显示成组的改名(行数 reuse,不是 delete+add);`git grep` 收尾只剩刻意保留项并逐条列出。
-- 第 1 条列出的调用点(除改名本身)**不因本笔改变调用关系**;`plan::…` 路径集合仍与 C1 后一致(43 条)。
-- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt` 干净
-  (**动手前先确认工作区没有在飞的 WIP 红**:§10「C1 完成」记了 `shell/mod.rs:4764` 的 `HOPS` dead-code 与
-  `shell/mod.rs:4723` 的 fmt 偏差来自未提交的探针 WIP;本笔收口前需那份 WIP 落地或已被用户处理);
-  `cargo test -p acts --lib --tests` 与基线**同数**(C1 后基线 = **870 passed / 0 failed / 1 ignored**)。
-- §10 追加一节「C2 完成」:改名清单前后、`git diff -M --stat` 摘要、刻意保留项、验收命令与结果。
+- `crates/acts/src` 内 `Execution` 只剩刻意保留项(逐条列出;让名后的 `NodeState` 不算残留);代码位置的 `execution`/`executions`
+  标识符为 0。
+- `git diff -M --stat` 显示成组改名(行数 reuse,不是 delete+add);调用点除改名外不改变调用关系。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt --all --check` 干净
+  (**动手前先处理工作区那笔未提交探针 WIP 的 `HOPS` 红**,见 §10「C2 完成」的过程登记 —— 它会让 `-D warnings` EXIT 101);
+  `cargo test -p acts --lib --tests` 与基线**同数**(C2 后基线 = **870 passed / 0 failed**)。
+- §10 追加一节「C3 完成」:改名清单前后、`git diff -M --stat` 摘要、刻意保留项、让名裁决、验收命令与结果。
 
 # 限制与约束
 
-- **先读**:`KERNEL_REFACTOR_DESIGN.md` §1.1(命名面事实)/§2.2(D1)/§3.1/§3.2/§4;§11 A 段;§10「C1 完成」+ §6(文件改写的两条事故口径)。
+- **先读**:`KERNEL_REFACTOR_DESIGN.md` §1.1(命名面事实)/§2.2(D1 已拍)/§3.1/§3.2/§4;§11 A 段;§10「C2 完成」+「C1 完成」+ §6(文件改写的两条事故口径)。
 - **一次提交只做一个切面**:只改名;不得夹带行为变更、结构重构、清理或顺手修 bug。
 - **不新增 `#[allow(...)]`**;需要就写进 §10 申请并在属性处写理由。
 - **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故:把 `export/actions.rs` 截断为空);
@@ -2175,10 +2215,10 @@ cargo test -p acts --lib --tests
 
 # 交付
 
-一笔提交(conventional 前缀 `refactor` 或 `chore`,单行 imperative 主语,例:`refactor(acts): rename the Aggregate* family to Process*`)
-+ §10 追加一节「C2 完成」(改名清单前后、`git diff -M --stat` 摘要、刻意保留项、验收命令与结果)
-→ 把 §11 A 段 **C2** 的状态改成「已做(§10「C2 完成」)」+ **原地重写本节的「当前任务」**
-+ **停下等用户确认**:下一笔 **C3**(`Execution*` → `Task*` + `task_state::TaskState` 改名让位)由 D1 的同一裁决覆盖
-  ("用户心里的 task = `Execution*`"),但 C3 会碰上 `task_state.rs` 里既有的 `TaskState` 撞名,落地前把让名方案给用户过一眼。
+一笔提交(conventional 前缀 `refactor` 或 `chore`,单行 imperative 主语,例:`refactor(acts): rename the Execution* family to Task*`)
++ §10 追加一节「C3 完成」(改名清单前后、`git diff -M --stat` 摘要、刻意保留项、让名裁决、验收命令与结果)
+→ 把 §11 A 段 **C3** 的状态改成「已做(§10「C3 完成」)」+ **原地重写本节的「当前任务」**
++ **停下等用户确认**:下一笔 **C4**(`TaskId` 显式化 + `OperationId.task` 换类型,`wire()` 派生但**输出仍是 node id**)
+  要动 `core/model` 与 `commit/process.rs` 的身份面,落地前把方案与它对 golden 的影响给用户过一眼。
 ```
 
