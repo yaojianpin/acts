@@ -1942,6 +1942,53 @@ P4a/P4b 与 P4 收尾续已完成并实测验证(逐项见 KERNEL_CUTOVER_NOTES.
    实现:新增 `AsyncAggregateRepository::remove(pid, expected_version)`,一个守卫批删聚合 + 两个索引;GC 只取
    "`settled` 且 `operations` 为空 且 行已回收"的 run,崩溃幂等。验收见 §10 T2。
 
+---
+
+### 下一步任务(2026-10-15):容器包参数式 fan-out 收尾 —— Feature B
+
+**目标**:`acts.core.block{ mode, acts }` / `acts.core.sequence{ in, acts }` / `acts.core.parallel{ in, acts }` 的内联 acts 变成内核**子执行**,
+`examples/approve`(pm/gm 审批)与 `examples/message`(block 里的两条 msg)按模型本意运行。现状见本⽂「已知边界」第 1 条:这些包"解析成功但无子节点、直接完成"
+(`server`/`shell` 的 `Runtime::fanout_command → container_shape` 只认显式 `branches` 与嵌套 `steps`;`ctx.build_acts` 写的是 effect seam 用完即弃的无头 process)。
+
+**本轮已实测的中间结论(探针做完即回退,未提交;证据在会话记录)**:
+- 导入期把 `block{ mode: sequence }` 的 acts 物化为"恒选分支"(`if: "true"`,steps 即各 act)**可用**:探针里 `m1`/`m2` 两条 msg act 都被内核跑到(该 run 正常完成)。
+- `parallel{ in }` 的**逐项实例化尚未实现**:探针 `in: ${{ users }}`(2 项)只跑了模板一次,`value` 为空。
+
+**做法(设计已定,可直接照做)**:
+1. `scheduler/shell/model.rs::ProcessSpec::from_workflow`(`assign_ids` 之后)新增 `materialize_container_acts(&mut Workflow)`:递归遍历
+   top-level steps、各 step 的 branches 内 steps、`catches`、`timeouts`(含本轮新加的分支),对命中容器包的 step 物化:
+   - `mode: sequence` → **1 个恒选分支**(`id = <step>#acts`,`if: "true"`),steps = 各 act(声明链即顺序);
+   - `mode: parallel` → **每个 act 一个恒选分支**(`<step>#act<i>`)——容器天然并行接纳自己的 branches;
+   - 带 `in` → **1 个恒选分支**(`<step>#in`),其 steps = **1 个模板 step**(`<step>#item`,`uses: acts.core.block`,
+     `params = { mode: 内部模式, acts }`);内部模式:`acts.core.parallel` → `parallel`,`acts.core.sequence` → `sequence`
+     (legacy 两者都用 block 包一层:`parallel.rs`/`sequence.rs` 的 `execute` 逐项建 `BlockPackageParams`)。
+   Act→Step 映射:`uses`(空则 None)/`params`/`vars`/`if`/`options`/`metadata`/`exposes`;`id` 为空则 `shortid()`(与 `assign_ids` 同口径)。
+2. 动态实例化:`scheduler/shell/mod.rs::fanout_command` 对"该 step 的 `params` 带 `in`"的节点走动态分支 ——
+   `items = params["in"]` 数组,每项一个 `ContainerChild { task_id = 模板 step id, model_node = 模板 id, plan = Entry,
+   predecessors = [Source], vars = [("index", i), ("value", item)] + 模板自身 vars, auto }`:即 **N 个 generation 并行接纳**
+   (legacy 每项一个 block task,options 带 `index`/`value`;模板的 acts 经作用域链继承这两个变量,故 `${{ value }}`/`${{ index }}` 可用)。
+3. `scheduler/core/plan/container.rs::plan_fanout` 需要**同一 plan 内重复 task_id 的递增收代**:现在 `next_generation(snapshot, …)` 只看快照,
+   同一 fan-out 里的 N 个同名 child 会算出同一个 generation(撞 id)。改为在 plan 内维护 `HashMap<task_id, u64>` 偏移
+   (取 `max(快照, 本 plan 已分配 + 1)`),`resolved`/`creates` 已在同一 plan 内累积,可作依据。
+4. 回归与验收:
+   - 新增内核 cell:静态 block 的 acts 都跑到(act 消息齐全);`parallel{ in }` 产出 `len(in)` 个子执行且各自 `value`/`index` 绑定正确;
+   - `examples/message`(block 的两条 msg 都发出)与 `examples/approve`(`{"pm":[…],"gm":[…]}` 非空、pm/gm 审批 act 都被应答)实测;
+   - **改** `scheduler/tests/reliability/parallel.rs` 的那条 conformance cell(`a_uses_param_fan_out_resolves_its_package_without_children`,
+     其文档已写明:将来补齐必须改这条);
+   - 门禁:`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` / `cargo fmt` / `cargo test -p acts`。
+5. 收口后更新登记:本⽂「已知边界」第 1 条 + `parallel.rs` 的 conformance cell 说明。
+
+**本轮已落地的相关改动(2026-10-15,提交 `449166d`;与上面任务相邻,勿重复做)**:
+- step 自身 `if`/`while` 守卫、显式/backward `next` 重入、`while` 循环回跳与 `ELOOP`(`max_node_run_times`)上界;catch/timeout handler 的守卫与 `next` 归派发器;
+- run 的 outputs = 模型 `exposes` 投影(不再拿整棵 root scope 撞 schema);无 `exposes` 时输出自身变量并剔除引擎事实(`__*`、`auto`、`ecode`/`message`/`error.*`);
+- 失败消息的 `ecode`/`message` 同时进 `outputs` 与 `inputs`,且客户端失败的 `ecode` 不再丢(`root_error` 用 `json_text` 宽容解码);
+- **outbox 即投即递**:hop 在**提交前**把本 plan 的记录交给 transport,确认的记录随同一笔提交落 `Delivered`(attempt/fence/revision=1);
+  被拒的留 `Pending` 并唤醒重投递 pass。曾用"每次提交唤醒一趟全局投递 pass"实现,实测**每条记录多两次整聚合提交**并近似翻倍整轮耗时
+  (`examples/simple` 19.3 s → 10.0 s debug / 1.2 s release),故改为本跳内投递;
+- 读模型每行投影按聚合版本守卫(旧提交的投影不得覆盖新行),`apply_action` 用自己提交返回的 snapshot 投影(避免二次 load 落后);
+- 实测一次 `simple`(≈500 hops,debug,内存 store):**708 次聚合读、726 次提交、569 行读**,每次读要解码聚合 + outbox/recovery 两个派生索引、
+  每次提交要整体重编码 —— 即 §9.3.4 登记的主因(投递与 tick 延迟均已排除),P5 仍应从增量编码下手。
+
 # 硬性约束
 - 守卫 `runtime/core/architecture.rs` 不可删;`core/`/`durable/` 不得命名 `crate::runtime::{shell,scheduler}`;
   `RUNTIME_ROOT`/tier 清单随目录改动同步(§10 已登记现行判据)。
