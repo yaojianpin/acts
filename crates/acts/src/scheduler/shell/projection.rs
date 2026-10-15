@@ -37,6 +37,7 @@ use crate::{
         model::{
             execution_graph::{ExecutionId, ExecutionState},
             task_state::TaskState,
+            transition_plan::AggregateVersion,
             view::NodeTree,
         },
     },
@@ -74,6 +75,19 @@ pub(crate) struct RowProjector {
     /// (`<root>/<pid>`) is projected into the proc row's env, which is what
     /// the sweeper reads to reclaim it.
     workdir: Option<std::path::PathBuf>,
+    /// The newest aggregate version each (run, row) was projected from.
+    ///
+    /// A projection is *derived* state and its writers are not serialized: the
+    /// driver projects the hops it runs while a client thread projects the
+    /// action it just committed, and the write-behind queue applies them in
+    /// arrival order — which is not the commit order. An older commit's
+    /// projection must therefore never write over a newer one's rows, so each
+    /// projection claims its run's version first and a version that is not
+    /// newer is dropped. Committed versions are totally ordered (one commit
+    /// wins the CAS and the losing writer re-plans from the winner's version),
+    /// which makes the check sound; the map is in-process, and after a restart
+    /// the first projection of a run writes (the rows are re-derived anyway).
+    projected: Arc<parking_lot::Mutex<std::collections::HashMap<String, AggregateVersion>>>,
 }
 
 impl RowProjector {
@@ -86,6 +100,34 @@ impl RowProjector {
             store,
             writer,
             workdir,
+            projected: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Claim one row's projection version, or refuse it because a newer
+    /// commit's projection of that row already ran (see [`Self::projected`]).
+    /// Claimed per row — the proc row under its own key — because a hop's
+    /// projection may cover a handful of rows while another commit's covers
+    /// the process row alone: one claim for both would let the narrower
+    /// projection lock the wider one out of a version they share.
+    /// Drop a claim whose projection failed (see [`Self::claim`]).
+    fn release(&self, snapshot: &AggregateSnapshot, row: &str) {
+        let key = format!("{pid}\u{1f}{row}", pid = snapshot.process_id);
+        let mut projected = self.projected.lock();
+        if projected.get(&key) == Some(&snapshot.version) {
+            projected.remove(&key);
+        }
+    }
+
+    fn claim(&self, snapshot: &AggregateSnapshot, row: &str) -> bool {
+        let mut projected = self.projected.lock();
+        let key = format!("{pid}\u{1f}{row}", pid = snapshot.process_id);
+        match projected.get(&key) {
+            Some(newest) if *newest >= snapshot.version => false,
+            _ => {
+                projected.insert(key, snapshot.version.clone());
+                true
+            }
         }
     }
 
@@ -129,15 +171,31 @@ impl RowProjector {
             }
         }
 
-        self.project_proc(snapshot, &model).await?;
+        if self.claim(snapshot, "proc")
+            && let Err(error) = self.project_proc(snapshot, &model).await
+        {
+            self.release(snapshot, "proc");
+            return Err(error);
+        }
         for (task_id, execution_id) in &latest {
             if let Some(nodes) = nodes
                 && !nodes.contains(task_id)
             {
                 continue;
             }
-            self.project_task(snapshot, &tree, &latest, task_id, execution_id)
-                .await?;
+            if !self.claim(snapshot, task_id) {
+                continue;
+            }
+            if let Err(error) = self
+                .project_task(snapshot, &tree, &latest, task_id, execution_id)
+                .await
+            {
+                // The claim may not outlive a write that never landed — the
+                // next projection of this version (a retry, a later flush)
+                // must be allowed to write the row.
+                self.release(snapshot, task_id);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -148,7 +206,13 @@ impl RowProjector {
         let Some(model) = model_of(snapshot)? else {
             return Ok(());
         };
-        self.project_proc(snapshot, &model).await
+        if self.claim(snapshot, "proc")
+            && let Err(error) = self.project_proc(snapshot, &model).await
+        {
+            self.release(snapshot, "proc");
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn project_proc(

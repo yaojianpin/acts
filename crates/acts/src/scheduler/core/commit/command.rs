@@ -107,6 +107,7 @@ impl ActionPlanner {
                     "{}:{}",
                     command.execution.task_id, command.execution.generation
                 ),
+                receipt: None,
             }],
         };
         plan.validate()

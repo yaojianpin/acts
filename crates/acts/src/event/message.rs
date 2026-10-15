@@ -197,9 +197,15 @@ impl Message {
         }
     }
 
+    /// Pin a failure on the message: `ecode`/`message` carry it. They go into
+    /// the message's `outputs` — what a consumer reads to learn why the run or
+    /// act failed — and stay in its `inputs` too, which is where every existing
+    /// client (and the catch predicates' own vocabulary) reads them.
     pub fn set_err(&mut self, ecode: &str, message: &str) {
         self.inputs.set(consts::ACT_ERR_CODE, ecode);
         self.inputs.set(consts::ACT_ERR_MESSAGE, message);
+        self.outputs.set(consts::ACT_ERR_CODE, ecode);
+        self.outputs.set(consts::ACT_ERR_MESSAGE, message);
     }
 }
 

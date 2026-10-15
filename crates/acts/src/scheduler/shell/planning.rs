@@ -197,6 +197,89 @@ pub(super) fn walk_step<'a>(
     None
 }
 
+/// The step the flow falls through to when a step names no target of its own:
+/// the sibling declared right after it inside the same container — the
+/// workflow's top-level steps, a branch's steps, or a handler list. `None` for
+/// the container's last child (the container itself then completes) and for a
+/// node that is not a step (a branch, the root).
+pub(super) fn declaration_successor(
+    model: &crate::model::Workflow,
+    target: &str,
+) -> Option<String> {
+    /// `Some(Some(next))` when `target` was found in this list, `Some(None)`
+    /// when it was the last entry.
+    fn in_list(steps: &[crate::model::Step], target: &str) -> Option<Option<String>> {
+        for (index, step) in steps.iter().enumerate() {
+            if step.id == target {
+                return Some(steps.get(index + 1).map(|next| next.id.clone()));
+            }
+            for branch in model::step_branches(step).unwrap_or_default() {
+                if let Some(found) = in_list(&branch.steps, target) {
+                    return Some(found);
+                }
+            }
+            if let Some(found) = in_list(&step.catches, target) {
+                return Some(found);
+            }
+            if let Some(found) = in_list(&step.timeouts, target) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    in_list(&model.steps, target).flatten()
+}
+
+/// Whether a step sits inside a `catches`/`timeouts` handler list. A handler
+/// is dispatched by the failure machinery or the process tick, never by the
+/// flow, so neither its guard nor its `next` is the flow's business: its `if`
+/// selects it where it is dispatched (the catch fan-out, the tick), and its
+/// completion reports to the container that dispatched it.
+pub(super) fn is_handler_step(model: &crate::model::Workflow, target: &str) -> bool {
+    fn in_handlers(steps: &[crate::model::Step], target: &str) -> bool {
+        for step in steps {
+            for branch in model::step_branches(step).unwrap_or_default() {
+                if in_handlers(&branch.steps, target) {
+                    return true;
+                }
+            }
+            for handler in step.catches.iter().chain(step.timeouts.iter()) {
+                if handler.id == target || in_handlers(std::slice::from_ref(handler), target) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    in_handlers(&model.steps, target)
+}
+
+/// Where the flow goes after a step settles, from the declaring model: the
+/// step's own `next` when it declares one, otherwise the next declared sibling
+/// ([`declaration_successor`]). `None` for a handler step ([`is_handler_step`]).
+///
+/// A step its own `if`/`while` guard skipped never takes its `next`: the
+/// legacy guard's failure falls through to the chain, so a self or backward
+/// `next` is not taken (that is what makes a guarded self-`next` loop
+/// terminate).
+pub(super) fn flow_target(
+    model: &crate::model::Workflow,
+    node: &str,
+    guard_skipped: bool,
+) -> Option<String> {
+    if is_handler_step(model, node) {
+        return None;
+    }
+    if guard_skipped {
+        return declaration_successor(model, node);
+    }
+    let step = find_step_in_model(model, node)?;
+    match step.next.as_ref().filter(|next| !next.trim().is_empty()) {
+        Some(next) => Some(next.clone()),
+        None => declaration_successor(model, node),
+    }
+}
+
 pub(super) fn container_shape<'a>(
     model: &'a crate::model::Workflow,
     model_node: &crate::scheduler::core::model::model_graph::NodeId,

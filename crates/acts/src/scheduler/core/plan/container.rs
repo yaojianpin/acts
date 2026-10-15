@@ -780,6 +780,7 @@ fn fanout_outbox(command: &ContainerFanoutCommand, outcome: &str) -> OutboxInten
         ),
         topic: format!("fanout.{outcome}"),
         payload: format!("{}:{}", command.source.task_id, command.source.generation),
+        receipt: None,
     }
 }
 

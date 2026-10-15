@@ -68,6 +68,12 @@ pub(super) fn panic_message(payload: &(dyn Any + Send)) -> String {
 /// with the constructors that read it.
 pub(crate) const CONFLICT_ECODE: &str = "ECONFLICT";
 
+/// The `ecode` of a flow that loops past `max_node_run_times`: a node the
+/// engine ran more often than any workflow should (the legacy
+/// `Process::create_task` bound). A caller-correctable model bug, reported
+/// through the ordinary failure walk so the run ends `Error`.
+pub(crate) const ELOOP_ECODE: &str = "ELOOP";
+
 pub(super) fn runtime(error: impl std::fmt::Display) -> ActError {
     ActError::Runtime(error.to_string())
 }

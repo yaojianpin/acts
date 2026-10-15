@@ -146,6 +146,14 @@ pub(crate) struct KernelHost {
             Box<dyn crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport>,
         >,
     >,
+    /// Immediate delivery: a commit that wrote outbox records notifies the
+    /// driver, whose delivery pass then runs at once instead of waiting for the
+    /// next tick. The tick stays the *retry* net — a record that could not be
+    /// delivered (a retryable outcome, a lease the pass backed off) is retried
+    /// by the same pass on its own schedule; what must never wait for a tick is
+    /// the first attempt, whose latency a client's next action sits behind (the
+    /// default 15 s cadence turned every client-driven step into a tick long).
+    deliver: Arc<tokio::sync::Notify>,
     /// The process-lifecycle seam: when attached, a run's start and terminal
     /// are reported as engine events — the driver's mirror of the legacy
     /// `on_proc` emission. The host builds the `Message` from the aggregate,
@@ -163,6 +171,12 @@ pub(crate) struct KernelHost {
     predicate: Arc<parking_lot::RwLock<Option<Arc<dyn predicate::PredicateRunner>>>>,
     /// Which runs were already reported: a start once, a terminal once.
     reported: Arc<parking_lot::Mutex<ReportedRuns>>,
+    /// How often one node may run in one run — the legacy
+    /// `max_node_run_times` bound, which the kernel keeps as the generation
+    /// count of the node (every re-entry mints one). A flow that loops without
+    /// a guard that closes is failed at the bound, exactly where the legacy
+    /// `Process::create_task` errored the process.
+    max_node_run_times: u64,
     /// The slot policy (`crate::scheduler::core::plan::concurrency`): the runs
     /// in flight at once, and the parked ones waiting for a slot. `start_process`
     /// reserves here and the driver settles here, so one lock owns the answer
@@ -365,6 +379,7 @@ impl KernelHost {
     pub(crate) fn new(
         kv: Arc<dyn KvStore>,
         cache_cap: usize,
+        max_node_run_times: u64,
     ) -> (Arc<Self>, Receiver<OperationId>) {
         let store = Arc::new(KvDocumentStore::new(kv));
         let aggregates = Arc::new(AsyncAggregateRepository::new(store));
@@ -377,10 +392,12 @@ impl KernelHost {
                 wake_tx,
                 effect: Arc::new(parking_lot::RwLock::new(None)),
                 transport: Arc::new(parking_lot::RwLock::new(Box::new(ShadowTransport))),
+                deliver: Arc::new(tokio::sync::Notify::new()),
                 lifecycle: Arc::new(parking_lot::RwLock::new(None)),
                 projection: Arc::new(parking_lot::RwLock::new(None)),
                 predicate: Arc::new(parking_lot::RwLock::new(None)),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
+                max_node_run_times,
                 admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(cache_cap))),
             }),
             wake_rx,
@@ -398,7 +415,11 @@ impl KernelHost {
     /// An in-memory host with an explicit slot bound — the tests that park.
     #[cfg(test)]
     pub(crate) fn in_memory_with_cap(cache_cap: usize) -> (Arc<Self>, Receiver<OperationId>) {
-        Self::new(Arc::new(crate::store::MemoryStore::new()), cache_cap)
+        Self::new(
+            Arc::new(crate::store::MemoryStore::new()),
+            cache_cap,
+            crate::Config::default().max_node_run_times() as u64,
+        )
     }
 
     /// Attach the effect runner: from then on a Func package's work runs
@@ -438,6 +459,107 @@ impl KernelHost {
     /// driving hops.
     pub(crate) fn attach_predicate_runner(&self, runner: Arc<dyn predicate::PredicateRunner>) {
         *self.predicate.write() = Some(runner);
+    }
+
+    /// Where the flow goes once `execution` settled, read from the declaring
+    /// model: the node the flow enters next, and whether it must be re-created
+    /// because its newest generation is already terminal (`planning::flow_target`
+    /// for the model's own answer, a `while` step's loop-back for the loop).
+    ///
+    /// `None` for a node the model does not name as a step — a branch, a
+    /// handler container, the workflow root — whose flow is the graph's own
+    /// edges. A step its own guard skipped falls through the *declaration*
+    /// chain, never its own `next`; a `while` step whose guard still holds
+    /// after the iteration re-enters itself.
+    async fn flow_of(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    ) -> Result<Option<crate::scheduler::core::plan::propagation::FlowTarget>> {
+        use crate::scheduler::core::plan::propagation::{FlowTarget, is_guard_skip};
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(None);
+        };
+        let node = match snapshot.executions.get(execution_id) {
+            Some(execution) => execution.model_node.as_str().to_string(),
+            None => return Ok(None),
+        };
+        // Only a settled *success* flows on (a step its own guard skipped
+        // included — that skip is the legacy fall-through). A failure, an
+        // abort or a cascade skip owns the hop: its own walk decides the run,
+        // and a flow from it would resurrect what the walk is ending.
+        let state = snapshot
+            .executions
+            .get(execution_id)
+            .map(|execution| execution.state);
+        if !matches!(
+            state,
+            Some(crate::scheduler::core::model::execution_graph::ExecutionState::Completed)
+                | Some(crate::scheduler::core::model::execution_graph::ExecutionState::Submitted)
+        ) && !is_guard_skip(snapshot, execution_id)
+        {
+            return Ok(None);
+        }
+        if find_step_in_model(&model, &node).is_none() {
+            return Ok(None);
+        }
+        let guard_skipped = is_guard_skip(snapshot, execution_id);
+        // What a re-entered generation's own scope must carry: its durable auto
+        // decision and its declared model variables.
+        let auto = auto_decision(snapshot, &node)?;
+        let vars: Vec<(String, String)> = find_step_in_model(&model, &node)
+            .map(|step| {
+                step.vars
+                    .iter()
+                    .map(|var| (var.name.clone(), var.value.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // A `while` step re-reads its guard after every iteration: while it
+        // holds, the step runs again — the bounded loop the declaration
+        // documents (`while` cannot be combined with `next`, checked at
+        // import). The guard re-reads the state the iteration left, which the
+        // completed execution's own scope carries.
+        if !guard_skipped
+            && let Some(node) = find_step_in_model(&model, &node)
+            && let Some(expr) = node.r#while.as_ref()
+        {
+            let holds = self
+                .evaluate_branch_predicate(snapshot, execution_id, expr, &[])
+                .await?;
+            if holds == PredicateValue::True {
+                return Ok(Some(FlowTarget {
+                    node: node.id.clone(),
+                    reopen: true,
+                    auto,
+                    vars,
+                }));
+            }
+        }
+        let Some(target) = flow_target(&model, &node, guard_skipped) else {
+            return Ok(None);
+        };
+        // Whether the flow *admits* the target or re-enters it: a target whose
+        // newest generation was never activated (`Created` — a step the flow
+        // has not reached yet) is admitted in place; one that already ran, is
+        // running or is waiting is re-entered as a fresh generation, because
+        // the flow names the node's *next activation* (a backward `next`, a
+        // step reached twice on different paths) and never the live one.
+        let reopen = snapshot
+            .executions
+            .iter()
+            .filter(|(id, _)| id.task_id == target)
+            .max_by_key(|(id, _)| id.generation)
+            .is_some_and(|(_, execution)| {
+                execution.state
+                    != crate::scheduler::core::model::execution_graph::ExecutionState::Created
+            });
+        Ok(Some(FlowTarget {
+            node: target,
+            reopen,
+            auto,
+            vars,
+        }))
     }
 
     /// Decide one branch `if`: on the engine's environment when a predicate
@@ -619,9 +741,10 @@ impl KernelHost {
         }
     }
 
-    /// The background driver: executes woken hops as they arrive, and on every
-    /// tick re-derives recovery work (the durable net) and runs one outbox
-    /// delivery pass. Exits when `shutdown` fires.
+    /// The background driver: executes woken hops as they arrive, runs one
+    /// outbox delivery pass the moment a commit writes records, and on every
+    /// tick re-derives recovery work (the durable net) and runs another
+    /// delivery pass (the retry net). Exits when `shutdown` fires.
     pub(crate) async fn serve(
         self: Arc<Self>,
         mut wake_rx: Receiver<OperationId>,
@@ -633,6 +756,16 @@ impl KernelHost {
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
+                _ = self.deliver.notified() => {
+                    // Bumped by the commit that wrote the records: the pass
+                    // runs while the write is still fresh. A notification
+                    // arriving while this pass runs is not lost — `Notify`
+                    // keeps one permit, so the loop comes back for the next
+                    // batch immediately instead of at the next tick.
+                    if let Err(error) = self.dispatch_outbox().await {
+                        tracing::warn!(error = %error, "kernel outbox pass failed");
+                    }
+                }
                 _ = ticker.tick() => {
                     let now = SystemClock.now_ms();
                     match self.recover(now).await {
@@ -759,6 +892,68 @@ impl KernelHost {
             tx: self.wake_tx.clone(),
         }
         .wake(operation);
+    }
+
+    /// Deliver a plan's own records *before* it commits — the effect seam's
+    /// ordering, applied to the outbox: the work runs, then one commit records
+    /// it. A record the transport confirms commits as `Delivered`, so the
+    /// driver's pass never touches it and the hop pays no claim, no confirm and
+    /// no extra store pass for its message — one hop, one commit, one
+    /// delivery. A record the transport could not confirm is left `Pending`
+    /// (the commit writes it so) and the driver's pass is woken to retry it.
+    ///
+    /// The at-least-once window is the same one the effect seam documents: a
+    /// crash between the delivery and the commit re-runs the hop, and the
+    /// message goes out again (the channel is at-least-once by construction).
+    ///
+    /// Called immediately before the commit that records the plan: the commit
+    /// is the visibility barrier, so a consumer that reacts to the delivered
+    /// message can only act on a run whose rows that commit (and every earlier
+    /// one) already wrote.
+    fn deliver_plan(
+        &self,
+        process_id: &str,
+        plan: &mut crate::scheduler::core::model::transition_plan::TransitionPlan,
+    ) {
+        if plan.outbox.is_empty() {
+            return;
+        }
+        let mut transport = self.transport.write();
+        let mut unconfirmed = false;
+        for intent in &mut plan.outbox {
+            let id = crate::scheduler::core::outbox::records::OutboxId {
+                process_id: process_id.to_string(),
+                key: intent.key.clone(),
+            };
+            let record = match crate::scheduler::core::outbox::records::OutboxRecord::pending(
+                id,
+                intent.topic.clone(),
+                intent.payload.clone(),
+                0,
+            ) {
+                Ok(record) => record,
+                Err(error) => {
+                    tracing::warn!(key = %intent.key, error = %error, "undeliverable outbox record left pending");
+                    unconfirmed = true;
+                    continue;
+                }
+            };
+            match transport.deliver(&record) {
+                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Delivered {
+                    receipt,
+                } => intent.receipt = Some(receipt),
+                other => {
+                    // A retryable (or unconfirmed) outcome: the record commits
+                    // `Pending` and the driver's pass owns it from here.
+                    tracing::debug!(key = %intent.key, outcome = ?other, "outbox record not confirmed in the hop");
+                    unconfirmed = true;
+                }
+            }
+        }
+        drop(transport);
+        if unconfirmed {
+            self.deliver.notify_one();
+        }
     }
 
     /// The slot bookkeeping for one run, from a fresh snapshot of it. Returns
@@ -1323,28 +1518,27 @@ impl KernelHost {
             )
             .await;
         match effect {
-            Ok(plan) => {
+            Ok(mut plan) => {
+                self.deliver_plan(process_id, &mut plan);
                 let receipt = match self
                     .aggregates
                     .commit_transition(&plan)
                     .await
                     .map_err(repository_error)?
                 {
-                    crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Committed { receipt, .. }
+                    crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Committed { receipt, snapshot }
                     | crate::scheduler::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted {
-                        receipt, ..
-                    } => receipt,
+                        receipt,
+                        snapshot,
+                    } => (receipt, snapshot),
                     crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
                         return Err(conflict(format!(
                             "action commit conflict on {process_id}/{task_id}"
                         )));
                     }
                 };
-                let committed = self
-                    .load(process_id)
-                    .await?
-                    .ok_or_else(|| ActError::Runtime("aggregate lost after action".into()))?
-                    .snapshot
+                let (receipt, committed_snapshot) = receipt;
+                let committed = committed_snapshot
                     .operations
                     .get(&operation_id)
                     .cloned()
@@ -1363,12 +1557,17 @@ impl KernelHost {
                 for operation in &receipt.new_operations {
                     wake.wake(operation);
                 }
-                // The read model follows the action's commits. A `Cancel` or
-                // `Back` re-enters through the durable `ReenterTask` operation
-                // the effect commit created (and this wake dispatched), so the
-                // rewind survives a lost completion compare-and-swap or a
-                // crash exactly like every other hop.
-                self.refresh_projection(process_id).await;
+                // The read model follows the action's *own* commit — the
+                // snapshot that commit returned, never a fresh load: a load is
+                // a second read that can already be older than a concurrent
+                // hop's commit, and projecting it would write that hop's rows
+                // away with an older state (the projection's write order must
+                // be the commit order). A `Cancel` or `Back` re-enters through
+                // the durable `ReenterTask` operation the effect commit created
+                // (and this wake dispatched), so the rewind survives a lost
+                // completion compare-and-swap or a crash exactly like every
+                // other hop — and that hop projects its own rows.
+                self.project(&committed_snapshot).await;
                 // The action can be what settles the run (a `Complete` on its
                 // last execution, an `Abort`): the slot it held goes back to
                 // the parked queue here, exactly like the hop that settles a
@@ -1797,6 +1996,7 @@ impl KernelHost {
                     source_operation: commit_claim,
                     join_policy:
                         crate::scheduler::core::plan::propagation::JoinPolicy::AllSucceeded,
+                    flow: self.flow_of(&snapshot, &execution_id).await?,
                 };
                 let mut plan =
                     PropagationPlanner::plan(&graph, &snapshot, &command).map_err(runtime)?;
@@ -1863,6 +2063,17 @@ impl KernelHost {
                 // twice is not a plan.
                 if upward_to.is_none()
                     && let Some(parent) = execution.as_ref().and_then(|e| e.parent.clone())
+                    // A hop that re-enters one of this parent's nodes (a
+                    // backward `next`, a `while` turn) is *not* the end of the
+                    // parent's chain: the join reads the snapshot, where the
+                    // re-entered child does not exist yet, so completing the
+                    // parent here would finish it under the node the flow just
+                    // created. Every other parent's join runs as usual (the
+                    // completed child's own branch/step settles with this hop).
+                    && !plan
+                        .execution_creates
+                        .iter()
+                        .any(|create| create.parent.as_ref() == Some(&parent))
                 {
                     let catch_join =
                         crate::scheduler::core::plan::container::ContainerPlanner::plan_catch_join(
@@ -1917,6 +2128,7 @@ impl KernelHost {
                                         key: record_key,
                                         topic: "task.failed".into(),
                                         payload: payload.to_string(),
+                                        receipt: None,
                                     },
                                 );
                             }
@@ -2030,6 +2242,8 @@ impl KernelHost {
             }
         };
 
+        let mut plan = plan;
+        self.deliver_plan(&id.process_id, &mut plan);
         let (receipt, loaded) = match self
             .aggregates
             .commit_transition(&plan)
@@ -2143,6 +2357,169 @@ impl KernelHost {
     /// operation. A resolution failure returns the failure plan instead (the
     /// execution decided `Failed`, the error walk taking over).
     #[allow(clippy::too_many_arguments)]
+    /// The step's own guard and run bound, decided at the start hop — the
+    /// legacy `Step::init`, which decides whether a step runs at all before any
+    /// act exists.
+    ///
+    /// - `if`/`while` false: the step is *skipped* and the flow falls through
+    ///   to the next declared step — never the step's own `next` (that is what
+    ///   lets a guarded self/backward `next` loop terminate). The private
+    ///   marker [`GUARD_SKIP_VAR`] is what tells the propagation and the join
+    ///   that this skip is a fall-through and not the deadness cascade.
+    /// - a guard the engine cannot decide (a null or invalid predicate): the
+    ///   step fails, exactly like the branch predicate the engine cannot
+    ///   decide.
+    /// - a node that already ran `max_node_run_times` times: the flow loops
+    ///   without a guard that closes, so the run fails here — the legacy
+    ///   `Process::create_task` bound, on the kernel's own run count (a
+    ///   generation per turn).
+    async fn guard_plan(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        id: &OperationId,
+        execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
+        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        claim: &OperationCommit,
+    ) -> Result<Option<TransitionPlan>> {
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(None);
+        };
+        let Some(step) = find_step_in_model(&model, execution_id.task_id.as_str()) else {
+            return Ok(None);
+        };
+        // A handler step (a catch or a timeout branch) is dispatched by the
+        // failure machinery or the tick, and *its* `if` is the selection that
+        // dispatched it — the flow never runs one, so its guard is not the
+        // flow's guard (`is_handler_step`; the import already refuses a
+        // handler `while`, which would loop it).
+        if is_handler_step(&model, execution_id.task_id.as_str()) {
+            return Ok(None);
+        }
+        // `while` is the loop's guard and the step's own entry check in one;
+        // `if` is only the entry check. A step declaring a `while` never
+        // declares a `next` (rejected at import), so only one of the two can
+        // be the guard of a looping step.
+        if let Some(expr) = step.r#while.as_ref().or(step.r#if.as_ref()) {
+            let verdict = self
+                .evaluate_branch_predicate(snapshot, execution_id, expr, &[])
+                .await?;
+            match verdict {
+                PredicateValue::True => {}
+                PredicateValue::False => {
+                    return Ok(Some(self.guard_skip_plan(
+                        snapshot,
+                        id,
+                        execution_id,
+                        execution,
+                        claim,
+                    )?));
+                }
+                PredicateValue::Invalid { message } => {
+                    let failure = Failure::new(String::new(), message);
+                    return Ok(Some(
+                        self.failure_plan(snapshot, id, execution_id, execution, claim, &failure)
+                            .await?,
+                    ));
+                }
+                PredicateValue::Null => {
+                    let failure = Failure::new(
+                        String::new(),
+                        format!("step '{}' guard '{expr}' evaluated to null", step.id),
+                    );
+                    return Ok(Some(
+                        self.failure_plan(snapshot, id, execution_id, execution, claim, &failure)
+                            .await?,
+                    ));
+                }
+            }
+        }
+        // The run bound: `generation` *is* the count of times this node ran in
+        // this run, because every turn mints a fresh generation.
+        if self.max_node_run_times > 0 && execution_id.generation >= self.max_node_run_times {
+            let failure = Failure::new(
+                ELOOP_ECODE,
+                format!(
+                    "node '{}' ({}) in process '{}' was executed more than {} times, \
+                     a loop in the workflow is likely",
+                    step.id, step.name, snapshot.process_id, self.max_node_run_times
+                ),
+            );
+            return Ok(Some(
+                self.failure_plan(snapshot, id, execution_id, execution, claim, &failure)
+                    .await?,
+            ));
+        }
+        Ok(None)
+    }
+
+    /// The plan of a step its own `if`/`while` guard skipped: the legacy
+    /// `Step::init` guard falling through. The execution is `Skipped` (the
+    /// legacy task's own state, and the row/message a client sees), the
+    /// private marker records that the flow goes on, the act's Skipped message
+    /// is emitted, and the propagation carries the flow into the next declared
+    /// step.
+    fn guard_skip_plan(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        id: &OperationId,
+        execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
+        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        claim: &OperationCommit,
+    ) -> Result<TransitionPlan> {
+        let propagate_id = OperationId {
+            process_id: id.process_id.clone(),
+            task_id: id.task_id.clone(),
+            generation: id.generation,
+            sequence: id.sequence + 1,
+        };
+        let mut plan = self.task_hop_plan(
+            snapshot,
+            id,
+            execution_id,
+            Some(execution),
+            claim,
+            "skipped",
+            "task.skipped",
+        )?;
+        // The marker the propagation and the join read (a `__` fact: out of
+        // the expression space and the read model).
+        plan.variable_writes.push(VariableWrite {
+            scope: execution_id.clone(),
+            name: crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR.to_string(),
+            value: serde_json::json!(true).to_string(),
+        });
+        // The act's own Skipped message, like the cascade's hop emits.
+        if let Some(payload) = self.hop_message_payload(
+            snapshot,
+            execution_id,
+            &id.task_id,
+            act_facts(snapshot, execution_id).as_ref(),
+            None,
+            None,
+        )? {
+            plan.outbox[0].payload = payload.to_string();
+        }
+        plan.state_changes.push(StateChange {
+            execution: execution_id.clone(),
+            expected_revision: execution.revision,
+            from: execution.state,
+            to: crate::scheduler::core::model::execution_graph::ExecutionState::Skipped,
+        });
+        if !snapshot.operations.contains_key(&propagate_id) {
+            plan.operations.push(OperationIntent {
+                id: propagate_id,
+                kind: OperationKind::PropagateTask,
+            });
+        }
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    // Like `effect_plan`, the planner mirrors the aggregate's own facts
+    // (operation, execution, claim, the action it seeds) as separate
+    // parameters; bundling them into a struct would only rename the same
+    // fields.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_task_plan(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
@@ -2174,6 +2551,15 @@ impl KernelHost {
             return self
                 .failure_plan(snapshot, id, execution_id, execution, claim, &failure)
                 .await;
+        }
+        // The step's own guard and its run bound, decided before anything
+        // resolves or runs (the legacy `Step::init`).
+        if let Some(execution) = execution
+            && let Some(plan) = self
+                .guard_plan(snapshot, id, execution_id, execution, claim)
+                .await?
+        {
+            return Ok(plan);
         }
         // The act's package facts and its own gate: every `uses` step resolves
         // its package at start, and the pinned facts ride every later message
@@ -2274,6 +2660,7 @@ impl KernelHost {
                     key: created_key,
                     topic: "message.created".into(),
                     payload: payload.to_string(),
+                    receipt: None,
                 },
             );
         }
@@ -2360,6 +2747,7 @@ impl KernelHost {
                     key: format!("{note}:{}:{}:{}", id.process_id, id.task_id, id.generation),
                     topic: topic.into(),
                     payload: String::new(),
+                    receipt: None,
                 },
             ],
         })
@@ -3180,6 +3568,7 @@ impl KernelHost {
                     ),
                     topic: "task.completed".into(),
                     payload: payload.to_string(),
+                    receipt: None,
                 },
             );
         }
@@ -3240,6 +3629,7 @@ impl KernelHost {
                     ),
                     topic: "task.completed".into(),
                     payload: payload.to_string(),
+                    receipt: None,
                 },
             );
         }
@@ -3629,6 +4019,7 @@ impl KernelHost {
                     ),
                     topic: "task.failed".into(),
                     payload: payload.to_string(),
+                    receipt: None,
                 },
             );
             plan.validate().map_err(runtime)?;
@@ -3698,6 +4089,7 @@ impl KernelHost {
                         ),
                         topic: topic.to_string(),
                         payload: payload.to_string(),
+                        receipt: None,
                     },
                 ),
             }

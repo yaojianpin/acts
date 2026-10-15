@@ -143,7 +143,8 @@ pub(crate) fn step_branches(step: &crate::model::Step) -> Option<&[crate::model:
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StepPlace {
     /// A seeded chain step of the workflow root: its auto decision joins the
-    /// seed set, and its own `if`/`while` keeps the P1 contract (ignored).
+    /// seed set. Its own `if`/`while` is its guard, evaluated at its start hop
+    /// (see `KernelHost::guard_plan`).
     TopLevel,
     /// A `catches` handler of a step. Its `if` is the handler's own
     /// selection — the legacy `Step::init` guard, evaluated when the failed
@@ -155,9 +156,10 @@ enum StepPlace {
     /// dispatcher; a `while` would loop the branch, which neither the tick nor
     /// the kernel has a driver for.
     Timeout,
-    /// A step inside a branch: its guard would silently change meaning (the
-    /// kernel join treats `Skipped` as a dead path, while a legacy step guard
-    /// falls through to the chain), so it is refused.
+    /// A step inside a branch: its guard is its own start hop's, like a
+    /// top-level step's, and a guard that fails falls through to the next step
+    /// declared in the same branch (`GUARD_SKIP_VAR` keeps the join from
+    /// reading that skip as a dead path).
     Nested,
 }
 
@@ -202,9 +204,12 @@ fn import_step(
             ));
         }
     }
-    if place == StepPlace::Nested && (step.r#if.is_some() || step.r#while.is_some()) {
+    // `while` cannot be combined with `next`: a while loop always flows to the
+    // next declared step when its condition fails, so an explicit `next` could
+    // never be taken (the same rule the model view enforces).
+    if step.next.is_some() && step.r#while.is_some() {
         return Err(ActError::Runtime(format!(
-            "step '{}' carries an 'if'/'while' guard inside a branch; guarded nested steps are not imported yet",
+            "step '{}' cannot combine 'while' with 'next': a while loop always flows to the next declared step when its condition fails",
             step.id
         )));
     }
@@ -938,8 +943,12 @@ mod tests {
         assert!(format!("{error}").contains("'while' guard"));
     }
 
+    /// A guard inside a branch is imported: its start hop evaluates it, and a
+    /// guard that fails falls through to the next step declared in the same
+    /// branch (the skip carries `GUARD_SKIP_VAR`, so the join reads it as a
+    /// fall-through rather than as the deadness cascade).
     #[test]
-    fn guarded_steps_inside_branches_are_rejected() {
+    fn guarded_steps_inside_branches_are_imported() {
         let workflow = crate::model::Workflow::new().with_step(|step| {
             step.with_id("step1").with_branch(|branch| {
                 branch
@@ -948,8 +957,27 @@ mod tests {
                     .with_step(|step| step.with_id("s11").with_if("v > 0"))
             })
         });
+        let spec = spec(&workflow).unwrap();
+        // The nested step's auto decision is seeded in the durable map (only
+        // top-level steps join the seed set).
+        let auto_map = spec
+            .seed_variables
+            .iter()
+            .find(|(_, name, _)| name == AUTO_MAP_VAR)
+            .map(|(_, _, value)| value.clone())
+            .expect("the auto map is seeded");
+        assert!(auto_map.contains("\"s11\":true"), "{auto_map}");
+    }
+
+    /// A `while` step cannot also declare a `next` (a while loop always flows
+    /// to the next declared step when its condition fails), the same rule the
+    /// model view enforces at build time.
+    #[test]
+    fn while_with_next_is_rejected() {
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("step1").with_next("step2").with_while("v > 0"));
         let error = spec(&workflow).unwrap_err();
-        assert!(format!("{error}").contains("'if'/'while' guard inside a branch"));
+        assert!(format!("{error}").contains("cannot combine 'while' with 'next'"));
     }
 
     #[test]

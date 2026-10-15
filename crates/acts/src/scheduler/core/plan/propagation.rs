@@ -2,9 +2,11 @@ use crate::scheduler::core::{
     commit::aggregate::AggregateSnapshot,
     model::{
         execution_graph::{ExecutionGraph, ExecutionId, ExecutionState},
+        model_graph::NodeId,
         operation::{OperationId, OperationKind},
         transition_plan::{
-            OperationCommit, OperationIntent, OutboxIntent, StateChange, TransitionPlan,
+            ExecutionCreate, OperationCommit, OperationIntent, OutboxIntent, StateChange,
+            TransitionPlan, VariableWrite,
         },
     },
 };
@@ -25,6 +27,57 @@ pub(crate) struct PropagateCommand {
     pub(crate) execution: ExecutionId,
     pub(crate) source_operation: OperationCommit,
     pub(crate) join_policy: JoinPolicy,
+    /// The flow the host read from the declaring model, when the settling
+    /// execution is a *step*: the node the flow goes to and whether it must be
+    /// re-created first because its newest generation is already terminal.
+    ///
+    /// The graph's successors only encode the chains the seed and the
+    /// container fan-outs wired (a declaration chain per container), while a
+    /// step's flow is a *model* fact: its explicit `next` may jump outside the
+    /// graph (backward to an ancestor, forward over a sibling), and a `while`
+    /// step loops back into itself. `None` for a node the model does not name
+    /// (a branch, a handler container, the workflow root), whose flow is the
+    /// graph's own edges.
+    pub(crate) flow: Option<FlowTarget>,
+}
+
+/// Where a step's flow goes once it settled — see [`PropagateCommand::flow`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FlowTarget {
+    /// The model node the flow enters.
+    pub(crate) node: String,
+    /// Its newest generation is already terminal: the flow re-enters the node,
+    /// so a fresh generation is created (a backward `next`, a `while` turn).
+    pub(crate) reopen: bool,
+    /// The node's durable auto decision (`__auto`) — what a re-entered
+    /// generation's scope must carry, like every fan-out child does, or the
+    /// engine would treat a waiting act as a self-completing one.
+    pub(crate) auto: bool,
+    /// The node's declared model variables (JSON text), seeded on the
+    /// re-entered generation's own scope — the same fact the fan-out seeds on
+    /// a child (`child_variables`), which the seed only wrote for generation 0.
+    pub(crate) vars: Vec<(String, String)>,
+}
+
+/// The private variable an execution carries when its own `if`/`while` guard
+/// decided it `Skipped`: the guard *fell through* — the legacy step skipped by
+/// its condition, whose flow goes on to the next declared step — as opposed to
+/// a skip the deadness cascade flowed in. A `__` fact: out of the expression
+/// space and the read model, durable so a replay reads the same verdict.
+pub(crate) const GUARD_SKIP_VAR: &str = "__guard_skip";
+
+/// The engine's failure vocabulary on a scope: the names the catch fan-out
+/// reserves and the upward error walk carries (`ecode`/`message` are the
+/// legacy task-data names, `error.code`/`error.message` the kernel's own).
+fn is_error_fact(name: &str) -> bool {
+    matches!(name, "ecode" | "message" | "error.code" | "error.message")
+}
+
+/// Whether one execution was skipped by its own guard (see [`GUARD_SKIP_VAR`]).
+pub(crate) fn is_guard_skip(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> bool {
+    snapshot
+        .variables
+        .contains_key(&(execution.clone(), GUARD_SKIP_VAR.to_string()))
 }
 
 pub(crate) struct PropagationPlanner;
@@ -49,7 +102,146 @@ impl PropagationPlanner {
 
         let mut state_changes = Vec::new();
         let mut operations = Vec::new();
-        for successor in graph.successors(&command.execution) {
+        let mut creates = Vec::new();
+        let mut writes: Vec<VariableWrite> = Vec::new();
+        // Whether the source's death flows on as a cascade (a dead source's
+        // admitted successors join it) or the source is merely *done*: a step
+        // its own guard skipped is the legacy fall-through — its flow runs on
+        // into the next declared step.
+        let source_alive = is_success(source.state) || is_guard_skip(snapshot, &command.execution);
+        // The targets this propagation flows into: the one node the model
+        // names when the host decided the flow (see [`PropagateCommand::flow`]),
+        // otherwise the graph's own successors.
+        let targets: Vec<ExecutionId> = match &command.flow {
+            Some(flow) => {
+                let Some(latest) = newest_generation(snapshot, &flow.node) else {
+                    // A `next` naming a node the run never instantiated: the
+                    // model is inconsistent with the seeded graph. Refusing is
+                    // the only honest answer — scheduling nothing would end
+                    // the flow silently.
+                    return Err(PropagationError::FlowTargetNotInstantiated(
+                        flow.node.clone(),
+                    ));
+                };
+                if flow.reopen {
+                    // The flow re-enters a node that was already activated —
+                    // terminal (a backward `next`, a `while` step's next turn)
+                    // or even still parked for its children (the flow's own
+                    // jump back into an ancestor while it waits). Only the node
+                    // itself is created here — its own
+                    // hops bring its forward closure alive (a container fans
+                    // its children out as fresh generations), exactly like the
+                    // seeded chain — with the parent and predecessors the dead
+                    // generation had, so the join keeps waiting where it did.
+                    let generation = latest
+                        .0
+                        .generation
+                        .checked_add(1)
+                        .ok_or(PropagationError::GenerationOverflow)?;
+                    let execution = ExecutionId::new(flow.node.clone(), generation)
+                        .map_err(|_| PropagationError::EmptyFlowTarget)?;
+                    // The re-entered generation inherits the dead one's edges,
+                    // and it is admitted like any other execution: `Ready` with
+                    // its start hop when every predecessor it inherited has
+                    // settled, otherwise `Created` — the predecessor still in
+                    // flight admits it through its own propagation (its
+                    // successors include this execution the moment the create
+                    // commits).
+                    // A predecessor that *is* the parent container counts as
+                    // passed: the parent parks precisely to wait for its
+                    // children, and the flow re-enters inside it (the seeded
+                    // chain's head is admitted the same way, as the fan-out's
+                    // `Entry` child).
+                    let predecessors_ready = latest.1.predecessors.iter().all(|predecessor| {
+                        Some(predecessor) == latest.1.parent.as_ref()
+                            || snapshot
+                                .executions
+                                .get(predecessor)
+                                .is_some_and(|execution| execution.state.is_terminal())
+                    });
+                    creates.push(ExecutionCreate {
+                        execution: execution.clone(),
+                        model_node: NodeId::parse(flow.node.clone())
+                            .map_err(|_| PropagationError::EmptyFlowTarget)?,
+                        parent: latest.1.parent.clone(),
+                        predecessors: latest.1.predecessors.clone(),
+                        initial_state: if predecessors_ready {
+                            ExecutionState::Ready
+                        } else {
+                            ExecutionState::Created
+                        },
+                    });
+                    if predecessors_ready {
+                        operations.push(OperationIntent {
+                            id: OperationId {
+                                process_id: command.process_id.clone(),
+                                task_id: flow.node.clone(),
+                                generation,
+                                sequence: snapshot.next_operation_sequence(&flow.node, generation),
+                            },
+                            kind: OperationKind::ExecuteTask,
+                        });
+                    }
+                    // The re-entered generation's own scope carries what every
+                    // other execution's does: its auto decision and its declared
+                    // model variables.
+                    writes.push(VariableWrite {
+                        scope: execution.clone(),
+                        name: "auto".to_string(),
+                        value: if flow.auto { "1" } else { "0" }.to_string(),
+                    });
+                    for (name, value) in &flow.vars {
+                        writes.push(VariableWrite {
+                            scope: execution.clone(),
+                            name: name.clone(),
+                            value: value.clone(),
+                        });
+                    }
+                    // The flow carries the source's own data into the scope the
+                    // re-entered node inherits from — the legacy `Task::next`
+                    // folding `parent.update_data(&outputs)` up the chain
+                    // *before* the next task reads it. Without this a jump back
+                    // to an ancestor would re-evaluate the ancestor's predicates
+                    // against the state from before the iteration that asked for
+                    // it (the iteration's own fold only reaches its immediate
+                    // parent).
+                    if let Some(parent) = latest.1.parent.clone() {
+                        for ((scope, name), value) in &snapshot.variables {
+                            if scope != &command.execution
+                                || crate::utils::consts::is_private_key(name)
+                                || name == "auto"
+                                // The failure vocabulary travels up the
+                                // ancestor walk of its own hop (`plan_upward`'s
+                                // carry), which writes it to every ancestor it
+                                // decides: carrying it here too would fight
+                                // that walk over the same scope.
+                                || is_error_fact(name)
+                                || writes.iter().any(|write| {
+                                    write.scope == parent && write.name == *name
+                                })
+                            {
+                                continue;
+                            }
+                            writes.push(VariableWrite {
+                                scope: parent.clone(),
+                                name: name.clone(),
+                                value: value.clone(),
+                            });
+                        }
+                    }
+                    tracing::debug!(
+                        node = %flow.node,
+                        generation,
+                        "the flow re-enters a settled node"
+                    );
+                    Vec::new()
+                } else {
+                    vec![latest.0]
+                }
+            }
+            None => graph.successors(&command.execution).to_vec(),
+        };
+        for successor in &targets {
             let target = snapshot
                 .executions
                 .get(successor)
@@ -63,7 +255,7 @@ impl PropagationPlanner {
                 // execution, e.g. a branch child of a cancelled container)
                 // joins the skip cascade in place instead of running on
                 // behind a dead path.
-                if !is_success(source.state)
+                if !source_alive
                     && matches!(
                         target.state,
                         ExecutionState::Ready | ExecutionState::Running | ExecutionState::Waiting
@@ -155,9 +347,9 @@ impl PropagationPlanner {
         let plan = TransitionPlan {
             process_id: command.process_id.clone(),
             expected: snapshot.version.clone(),
-            execution_creates: Vec::new(),
+            execution_creates: creates,
             state_changes,
-            variable_writes: Vec::new(),
+            variable_writes: writes,
             source_operation: Some(command.source_operation.clone()),
             operations,
             outbox: vec![OutboxIntent {
@@ -173,6 +365,7 @@ impl PropagationPlanner {
                     "{}:{}",
                     command.execution.task_id, command.execution.generation
                 ),
+                receipt: None,
             }],
         };
         plan.validate()
@@ -203,13 +396,19 @@ fn readiness(
     }
     let mut waiting = false;
     for predecessor in predecessors {
-        let state = snapshot
+        let execution = snapshot
             .executions
             .get(predecessor)
-            .ok_or_else(|| PropagationError::ExecutionNotFound(predecessor.clone()))?
-            .state;
+            .ok_or_else(|| PropagationError::ExecutionNotFound(predecessor.clone()))?;
+        let state = execution.state;
         if !state.is_terminal() {
             waiting = true;
+            continue;
+        }
+        // A step its own `if`/`while` guard skipped is the legacy
+        // fall-through, not a dead path: its successor runs (the guard said
+        // "not now", not "everything below is dead").
+        if state == ExecutionState::Skipped && is_guard_skip(snapshot, predecessor) {
             continue;
         }
         if policy == JoinPolicy::AllSucceeded && !is_success(state) {
@@ -236,6 +435,23 @@ fn readiness(
 /// it), so its successors are skipped too instead of running.
 fn is_success(state: ExecutionState) -> bool {
     matches!(state, ExecutionState::Completed | ExecutionState::Submitted)
+}
+
+/// The newest generation of one model node, with its snapshot. `None` when the
+/// run never instantiated it.
+fn newest_generation<'a>(
+    snapshot: &'a AggregateSnapshot,
+    node: &str,
+) -> Option<(
+    ExecutionId,
+    &'a crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+)> {
+    snapshot
+        .executions
+        .iter()
+        .filter(|(id, _)| id.task_id == node)
+        .max_by_key(|(id, _)| id.generation)
+        .map(|(id, execution)| (id.clone(), execution))
 }
 
 fn validate_envelope(
@@ -281,6 +497,12 @@ pub(crate) enum PropagationError {
         execution: ExecutionId,
         state: ExecutionState,
     },
+    /// A step's `next` names a node the run never instantiated (the model and
+    /// the seeded graph disagree). Scheduling nothing would end the flow
+    /// silently, so the hop refuses instead.
+    FlowTargetNotInstantiated(String),
+    EmptyFlowTarget,
+    GenerationOverflow,
     InvalidPlan(String),
 }
 impl fmt::Display for PropagationError {
@@ -399,6 +621,7 @@ mod tests {
                     heartbeat_revision: 0,
                 },
             },
+            flow: None,
         }
     }
 

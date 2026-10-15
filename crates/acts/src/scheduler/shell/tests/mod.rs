@@ -17,6 +17,10 @@ use crate::{
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+/// How often one node may run in the harness's hosts: the configured default,
+/// so a cell that loops on purpose is bounded exactly like a served run.
+const MAX_NODE_RUN_TIMES: u64 = 1000;
+
 struct CountingTransport {
     delivered: Arc<parking_lot::Mutex<usize>>,
 }
@@ -68,6 +72,12 @@ async fn assert_all_terminal(host: &KernelHost, pid: &str) {
 #[tokio::test]
 async fn linear_process_runs_to_completion_and_delivers_outbox() {
     let (host, mut wake_rx) = KernelHost::in_memory();
+    // The transport is attached before the run: a hop delivers its own records
+    // inside its commit, so nothing waits for a pass.
+    let counter = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(CountingTransport {
+        delivered: counter.clone(),
+    }));
     let spec = ProcessSpec::linear("p1", "root", &["a", "b"]);
     host.start_process(&spec).await.unwrap();
     let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
@@ -80,13 +90,11 @@ async fn linear_process_runs_to_completion_and_delivers_outbox() {
     // started x3 + completed x3 + propagated x3.
     assert_eq!(snapshot.outbox.len(), 9);
 
-    let counter = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(CountingTransport {
-        delivered: counter.clone(),
-    }));
-    let delivered = host.dispatch_outbox().await.unwrap();
-    assert_eq!(delivered, 9);
+    // Every record went out with the commit that wrote it: the pass that runs
+    // on the tick (and the retry net) has nothing left.
     assert_eq!(*counter.lock(), 9);
+    let delivered = host.dispatch_outbox().await.unwrap();
+    assert_eq!(delivered, 0, "in-hop delivery leaves no pending record");
     let snapshot = host.snapshot("p1").await.unwrap().unwrap();
     assert!(
         snapshot
@@ -307,7 +315,7 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
     };
     let stored = ConflictKv::new(PID, root.clone());
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1);
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES);
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
     host.start_process(&spec).await.unwrap();
 
@@ -405,7 +413,7 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
         .with_id("wf-cap")
         .with_step(|step| step.with_id("s1"));
     let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1);
+    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES);
     // The read model is what a parked run is *visible* through, so this test
     // carries the projector the serving host attaches.
     let store = Arc::new(crate::store::Store::new(kv));
@@ -1327,6 +1335,32 @@ async fn kernel_task_and_act_messages_are_emitted() {
         // comparison sees the same settled stream the legacy engine
         // emitted synchronously.
         runtime.kernel().dispatch_outbox().await.unwrap();
+        // The rows are a write-behind projection: they lag the completion
+        // event by a queue turn, and a projection landing after `close` is
+        // refused (the rows would then read the state before it). Wait for the
+        // run's own row to read terminal before collecting the set.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            runtime.flush_writer().await.unwrap();
+            let state = runtime
+                .store()
+                .procs()
+                .find_opt(&pid)
+                .await
+                .unwrap()
+                .map(|row| row.state);
+            if state
+                .as_deref()
+                .is_some_and(|state| state != "running" && state != "none")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run's row never read terminal: {state:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         // The durable read model of this run, folded: a row's node is its
         // own `node_data` id (the workflow root is `$`, as in the kernel),
         // and an act row folds to the node of its parent row. The legacy
@@ -5059,6 +5093,23 @@ async fn uses_steps_write_created_message_records() {
             step.with_id("s2")
                 .with_uses("test.irq", crate::Vars::new().with("key", "irq-1"))
         });
+    // The transport is attached before the run: a hop delivers its own records
+    // inside its commit, so nothing waits for a pass to see them.
+    struct TopicTransport {
+        topics: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for TopicTransport {
+        fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
+            self.topics.lock().push(record.topic.clone());
+            DeliveryOutcome::Delivered {
+                receipt: "ok".into(),
+            }
+        }
+    }
+    let topics = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    host.attach_outbox_transport(Box::new(TopicTransport {
+        topics: topics.clone(),
+    }));
     let spec = ProcessSpec::from_workflow("p-msg", &workflow, &run_as).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -5104,24 +5155,9 @@ async fn uses_steps_write_created_message_records() {
         crate::scheduler::core::model::execution_graph::ExecutionState::Completed
     );
 
-    // The records are deliverable: a transport sees them like any other
-    // outbox record.
-    struct TopicTransport {
-        topics: Arc<parking_lot::Mutex<Vec<String>>>,
-    }
-    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for TopicTransport {
-        fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
-            self.topics.lock().push(record.topic.clone());
-            DeliveryOutcome::Delivered {
-                receipt: "ok".into(),
-            }
-        }
-    }
-    let topics = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    host.attach_outbox_transport(Box::new(TopicTransport {
-        topics: topics.clone(),
-    }));
-    host.dispatch_outbox().await.unwrap();
+    // The records reached the transport with the commits that wrote them: the
+    // pass has nothing left to deliver.
+    assert_eq!(host.dispatch_outbox().await.unwrap(), 0);
     let delivered = topics.lock().clone();
     assert_eq!(
         delivered
@@ -5621,5 +5657,69 @@ async fn effect_denies_a_snapshot_scope_the_owner_lacks() {
         !snapshot.variables.contains_key(&(s1, "token".to_string())),
         "a denied seal must not produce outputs"
     );
+    engine.close().await;
+}
+
+/// A commit that writes outbox records delivers them at once: the driver's
+/// delivery pass is woken by the commit itself instead of waiting for the tick.
+///
+/// The tick here is an hour away, so a message can only have come from that
+/// wake — and a client's next action waits for exactly this message, which is
+/// why the tick cadence (15 s by default) turned every client-driven step into
+/// a tick-long stall. The tick stays the retry net.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_commit_delivers_its_records_without_waiting_for_a_tick() {
+    let engine = crate::Engine::builder().start().await.unwrap();
+    let (host, wake_rx) = KernelHost::in_memory();
+    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+        engine.runtime().clone(),
+    )));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::Message>();
+    host.attach_outbox_transport(Box::new(message::MessageForwarder::new(
+        move |msg: &crate::Message| {
+            let _ = tx.send(msg.clone());
+        },
+    )));
+
+    let package = engine.runtime().package().clone();
+    let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-immediate-delivery")
+        .with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_IRQ,
+                crate::Vars::new().with("key", "irq-1"),
+            )
+        });
+    let spec = ProcessSpec::from_workflow("p-immediate-delivery", &workflow, &run_as).unwrap();
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let driver = tokio::spawn(host.clone().serve(
+        wake_rx,
+        shutdown.clone(),
+        std::time::Duration::from_secs(3600),
+    ));
+    host.start_process(&spec).await.unwrap();
+
+    let created = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while let Some(message) = rx.recv().await {
+            if message.is_irq() && message.state == crate::MessageState::Created {
+                return message;
+            }
+        }
+        panic!("the delivery channel closed before the act was announced");
+    })
+    .await
+    .expect("the act's Created message must arrive without a tick");
+    assert_eq!(created.pid, "p-immediate-delivery");
+    assert_eq!(created.tid, "s1");
+    assert_eq!(
+        created.inputs.get::<serde_json::Value>("params").unwrap()["key"],
+        "irq-1"
+    );
+
+    shutdown.cancel();
+    driver.await.unwrap();
     engine.close().await;
 }

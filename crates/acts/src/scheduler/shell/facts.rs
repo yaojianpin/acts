@@ -175,27 +175,111 @@ pub(super) fn is_engine_fact(name: &str) -> bool {
     crate::utils::consts::is_private_key(name) || name == "auto"
 }
 
-/// The engine `Message` of one run's lifecycle: the workflow-level fact the
-/// legacy `root.create_message` produced, built from the aggregate (its only
-/// source). The root scope's user variables are the run's outputs.
-pub(super) fn process_message(
+/// Whether a scope variable is one of the engine's *failure* facts: the names
+/// the catch fan-out reserves and writes into a failed step's scope so a
+/// handler's guard can select on them (`$ecode()`/`message` are the legacy
+/// task-data names, `error.code`/`error.message` the kernel's own). They are
+/// engine facts like `auto` — the completion of a run that recovered must not
+/// report its own error names as workflow data (the legacy read model kept
+/// them on the task, out of a declared `exposes`).
+pub(super) fn is_error_fact(name: &str) -> bool {
+    matches!(name, "ecode" | "message" | "error.code" | "error.message")
+}
+
+/// The user variables of one run's root scope (the aggregate's JSON text
+/// decoded), filtered by `keep`. Private names and the durable engine facts
+/// ([`is_engine_fact`]) are never part of a run's data.
+pub(super) fn root_variables(
     snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
     root: &crate::scheduler::core::model::execution_graph::ExecutionId,
-) -> crate::Message {
+    keep: impl Fn(&str) -> bool,
+) -> crate::Vars {
     let mut vars = crate::Vars::new();
     for ((scope, name), raw) in &snapshot.variables {
-        if scope != root || is_engine_fact(name) {
+        if scope != root || is_engine_fact(name) || !keep(name) {
             continue;
         }
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
             vars.set(name, value);
         }
     }
-    let mid = model_of(snapshot)
-        .ok()
-        .flatten()
-        .map(|model| model.id)
-        .unwrap_or_default();
+    vars
+}
+
+/// One run's declared `exposes` answered over its own scope — the legacy
+/// `Task::outputs` projection, which *is* a workflow's output surface
+/// (`exposes` filters what completes as outputs; it is not merely a schema for
+/// everything the run happens to hold).
+///
+/// An entry answers by its own `value`: a `${{ }}` template is evaluated
+/// against the run's variables, a literal is taken as it stands, and an entry
+/// that declares no value at all reads the run's variable of that name (the
+/// legacy `fill_outputs` rules). A name that resolves to nothing completes as
+/// `null` rather than failing the run.
+pub(super) fn exposed_variables(
+    snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+    root: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    exposes: &[crate::Variant],
+) -> crate::Vars {
+    let scope = scope_vars(snapshot, root);
+    let read = |name: &str| {
+        scope
+            .iter()
+            .find(|(key, _)| key == name)
+            .and_then(|(_, raw)| serde_json::from_str::<serde_json::Value>(raw).ok())
+    };
+    let mut outputs = crate::Vars::new();
+    for expose in exposes {
+        let value = match &expose.value {
+            serde_json::Value::String(text) => match crate::utils::get_expr(text) {
+                Some(expr) => evaluate_expression(&expr, &scope).unwrap_or(serde_json::Value::Null),
+                None => expose.value.clone(),
+            },
+            serde_json::Value::Null => read(&expose.name).unwrap_or(serde_json::Value::Null),
+            value => value.clone(),
+        };
+        outputs.set(&expose.name, value);
+    }
+    outputs
+}
+
+/// Evaluate one `${{ }}` expression against a scope chain (nearest first), the
+/// same variable space a branch predicate reads. `None` when the expression
+/// does not compile, names something the scope does not hold, or has no JSON
+/// value — the legacy projection completed such an entry as `null`.
+fn evaluate_expression(expr: &str, scope: &[(String, String)]) -> Option<serde_json::Value> {
+    let program = acts_expr::Expr::compile(expr).ok()?;
+    let mut context = acts_expr::Context::new();
+    for name in program.references() {
+        let (_, raw) = scope.iter().find(|(key, _)| key == name)?;
+        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        context.set(name, acts_expr::Value::from(value));
+    }
+    program.eval(&context).ok()?.to_json().ok()
+}
+
+/// The engine `Message` of one run's lifecycle: the workflow-level fact the
+/// legacy `root.create_message` produced, built from the aggregate (its only
+/// source). The root scope's user variables are the run's inputs; its outputs
+/// are the model's `exposes` ([`exposed_variables`]) — the run's whole variable
+/// space only when it declares none ([`root_variables`]).
+pub(super) fn process_message(
+    snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+    root: &crate::scheduler::core::model::execution_graph::ExecutionId,
+) -> crate::Message {
+    let model = model_of(snapshot).ok().flatten();
+    let inputs = root_variables(snapshot, root, |_| true);
+    let outputs = match &model {
+        Some(model) if !model.exposes.is_empty() => {
+            exposed_variables(snapshot, root, &model.exposes)
+        }
+        // No `exposes`: the run's whole variable space is its output surface,
+        // minus the failure vocabulary the catch fan-out pins on a step
+        // ([`is_error_fact`]) — a run that recovered from a caught failure must
+        // not report its own error names as data.
+        _ => root_variables(snapshot, root, |name| !is_error_fact(name)),
+    };
+    let mid = model.map(|model| model.id).unwrap_or_default();
     let state = snapshot
         .executions
         .get(root)
@@ -209,8 +293,8 @@ pub(super) fn process_message(
         pid: snapshot.process_id.clone(),
         nid: crate::utils::consts::TASK_ROOT_TID.to_string(),
         mid,
-        inputs: vars.clone(),
-        outputs: vars,
+        inputs,
+        outputs,
         timestamp: crate::utils::time::time_millis(),
         ..Default::default()
     }
@@ -240,11 +324,17 @@ pub(super) fn root_error(
     snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
     root: &crate::scheduler::core::model::execution_graph::ExecutionId,
 ) -> (String, String) {
+    // The value is read the way every other scope reader reads it
+    // ([`json_text`]): the failure vocabulary reaches the root both as an
+    // engine-encoded JSON string (the catch fan-out's `json_var`) and as the
+    // raw text a client's `ecode`/`message` options carry (`ApplyActionCommand`
+    // writes the client's strings verbatim), so a strict decode would report
+    // every client failure as an empty code.
     let read = |name: &str| {
         snapshot
             .variables
             .get(&(root.clone(), name.to_string()))
-            .and_then(|raw| serde_json::from_str::<String>(raw).ok())
+            .map(|raw| json_text(raw))
             .unwrap_or_default()
     };
     (read("error.code"), read("error.message"))

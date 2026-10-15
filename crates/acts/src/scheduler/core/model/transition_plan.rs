@@ -10,7 +10,12 @@ use crate::scheduler::core::{
 use std::collections::HashSet;
 use std::fmt;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// The counters a commit advances. They only ever grow, and any two
+/// *committed* versions are totally ordered (a commit wins one CAS and the
+/// loser re-plans from the winner's version), which is what lets a derived
+/// read model drop a projection that is older than the rows it would write
+/// (see `RowProjector::claim`).
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct AggregateVersion {
     /// Immutable execution-topology revision. State-only commits never change it.
     pub(crate) graph: u64,
@@ -59,6 +64,13 @@ pub(crate) struct OutboxIntent {
     pub(crate) key: String,
     pub(crate) topic: String,
     pub(crate) payload: String,
+    /// The receipt the hop's own transport returned for this record, when it
+    /// delivered it *before* committing (the effect seam's ordering: the work
+    /// runs, then one commit records it). The commit creates the record
+    /// already `Delivered` — no claim, no confirm pass, no second commit — and
+    /// `None` leaves it `Pending` for the driver's retry pass (a transport that
+    /// refused, or a plan no hop has offered the transport yet).
+    pub(crate) receipt: Option<String>,
 }
 
 /// Complete, value-only output of a planner. It contains no live process,
@@ -323,6 +335,7 @@ mod tests {
             key: "k".into(),
             topic: " ".into(),
             payload: "{}".into(),
+            receipt: None,
         });
         assert_eq!(
             p.validate(),

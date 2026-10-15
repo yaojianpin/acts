@@ -67,15 +67,20 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
             inputs.set(key, value.clone());
         }
     }
+    // The failure facts an error record adds: `ecode`/`message` are what a
+    // consumer reads the failure from, so they land in the message's `outputs`
+    // as well as its `inputs`.
+    let mut outputs = Vars::new();
     if let Some(error) = payload.get("error").and_then(|value| value.as_object()) {
         if let Some(code) = error.get("code") {
             inputs.set(consts::ACT_ERR_CODE, code.clone());
+            outputs.set(consts::ACT_ERR_CODE, code.clone());
         }
         if let Some(message) = error.get("message") {
             inputs.set(consts::ACT_ERR_MESSAGE, message.clone());
+            outputs.set(consts::ACT_ERR_MESSAGE, message.clone());
         }
     }
-    let mut outputs = Vars::new();
     if let Some(out) = payload.get("outputs").and_then(|value| value.as_object()) {
         for (key, value) in out {
             outputs.set(key, value.clone());

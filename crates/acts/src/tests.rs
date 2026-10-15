@@ -3,7 +3,7 @@ use crate::event::EventAction;
 use crate::{
     ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, Engine, KvStore,
     MemoryStore, MessageState, ScanOperation, ScanOptions, Vars, Workflow, utils,
-    utils::test::USES_IRQ,
+    utils::test::USES_IRQ, utils::test::USES_SET,
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -882,5 +882,491 @@ async fn snapshot_manager_remove_requires_registration() {
     assert!(matches!(err, crate::ActError::Runtime(_)), "got: {err}");
     assert!(err.to_string().contains("missing"), "got: {err}");
 
+    engine.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// 运行(消息)语义 — the surface the published example models read
+// ---------------------------------------------------------------------------
+
+/// A run completes with exactly its model's `exposes`: the declaration is the
+/// run's output *surface*, not a schema for every variable the run happens to
+/// hold.
+///
+/// The whole root scope used to be validated against the exposes schema, whose
+/// `additionalProperties: false` rejected every name the model did not declare
+/// — so a model with bookkeeping variables beside one exposed result ended as
+/// an *errored* run (`model(...) outputs validation error: Additional
+/// properties are not allowed ('index' was unexpected)`), which is what
+/// `examples/simple`, `examples/while`, `examples/custom_package` and
+/// `examples/subflow` all announced.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_completes_with_its_exposed_outputs() {
+    let engine = Engine::builder().start().await.unwrap();
+    let workflow = Workflow::from_yml(
+        r#"
+id: exposes-projection
+ver: 0.1.0
+vars:
+  - name: index
+    value: 0
+  - name: value
+    value: 0
+exposes:
+  - name: result
+    value: ${{ value }}
+steps:
+  - name: bookkeeping
+    id: bookkeeping
+    uses: acts.transform.set
+    params:
+      index: 7
+  - name: accumulate
+    id: accumulate
+    uses: acts.transform.set
+    params:
+      value: ${{ index + 48 }}
+"#,
+    )
+    .unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let (s, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_complete(move |e| {
+        let s = s.clone();
+        async move {
+            s.send(e.outputs.to_value());
+        }
+    });
+    engine.channel().on_error(move |e| async move {
+        panic!("the run must not error: {:?}", e.inputs);
+    });
+
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("the run never completed");
+    assert_eq!(
+        outputs,
+        json!({ "result": 55 }),
+        "only the declared expose is an output, and it answers its own value"
+    );
+    engine.close().await;
+}
+
+/// A model that declares no `exposes` outputs its own variables (the legacy
+/// fallback), never the engine's durable facts.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_without_exposes_outputs_its_own_variables() {
+    let engine = Engine::builder().start().await.unwrap();
+    let workflow = Workflow::new()
+        .with_id("no-exposes")
+        .with_var("a", 0)
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_SET, Vars::new().with("a", 42))
+        });
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let (s, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_complete(move |e| {
+        let s = s.clone();
+        async move {
+            s.send(e.outputs.to_value());
+        }
+    });
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("the run never completed");
+    assert_eq!(outputs, json!({ "a": 42 }));
+    engine.close().await;
+}
+
+/// A failure reports itself in the message's `outputs` — `ecode` and `message`
+/// are what a consumer reads to learn why an act or a run failed — and stays in
+/// its `inputs`, where the clients and the catch predicates have always read
+/// them.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_reports_its_ecode_in_the_messages_outputs() {
+    let engine = Engine::builder().start().await.unwrap();
+    let workflow = Workflow::new()
+        .with_id("failure-outputs")
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+        });
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let (s, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_error(move |e| {
+        let s = s.clone();
+        async move {
+            s.send(e.outputs.to_value());
+        }
+    });
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let ex = executor.clone();
+    engine.channel().on_message(move |e| {
+        let ex = ex.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let mut vars = Vars::new();
+                vars.set("ecode", "err1");
+                vars.set("message", "boom");
+                ex.act().fail(&e.pid, &e.tid, vars).await.unwrap();
+            }
+        }
+    });
+    executor
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("the run never errored");
+    assert_eq!(outputs.get("ecode"), Some(&json!("err1")));
+    assert_eq!(outputs.get("message"), Some(&json!("boom")));
+    engine.close().await;
+}
+
+/// A run that *recovered* from a caught failure is a successful run: the
+/// engine's own failure vocabulary (`ecode`/`message`/`error.*`, which the
+/// catch fan-out pins on the failed step for its handlers' guards) is not part
+/// of its outputs, and the declared handler is the one that ran.
+///
+/// This is the published `examples/catches` model, driven to its `err1` catch.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovered_run_carries_no_error_facts_in_its_outputs() {
+    let engine = Engine::builder().start().await.unwrap();
+    let workflow = Workflow::from_yml(include_str!("../../../examples/catches/model.yml")).unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let caught = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = caught.clone();
+    engine.channel().on_message(move |e| {
+        let seen = seen.clone();
+        async move {
+            if let Some(params) = e.params()
+                && let Some(key) = params.get::<String>("key")
+                && e.is_state(MessageState::Created)
+            {
+                seen.lock().push(key);
+            }
+        }
+    });
+    let (s, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_complete(move |e| {
+        let s = s.clone();
+        async move {
+            s.send(e.outputs.to_value());
+        }
+    });
+    engine.channel().on_error(move |e| async move {
+        panic!("a caught failure is not a failed run: {:?}", e.inputs);
+    });
+
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let ex = executor.clone();
+    engine.channel().on_message(move |e| {
+        let ex = ex.clone();
+        async move {
+            match e.params().and_then(|p| p.get::<String>("key")).as_deref() {
+                Some("init") if e.is_state(MessageState::Created) => {
+                    ex.act()
+                        .complete(&e.pid, &e.tid, Vars::new())
+                        .await
+                        .unwrap();
+                }
+                // the working act fails; the model's `err1` handler answers it
+                Some("act1") if e.is_state(MessageState::Created) => {
+                    let mut vars = Vars::new();
+                    vars.set("ecode", "err1");
+                    ex.act().fail(&e.pid, &e.tid, vars).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+    executor
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("a caught failure completes the run");
+    assert_eq!(
+        outputs,
+        json!({}),
+        "the run's outputs are its own data, never the failure vocabulary"
+    );
+    assert!(
+        caught.lock().iter().any(|key| key == "catch1"),
+        "the err1 handler must have run: {:?}",
+        caught.lock()
+    );
+    engine.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// step 守卫与循环 — `if`/`while` 与 backward `next`
+// ---------------------------------------------------------------------------
+
+/// A `while` step is a bounded loop: the guard is re-read after every
+/// iteration and the step re-enters while it holds, then the flow falls
+/// through to the next declared step once it fails.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_while_step_loops_until_its_guard_fails() {
+    let engine = Engine::builder().start().await.unwrap();
+    // `examples/while`'s shape: `add` accumulates index into value while
+    // `index <= input` (10), so the sum is 0+1+…+10.
+    let workflow = Workflow::from_yml(include_str!("../../../examples/while/model.yml")).unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let (s, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_complete(move |e| {
+        let s = s.clone();
+        async move {
+            s.send(e.outputs.to_value());
+        }
+    });
+    engine.channel().on_error(move |e| async move {
+        panic!("the loop must finish, not fail: {:?}", e.inputs);
+    });
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new().with("input", 10))
+        .await
+        .unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("the loop never finished");
+    assert_eq!(
+        outputs,
+        json!({ "result": 55 }),
+        "the loop must run while the guard holds (0+…+10)"
+    );
+    engine.close().await;
+}
+
+/// A step whose `if` guard fails is *skipped* and the flow falls through to the
+/// next declared step: its own `next` is not taken (which is what makes a
+/// guarded self/backward `next` loop terminate), and its act never runs.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_whose_guard_fails_is_skipped_and_the_flow_falls_through() {
+    let engine = Engine::builder().start().await.unwrap();
+    let workflow = Workflow::from_yml(
+        r#"
+id: guarded-skip
+ver: 0.1.0
+vars:
+  - name: hit
+    value: 0
+exposes:
+  - name: result
+    value: ${{ hit }}
+steps:
+  - name: guard
+    id: guard
+    if: "false"
+    next: guard
+    uses: acts.transform.set
+    params:
+      hit: 99
+  - name: afterwards
+    id: afterwards
+    uses: acts.transform.set
+    params:
+      hit: 7
+"#,
+    )
+    .unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let (s, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_complete(move |e| {
+        let s = s.clone();
+        async move {
+            s.send(e.outputs.to_value());
+        }
+    });
+    engine.channel().on_error(move |e| async move {
+        panic!("a skipped step is not a failed run: {:?}", e.inputs);
+    });
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("the run never completed");
+    assert_eq!(
+        outputs,
+        json!({ "result": 7 }),
+        "the guarded step must not run and the chain must go on"
+    );
+    engine.close().await;
+}
+
+/// A backward `next` re-enters the node it names — the `examples/simple` loop:
+/// `cond`'s branch guard is re-evaluated every time `add` jumps back into it,
+/// so the loop ends when the guard fails.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backward_next_re_enters_the_node_it_names() {
+    let engine = Engine::builder().start().await.unwrap();
+    let workflow = Workflow::from_yml(include_str!("../../../examples/simple/model.yml")).unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let (s, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_complete(move |e| {
+        let s = s.clone();
+        async move {
+            s.send(e.outputs.to_value());
+        }
+    });
+    engine.channel().on_error(move |e| async move {
+        panic!("the loop must finish, not fail: {:?}", e.inputs);
+    });
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new().with("input", 10))
+        .await
+        .unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("the loop never finished");
+    assert_eq!(
+        outputs,
+        json!({ "result": 55 }),
+        "the backward `next` must re-enter `cond` with the iteration's state"
+    );
+    engine.close().await;
+}
+
+/// A flow that loops without a guard that closes fails the run at
+/// `max_node_run_times` instead of running forever (the legacy
+/// `Process::create_task` bound).
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unbounded_loop_fails_at_max_node_run_times() {
+    let engine = Engine::builder()
+        .max_node_run_times(5)
+        .start()
+        .await
+        .unwrap();
+    let workflow = Workflow::from_yml(
+        r#"
+id: runaway
+ver: 0.1.0
+vars:
+  - name: hits
+    value: 0
+steps:
+  - name: spinner
+    id: spinner
+    next: spinner
+    uses: acts.transform.set
+    params:
+      hits: ${{ hits + 1 }}
+"#,
+    )
+    .unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+
+    let (s, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_error(move |e| {
+        let s = s.clone();
+        async move {
+            s.send(e.outputs.to_value());
+        }
+    });
+    engine.channel().on_complete(move |_| async move {
+        panic!("an unbounded loop must not complete");
+    });
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("the runaway loop never failed");
+    assert_eq!(
+        outputs.get("ecode"),
+        Some(&json!("ELOOP")),
+        "the bound reports itself: {outputs}"
+    );
     engine.close().await;
 }

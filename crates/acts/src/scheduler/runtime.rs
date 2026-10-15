@@ -496,8 +496,11 @@ impl Runtime {
         // task over the same key-value store, woken per hop, ticked for
         // recovery and outbox delivery, and it serves (starts, actions,
         // effects, messages).
-        let (kernel, wake_rx) =
-            crate::scheduler::shell::KernelHost::new(store.kv(), config.cache_cap() as usize);
+        let (kernel, wake_rx) = crate::scheduler::shell::KernelHost::new(
+            store.kv(),
+            config.cache_cap() as usize,
+            config.max_node_run_times() as u64,
+        );
         {
             let driver = kernel.clone();
             let driver_shutdown = shutdown.clone();

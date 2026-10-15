@@ -449,8 +449,26 @@ pub(crate) fn advance_transition(
             process_id: next.process_id.clone(),
             key: item.key.clone(),
         };
-        let record = OutboxRecord::pending(id.clone(), item.topic.clone(), item.payload.clone(), 0)
-            .map_err(CommitError::InvalidOutbox)?;
+        let mut record =
+            OutboxRecord::pending(id.clone(), item.topic.clone(), item.payload.clone(), 0)
+                .map_err(CommitError::InvalidOutbox)?;
+        // A record the hop's own transport already delivered commits as
+        // delivered (see `OutboxIntent::receipt`): the message is out, and the
+        // record exists to say so — the driver's pass never sees it, so one
+        // hop stays one delivery without a claim and a confirm of its own.
+        if let Some(receipt) = &item.receipt {
+            // The record's own counters must describe the delivery it records:
+            // one attempt, its fence, and a revision that covers it — exactly
+            // what a claimed-then-confirmed record carries. A `Delivered`
+            // record with attempt 0 is an invalid persisted state (nothing can
+            // be delivered before it was ever sent).
+            record.attempt = 1;
+            record.last_fence = 1;
+            record.revision = 1;
+            record.state = crate::scheduler::core::outbox::records::OutboxState::Delivered {
+                receipt: receipt.clone(),
+            };
+        }
         new_outbox.push(id.clone());
         next.outbox.insert(id, record);
     }
@@ -904,6 +922,7 @@ mod tests {
                 key: "complete:p1:t1:0".into(),
                 topic: "task.completed".into(),
                 payload: "{}".into(),
+                receipt: None,
             }],
         }
     }

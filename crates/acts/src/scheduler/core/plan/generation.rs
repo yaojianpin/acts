@@ -219,6 +219,7 @@ impl GenerationPlanner {
                 ),
                 topic: "task.reentered".into(),
                 payload: format!("{}:{}", next.task_id, next.generation),
+                receipt: None,
             }],
         };
         plan.validate()
