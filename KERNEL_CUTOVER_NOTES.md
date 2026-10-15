@@ -1995,43 +1995,15 @@ src/scheduler/
 
 ---
 
-## 11. P6 提示词(2026-10-15,**第 1 项已执行**;第 2–7 项未做)
+## 11. 任务(P6 + P7 合并,按序;清单在提示词**外**)
 
-> 本轮第 1 项(性能)的落地与实测见 §10「P6-1」;下面这份任务书保留原文,作为当时的任务书 ——
-> 它的"当前状态/验收"是**发出时**的事实,现行状态以下一节(§12 P7 提示词)为准。
-
-```
-你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的去 legacy 迁移执行 agent(第四轮:P4c 性能收口、两条登记边界、门禁与文档)。
-
-# 当前状态(不要重做)
-
-- **kernel 是唯一引擎**(P4a/P4b/P4 收尾续/P5 名与形均已完成,逐项见 §10):常驻引擎、旧套件、`Config::kernel_engine`、
-  `Cache`/`queue`/`ops` 的运行面、`ActTask`/`Sign`/`PropagationPhase` 均已删除;`Runtime` 单路 kernel、自持 `Arc<Store>` +
-  `StoreWriter`;写路径在 `store/writebehind.rs`,行方法在 `store/{process_rows,delivery_rows}.rs`;`scheduler/` 四层定名
-  (`core`/`durable`/`shell` + `runtime.rs`),门面只有显式 `pub use`。
-- **Feature B 已完成(2026-10-15,§10「Feature B 完成」有完整记录,含原设计漏掉的三处)**:容器包
-  (`acts.core.block`/`sequence`/`parallel`)的内联 acts 现在是内核子执行 —— 导入期 `materialize_container_acts`
-  (`scheduler/shell/model.rs`)把 `{mode, acts}`/`{in, acts}` 改写成模型的 `branches`/`steps`;
-  `fanout_command::param_fanout_children`(`scheduler/shell/mod.rs`)按 `in` 逐项实例化模板(每项一个 generation,
-  scope 带 `index`/`value`);`plan_fanout`(`scheduler/core/plan/container.rs`)的子槽位 admission **按父定位**;
-  `action_identity` 取"能接受该动作的最新 generation"。`examples/message` 两条 msg 都发、`examples/approve` 收
-  `outputs={"gm":["3"],"index":0,"pm":["1","2"],"value":"3"}`。**这四处别再动**。
-- **当前验收(实测)**:`cargo test -p acts` = **871 passed / 0 failed** + doctests 11 passed / 0 failed;
-  `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = EXIT 0;`cargo fmt --check` 干净。
-  `cargo test -p acts-package-shell` = 5 个 target 里 4 个全绿,`--test vars` 3/4(唯一失败在基线(把改动 stash 掉)上同样失败)。
-- **测试环境两个既知事实(§10 §4「harness 的界限」+ Feature B 轮实测)**:① 全量 `cargo test -p acts` 会翻 1–2 条**负载/投影
-  滞后敏感**的用例,每次位置不同(`export::actions::tests::a_run_cannot_seal_another_subjects_scope`、
-  `scheduler::shell::tests::kernel_task_and_act_messages_are_emitted`、`tests::a_backward_next_re_enters_the_node_it_names`
-  自带的 20 s 上限),**单跑都绿** —— 判定"是不是本轮引入"之前先 `git stash` 跑同命令对照基线;
-  ② 读**投影行**之前一律 `runtime.flush_writer()`(行滞后一次提交;不动点断言一律钉聚合)。
-- **`acts-server` 的环境现象**(§10 §5k 有原始输出):"全部 target 一条命令"本机报
-  `failed to mmap file '...\libacts-*.rlib': 页面文件太小 (os error 1455)`(Windows 提交限额),`-j 2` 即全绿,CI(Linux)不受影响。
-
-# P6 任务(按序), 每执行完一个任务，更新下一步提示词并等待用户确认
-
-> **进度(2026-10-15)**:第 1 项的性能主项完成第二笔(§10「P6-1」:hop 自己的 close 并进 effect 提交,
-> 归一后 **≈ −25…30%/hop**,无持久化格式变更)。第 1 项的 (i)-②(拆文档/append-only)、(iv)(plan/记账 CPU 画像)、
-> c(投影降频)以及**第 2–7 项全部未做**。
+> **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
+> 每执行完一项:**原地更新下一节的提示词**(改成下一项)+ 只改本节的状态标记,**不追加新提示词、不新增小节**。
+>
+> **状态(2026-10-15)**:第 1 项已完成两笔 —— §5m(提交把快照交回)与 §10「P6-1」(hop 自己的 close 并进
+> effect 提交,归一后 **≈ −25…30%/hop**,无持久化格式变更);(ii) 按聚合版本缓存派生**实测收益不足、已放弃**
+> (§10「P6-1」)。**下一步 = 第 1 项 b 的 (iv):给 engine 形状那 ~1 ms/hop 做分阶段画像**(插桩已在工作区、
+> 未提交,见下一节)。**第 2–7 项未做。**
 
 1. **P4c 性能收口(强制,已有基线)**:30 步纯 step 线性 workflow。
    **基线一律用 release(§10 §5n):93 hops / 0.684 s = 7.4 ms/hop ≈ 136 hop/s**(内存 store)。
@@ -2103,95 +2075,60 @@ src/scheduler/
       execution 的非引擎变量会折进父作用域 —— 于是它们出现在祖先作用域与 run 的 outputs(`examples/approve` 的 outputs 里就有)。
       legacy 把这两者放在 act 的 **options**(不是 task data),没有这一路上浮。要贴近 legacy 就得给逐项绑定一个不参与折叠的载体
       (或者反过来:接受并在 `已知边界` 写明"逐项绑定会成为 outputs 的一部分")。
+
+## 12. 下一步提示词(只含**当前任务**与限制约束;每轮**原地更新**,不追加)
+
+> 任务清单在 §11;这里只有"现在做哪一项"和约束。**每执行完一项:重写本节的「当前任务」,并把 §11 的状态标记改掉。**
+
 ```
+你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
----
+# 当前任务:给 engine 形状的 hop 做分阶段画像(§11 第 1 项里标着 **(iv)** 的那一条;**只量不改代码**)
 
-## 12. P7 提示词(下一轮,可整段复制)
+**背景**:§10「P6-1」测得端到端 engine 形状(30 步真实 workflow、release、内存 store、93 hops)约 4.2 ms/hop,
+整包 codec(每 hop 3 decode + 2 encode 一个 ~30–44 KB 的聚合)与 store 之外**还有约 1 ms/hop 无法归属**;
+§9.3.3 要的"行投影占每 hop 的比例"也还没有。
 
-```
-你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的去 legacy 迁移执行 agent(第五轮:性能剩余项、两条登记边界、死件删除、门禁与文档)。
+**做法**:
+1. **插桩已在工作区(未提交)**:`crates/acts/src/scheduler/shell/mod.rs` 末尾有 `hop_trace`(`#[cfg(test)]` 与
+   `#[cfg(not(test))]` 两个孪生 + 11 个阶段常量),`execute_one` 里有 9 处 hook(hop / load / place1 / claim /
+   plan / deliver / commit / wake / lifecycle / project / place2 —— 纯增行,不改逻辑);
+   `crates/acts/src/scheduler/shell/tests/perf_probe.rs` 是画像探针(`#[ignore]`),`shell/tests/mod.rs` 里有
+   `mod perf_probe;`。已 `cargo check -p acts --lib --tests` 通过。工作区若被丢弃,按上述阶段名重建即可。
+2. 跑 `cargo test --release -p acts --lib perf_probe -- --nocapture --ignored --test-threads=1`(release 构建 ~7 min),
+   3 轮;记下每阶段 ms/hop、占整 run 的比例、timed sum 与 wall 的差额。
+3. **先出分解,写进 §10 的新小节「P7-1a」**(探针形状 + 3 轮原始数值 + 每阶段占比 + 结论指向下一笔),**再决定下一笔动哪里**;
+   没有分解不动手改生产代码。
+4. 收口:写完 §10 后**回滚插桩与探针**(`git checkout -- crates/acts/src/scheduler/shell/mod.rs
+   crates/acts/src/scheduler/shell/tests/mod.rs && rm crates/acts/src/scheduler/shell/tests/perf_probe.rs`),
+   按分解的结论把 §11 第 1 项的状态与本节「当前任务」改成下一项(1b 拆文档 / 1c 少一次 load / 1d 投影降频,或第 2 项),
+   然后提交一笔 docs(notes 改动即可;**插桩与探针不得进提交**)。
 
-# 先读(按序,不要跳)
+**验收**:§10 里有一张可复核的分阶段表(每阶段 ms/hop + 占比 + 与 wall 的差额),结论明确指向下一笔;
+`git status` 干净(只剩 notes 的改动或已提交)。
 
-1. KERNEL_CUTOVER_NOTES.md —— 唯一权威。重点:§10「P6-1」(最近一次性能落地与实测,含探针形状与分解)、
-   §10「Feature B 完成」(容器包内联 acts,§4 是两条待决边界)、§10「可靠性矩阵回归」(§6 的 T1/T2 两条待办)、
-   §10 §5l/§5n/§5o(性能画像与"一律用 release"的结论)、§9.3.3/§9.3.4(代价分级)、§11(上一轮任务书原文)。
-2. KERNEL_MIGRATION_NOTES.md —— 第一轮语义结论(折叠口径、join/abort/error/catch/timeout 的行为定义)。
-3. crates/acts/src/scheduler/ 与它的 core/architecture.rs —— 现行四层(core/durable/shell + runtime.rs)与守卫。
+# 限制与约束
 
-# 当前状态(不要重做)
-
-- **kernel 是唯一引擎**(P4a/P4b/P4 收尾续/P5 名与形均已完成,逐项见 §10):常驻引擎、旧套件、`Config::kernel_engine`、
-  `Cache`/`queue`/`ops` 的运行面、`ActTask`/`Sign`/`PropagationPhase` 均已删除;`Runtime` 单路 kernel、自持 `Arc<Store>` +
-  `StoreWriter`;写路径在 `store/writebehind.rs`,行方法在 `store/{process_rows,delivery_rows}.rs`;门面只有显式 `pub use`。
-- **Feature B 已完成(2026-10-15,§10「Feature B 完成」)**:容器包(`acts.core.block`/`sequence`/`parallel`)的内联 acts
-  是内核子执行 —— 导入期 `materialize_container_acts`(`scheduler/shell/model.rs`)把它们改写成模型的 `branches`/`steps`;
-  `param_fanout_children`(`scheduler/shell/mod.rs`)按 `in` 逐项实例化模板;`plan_fanout`(`core/plan/container.rs`)的子槽位
-  admission **按父定位**;`action_identity` 取"能接受该动作的最新 generation"。**这四处别再动。**
-- **性能:P6-1 已完成(2026-10-15,§10「P6-1」)**:hop 自己的 `Complete`(close)并进 effect 提交,每 hop 从 **4 decode + 3 encode**
-  降到 **3 + 2**,`Committed` 仍是持久化状态(V2 tag + `FinalizeCommit` 继续处理旧 writer 留下的聚合)但**没有 hop 再产出它**。
-  实测(同探针、`--test-threads=1`、改前用 `git stash` 在同一棵树上复测):lean 形状 **3.48 → 1.79 ms/hop**、
-  engine 形状 **4.51 → 4.16 ms/hop**(自身噪声 ±15%,单看它测不出);两轮 per-call 微基准差 ~1.3×(环境比),
-  **归一后 ≈ −25…30%/hop**。无持久化格式变更。
-- **已经量过、不要再做的**(逐条在 §10):§9.3.2 合并 Claim+PrepareCommit(§5g,无收益);§5j 投影行"内容未变则不写";
-  §5m 提交把快照交回;§5o 就地推进快照;§10「P6-1」的 close 折叠。**特别是 (ii) 按聚合版本缓存 per-hop 派生**:
-  §10「P6-1」实测收益不足(`execution_graph` 72–108 µs/次、`model_of` 42–56 µs/次,后者只在真实 workflow 形状存在),
-  **不要再做**;同理"派生索引/投影行的写合并/懒写"对 hop 吞吐无关(`recovery_entries` 与两个索引文档每 hop 各 < 1 µs),
-  只在真后端(sled/pg)的写次数/字节上有意义。
-- **当前验收(实测 2026-10-15)**:`cargo test -p acts --lib --tests` = **870 passed / 0 failed**;
-  `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = EXIT 0;`cargo fmt --check` 干净。
-  (§11 记的 `cargo test -p acts` = 871 + doctests 11 是**那一轮发出时**的值;P6-1 删了 2 条 pin 旧 close 边界的 cell、新增 1 条。)
-- **测试环境两个既知事实(§10 §4「harness 的界限」+ Feature B 轮实测)**:① 全量 `cargo test -p acts` 会翻 1–2 条
-  **负载/投影滞后敏感**的用例,每次位置不同,单跑都绿 —— 判定"是不是本轮引入"之前先 `git stash` 跑同命令对照基线;
-  ② 读**投影行**之前一律 `runtime.flush_writer()`(行滞后一次提交;不动点断言一律钉聚合)。
-- **`acts-server` 的环境现象**(§10 §5k 有原始输出):"全部 target 一条命令"本机报
-  `failed to mmap file '...\libacts-*.rlib': 页面文件太小 (os error 1455)`(Windows 提交限额),`-j 2` 即全绿,CI(Linux)不受影响。
-
-# P7 任务(按序), 每执行完一个任务，更新下一步提示词并等待用户确认
-
-1. **性能剩余项(按 §10「P6-1」的实测排序,先量后改,每项独立提交)**:
-   a. **(iv) 给 engine 形状那 ~1 ms/hop 做画像**:§10「P6-1」测得 engine 形状里还有约 1 ms/hop 既不是整包 codec 也不是
-      store(§5l:store 只占 1.4%)。用 §10「P6-1」的 engine 探针形状(**30 步真实 workflow、release、内存 store、
-      93 hops、`--test-threads=1`**)+ `#[cfg(test)]` 分阶段计时,把 hop 的 plan 构造、消息 payload 编码、
-      `place_run`/`deliver_plan`、行投影(`project_touched`,§9.3.3 要的正是这份比例)分解出来。
-      **先出分解、写进 §10,再决定下一笔动哪里**;没有分解不动手。
-   b. **(i)-② 拆文档 / append-only 操作日志**(§9.3.4②)—— **单独立项**:V2 → 新版本、迁移、golden fingerprint 更新
-      (`core/commit/aggregate.rs` 的 `canonical_aggregate_and_commit_digest_match_golden_fingerprint` 一族)。
-      它解决"每次编解码的常数 + 写字节",**不是当前吞吐主因**;a. 的分解若显示 codec 仍是大头,先做它。
-   c. **(i)-① 少一次 load(只在 a. 支持时才做)**:hop 起始的 `load1` 现在**不能**直接删 —— `DispatchTimeout` 的预检必须在
-      claim **之前**判 idle(否则每 tick 的 idle timer 从 0 次提交变成 2 次),`place_run` 也用它。要做就得把 claim 提前、
-      预检挪到 claim 之后,并连 idle timer 的退路一起证明净收益。
-   d. **§9.3.3 投影降频或 wake 驱动**:只在 a. 的分解显示行投影是大头时才做;注意别把"引擎级用例单例已被 tick 主导"
-      误当 hop 吞吐(§5f)。
-   **不要做**:按版本缓存派生(实测不足)、任何没有 before/after 实测的"优化"、以及把 engine 形状的 raw 单次值当基线。
-2. **唯一保留的语义边界复核**:`sealed` 快照不进读模型(vars 行 sealed 恒空、聚合不存 sealed;§10「仍未完成」§2 与
-   「P4 收尾续」)。要么实现(聚合持久化 sealed,或投影携带 sealed),要么在 §10/CHANGELOG 明确写成**永久已知边界**(现状)。
-3. **收口门禁(全 workspace)**:clippy / fmt / `cargo test -p acts --lib --tests` / `-p acts-store`
-   (sled,sqlite,postgres)/ `-p acts-server` / `-p acts-plugin-*` / `-p acts-package-*` / `-p acts-cli`
-   (按 AGENTS.md);不动 manifest 就不必跑 `cargo deny check bans`。`acts-server` 若只有"全部 target 一条命令"
-   会红,逐 target 跑并在 §10 记录该环境现象。
-4. **文档**:`lib.rs` 顶部注释、`CHANGELOG.md`(配置开关已删:`kernel_engine` 不存在;`cache_cap` 语义 =
-   在飞 run 数上限)、`README` 里可能残留的 legacy 说法;§10 追加本轮记录,并把本文提示词更新为 P8(如仍需)。
-5. **删死掉的 `ops` 族(BREAKING,见 §10「可靠性矩阵回归」§6 T1)**:内核 outbox 记录在聚合里,`ops` 集合生产侧无
-   writer/reader,仅剩 `remove_proc_rows` 的家族清单 + 单测借用。删 `Store::ops()`/`StoreIden::Ops`/`store/data/op.rs`
-   与那一行,单测示例集合换成 messages/deliveries;先决定老库遗留 `ops-*` 孤儿行的处理(接受/保留只删不建/一次性清理),
-   并记 CHANGELOG BREAKING。验收:`grep` 生产侧为 0 + 全量门禁绿。
-6. **聚合文档的回收/归档(见 §10「可靠性矩阵回归」§6 T2)**:`kernel/aggregates/<hex pid>` 现在无删除路径,
-   sweeper 只删行 + workdir,导致 pid 终身不可复用且聚合无界增长(§5i:字节大头)。先定三件事:保留策略(静默 N 时间 /
-   运维归档 / 容量触发)、pid 复用语义(若要保留"pid 永久唯一"就另存墓碑/pid-epoch)、历史取舍(行回收后聚合是唯一记录)。
-   实现:新增 `AsyncAggregateRepository::remove(pid, expected_version)`,一个守卫批删聚合 + 两个索引;GC 只取
-   "`settled` 且 `operations` 为空 且 行已回收"的 run,崩溃幂等。验收见 §10 T2。
-7. **Feature B 轮新登记的两条边界,逐条决定(实现或写成永久边界)**(逐条证据见 §10「Feature B 完成」§4):
-   a. **节点寻址的 action 无法区分同一节点的多个实例**:action/message 只带 `tid` = 模型节点 id,而一个 run 可以让同一节点同时有
-      多个 generation(参数式 fan-out 的逐项实例、`sequence{in}` 预建的下一项),客户端只能按投递顺序逐条作答;乱序作答或"给不同实例
-      不同的 options"表达不了。要做就两条路之一:**运行期按 `in` 扩展模型出逐项副本**(每项独立 node id = legacy 的 fresh id 语义,
-      但要处理模型扩展 + `__auto` 追加 + `declaration_successor` 的实例内链),或 **让 message/action 带实例号**(动 message/action
-      的身份面)。两条都属**身份/持久化模型改动** —— 先写设计再动手,别顺手改 `action_target` 的选法。
-   b. **逐项绑定的上浮**:`index`/`value` 是模板 execution 自己的 scope 变量(作用域链继承,`${{ value }}` 因此可用),而 completed
-      execution 的非引擎变量会折进父作用域 —— 于是它们出现在祖先作用域与 run 的 outputs(`examples/approve` 的 outputs 里就有)。
-      legacy 把这两者放在 act 的 **options**(不是 task data),没有这一路上浮。要贴近 legacy 就得给逐项绑定一个不参与折叠的载体
-      (或者反过来:接受并在 `已知边界` 写明"逐项绑定会成为 outputs 的一部分")。
+- **先读**:§10「P6-1」(最近一次性能落地与实测)、§10 §5l/§5n/§5o(性能画像与"一律用 release")、§9.3.3/§9.3.4、§11 的任务清单。
+- **性能结论一律以 release + 内存 store + `--test-threads=1` 为准**;前后对比用**同一个探针**,改前用
+  `git stash push -- <生产侧文件>` 在同一棵树上复测;engine 形状的单次 raw 值噪声 ±15%,不能当基线;
+  结论按同轮测到的环境比**归一后**再宣称(§10「P6-1」就是这么写的)。
+- **已经量过、不要再做**(逐条见 §10):§9.3.2 合并 Claim+PrepareCommit(§5g,无收益);§5j 投影行"内容未变则不写";
+  §5m 提交把快照交回;§5o 就地推进快照;§10「P6-1」的 close 折叠。**特别是 (ii) 按聚合版本缓存 per-hop 派生**
+  (`execution_graph` 72–108 µs/次、`model_of` 42–56 µs/次)与"派生索引/投影行的写合并/懒写"
+  (`recovery_entries` 与两个索引文档每 hop 各 < 1 µs,只对真后端 sled/pg 的写次数有意义)。
+- **不改行为**:这一项只加临时插桩;`hop_trace` 与探针必须在本轮结束前删除。
+- **每次改动前后都跑真正的用例与真探针,并把实测数值写进 §10**。
+- 守卫 `crates/acts/src/scheduler/core/architecture.rs` 不可删(只随分层演进改规则);`core/`、`durable/` 不得命名
+  `crate::scheduler::shell`(`SHELL_MODULES`);`RUNTIME_ROOT`/tier 清单随目录改动同步。
+- 禁止新 `#[allow(...)]` 压 lint(除 §10 已登记的那几条,属性处必须写理由);新增一条就在 §10 登记。
+- **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故:把 `export/actions.rs` 截断为空);
+  串行构建(Defender 会锁 rlib/exe);工作区 CRLF,批量改写后 `file` 复核。
+- 全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4);读**投影行**之前 `runtime.flush_writer()`。
+- 测试环境:`acts-server`"全部 target 一条命令"本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
+- 容器包的内联 acts 已在导入期物化(`materialize_container_acts` + `param_fanout_children` 是唯一入口):改容器包、
+  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」(按父定位、`sequence` 链式、`action_target` 的选法
+  都有实测依据),不要另开第二条展开路径,也不要为了绕开它们去改 `GenerationAdmissionPolicy` 的既有语义。
 
 # 每阶段收口(必须全绿才算完成)
 
@@ -2200,24 +2137,9 @@ cargo fmt
 cargo test -p acts --lib --tests
 …(其余 crate 见任务 3;动了 manifest 才跑 cargo deny check bans)
 
-# 硬性约束
-
-- 守卫 `crates/acts/src/scheduler/core/architecture.rs` 不可删;`core/`、`durable/` 不得命名 `crate::scheduler::shell`
-  (`SHELL_MODULES`);`RUNTIME_ROOT`/tier 清单随目录改动同步。
-- 禁止新 `#[allow(...)]` 压 lint(除 §10 已登记的那几条,属性处必须写理由);新增一条就在 §10 登记。
-- 串行构建(Defender 会锁 rlib/exe);工作区 CRLF,批量改写后 `file` 复核。
-- **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故:把 `export/actions.rs` 截断为空)。
-- **每次改动前后都跑真正的用例与真探针,并把实测数值写进 §10**;性能一律用 **release + 内存 store + `--test-threads=1`**,
-  前后对比用**同一个探针**(改前用 `git stash push -- <生产侧文件>` 在同一棵树上复测),engine 形状的单次 raw 值噪声 ±15%,
-  不能当基线;**结论要按同轮测到的环境比归一后再宣称**(§10「P6-1」的做法就是这么写的)。
-- 全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4 + Feature B 轮实测);读投影行之前 `runtime.flush_writer()`。
-- 容器包的内联 acts 已在导入期物化(`materialize_container_acts` + `param_fanout_children` 是唯一入口):改容器包、
-  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」(按父定位、`sequence` 链式、`action_target` 的选法都有实测依据),
-  不要另开第二条展开路径,也不要为了绕开它们去改 `GenerationAdmissionPolicy` 的既有语义。
-
 # 交付
 
 每完成一个任务 → 一笔提交(conventional 前缀,单行 imperative 主语)+ §10 追加该任务的记录(改了什么、file:line、前后实测数值与探针形状、发现的语义差异)
-→ 更新本节提示词(下一个任务的现状)+ 停下等用户确认。
+→ **原地重写本节的「当前任务」**(改成下一项)+ 改 §11 的状态标记(**不追加新的提示词小节**)+ 停下等用户确认。
 ```
 
