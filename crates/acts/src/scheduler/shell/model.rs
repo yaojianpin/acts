@@ -113,6 +113,158 @@ fn assign_branch_ids(branch: &mut crate::model::Branch) {
     }
 }
 
+/// The `uses` ids of the container packages whose inline `acts` the kernel
+/// materializes into model children (see [`materialize_container_acts`]).
+pub(crate) const BLOCK_PACKAGE: &str = "acts.core.block";
+pub(crate) const PARALLEL_PACKAGE: &str = "acts.core.parallel";
+pub(crate) const SEQUENCE_PACKAGE: &str = "acts.core.sequence";
+
+/// Materialize the inline acts of the container packages into the model's own
+/// shape, so the kernel's fan-out machinery drives them.
+///
+/// The kernel fans a container out from the *model*: a step's `branches` and a
+/// branch's `steps` are its children. A container package's acts live in its
+/// `params.acts` array instead, and the package's `ctx.build_acts` writes them
+/// into the headless scope the effect seam discards — so without this pass a
+/// `acts.core.block`/`sequence`/`parallel` step resolves its package and
+/// completes with no children at all.
+///
+/// The rewrite mirrors the legacy expansion (each package's `execute` built the
+/// same shape through `ctx.build_acts`):
+///
+/// - `acts.core.block{ mode: sequence }` → one always-selected branch
+///   `<step>#acts` whose steps are the acts, in declaration order (the branch
+///   fans its steps out one successor at a time);
+/// - `acts.core.block{ mode: parallel }` → one always-selected branch per act
+///   (`<step>#act<i>`), which the container admits together;
+/// - `acts.core.parallel{ in, acts }` / `acts.core.sequence{ in, acts }` → one
+///   always-selected branch `<step>#in` holding a single template step
+///   `<step>#item` (an `acts.core.block` over the same acts). The container
+///   fans the template out once per `in` item at run time — only the run knows
+///   how many there are — and the template's acts are materialized in turn by
+///   the descent below.
+///
+/// The container step keeps its own package and params: it still announces
+/// itself (the legacy step message) and its params still resolve, so a
+/// schema violation fails the act exactly where it always did.
+fn materialize_container_acts(workflow: &mut crate::model::Workflow) {
+    for step in workflow.steps.iter_mut() {
+        materialize_step(step);
+    }
+}
+
+fn materialize_step(step: &mut crate::model::Step) {
+    materialize_one(step);
+    // The branches just added are walked too: a container act nested inside
+    // another container's acts is materialized in turn, and its own branches
+    // after that.
+    for branch in step.branches.iter_mut() {
+        for inner in branch.steps.iter_mut() {
+            materialize_step(inner);
+        }
+    }
+    for catch in step.catches.iter_mut() {
+        materialize_step(catch);
+    }
+    for timeout in step.timeouts.iter_mut() {
+        materialize_step(timeout);
+    }
+}
+
+/// One step's inline acts, materialized into its branches when it is a
+/// container package step and it declares an `acts` array. Anything else
+/// (another package, no acts) is left alone.
+fn materialize_one(step: &mut crate::model::Step) {
+    let Some(uses) = step.uses.clone() else {
+        return;
+    };
+    let params = step.params.clone();
+    let Some(object) = params.as_object() else {
+        return;
+    };
+    let Some(acts) = object.get("acts") else {
+        return;
+    };
+    let Some(values) = acts.as_array() else {
+        return;
+    };
+    let Some(steps) = values.iter().map(act_to_step).collect::<Option<Vec<_>>>() else {
+        // An act the model cannot read is not silently dropped: the step keeps
+        // its declaration and the package's own params validation decides it.
+        return;
+    };
+    let id = step.id.clone();
+    let branches = match uses.as_str() {
+        BLOCK_PACKAGE => {
+            let parallel = object.get("mode").and_then(|mode| mode.as_str()) == Some("parallel");
+            if parallel {
+                steps
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, step)| container_branch(format!("{id}#act{index}"), vec![step]))
+                    .collect()
+            } else {
+                vec![container_branch(format!("{id}#acts"), steps)]
+            }
+        }
+        PARALLEL_PACKAGE | SEQUENCE_PACKAGE => {
+            let mode = if uses == PARALLEL_PACKAGE {
+                "parallel"
+            } else {
+                "sequence"
+            };
+            let template = crate::model::Step {
+                id: format!("{id}#item"),
+                uses: Some(BLOCK_PACKAGE.to_string()),
+                params: serde_json::json!({ "mode": mode, "acts": acts }),
+                ..Default::default()
+            };
+            vec![container_branch(format!("{id}#in"), vec![template])]
+        }
+        _ => return,
+    };
+    step.branches.extend(branches);
+}
+
+/// One inline act as a model step: the same vocabulary, with the id the legacy
+/// tree assigned (a fresh short id for an unnamed act, so its node is
+/// addressable) and an empty `uses` normalized to `None` — a step without a
+/// package self-completes, while `Some("")` would read as an unregistered
+/// package and wait for a client that never comes.
+fn act_to_step(act: &serde_json::Value) -> Option<crate::model::Step> {
+    let act: crate::model::Act = serde_json::from_value(act.clone()).ok()?;
+    let id = if act.id.trim().is_empty() {
+        crate::utils::shortid()
+    } else {
+        act.id
+    };
+    Some(crate::model::Step {
+        name: act.name,
+        desc: act.desc,
+        id,
+        vars: act.vars,
+        r#if: act.r#if,
+        uses: (!act.uses.trim().is_empty()).then_some(act.uses),
+        params: act.params,
+        options: act.options,
+        metadata: act.metadata,
+        exposes: act.exposes,
+        ..Default::default()
+    })
+}
+
+/// An always-selected branch over `steps`. The kernel's branch selection reads
+/// a missing guard as unselected (`PredicateValue::False`), so a materialized
+/// container branch states its selection plainly.
+fn container_branch(id: String, steps: Vec<crate::model::Step>) -> crate::model::Branch {
+    crate::model::Branch {
+        id,
+        r#if: Some("true".to_string()),
+        steps,
+        ..Default::default()
+    }
+}
+
 /// Whether a step self-completes once its act ran. The answer is the
 /// package's own `ActRunAs`: `Func` and `Msg` runs come to an end inside the
 /// execution, an `Irq` waits for a client response. A step without a package
@@ -351,6 +503,10 @@ impl ProcessSpec {
         // must reach it, exactly as it is in the legacy run.
         let mut assigned = workflow.clone();
         assign_ids(&mut assigned);
+        // The container packages' inline acts become model children here,
+        // after the ids they need are assigned and before anything derives the
+        // nested structure from the copy (the durable model and the auto map).
+        materialize_container_acts(&mut assigned);
         let workflow = &assigned;
         let mut seed_variables: Vec<(Option<String>, String, String)> = Vec::new();
         for var in &workflow.vars {
@@ -1008,5 +1164,195 @@ mod tests {
         assert_eq!(spec.children.len(), 2);
         let snapshot = spec.seed_snapshot().unwrap();
         assert_eq!(snapshot.executions.len(), 3);
+    }
+
+    /// The durable model of a run, decoded from the root scope's
+    /// [`MODEL_VAR`] — what a hop reads the nested structure from.
+    fn durable_model(snapshot: &AggregateSnapshot) -> crate::model::Workflow {
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        serde_json::from_str(
+            snapshot
+                .variables
+                .get(&(root, MODEL_VAR.to_string()))
+                .expect("the model is seeded on the root scope"),
+        )
+        .unwrap()
+    }
+
+    /// The auto map the import seeded, decoded.
+    fn durable_auto(snapshot: &AggregateSnapshot) -> serde_json::Map<String, serde_json::Value> {
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        serde_json::from_str(
+            snapshot
+                .variables
+                .get(&(root, AUTO_MAP_VAR.to_string()))
+                .expect("the auto map is seeded on the root scope"),
+        )
+        .unwrap()
+    }
+
+    /// A container package's inline acts become the model's own shape, because
+    /// the kernel's fan-out reads `branches`/`steps` and never a package's
+    /// params: `acts.core.block` turns into an always-selected branch over its
+    /// acts (one branch per act for `mode: parallel`), and
+    /// `acts.core.parallel`/`sequence` into one always-selected branch holding
+    /// the template step the run-time fan-out instantiates per `in` item. The
+    /// template's own acts are materialized in turn, and every materialized
+    /// step reaches the durable auto map (the fan-out reads its self-completion
+    /// decision from there).
+    #[test]
+    fn container_package_acts_become_model_children() {
+        let workflow = crate::model::Workflow::from_yml(
+            r#"
+name: containers
+vars:
+  - name: items
+    value: ["u1", "u2"]
+steps:
+  - name: block
+    id: block
+    uses: acts.core.block
+    params:
+      mode: sequence
+      acts:
+        - uses: acts.core.msg
+          params:
+            key: m1
+        - uses: acts.core.msg
+          params:
+            key: m2
+  - name: fan
+    id: fan
+    uses: acts.core.parallel
+    params:
+      in: '${{ items }}'
+      acts:
+        - uses: acts.core.irq
+          params:
+            key: a1
+"#,
+        )
+        .unwrap();
+        let imported = ProcessSpec::from_workflow("p1", &workflow, &|uses| {
+            // The `run_as` the registered core packages declare: what each
+            // materialized node's auto decision is derived from.
+            Some(match uses {
+                "acts.core.msg" => crate::ActRunAs::Msg,
+                "acts.core.irq" => crate::ActRunAs::Irq,
+                _ => crate::ActRunAs::Func,
+            })
+        })
+        .unwrap();
+        let snapshot = imported.seed_snapshot().unwrap();
+        let model = durable_model(&snapshot);
+        let auto = durable_auto(&snapshot);
+
+        // `acts.core.block{ mode: sequence }`: one always-selected branch over
+        // both acts, in declaration order.
+        let block = model.steps.iter().find(|step| step.id == "block").unwrap();
+        assert_eq!(block.branches.len(), 1);
+        let branch = &block.branches[0];
+        assert_eq!(branch.id, "block#acts");
+        assert_eq!(branch.r#if.as_deref(), Some("true"));
+        assert_eq!(branch.steps.len(), 2);
+        assert!(
+            branch.steps.iter().all(|step| !step.id.is_empty()),
+            "an unnamed act gets an id like any unnamed step: {:?}",
+            branch.steps
+        );
+
+        // `acts.core.parallel{ in, acts }`: one always-selected branch holding
+        // the template step, whose own acts are materialized as its branches.
+        let fan = model.steps.iter().find(|step| step.id == "fan").unwrap();
+        assert_eq!(fan.branches.len(), 1);
+        assert_eq!(fan.branches[0].id, "fan#in");
+        assert_eq!(fan.branches[0].r#if.as_deref(), Some("true"));
+        assert_eq!(fan.branches[0].steps.len(), 1);
+        let template = &fan.branches[0].steps[0];
+        assert_eq!(template.id, "fan#item");
+        assert_eq!(template.uses.as_deref(), Some(BLOCK_PACKAGE));
+        assert_eq!(template.params["mode"], "parallel");
+        assert_eq!(template.branches.len(), 1);
+        assert_eq!(template.branches[0].id, "fan#item#act0");
+        assert_eq!(
+            template.branches[0].steps[0].uses.as_deref(),
+            Some("acts.core.irq")
+        );
+
+        // Every materialized step carries an auto decision: the template is a
+        // `Func` container (it self-completes and then fans out), the irq act
+        // inside it waits for a client, and the block's msg acts self-complete
+        // (the `run_as` their packages declare).
+        assert_eq!(
+            auto.get(&template.id),
+            Some(&serde_json::Value::Bool(true)),
+            "auto map must decide the template: {auto:?}"
+        );
+        assert_eq!(
+            auto.get(&template.branches[0].steps[0].id),
+            Some(&serde_json::Value::Bool(false)),
+            "auto map must leave the irq act waiting: {auto:?}"
+        );
+        for step in &branch.steps {
+            assert_eq!(auto.get(&step.id), Some(&serde_json::Value::Bool(true)));
+        }
+    }
+
+    /// `mode: parallel` materializes one branch per act (the container admits
+    /// its branches together), and a package the import does not know is left
+    /// exactly as declared — a user package with an `acts` param is not a
+    /// container.
+    #[test]
+    fn only_the_container_packages_are_materialized() {
+        let workflow = crate::model::Workflow::from_yml(
+            r#"
+name: containers
+steps:
+  - name: parallel block
+    id: pblock
+    uses: acts.core.block
+    params:
+      mode: parallel
+      acts:
+        - uses: acts.core.msg
+        - uses: acts.core.msg
+  - name: foreign
+    id: foreign
+    uses: my.custom.package
+    params:
+      acts:
+        - uses: acts.core.msg
+"#,
+        )
+        .unwrap();
+        let snapshot = spec(&workflow).unwrap().seed_snapshot().unwrap();
+        let model = durable_model(&snapshot);
+
+        let parallel = model.steps.iter().find(|step| step.id == "pblock").unwrap();
+        assert_eq!(
+            parallel
+                .branches
+                .iter()
+                .map(|branch| branch.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["pblock#act0".to_string(), "pblock#act1".to_string()]
+        );
+        assert!(
+            parallel
+                .branches
+                .iter()
+                .all(|branch| branch.steps.len() == 1),
+            "one branch per act, one act per branch"
+        );
+
+        let foreign = model
+            .steps
+            .iter()
+            .find(|step| step.id == "foreign")
+            .unwrap();
+        assert!(
+            foreign.branches.is_empty(),
+            "a package the import does not know keeps its declaration"
+        );
     }
 }

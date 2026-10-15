@@ -6,19 +6,24 @@
 //! The kernel fans a container out from the *model*: a step declaring branches
 //! (`model::step_branches`) admits one child execution per selected branch in
 //! one atomic plan, parks itself `Running` for the children, and the container
-//! join completes it once every child is terminal. The legacy row drove the same
-//! shape through the `acts.core.parallel` package's `in`/`acts` expansion, and
-//! that expansion is **not** a mechanism the kernel has: the container packages'
-//! `ctx.build_acts` writes into the headless scope the effect runner builds and
-//! throws away (`runtime/shell/effects.rs`), and `ProcessSpec::from_workflow`
-//! (`runtime/shell/model.rs`) imports no nested acts out of a package's params.
-//! A `uses: acts.core.parallel` step with an `acts` array therefore resolves its
-//! package and auto-completes — no child execution, no act, no message. That
-//! silent drop is a kernel defect, not a property to pin as a reliability
-//! guarantee: the four cells below drive the fan-out the kernel does have — two
-//! sibling branches, each running its own act — and each says what that buys it.
-//! One further cell is a *conformance* marker for the param shape itself, so the
-//! drop cannot change unnoticed and whoever closes the gap must face it.
+//! join completes it once every child is terminal.
+//!
+//! The container packages needed a bridge to that shape — their inline acts live
+//! in the package's `in`/`acts` params, and `ctx.build_acts` writes them into
+//! the headless scope the effect runner throws away
+//! (`scheduler/shell/effects.rs`) — and until 2026-10-15 a
+//! `uses: acts.core.parallel` step resolved its package and auto-completed with
+//! no child execution, no act and no message: a silent drop, pinned by a
+//! conformance cell that this round's fix had to rewrite. The bridge
+//! (`materialize_container_acts`) rewrites a container step's inline acts into
+//! the branches/steps the kernel fans out — one branch over the declared chain
+//! for `block{ mode: sequence }`, one branch per act for `mode: parallel`, and
+//! one branch holding a template step for `parallel`/`sequence{ in, acts }` —
+//! and the fan-out instantiates that template once per `in` item. The cells
+//! below drive both shapes: the four original ones keep driving the
+//! explicit-branch fan-out, and two more cover the materialized packages (a
+//! block's acts in both modes, and one template instance per `in` item with its
+//! own `index`/`value` bindings).
 //!
 //! "Exactly once" is the aggregate's. The branch acts are executions (one per
 //! model node, generation 0) and each client decision leaves one `action:` and
@@ -42,9 +47,9 @@ use parking_lot::Mutex;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::Act;
 use crate::scheduler::core::commit::aggregate::AggregateSnapshot;
 use crate::scheduler::core::model::execution_graph::ExecutionState;
+use crate::{Act, Step};
 
 use super::*;
 
@@ -90,24 +95,6 @@ fn parallel_workflow() -> Workflow {
                         .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
                 })
             })
-    })
-}
-
-/// The legacy `acts.core.parallel` shape kept verbatim from the ported row: one
-/// step whose fan-out lives in the package's `in`/`acts` params. The kernel's
-/// fan-out walk reads explicit `branches` only, so this shape is what the
-/// conformance cell below pins.
-fn package_parallel_workflow() -> Workflow {
-    Workflow::new().with_step(|step| {
-        step.with_id("step1").with_uses(
-            "acts.core.parallel",
-            Vars::from(json!({
-                "in": ["u1", "u2"],
-                "acts": [Act::irq(|act| {
-                    act.with_params_vars(|v| v.with("key", "act1")).with_id("act1")
-                })]
-            })),
-        )
     })
 }
 
@@ -604,66 +591,339 @@ async fn concurrent_sibling_completions_join_the_container_exactly_once_inner() 
 }
 
 // ---------------------------------------------------------------------------
-// PARALLEL × 容器包 — the `uses`-param shape against the kernel as it stands
+// PARALLEL × 容器包 — the packages' inline acts as kernel sub-executions
 // ---------------------------------------------------------------------------
 
-/// A `uses: acts.core.parallel` step whose fan-out lives in its package's
-/// `in`/`acts` params resolves the package and completes with **no** child
-/// execution and **no** branch message: the container shape walk reads the
-/// model's explicit `branches` only, and the package's `ctx.build_acts` writes
-/// into the headless scope the effect seam discards, so the nested acts are
-/// never imported as executions.
+/// The `acts.core.{parallel,sequence}{ in, acts }` shape: one container step
+/// whose fan-out lives in the package's `in`/`acts` params, over two items the
+/// run supplies as a workflow variable (the expression form, like
+/// `examples/approve`'s `in: '${{ pm }}'`). Each item instantiates the
+/// container's template step once — the legacy engine's per-item block task —
+/// and the act reads its item through the scope chain
+/// (`${{ value }}`/`${{ index }}`), exactly as the legacy options carried it.
+/// The two packages differ only in how the items are admitted (together vs
+/// chained), which is what [`item_predecessors`] reads back.
+fn package_items_workflow(package: &str) -> Workflow {
+    let mut step = Step::new();
+    step.id = "step1".to_string();
+    step.uses = Some(package.to_string());
+    step.params = json!({
+        "in": "${{ items }}",
+        "acts": [Act::msg(|act| act.with_params_vars(|v| v
+            .with("key", "act1")
+            .with("value", "${{ value }}")
+            .with("index", "${{ index }}")
+        ))]
+    });
+    let mut workflow = workflow_with(step);
+    workflow
+        .vars
+        .push(crate::Variant::create("items", json!(["u1", "u2"])));
+    workflow
+}
+
+/// A one-step workflow over `step`. The fixtures below build their step
+/// programmatically (their params differ), which `Workflow::with_step` cannot
+/// express: it takes a `fn` pointer, and a builder closure would capture the
+/// model it is building.
+fn workflow_with(step: Step) -> Workflow {
+    let mut workflow = Workflow::new();
+    workflow.steps.push(step);
+    workflow
+}
+
+/// The `acts.core.block{ mode, acts }` shape: one container step whose inline
+/// acts are the package's `params.acts` array. Legacy built them into the task
+/// tree from the act's own `run`; the kernel materializes the same children
+/// into the model at import, so the two modes below are the two shapes that
+/// rewrite takes — one branch over the declared chain (sequence), one branch
+/// per act (parallel).
+fn package_block_workflow(mode: &str) -> Workflow {
+    let mut step = Step::new();
+    step.id = "step1".to_string();
+    step.uses = Some("acts.core.block".to_string());
+    step.params = json!({
+        "mode": mode,
+        "acts": [
+            Act::msg(|act| act.with_params_vars(|v| v.with("key", "block1"))),
+            Act::msg(|act| act.with_params_vars(|v| v.with("key", "block2"))),
+        ]
+    });
+    workflow_with(step)
+}
+
+/// One `Created` act message a cell observed: the model node it names and the
+/// item facts its params resolved to.
+#[derive(Clone, Debug)]
+struct AnnouncedAct {
+    nid: String,
+    key: String,
+    value: String,
+    index: String,
+}
+
+/// The messages a cell has seen, shared with the engine's handler.
+type Announced = Arc<Mutex<Vec<AnnouncedAct>>>;
+
+/// Every `Created` act message the engine announces, with the params a
+/// container package's act resolved (`key`/`value`/`index`) — what a param
+/// fan-out's per-item act resolves its item to. The items share one act model
+/// node (they are two generations of it), so the node id alone cannot tell them
+/// apart and the resolved params must.
+fn capture_act_items(engine: &Engine) -> Announced {
+    let seen: Announced = Arc::new(Mutex::new(Vec::new()));
+    let rec = seen.clone();
+    engine.channel().on_message(move |e| {
+        let rec = rec.clone();
+        async move {
+            if !e.is_state(MessageState::Created) {
+                return;
+            }
+            let Some(params) = e.inputs.get::<Vars>("params") else {
+                return;
+            };
+            // A string param renders as its text (that is what the model
+            // declared); anything else keeps its JSON spelling.
+            let text = |name: &str| match params.get::<serde_json::Value>(name) {
+                Some(serde_json::Value::String(text)) => text,
+                Some(value) => value.to_string(),
+                None => String::new(),
+            };
+            rec.lock().push(AnnouncedAct {
+                nid: e.nid.clone(),
+                key: text("key"),
+                value: text("value"),
+                index: text("index"),
+            });
+        }
+    });
+    seen
+}
+
+/// The keys of the `Created` act messages the engine announced, sorted: how a
+/// cell names the acts a container drove, without knowing their assigned ids.
+fn announced_keys(seen: &Announced) -> Vec<String> {
+    let mut keys: Vec<String> = seen
+        .lock()
+        .iter()
+        .map(|act| act.key.clone())
+        .filter(|key| !key.is_empty())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// The model node a run instantiates per `in` item, and the generations the
+/// aggregate holds for it: the shape a param fan-out must produce, one per item.
+async fn item_generations(engine: &Engine, pid: &str) -> Vec<u64> {
+    generations(engine, pid, "step1#item").await
+}
+
+/// The `(index, value)` bindings the param fan-out left on the template
+/// executions' own scopes, sorted by index: the item facts the acts read.
+async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
+    let snapshot = aggregate(engine, pid).await;
+    let mut bindings: Vec<(String, String)> = snapshot
+        .executions
+        .keys()
+        .filter(|id| id.task_id == "step1#item")
+        .map(|id| {
+            let read = |name: &str| {
+                snapshot
+                    .variables
+                    .get(&(id.clone(), name.to_string()))
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            (read("index"), read("value"))
+        })
+        .collect();
+    bindings.sort();
+    bindings
+}
+
+/// The predecessor edges of the template executions, by generation: the fact
+/// that tells the two item shapes apart. `parallel` sources every item from
+/// the container; `sequence` chains each behind the previous item (the legacy
+/// `build_acts(&acts, true)`), which is why its items start one at a time.
+async fn item_predecessors(engine: &Engine, pid: &str) -> Vec<(u64, Vec<String>)> {
+    let snapshot = aggregate(engine, pid).await;
+    let mut edges: Vec<(u64, Vec<String>)> = snapshot
+        .executions
+        .iter()
+        .filter(|(id, _)| id.task_id == "step1#item")
+        .map(|(id, execution)| {
+            (
+                id.generation,
+                execution
+                    .predecessors
+                    .iter()
+                    .map(|parent| format!("{}@{}", parent.task_id, parent.generation))
+                    .collect(),
+            )
+        })
+        .collect();
+    edges.sort();
+    edges
+}
+
+/// The `in`/`acts` param fan-out is a kernel sub-execution now: the container
+/// admits one execution of its template step per `in` item, the item's
+/// `index`/`value` land on that execution's own scope, the template's acts
+/// (materialized from the package's params at import) run under each item, and
+/// the container joins once every item settled.
 ///
-/// This is a *conformance* pin on a known cutover gap (the `acts.core.parallel`
-/// entry in `KERNEL_CUTOVER_NOTES.md`'s 「已知边界」; the same holds for
-/// `acts.core.block`/`acts.core.sequence`). It pins the current behavior
-/// plainly rather than hiding it: giving a package's nested acts a kernel
-/// representation is exactly what would change this cell, and whoever closes
-/// the gap MUST rewrite it. The window is the only tool for the negative half —
-/// no message can be polled *to* arriving — while the execution set is read off
-/// the aggregate.
+/// The occurrences share the template's model node and take successive
+/// generations of it: legacy built one block task per item with a fresh id, and
+/// the kernel's equivalent is one node instantiated N times (`plan_fanout`
+/// hands a repeated task id the generation after the plan's own last
+/// allocation, since the snapshot cannot see this plan's creations yet). A
+/// failure would mean an item was dropped or duplicated, its bindings mixed up,
+/// the wrong admission shape, or a container that never joined.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_uses_param_fan_out_resolves_its_package_without_children() {
+async fn a_uses_param_fan_out_instantiates_one_template_per_item() {
     bounded(
-        "a_uses_param_fan_out_resolves_its_package_without_children",
-        a_uses_param_fan_out_resolves_its_package_without_children_inner(),
+        "a_uses_param_fan_out_instantiates_one_template_per_item",
+        a_uses_param_fan_out_instantiates_one_template_per_item_inner(),
     )
     .await;
 }
 
-async fn a_uses_param_fan_out_resolves_its_package_without_children_inner() {
-    let engine = engine_on(FaultKv::new().store()).await;
-    let seen = capture_branch_acts(&engine);
-    let pid = start_run(&engine, &package_parallel_workflow()).await;
+async fn a_uses_param_fan_out_instantiates_one_template_per_item_inner() {
+    // `parallel` admits the items together, `sequence` one behind the other:
+    // the same per-item instantiation, two admission shapes.
+    for (package, chained) in [("acts.core.parallel", false), ("acts.core.sequence", true)] {
+        let engine = engine_on(FaultKv::new().store()).await;
+        let seen = capture_act_items(&engine);
+        let pid = start_run(&engine, &package_items_workflow(package)).await;
 
-    // nothing waits for a client: the step's Func effect resolves and the run
-    // completes without a single branch act
-    wait_completed(&engine, &pid).await;
-    let mut nodes = node_generations(&engine, &pid).await;
-    nodes.sort();
-    let mut expected = vec![
-        (utils::consts::TASK_ROOT_TID.to_string(), 0),
-        ("step1".to_string(), 0),
-    ];
-    expected.sort();
-    assert_eq!(
-        nodes, expected,
-        "a param fan-out admits no child execution on the kernel"
-    );
-    assert_eq!(
-        decided_state(&engine, &pid, "step1").await,
-        Some(ExecutionState::Completed),
-        "the step completes with its package effect, without a join"
-    );
+        wait_completed(&engine, &pid).await;
+        assert_eq!(
+            item_generations(&engine, &pid).await,
+            vec![0, 1],
+            "({package}) one template execution per `in` item, at successive generations"
+        );
+        assert_eq!(
+            item_bindings(&engine, &pid).await,
+            vec![
+                ("0".to_string(), "\"u1\"".to_string()),
+                ("1".to_string(), "\"u2\"".to_string()),
+            ],
+            "({package}) each item's index and value land on its own template scope"
+        );
+        let source = "step1@0".to_string();
+        let expected: Vec<Vec<String>> = if chained {
+            vec![vec![source], vec!["step1#item@0".to_string()]]
+        } else {
+            vec![vec![source.clone()], vec![source]]
+        };
+        assert_eq!(
+            item_predecessors(&engine, &pid)
+                .await
+                .into_iter()
+                .map(|(_, edges)| edges)
+                .collect::<Vec<_>>(),
+            expected,
+            "({package}) the items are admitted as the package declares"
+        );
+        // The template's act ran once per item, each resolving its own item
+        // through the scope chain: the same node, two values. The messages ride
+        // the outbox to the emitter's per-process worker, which may still be
+        // delivering when the run settles, so wait for both before asserting.
+        let announced_items =
+            |seen: &Announced| seen.lock().iter().filter(|act| act.key == "act1").count();
+        let what = format!("({package}) the act of each item of {pid} to be announced");
+        poll_until_dumped(
+            &what,
+            || async { announced_items(&seen) >= 2 },
+            || dump_state(&engine, &pid),
+        )
+        .await;
+        let announced = seen.lock().clone();
+        let mut items: Vec<String> = announced
+            .iter()
+            .filter(|act| act.key == "act1")
+            .map(|act| format!("{}={}", act.index, act.value))
+            .collect();
+        // The two items' hops are independent, so their deliveries may arrive
+        // in either order: the cell asserts the set, not the arrival order.
+        items.sort();
+        assert_eq!(
+            items,
+            vec!["0=u1".to_string(), "1=u2".to_string()],
+            "({package}) the act of each item resolves that item's `index`/`value`: {announced:?}"
+        );
+        assert_eq!(
+            decided_state(&engine, &pid, "step1").await,
+            Some(ExecutionState::Completed),
+            "({package}) the container completes once its items settled"
+        );
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    let announced = seen.lock().clone();
-    assert!(
-        announced.is_empty(),
-        "a param fan-out must dispatch no branch act: {announced:?}"
-    );
+        sweep_until_gone(&engine, &pid).await;
+        engine.close().await;
+    }
+}
 
-    sweep_until_gone(&engine, &pid).await;
-    engine.close().await;
+/// The block's inline acts are model children now: both declared acts run and
+/// the run completes, in both modes. Legacy expanded the same array through the
+/// package's `ctx.build_acts`, which the kernel's effect seam discards — so
+/// before the import materialized them, a block step completed with no child at
+/// all and neither message was ever announced.
+///
+/// A failure would mean one of the two modes dropped its acts, ran one twice, or
+/// never joined.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_block_packages_inline_acts_run_as_children_in_both_modes() {
+    bounded(
+        "a_block_packages_inline_acts_run_as_children_in_both_modes",
+        a_block_packages_inline_acts_run_as_children_in_both_modes_inner(),
+    )
+    .await;
+}
+
+async fn a_block_packages_inline_acts_run_as_children_in_both_modes_inner() {
+    for mode in ["sequence", "parallel"] {
+        let engine = engine_on(FaultKv::new().store()).await;
+        let seen = capture_act_items(&engine);
+        let pid = start_run(&engine, &package_block_workflow(mode)).await;
+
+        wait_completed(&engine, &pid).await;
+        // The messages ride the outbox and are handed to the emitter's
+        // per-process worker, which may still be delivering when the run
+        // settles: wait for what the cell reads, then assert.
+        let what = format!("({mode}) both inline acts of {pid} to be announced");
+        poll_until_dumped(
+            &what,
+            || async { announced_keys(&seen).len() >= 2 },
+            || dump_state(&engine, &pid),
+        )
+        .await;
+        assert_eq!(
+            announced_keys(&seen),
+            vec!["block1".to_string(), "block2".to_string()],
+            "({mode}) both inline acts must run"
+        );
+        let unfinished: Vec<String> = aggregate(&engine, &pid)
+            .await
+            .executions
+            .iter()
+            .filter(|(_, execution)| !execution.state.is_terminal())
+            .map(|(id, execution)| format!("{id:?}:{:?}", execution.state))
+            .collect();
+        assert!(
+            unfinished.is_empty(),
+            "({mode}) the joined run must have no non-terminal execution: {unfinished:?}"
+        );
+        assert_eq!(
+            decided_state(&engine, &pid, "step1").await,
+            Some(ExecutionState::Completed),
+            "({mode}) the container completes once its acts settled"
+        );
+
+        sweep_until_gone(&engine, &pid).await;
+        engine.close().await;
+    }
 }

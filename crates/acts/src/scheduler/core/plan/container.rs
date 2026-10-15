@@ -305,14 +305,52 @@ impl ContainerPlanner {
         // Resolved execution of each already-processed child, for sibling
         // predecessor references.
         let mut resolved: Vec<ExecutionId> = Vec::with_capacity(command.children.len());
+        // The children this source already holds, per model node, oldest
+        // generation first. A child slot belongs to its *parent*: the same model
+        // node may be live under several parents at once (a `uses`-param
+        // container's per-item templates each instantiate the same act node), and
+        // only the executions this fan-out admitted are its own to reuse. A
+        // command that names one node N times (the param fan-out) maps its i-th
+        // occurrence to the i-th child it already holds, and allocates the rest.
+        let mut held: std::collections::HashMap<String, Vec<ExecutionId>> =
+            std::collections::HashMap::with_capacity(command.children.len());
+        let mut occurrence: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::with_capacity(command.children.len());
+        // The generations this plan itself allocated, per task id: the snapshot
+        // does not hold this plan's creations yet, so a repeat takes the
+        // generation after the plan's own last allocation, never the one the
+        // snapshot's `next_generation` reports.
+        let mut allocated: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::with_capacity(command.children.len());
         for (index, child) in command.children.iter().enumerate() {
             if child.task_id.trim().is_empty() {
                 return Err(ContainerError::EmptyChildTaskId);
             }
-            let observation = SlotObservation::vacant(false, false)
-                .with_existing(existing_generation(snapshot, &child.task_id));
-            let generation = next_generation(snapshot, &child.task_id)
+            let nth = {
+                let count = occurrence.entry(child.task_id.clone()).or_insert(0);
+                let nth = *count;
+                *count += 1;
+                nth
+            };
+            let siblings = held
+                .entry(child.task_id.clone())
+                .or_insert_with(|| existing_children(snapshot, &command.source, &child.task_id));
+            let existing = siblings.get(nth).cloned();
+            let observation =
+                SlotObservation::vacant(false, false).with_existing(match &existing {
+                    Some(execution) => generation_state(snapshot, execution),
+                    None => ExistingGeneration::Absent,
+                });
+            let base = next_generation(snapshot, &child.task_id)
                 .ok_or(ContainerError::GenerationOverflow)?;
+            let generation = match allocated.get(&child.task_id) {
+                Some(previous) => base.max(
+                    previous
+                        .checked_add(1)
+                        .ok_or(ContainerError::GenerationOverflow)?,
+                ),
+                None => base,
+            };
             let execution = match crate::scheduler::core::plan::execution_admission::GenerationAdmissionPolicy::decide(
                 crate::scheduler::core::plan::execution_admission::ExecutionSlotKind::Once,
                 crate::scheduler::core::plan::execution_admission::AdmissionIntent::Forward,
@@ -320,14 +358,14 @@ impl ContainerPlanner {
             ) {
                 crate::scheduler::core::plan::execution_admission::AdmissionDecision::Ignore => {
                     resolved.push(
-                        latest_execution(snapshot, &child.task_id)
-                            .ok_or(ContainerError::ExecutionNotFound(command.source.clone()))?,
+                        existing.ok_or(ContainerError::ExecutionNotFound(command.source.clone()))?,
                     );
                     continue;
                 }
                 crate::scheduler::core::plan::execution_admission::AdmissionDecision::AllocateGeneration => {
                     let execution = ExecutionId::new(child.task_id.clone(), generation)
                         .map_err(|_| ContainerError::EmptyChildTaskId)?;
+                    allocated.insert(child.task_id.clone(), generation);
                     creates.push(ExecutionCreate {
                         execution: execution.clone(),
                         model_node: child.model_node.clone(),
@@ -352,8 +390,8 @@ impl ContainerPlanner {
                     execution
                 }
                 crate::scheduler::core::plan::execution_admission::AdmissionDecision::ReadmitExisting => {
-                    let execution = latest_execution(snapshot, &child.task_id)
-                        .ok_or(ContainerError::ExecutionNotFound(command.source.clone()))?;
+                    let execution =
+                        existing.ok_or(ContainerError::ExecutionNotFound(command.source.clone()))?;
                     // A queued chain successor is admitted by propagation, never
                     // by the fan-out: an execution the seed (the root's own
                     // chain) or a rewind already created stays `Created` until
@@ -643,29 +681,37 @@ impl ContainerPlanner {
     }
 }
 
-/// The existing-generation observation for one task's admission slot: the
-/// state of its latest generation. `Created` never ran (`Unstarted`), so a
-/// rewound-and-recreated child is readmitted rather than duplicated.
-fn existing_generation(snapshot: &AggregateSnapshot, task_id: &str) -> ExistingGeneration {
-    let Some(latest) = latest_execution(snapshot, task_id) else {
-        return ExistingGeneration::Absent;
-    };
-    match snapshot.executions[&latest].state {
-        ExecutionState::Created => ExistingGeneration::Unstarted,
-        ExecutionState::Ready | ExecutionState::Running | ExecutionState::Waiting => {
+/// The executions one task already has under one parent, oldest generation
+/// first: the children a re-run of this fan-out reuses (the seed's chain, a
+/// Cancel rewind's recreation) instead of duplicating.
+fn existing_children(
+    snapshot: &AggregateSnapshot,
+    parent: &ExecutionId,
+    task_id: &str,
+) -> Vec<ExecutionId> {
+    let mut children: Vec<ExecutionId> = snapshot
+        .executions
+        .iter()
+        .filter(|(id, execution)| {
+            id.task_id == task_id && execution.parent.as_ref() == Some(parent)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    children.sort_by_key(|id| id.generation);
+    children
+}
+
+/// The admission observation for one already-existing execution: `Created`
+/// never ran (`Unstarted`), so a rewound-and-recreated child is readmitted
+/// rather than duplicated.
+fn generation_state(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> ExistingGeneration {
+    match snapshot.executions.get(execution).map(|held| held.state) {
+        Some(ExecutionState::Created) => ExistingGeneration::Unstarted,
+        Some(ExecutionState::Ready | ExecutionState::Running | ExecutionState::Waiting) => {
             ExistingGeneration::Active
         }
         _ => ExistingGeneration::Completed,
     }
-}
-
-fn latest_execution(snapshot: &AggregateSnapshot, task_id: &str) -> Option<ExecutionId> {
-    snapshot
-        .executions
-        .keys()
-        .filter(|id| id.task_id == task_id)
-        .max_by_key(|id| id.generation)
-        .cloned()
 }
 
 fn next_generation(snapshot: &AggregateSnapshot, task_id: &str) -> Option<u64> {

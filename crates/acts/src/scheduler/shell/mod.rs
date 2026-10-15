@@ -1200,13 +1200,7 @@ impl KernelHost {
                 operation: intent.operation.clone(),
             });
         }
-        let execution_id = snapshot
-            .executions
-            .keys()
-            .filter(|id| id.task_id == task_id)
-            .max_by_key(|id| id.generation)
-            .cloned()
-            .ok_or_else(|| ActError::Runtime(format!("execution {task_id} not found")))?;
+        let execution_id = Self::action_target(snapshot, task_id, action)?;
         let mut sequence = snapshot
             .operations
             .keys()
@@ -1238,6 +1232,49 @@ impl KernelHost {
             }
             sequence += 1;
         }
+    }
+
+    /// The execution one client action on `task_id` names.
+    ///
+    /// The kernel's action surface is *node*-addressed — a message carries the
+    /// model node id (`tid`), never an execution instance — so the node's
+    /// newest generation is what the action means, and a node with a single
+    /// live generation behaves exactly as it always has.
+    ///
+    /// A run may hold several generations of one node at once, though: a
+    /// `uses`-param container instantiates its template — and so the same act
+    /// node — once per `in` item, and a chained `sequence` admits item `i+1`
+    /// as `Created` while item `i` waits. The action therefore takes the
+    /// **newest generation that can accept it**: the client is asked once per
+    /// item (one `Created` message each, and one process's handlers run in
+    /// emission order), so answering each message decides the next instance
+    /// rather than being refused by a sibling that is not there yet. The
+    /// legacy engine's per-item act carried a fresh id instead, and the
+    /// kernel's node identity cannot tell the instances apart — see the
+    /// registered boundary on node-addressed actions in
+    /// `KERNEL_CUTOVER_NOTES.md`.
+    ///
+    /// With no generation that can take it, the newest is named anyway, so the
+    /// preflight answers the refusal the caller earned (a duplicate delivery, a
+    /// decision on a settled node) rather than a missing execution.
+    fn action_target(
+        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        task_id: &str,
+        action: &crate::scheduler::core::commit::command::ActionKind,
+    ) -> Result<crate::scheduler::core::model::execution_graph::ExecutionId> {
+        use crate::scheduler::core::commit::command::action_allowed;
+        let generations = || {
+            snapshot
+                .executions
+                .keys()
+                .filter(|id| id.task_id == task_id)
+        };
+        generations()
+            .filter(|id| action_allowed(snapshot.executions[*id].state, action))
+            .max_by_key(|id| id.generation)
+            .or_else(|| generations().max_by_key(|id| id.generation))
+            .cloned()
+            .ok_or_else(|| ActError::Runtime(format!("execution {task_id} not found")))
     }
 
     /// Whether the operation at `intent` carries *this* decision: it exists and
@@ -4097,6 +4134,105 @@ impl KernelHost {
         Ok(())
     }
 
+    /// The dynamic children of a `uses`-param container, or `None` when the
+    /// model node is not one (or has already fanned out for this generation).
+    ///
+    /// `acts.core.parallel{ in, acts }` and `acts.core.sequence{ in, acts }`
+    /// instantiate their template step (`<step>#item`, an `acts.core.block`
+    /// over the same acts) once per `in` item — exactly the legacy expansion
+    /// (`ParallelPackage`/`SequencePackage` built one block act per item, with
+    /// the item's index and value on its options). The count is a run-time
+    /// fact, so the children share the template's model node and take
+    /// successive generations of it; each carries its item on its own scope as
+    /// `index`/`value`.
+    ///
+    /// `parallel` admits its items together (`Entry`, all sourced by the
+    /// container); `sequence` chains them (`Entry` then `Queued` behind the
+    /// previous sibling), like the legacy `build_acts(&acts, true)`.
+    fn param_fanout_children(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
+        model: &crate::model::Workflow,
+        model_node: &crate::scheduler::core::model::model_graph::NodeId,
+    ) -> Result<Option<Vec<ContainerChild>>> {
+        let Some(step) = find_step_in_model(model, model_node.as_str()) else {
+            return Ok(None);
+        };
+        let Some(uses) = step.uses.as_deref() else {
+            return Ok(None);
+        };
+        let parallel = match uses {
+            model::PARALLEL_PACKAGE => true,
+            model::SEQUENCE_PACKAGE => false,
+            _ => return Ok(None),
+        };
+        // The `in` array: the params the start hop resolved and pinned — the
+        // same facts every later message of the act carries — falling back to
+        // a literal declaration, which is all a host without an effect runner
+        // ever has (its expression form is unresolvable there, and the
+        // container then fans out no items).
+        let pinned = act_facts(snapshot, execution_id).map(|facts| facts.params);
+        let items = pinned
+            .as_ref()
+            .and_then(|params| params.get("in"))
+            .or_else(|| step.params.get("in"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let template_id = format!("{}#item", step.id);
+        let template_node = node_id(&template_id)?;
+        // A container whose template already left `Created` has fanned out for
+        // this generation; a completion now is a force-finish, not a second
+        // fan-out.
+        if snapshot.executions.values().any(|execution| {
+            execution.parent.as_ref() == Some(execution_id)
+                && execution.model_node == template_node
+                && execution.state
+                    != crate::scheduler::core::model::execution_graph::ExecutionState::Created
+        }) {
+            return Ok(None);
+        }
+        let template_vars: Vec<(String, String)> = find_step_in_model(model, &template_id)
+            .map(|template| {
+                template
+                    .vars
+                    .iter()
+                    .map(|var| (var.name.clone(), var.value.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let auto = auto_decision(snapshot, &template_id)?;
+        let children = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let mut vars = vec![
+                    ("index".to_string(), serde_json::json!(index).to_string()),
+                    ("value".to_string(), item.to_string()),
+                ];
+                vars.extend(template_vars.iter().cloned());
+                ContainerChild {
+                    task_id: template_id.clone(),
+                    model_node: template_node.clone(),
+                    plan: if parallel || index == 0 {
+                        ContainerChildPlan::Entry
+                    } else {
+                        ContainerChildPlan::Queued
+                    },
+                    predecessors: if parallel || index == 0 {
+                        vec![ContainerPredecessor::Source]
+                    } else {
+                        vec![ContainerPredecessor::Sibling(index - 1)]
+                    },
+                    vars,
+                    auto,
+                }
+            })
+            .collect();
+        Ok(Some(children))
+    }
+
     /// The fan-out command for a container execution, or `None` when the
     /// model node is a plain leaf. Branch selection goes through the kernel's
     /// own `BranchPlanner::decide`; the inner chain of a branch is queued
@@ -4112,6 +4248,27 @@ impl KernelHost {
         let Some(model) = model_of(snapshot)? else {
             return Ok(None);
         };
+        // A `uses`-param container (`acts.core.parallel`/`acts.core.sequence`)
+        // instantiates its template step once per `in` item — the legacy
+        // engine's per-item block task, which only the run can count. The
+        // children are that one model node at successive generations, each
+        // carrying its item as `index`/`value` on its own scope (the
+        // template's acts read them through the scope chain).
+        if let Some(children) =
+            self.param_fanout_children(snapshot, execution_id, &model, model_node)?
+        {
+            return Ok(Some(ContainerFanoutCommand {
+                process_id: snapshot.process_id.clone(),
+                source: execution_id.clone(),
+                source_operation: claim.clone(),
+                children,
+                inputs: inputs.to_vec(),
+                // Like every container: the source parks `Running` while its
+                // children run, and the join decides it once they settled.
+                source_park:
+                    crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+            }));
+        }
         let Some(shape) = container_shape(&model, model_node) else {
             return Ok(None);
         };
