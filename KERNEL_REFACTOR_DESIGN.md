@@ -1,0 +1,357 @@
+# scheduler(内核)重构设计笔记(2026-10-15)
+
+> **状态:设计稿,未动生产代码。** 4 个待拍项见 §2.2(D1 命名 / D2 实例 id 形态 / D3 行内链 / D4 `view` 挪位),拍完即可按 §4 的 C1 起步。
+> **范围**:用户提出的 7 条 scheduler 重构思路 —— ①聚合命名 ②task 身份 ③投影出行 ④outbox 消息 ⑤立即投递 ⑥`core/plan/` 模块拆分 ⑦`core/model/view/` 的去留。
+> **关系**:本文档落实 `KERNEL_CUTOVER_NOTES.md` §11 C4/C5(「先写设计再动手」),并把 §11 L1 (删 `ops`)、§10「读模型行表 `procs`/`tasks`/`vars` 的去留」两个待决项的影响面写清。
+> **性质**:第 ⑤ 条是**决策**(已定,见 §2.1),第 ③ 条**已经实现**(真实改动只是"一行一实例",依赖第 ② 条),第 ② 条是唯一动持久化格式的改动,第 ①/⑥ 条是命名与搬运。
+
+---
+
+## 1. 已核实事实(勿再猜,逐条 file:line)
+
+### 1.1 命名面
+
+| 事实 | 位置 |
+|---|---|
+| **仓库里没有 `Aggregate` 类型**(`grep -E '^\s*(pub )?(struct\|enum\|type\|trait) Aggregate\b'` = 0 命中) | — |
+| `AggregateSnapshot{process_id, version, executions, variables, operations, outbox}` 就是聚合根,一个 pid 一份文档 | `scheduler/core/commit/aggregate.rs:24-34` |
+| `ExecutionSnapshot{model_node, parent, predecessors, state, revision}` = 一个实例的持久化切片 | `scheduler/core/commit/aggregate.rs:15` |
+| `Process` / `Task` 这两个名字已被 **legacy 内存视图**占用(`Process` 持 `Arc<Runtime>`+`NodeTree`+`TaskTree`,服务 `proc:get`/`Runtime::proc` 的行重建) | `scheduler/shell/process/process.rs:20`、`store/process_rows.rs:31-39` |
+| `Operation` = **一次持久化 hop**,不是 task:`OperationKind` 的 9 变体含 `DeliverMessage/FireTrigger/RunPostCommit/ApplyAction/DispatchTimeout` | `scheduler/core/model/operation.rs:13-52` |
+| `Action` 已被**三义**占用:①线上事件(公共面 `acts::Action` + `EventAction`)②内核决策(`ActionKind`/`ApplyActionCommand`)③运维/ACL 动词面(`proc:start`/`task:get`/`msg:ack`) | `lib.rs:45`、`event/action.rs:6-15`、`core/commit/command.rs:17-28`、`export/actions.rs:300-341` |
+| `*Command` 已一致地表示"planner 的输入查询"(8 处) | `plan/{upward,branch,propagation,generation,container}.rs`、`commit/command.rs` |
+
+### 1.2 身份面
+
+| 事实 | 位置 |
+|---|---|
+| `OperationId{process_id, task_id, generation, sequence}`,其中 **`task_id` 就是模型节点 id**(`NodeId.as_str()`;根 = `"$"`) | `core/model/operation.rs:5-10`、`utils/consts.rs:27` |
+| `ExecutionId{task_id, generation}` —— 同一节点重复实例靠 **`generation`** 区分,`task_id` 本身不是唯一实例身份 | `core/model/execution_graph.rs:6-9` |
+| 生产侧把 node id 写进 `OperationId.task_id` 的构造点共 26 处(种子 / hop / action / fan-out / 重入 / upward) | `shell/model.rs:714-723`、`shell/mod.rs:341,858,1220,1740,1874,1937,2506,2745,2841,3064,3522,3808`、`commit/command.rs:89-94`、`plan/container.rs:449,557,662,765`、`plan/propagation.rs:176,277,304,327`、`plan/generation.rs:195`、`plan/upward.rs:84` |
+| 幂等判定依赖**整份快照相等** ⇒ 实例 id 必须是 (node, generation) 的**纯函数**(随机 id 会让"模糊重试"变成"多造一个实例") | `durable/async_document_store.rs:412-432` |
+| 动态 fan-out **已经**在用"id ≠ node"的形状:`ContainerChild{task_id = "<step>#item", model_node = 模板}` | `plan/container.rs:160-163`、§10「Feature B 完成」§1 |
+| action 是**节点寻址**的:`action_target` 取"能接受该动作的最新 generation" | `shell/mod.rs:1240-1279`(登记边界见 §10「Feature B 完成」§4、§11 C4/C5) |
+| 重复插入**会**被挡住,不静默覆盖:`ExecutionAlreadyExists` / `GenerationNotMonotonic` / `OperationAlreadyExists`(裸 `HashMap::insert` 确实会覆盖) | `aggregate.rs:562-566,575-585,618-620`(插入点 `:408-419,439-443`) |
+| scope 变量键已经是**实例级**:`variables: BTreeMap<(ExecutionId, String), String>` | `aggregate.rs:28` |
+
+### 1.3 投影面(读模型)
+
+| 事实 | 位置 |
+|---|---|
+| 投影**已经**产出 `procs`/`tasks`/`vars` 三张行表(`data::Proc`/`data::Task`/`data::TaskVars`),每次提交后幂等重写 | `shell/projection.rs:141/148/224/315`、构造 `runtime.rs:555-559`、调用点 `shell/mod.rs:600-618,620-640,643-657,659-686` |
+| **一个节点只有一行**:`latest: node id → ExecutionId`(最新代胜) | `shell/projection.rs:163-175` |
+| `data::Task` 字段:`id, pid, tid, node_data, kind, prev, next, parent, name, state, err, start_time, end_time, timestamp, v`;`tid` = node id,`prev/next/parent` = **node id** | `store/data/task.rs:9-26`、`shell/projection.rs:331,365-380` |
+| 行键 = `Id::id()` = **`pid + tid` 无分隔符直接拼** | `utils/id.rs:39-46` |
+| API 形状已经把实例与节点分开:`TaskInfo.id = tid`,`TaskInfo.nid = node_data.id` | `model/info.rs:189-207` |
+| `data::Op`(`ops` 集合)**生产侧无 writer/reader**,是死件(§11 L1 已排期删) | `store/store.rs:81`、§10「可靠性矩阵回归」§6 T1 |
+
+### 1.4 消息面(outbox → Message)
+
+| 事实 | 位置 |
+|---|---|
+| 主题→状态映射只此一张表(9 个主题能变消息) | `shell/message.rs:30-41` |
+| 消息的 `tid`/`nid` 都是 node id | `shell/message.rs:96-112` |
+| `type` 的来源只有 `workflow\|branch\|step`;**`"act"` 只是 payload 缺省值** | `shell/facts.rs:596-608`、`shell/message.rs:51-54` |
+| act 载荷不写 `kind`;branch 被显式抑制(忠实 legacy `Branch::init` 关 emit) | `shell/mod.rs:3120-3186`、`:3202-3205` |
+| `message.created`(Created)覆盖 uses step / 无包 step / 根 `$`(kind=workflow);branch 不写 | 写入条件 `:2605-2613` + push `:2695-2705`;实测断言 `shell/tests/mod.rs:5165-5169` |
+| `task.started` 是**空载荷**的 hop 注记(每 ExecuteTask 一次) | `shell/mod.rs:2572-2580`、模板 `:2782-2788` |
+| `task.completed` 有 4 个写入点(叶子/容器 join/fan-out/park),互斥且带序列限定 | `:2928-2950`、`:3597-3608`、`:3661-3673`、`:3688-3734` |
+| **4 个主题静默**(非 JSON 载荷):`task.propagated`、`task.reentered`、`fanout.selected`、`fanout.empty` | `plan/propagation.rs:355-370`、`plan/generation.rs:212-223`、`plan/container.rs:818-830` |
+| 根节点**双发**:既走 outbox(kind=workflow)又走 `LifecycleSink` 的 `on_start`/`on_complete`/`on_error` | `shell/mod.rs:188-199,446,690-745`、`runtime.rs:545-550`、`facts.rs:267-300` |
+
+### 1.5 投递面
+
+| 事实 | 位置 |
+|---|---|
+| **已经"马上发"**:`deliver_plan` 在提交**之前**发本 plan 的 outbox 记录;transport 确认的 receipt 随提交落成 `Delivered`;未确认才 notify driver 的重试 pass | `shell/mod.rs:907-958`、`aggregate.rs:459-472`、`deliver: Arc<Notify>` `shell/mod.rs:150-159` |
+| tick 只是重试网:`dispatch_outbox` 扫派生索引 → 认领 → 发 → 落结果 | `shell/mod.rs:4609-4750`、`runtime.rs:512-514` |
+| **outbox 不写 `messages`/`deliveries` 行**:行只由 ack 通道(`on_message` → `store_delivery`)写。没有订阅者时,"马上发出去"在存储里不留痕 | `export/channel.rs:321-336`、`runtime.rs:187-189` |
+| 语义是 at-least-once:deliver 与 commit 之间崩溃 ⇒ 重发(与 effect seam 同一窗口) | `shell/mod.rs:917-928` 注释 |
+
+### 1.6 存储键面(为什么 id 的字符集不是审美问题)
+
+| 事实 | 位置 |
+|---|---|
+| 索引键 = `{prefix}-{field}-{encoded_value}-{id}`;值段走 `encode_key_str`(只有 `[A-Za-z0-9]` 直通,**其余全转义**),**id 段裸拼** | `store/collection.rs:190-193`、`:876-893` |
+| 写明的**不变量**:`-` 是值字符集之下唯一的定界符,值段永不出现 `-`,**ids 是 alphanumeric**,且 **`.` 绝不出现在 id 里** —— 这是 `KEY_SEP_SUCC`(`.`)组边界技巧的前提 | `utils/consts.rs:58-74` |
+| 内核自己的做法就是**把 id 十六进制化**:聚合键 = `前缀 + hex(pid)`;恢复条目键 = `前缀 + hex(pid) + "." + hex(task_id) + "." + gen + "." + seq` | `durable/document_store.rs:207-226`、`core/recovery/recovery_entry.rs:28-47` |
+| 现有隐患(node id 直接当 tid):用户声明 `id: "a-b"` ⇒ 行键无分隔符拼接 + `Id::from` 按 `-` 切 ⇒ 歧义;根 `tid = "$"`(0x24 < 0x2D)也不满足"ids are alphanumeric"(今天无害) | `utils/id.rs:39-46`、`consts.rs:27` |
+
+### 1.7 模块面
+
+| 事实 | 位置 |
+|---|---|
+| `core/plan` = 10 文件 / 4436 行;`container.rs` 独占 1842 行(其中 864-1842 是 `mod tests`,约 979 行) | 见 §3.6 表 |
+| 每个文件同一形状:DTO/consts → Planner impl → 私有 helper → `*Error` → `mod tests` | 同上 |
+| `plan/mod.rs` **只有 `pub(crate) mod`,没有 re-export**;`core::plan::` 在 `scheduler/` 之外 **0 命中** | `core/plan/mod.rs`(11 行) |
+| 架构守卫只分类 **`src/scheduler` 的直接子项**(`RUNTIME_ROOT`),`PURE_MODULES = ["core"]` 是**递归**扫描 ⇒ 拆 `core/plan/` 内部对守卫星中立 | `core/architecture.rs:24-46,261-274,283` |
+
+### 1.8 `core/model/view/**` 的现状(用户追问"要不要去掉")
+
+`view` = `(Node, NodeContent, NodeData, NodeKind, NodeOutputKind)` + `NodeTree` + `build`/`visit` 两个自由函数簇。
+
+| 事实 | 位置 |
+|---|---|
+| `NodeContent` 是 `crate::model` 四个类型的 1:1 再包一层(`Workflow(Arc<Workflow>) / Branch / Step / Act`),只为统一 `id()/name()/vars()/options()/exposes()/params()` | `view/node.rs:10-15,80-151` |
+| `Node` 是 `Arc` 图:`parent/children/prev/next/chain` 全是 `Arc<RwLock<Weak<Node>>>` + 动态子节点 `nodes`;`NodeData` 是它的**扁平化 serde 形状** | `view/node.rs:41-63,65-78` |
+| **`NodeTree` 从不被序列化**(`#[derive(Default, Clone)]`,无 serde);唯一被持久化的是 `NodeData` —— `tasks.node_data` 列 | `view/node_tree.rs:15`、`view/node.rs:64` |
+| `NodeData` 的写者:`shell/process/task.rs:294`、`shell/projection.rs:349`;读者:`store/process_rows.rs:91`、`model/info.rs:191` | 同左 |
+| **每 effect hop 建一整棵树**:`shell/scope.rs:47-66`(`process.load(&spec.model)` → `tree.node(task_id)` → `create_task`),喂 `Task::params/options` | `shell/scope.rs:48-66`、`shell/effects.rs:110-143`、`shell/predicate.rs:66` |
+| **core 层没有任何策略代码用它**:`core/model/mod.rs:9` 只是 `pub(crate) mod view;`,其余 `view` 命中全在模块内部;消费者全在 shell/root/tests | `core/model/mod.rs:9`;`shell/{projection,scope,context,process/*}.rs`、`model/*`、`store/process_rows.rs` |
+| 它在两条**生产路径**上:①`model:deploy` 的校验(`Workflow::valid` → `NodeTree::load`,还顺带校验 trigger/event id)②`model:get fmt=tree` 的渲染(`Workflow::tree_output`) | `model/workflow.rs:111-121,151-155`、`model_executor.rs:36,58`、`view/node_tree.rs:44-70` |
+| 动态 act 簇(`dyn_build_act` + `append_node` + `Node::nodes`)的唯一生产闸门是 `Context::build_acts`,而 **effect seam 丢弃它的结果**(只读 data/env 差量);调用方是容器包 | `view/build.rs:215-243`、`view/node_tree.rs:97-110`、`shell/context.rs:255-271`、`shell/model.rs:122-133`、`shell/effects.rs:201-205`、`package/core/{block,parallel,sequence}.rs` |
+| **同一份 id 分配逻辑写了两遍**:`view/build.rs` 的 `prepare_workflow_ids/prepare_step_ids/prepare_branch_ids`(私有)与 `shell/model.rs:83-113` 的 `assign_ids` | 同左 |
+| 已经死掉的:`visit.rs` 全簇(只服务 `print`/`tree_output`)、`Node::from_str`(仅测试)、`NodeTree::build`+`build_workflow`(仅测试)、`build.rs:183-213` 注释掉的 `build_act`、`Workflow::print`(无调用者) | 见"删死件"列的 file:line |
+| `visit.rs` 里有**真缺陷**:每个 `Visitor` 克隆 `Box<VisitRoot>`,`visit()` 只改克隆 ⇒ `visits` 计数恒 0 ⇒ 循环 `next` 链在 `print`/`tree_output` 里无界递归 | `view/visit.rs:21-23,45-65,75-80,100-105` |
+| `crates/acts` 之外(CLI/server/channel/packages/plugins/examples)**零命中**(`acts-store` 测试里只有字面字符串 `node_data`) | — |
+
+---
+
+## 2. 决策
+
+### 2.1 已定
+
+- **第 ⑤ 条(投递)**:保留「发在提交前」(现状)。理由:延迟最低、与 effect seam 同序;代价是 at-least-once 重复窗口 —— 写进文档即可,不改代码。
+- **第 ① 条的前提**:legacy `Process`/`Task`/`Action` 不参与命名决策(迁移后移除),因此终态名字**现在就按终态取**;临时并存(`ProcessSnapshot` vs shell `Process`)可接受,层不同且守卫已在挡越层。
+- **第 ② 条的铁律**:实例 id 必须是 `(node, generation)` 的**纯函数**。理由见 §1.2 的 `AlreadyCommitted` 条目 —— 这不是风格问题,是"会不会多造一个实例"的问题。
+- **第 ③ 条**:不改"投影已存在"这件事,真实改动只有"一行一实例",且它**依赖第 ② 条**。
+
+### 2.2 待拍(4 项)
+
+**D1 —— 命名词汇:取 `{Process, Task, Operation}`(推荐),不取 `{Action, Task}`。**
+
+- `Action` 已三义(§1.1),扩成第四义会同时污染公共面 `acts::Action`、内核 `ActionKind`、ACL 动词面。
+- `Operation → Task*` 会把 `DeliverMessage/FireTrigger/RunPostCommit` 变成"Task 的一种"(§1.1)。
+- 用户心里的 task = **`Execution*`**(节点的一个实例),所以正确的改名方向是 `Execution* → Task*`,而不是 `Operation* → Task*`。
+- `*Command` 保持不动(它已经一致地表示 planner 输入,改成 `*Action` 语义是反的)。
+
+**D2 —— 实例 id 的派生与形态:`TaskId{node, generation}` + hex `wire()`。**
+
+```rust
+// 身份:实例 = 节点的第 generation 代(确定性派生,不是 nanoid)
+pub(crate) struct TaskId { node: NodeId, generation: u64 }
+
+impl TaskId {
+    // 甲(可逆):定宽 gen 前缀 + hex(node)
+    fn wire(&self) -> String { format!("{:016x}{}", self.generation, hex(self.node.as_str())) }
+    // 乙(不可逆,定长 32):摘要;sha256_hex 已在 core/commit/aggregate.rs:812
+    // fn wire(&self) -> String { sha256_hex(&[pid,0x00,node,0x00,gen_le].concat())[..32] }
+}
+```
+
+| | 形态 | 可逆 | 长度 | 前端能猜 | 反解成本 |
+|---|---|---|---|---|---|
+| 甲 | `[0-9a-f]`,定宽 16 hex 的 gen 在前 | ✅ O(1) | 16 + 2×node | 解 hex 即还原(只是不显眼) | 无(`parse()` 一处) |
+| **乙(推荐)** | 32 位 hex 摘要 | ❌ | 恒 32 | 不能 | 查 snapshot |
+
+推荐**乙**:定长 ⇒ 键不随用户起的 node 名长度膨胀(甲下 40 字符的 node 名 → 96 字符 tid,`tasks` 的 6 个索引字段 + `vars` 2 个全跟着涨);且"tid 反推 node"在内核里**本来就不需要** —— 所有 `NodeId::parse(task_id)`/`task_id == node` 的调用点手上都握着 `&OperationId`/`&ExecutionId`,把参数换成 `&TaskId` 即可(§1.4 的 `act_message_payload`/`node_kind_and_name`),最热的 `action_target`(§1.2)今天**本来就在扫** `executions.keys()`,把字符串比较换成 `wire()` 比较时复杂度不变。
+
+**⚠ 与旧建议的冲突(必须同时拍)**:一旦定了"tid 一律 hex",上一轮讨论里"gen==0 沿用裸 node id 以保证 golden 不变"就**作废** —— 同一字段混两种形态(`s2` 与 `9f3a…`)会让"前端靠猜"的问题原样回来。所以 D2 实际是:**接受全量重冻结 golden(BREAKING)** vs **保留 node id 可读性**。推荐前者(一次做完)。
+
+**D3 —— `data::Task.{prev,next,parent}` 的取值。**
+
+推荐**保持 node id**(它们描述的是模型链,legacy 的 `parent` 指 step 的 tid 但读模型另有 `node_data.id`)。若改成实例 tid,前端要 join 就得解 hex,与"别让前端猜"的目标相反。
+
+**D4 —— `core/model/view/**` 是否挪位(§3.7 (c))。**
+
+推荐**先做瘦身 (C8a/C8b),挪位与替代按 §3.7 (c)/(d) 登记**(保守:动路径与热路径的收益低于风险)。要挪就选 (c2) `crate::model::view`(方向最正 —— `view` 本来就同时服务 `crate::model::{valid,tree_output}` 与 `crate::store` 的行重建),并给架构守卫加一条"谁可以命名 `model::view`";不挪则明确接受"core 里住着一个 shell/tooling 关注点",在 §3.7 写明,不再反复讨论。
+
+---
+
+## 3. 设计
+
+### 3.1 身份模型(核心)
+
+```rust
+// core/model/task.rs(新;由 execution_graph.rs 演化)
+pub(crate) struct TaskId { node: NodeId, generation: u64 }   // 实例身份:确定性、纯函数
+pub(crate) struct TaskSnapshot {                             // 现在的 ExecutionSnapshot
+    id: TaskId,
+    parent: Option<TaskId>,
+    predecessors: Vec<TaskId>,
+    state: TaskState,          // 现在的 ExecutionState
+    revision: u64,
+}
+pub(crate) struct ProcessSnapshot {                          // 现在的 AggregateSnapshot
+    process_id: String,
+    version: ProcessVersion,
+    tasks: HashMap<TaskId, TaskSnapshot>,                    // 现在是 executions
+    variables: BTreeMap<(TaskId, String), String>,
+    operations: HashMap<OperationId, OperationRecord>,       // 不变(它是 hop)
+    outbox: HashMap<OutboxId, OutboxRecord>,                 // 不变
+}
+pub(crate) struct OperationId {                              // task_id 换类型,语义收紧
+    process_id: String,
+    task: TaskId,                                            // 现在是 task_id: String(= node id)
+    sequence: u64,                                           // 同一实例内的第几次 hop
+}
+```
+
+- **`node` 只存在于 `TaskId` 里一次**:不做"平铺 `node_id` + `task_id` 两个字段"——那会引入必须校验的冗余(`validate()` 今天已有 `OperationIdentityMismatch`/`ForeignOperation` 三条同类检查),还会让恢复条目键(§1.6)近乎翻倍。要 node 用 `id.task.node()`,要实例用 `id.task`,要线上/行键字符串用 `id.task.wire()`。
+- `generation` **继续作为节点内计数留存**(admission/reentry/`next_generation` 都要它),只是不再是身份的组成部分之一 —— 它被吸收进 `TaskId`。
+- **`NodeId` 保持自由**(可含 `#`:合成器产出 `<step>#item`,用户模型也可声明),**`wire()` 必须纯 hex**。两套字符集分开正是这次要修的:今天它们恰好是同一个字符串。
+
+**四条不变量(验收口径)**
+
+1. `wire()` 只含 `[0-9a-f]` ⇒ 满足 §1.6 的"ids are alphanumeric / `.` 绝不出现在 id 里"。
+2. `wire()` 对 `(node, generation)` **单射** ⇒ 两个实例不可能撞 id。
+3. `wire()` 是**纯函数**且不依赖进程内状态(禁 nanoid / uuidv4 / 时间戳 / 自增计数)⇒ `AlreadyCommitted` 的整快照相等、`canonical_aggregate_bytes`/`digest`、CAS 输家重 plan 全部照旧成立。
+4. 同一 `TaskId` 反复 `wire()` 稳定。
+
+**`wire()` 的落点(全部是"字符串 ↔ 结构"的边界)**
+
+| 落点 | 现在 | 改成 |
+|---|---|---|
+| 消息 `tid`/`nid` | node id(`shell/message.rs:96-112`) | `tid = wire()`,`nid = node`(明文,保持不变) |
+| action 目标 | `action_target(task_id: &str)` 字符串比较(`shell/mod.rs:1240-1279`) | 比较 `wire()`;选法**不动**(§11 C4/C5 的告诫) |
+| 行键 | `Id::new(pid, node_id)`(`projection.rs:331`) | `Id::new(pid, &wire)` |
+| 恢复条目键 | `hex(pid).hex(task_id).gen.seq`(`recovery_entry.rs:28-47`) | `hex(pid).wire.seq`(gen 已进 wire) |
+| 模型查找 | `NodeId::parse(task_id)`(`shell/mod.rs:3127`)、`node_kind_and_name(model, tid)`(`facts.rs:596`) | 直接收 `&TaskId`,查 `TaskSnapshot.node` |
+| 根查找 | `tid == "$"`(`facts.rs:23-27`、`shell/mod.rs:551-556,700-704`) | 结构化(根 = 种子的那个 TaskId),`$` 退回 `NodeId` 层面 |
+| 客户端面 | `tid` = node id(CLI 列 / `task:get` / `MessageInfo.tid` / gRPC `data`) | `tid` = `wire()`,节点用 `nid` |
+
+**持久化(必须与身份同批)**
+
+- `ACTSPV2` → **V3**:每个 `TaskId`/`OperationId.task` 落 `wire` 字符串 + node 字符串 + gen(`snapshot_codec.rs:210-230,362-368` 一带);V2 文档 **upcast**:`instance id := 该代 node 的 wire`(退化等价,行为不变)。
+- 恢复条目索引键格式随之变 ⇒ 老库遗留的旧键成**孤儿**(与 §11 L1  `ops` 孤儿同类),处理策略与那一项一起定。
+
+### 3.2 命名表(终态)
+
+| 现在 | 终态 | 备注 |
+|---|---|---|
+| `AggregateSnapshot` | `ProcessSnapshot` | 根;`Aggregate*` 全族跟改(`AggregateVersion`/`AggregateRepository`/`AggregateDocumentCodec`/`AggregateEnvelope`/`AsyncAggregateRepository`/`MemoryAggregateRepository`) |
+| `ExecutionId` | **`TaskId{node, generation}`** | 实例身份 |
+| `ExecutionSnapshot` | `TaskSnapshot` | |
+| `ExecutionState` | `TaskState` | 需把现有 `core::model::task_state::TaskState`(legacy 12 态:`None/Pending/Interrupt/Error`)改名让位(如 `NodeState`);它是 `pub(crate)`(`lib.rs:59`),不落到线上 |
+| `ExecutionGraph`/`ExecutionNode` | `TaskGraph`/`TaskNode` | |
+| `Operation*` | **不变** | 它是 hop,不是 task |
+| shell `Process`/`Task` | 不动,等删 | 与 `ProcessSnapshot` 临时并存 |
+
+### 3.3 投影(第 ③ 条)
+
+- 目标:一行 = **一个实例**。`latest: node → ExecutionId`(最新代胜)的折叠取消,`tasks` 行键 = `pid + wire()`。
+- `node_data`、`kind`、`name` 照旧从模型取;`tid = wire()`、`node_data.id = node`(API 契约:`nid` 找节点、`tid` 指实例,`model/info.rs:189-207` 已经是这个形状)。
+- D3 决定 `prev/next/parent` 的取值。
+- `ops` 是死件:删它归 §11 L1 ,**不要**在本轮顺手删(避免一个 commit 混两件事)。
+
+### 3.4 消息(第 ④ 条)
+
+现状(§1.4)已经能发 Created/Completed 三层级,缺的是纪律:
+
+1. **层级显式化**:act 载荷也写 `kind`(`shell/mod.rs:3120-3186`),`node_kind_and_name` 的返回值扩到 `workflow|branch|step|act`;对外字符串形态保持不变(它同时是 `data::Message.r#type` / channel / gRPC 的载荷),**不**改成 enum 上公共面 —— 内部加一个 `MessageLevel` 类型化即可。
+2. **静默 topic 拍一下**:`task.propagated`/`task.reentered`/`fanout.selected|empty` 保持静默(= legacy 无此事件,保持一致),或给状态。倾向**保持静默并写明**。
+3. **根节点双发**确认:outbox(kind=workflow)与 lifecycle 通道**都**保留(= legacy `on_task` + `on_proc` 的忠实复刻)。
+4. **每终态恰一条**:为每个 `ExecutionState` 终态补一条"该发什么状态"的映射测试,防止新增状态漏发(今天 `message_from_record` 的 9 项映射是唯一的真值源)。
+
+### 3.5 投递(第 ⑤ 条,决策已定)
+
+不改代码。只在文档里写明两条边界:
+
+- at-least-once:deliver 与 commit 之间崩溃会重发(`shell/mod.rs:917-928`)。
+- **无 handler 时不留行**:`messages`/`deliveries` 只由 ack 通道写(`export/channel.rs:321-336`)——"马上发出去"是内存事件,不是持久化事实。
+
+### 3.6 模块划分(第 ⑥ 条)
+
+| 文件 | 行 | 内容分段(要拆的理由) |
+|---|---|---|
+| `container.rs` | 1842 | 1-42 文档/imports · 49-138 flow/sign 事实读取 · 140-231 7 个 DTO · 233-682 `ContainerPlanner` · 684-825 8 个私有 helper · 833-861 `ContainerError` · **864-1842 tests** |
+| `propagation.rs` | 734 | 19-75 DTO · 83-377 Planner · 378-486 `JoinReadiness`+readiness helper · 487-514 Error · 515-734 tests |
+| `timeout.rs` | 568 | 42-163 marker/claim 事实 · 165-234 dispatch · 236-568 tests |
+| `generation.rs` | 614 | 17-231 Planner · 232-257 Error · 258-614 tests |
+| `upward.rs` | 253 | 28-100 Planner · 101-117 Error · 118-253 tests |
+| `branch.rs` | 152 | `PredicateValue`(全仓耦合最多,约 31 处) · DTO · Planner(无 tests,覆盖在 `core/coverage.rs`) |
+| `concurrency.rs` 95 / `execution_admission.rs` 100 / `cron.rs` 67 | ≤100 | **不动**(已够小;`cron::Cron` 是唯一 `pub` 项且被 scheduler 面 re-export) |
+
+拆法:
+
+```
+core/plan/container/{mod.rs, flow.rs, child.rs, fanout.rs, join.rs, catch_join.rs, errors.rs, tests/}
+core/plan/propagation/{mod.rs, join.rs, cascade.rs, errors.rs, tests.rs}
+core/plan/timeout/{mod.rs, marker.rs, dispatch.rs, tests.rs}
+core/plan/generation/{mod.rs, errors.rs, tests.rs}
+core/plan/upward/{mod.rs, errors.rs, tests.rs}
+core/plan/branch/{mod.rs, errors.rs}
+```
+
+**关键技巧(让调用方看不见)**:`mod.rs` 里 `pub(crate) use fanout::ContainerFanoutCommand;` 等原样 re-export ⇒ `shell/mod.rs` 里那 ~60 处 `plan::container::ContainerPlanner` **一行都不用动**;`PredicateValue` 留在 `branch/mod.rs` 保持路径 `plan::branch::PredicateValue` 不变。守卫中立(§1.7),`container.rs` 的 tests 按主题归位(不要搬到一个大 `tests.rs` 里换个地方堆)。
+
+### 3.7 `core/model/view/**` 的去留(第 ⑦ 条,用户追问)
+
+**结论:`view` 整体不可删 —— 它不是 legacy 残留,而是"读模型形状 + 导入期索引";但它内部有整簇死件和一处重复实现,该做的是"瘦身",挪位与替代另行登记。**
+
+不可删的四条(每条都有一个"只有它有"的能力,§1.8 有 file:line):
+
+1. `NodeData` 是 `tasks.node_data` 列的**持久化形状**(写 `shell/process/task.rs:294`/`shell/projection.rs:349`,读 `store/process_rows.rs:91`/`model/info.rs:191`)——删它要同时换列格式 + 老库 upcast。
+2. `NodeTree::load` 是 **`model:deploy` 的校验实现**(`Workflow::valid` → `model_executor.rs:36`),还顺带校验 trigger/event id(`view/node_tree.rs:44-70`)。规则可以搬,但搬 ≠ 删。
+3. `tree_output` 是**生产 API**(`model:get fmt=tree`,`model_executor.rs:58`)。
+4. **每 effect hop 建一整棵树**(`shell/scope.rs:47-66`)—— 它是热路径,不是旁路件。
+
+可做/可登记的四档(按风险升序):
+
+| 档 | 内容 | 风险 |
+|---|---|---|
+| **(a) 删死件** | `visit.rs` 全簇(只服务 `print`/`tree_output`,且它自带缺陷:每 `Visitor` 克隆 `Box<VisitRoot>` ⇒ 计数恒 0 ⇒ 循环 `next` 链无界递归);`Node::from_str`(仅测试);`NodeTree::build`+`build_workflow`(仅测试);`build.rs:183-213` 注释掉的 `build_act`;`Workflow::print`(无调用者)。`tree_output` 改成沿 `Node.children` 自递归(顺手修掉那个递归缺陷) | 低:纯删 + 一个渲染函数换实现(无测试 pin 其输出,只有 `Node::from_str` 的往返测试) |
+| **(b) 去重** | ①**id 分配写了两遍**:`view/build.rs` 的 `prepare_workflow_ids/prepare_step_ids/prepare_branch_ids` 与 `shell/model.rs:83-113` 的 `assign_ids` 合一 ②`projection.rs:323-350` 的 `node.kind()/name()` 换成已有的 `facts.rs:595-613 node_kind_and_name`(含根 `("workflow", model.name)`)③`NodeKind` 两份合一(`view::NodeKind` 4 变体 vs `model_graph::NodeKind` 2 变体) | 中:单一来源,行为等价 |
+| **(c) 挪位(D4,待拍)** | `view` 今天住在 `core/`,而 core 层**零策略代码**用它(只有 `core/model/mod.rs:9` 一行声明),消费者全在 shell/root/`crate::model`/`crate::store`。两个方向:(c1) 挪进 `scheduler/shell/` —— 零守卫改动,但 `crate::model → scheduler::shell` 的方向更难看(该依赖今天已存在:它就是 `crate::model → scheduler`);(c2) 挪成 crate 级 `crate::model::view`(与 `model_graph` 对称)——方向最正,但要给守卫新增一条"谁可以命名 `model::view`" | 低-中:路径 + import(+ 守卫条目) |
+| **(d) 需替代先行(登记,不本轮)** | ①`shell/scope.rs` 的"每 hop 建整棵树"换成轻量 `ModelNode` 视图(要带 `params/options/exposes/kind/name`,step 与 branch 都要)②`node_data` 列形状重定 ③`Workflow::valid`/`tree_output` 搬到 `Workflow` 上(~40 行规则)④`Task` 不再持 `Arc<Node>` ⑤**动态 act 簇与 `Context::build_acts` 的去留** —— 需先验证 effect seam 是否真的丢弃其结果(`shell/model.rs:122-133`、`shell/effects.rs:201-205`,容器包调用方 `package/core/{block,parallel,sequence}.rs`)。这条若成立,就是"每 hop 跑了但不生效"的白付开销;**验证前不动** | 高:动热路径与持久化列 |
+
+> 注意:`view` 与 `model_graph.rs` 是**两份模型图、两种用途**(`view` = 导入期 id/索引 + 读模型形状 + 打印/校验;`model_graph` = 纯策略面的 `NodeId`/`successor`),不要合成一份 —— 本节的 (b)① 只合并"重复的 id 分配",不合并这两份图。
+
+---
+
+## 4. 实施计划(提交切分)
+
+> **任务清单的唯一真值在 `KERNEL_CUTOVER_NOTES.md` §11**(已完成项已从那里删除;编号 `C1…C8c` 与本节一致)。
+> 本节保留**为什么这样切**(依赖关系、每笔内容、行为变更、回滚),不重复状态标记。
+
+```mermaid
+graph LR
+  C1["C1 拆 core/plan 目录<br/>纯搬移 · 调用方不可见"] --> C2["C2 Aggregate* → Process*<br/>纯改名"]
+  C2 --> C3["C3 Execution* → Task*<br/>纯改名 + TaskState 让位"]
+  C3 --> C4["C4 身份类型化<br/>TaskId 显式 · 输出不变"]
+  C4 --> C5["C5 wire()=hex + codec V3 + 一行一实例<br/>BREAKING · golden 重冻结"]
+  C5 --> C6["C6 消息层级显式化 + 终态映射测试"]
+  C7["C7 投递边界写进文档<br/>零代码"]
+  C8a["C8a view 删死件<br/>+ tree_output 自递归"] --> C8b["C8b view 去重<br/>assign_ids · NodeKind"]
+```
+
+| 提交 | 内容 | 行为变更 | 依赖 | 回滚 |
+|---|---|---|---|---|
+| **C1** | `core/plan/**` 拆目录 + re-export 保持路径 + tests 归位 | 无 | — | 纯搬移,revert 即回 |
+| **C2** | `Aggregate*` 全族 → `Process*` | 无 | C1(避免二次 churn) | 纯改名 |
+| **C3** | `Execution*` → `Task*` + `task_state::TaskState` 改名让位 | 无 | C2 | 纯改名 |
+| **C4** | `TaskId` 显式化 + `OperationId.task` 换类型;`wire()` 派生但**仍输出 node id** | 无(输出不变 ⇒ golden 全绿) | C3 | 可单独回 |
+| **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + D3 + golden 重冻结 + CHANGELOG BREAKING | **有(BREAKING)** | C4 | 需回滚数据(C5 之后写的聚合是 V3) |
+| **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | 有(新增/明确消息) | C5(消息的 `tid` 依赖 C5) | 独立 |
+| **C7** | §3.5 两条边界写进本文档 + `CHANGELOG` 说明 | 无 | — | — |
+| **C8a** | `view` 删死件:`visit.rs` 全簇 + `Node::from_str` + `NodeTree::build`/`build_workflow` + 注释掉的 `build_act` + `Workflow::print`;`tree_output` 改自递归 | 无(渲染实现等价,且修掉 `visit` 的循环守卫缺陷) | — | 独立可回 |
+| **C8b** | `view` 去重:`prepare_*_ids` 与 `shell/model.rs::assign_ids` 合一(§3.7 b①);投影的 `node.kind()/name()` 换 `node_kind_and_name`(b②);`NodeKind` 两份合一(b③) | 无(单一来源) | C8a | 独立可回 |
+| **C8c** | `view` 挪位(§3.7 (c),需先拍 D4)+ (d) 的登记项(含验证 effect seam 是否丢弃 `build_acts` 的结果) | 视结论 | C8b | — |
+
+**每笔的收口门禁**(AGENTS.md):`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt`;C1-C4 至少跑 `cargo test -p acts --lib --tests`;C5/C6 跑全量 per-crate 套件(`-p acts`、`-p acts-acl`、`-p acts-expr --all-features`、`-p acts-channel`、`-p acts-plugin-*`、`-p acts-package-*`、`-p acts-store --features sled,sqlite,postgres`、`-p acts-cli`、`-p acts-server`);不动 manifest 就不必跑 `cargo deny check bans`。
+
+**C5 的前置检查(动之前先做)**:C4 落地后先跑一次全量套件,把"golden 里所有 pin 住 `tid == 节点 id` 的断言"列成清单(至少 `scheduler/shell/tests/mod.rs:5270`、`kernel_*` parity、行投影口径),再逐条决定"改写 vs 保留"(§5)。
+
+**起步方式**:按 C1 起。§12 的提示词原地更新为 C1(不追加新小节),执行完停下等确认。
+
+---
+
+## 5. 风险与登记
+
+| 风险 | 证据 | 处置 |
+|---|---|---|
+| **golden 重冻结** | P0 有意冻结了 parity 为常量(§10 P0、§11 正文) | C5 必须写明"为什么解冻";D2 允许时优先选不破 golden 的形态,但 hex 与"gen==0 裸 node id"互斥(§2.2) |
+| **外部面 BREAKING** | `tid` 出现在 CLI 列 / `task:get` / `MessageInfo.tid` / gRPC `data`(`agent://TaskIdIdentity` 第 3 节) | CHANGELOG 记 BREAKING;C6 顺手把"`nid` 找节点"写进契约 |
+| **键长 / 存储字节** | `tasks` 6 个索引字段 + `vars` 2 个,每条索引键含 id 段;行键 `pid+tid`(`collection.rs:190`、`utils/id.rs:39`) | 选乙(定长 32);C5 前用 §10 P6-1 的探针量一次字节增量 |
+| **旧库兼容** | codec `ACTSPV2` + 恢复条目键 `hex(task_id).gen.seq` | codec V3 + V2 upcast(退化等价);孤儿键与 §11 L1 一起定 |
+| **根 `$` 字符集** | `$` = 0x24 < 0x2D,违反"ids are alphanumeric"(今天无害) | D2 选"一律 hex" ⇒ 一并修掉;`TASK_ROOT_TID` 退回 `NodeId` 层面 |
+| **两套字符集混淆** | node id 可含 `#`(合成器),tid 必须纯 hex | §3.1:分开定义;`NodeId` 不新增限制 |
+| **`view` 换渲染实现** | `tree_output` 是生产 API(`model_executor.rs:58` = `model:get fmt=tree`),且无测试 pin 其输出(只有 `Node::from_str` 的往返测试) ⇒ 回归不会被测试抓住 | C8a 逐字保留输出(同一 DFS 顺序、同一缩进),并在 `model:get fmt=tree` 上做一次 smoke |
+
+**明确不做(本轮 out of scope)**
+
+- 不改 `action_target` 的选法(§11 C4/C5 的告诫)。
+- 不做聚合文档回收/归档(§11 L2)。
+- 不删 `ops`、不删读模型行表(§11 L1 、§10「读模型行表去留」)。
+- 不动 `timeout` 的 `__timeouts` 分支 node id(那是模型语义,且走变量值不走键)。
+- 不改投递顺序(§2.1)。

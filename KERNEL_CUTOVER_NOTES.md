@@ -531,55 +531,7 @@ P3 之后由编译器证明零调用。
 
 ---
 
-## 8. 提示词(可整段复制给执行 agent)
-
-```
-你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的迁移执行 agent。
-
-# 任务
-按 KERNEL_CUTOVER_NOTES.md 的阶段划分,把确定性 kernel 扶正为唯一引擎并删掉 legacy。
-严格按 P0 → P1 → P2 → P3 → P4 → P5 → P6 推进,不得跳序,不得合并阶段到一笔提交。
-
-# 先读(按序,不要跳)
-1. KERNEL_CUTOVER_NOTES.md        —— 本轮计划与已核实事实(唯一权威)
-2. KERNEL_MIGRATION_NOTES.md      —— 第一轮语义结论(折叠口径、join/abort/error/catch/timeout 的行为定义)
-3. crates/acts/src/runtime/mod.rs 及其 architecture.rs —— 现行分层与守卫
-4. crates/acts/src/runtime/shell/mod.rs 头部注释 —— 三跳契约(ExecuteTask/ApplyAction/PropagateTask)
-5. AGENTS.md —— 门禁命令
-
-# 每阶段收口(必须全绿才算完成)
-cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
-cargo fmt
-cargo test -p acts --lib --tests
-P3 之前,§1.8 列出的红是允许的既有红,不允许出现新的红;
-P3 之后这些红必须全部消失,若仍在 = 真回归,必须定位。
-P4 起再加 cargo test -p acts-store / -p acts-server。
-
-# 硬性约束
-- 不要删 runtime/core/architecture.rs 的守卫,只改它的扫描范围与规则档位(判据是 core/ 目录 + RUNTIME_ROOT 清单)。
-- 不要在 P3 之前删除 cache/scheduler 的任何代码。
-- P3 必须同时删除 restore/start_parked/resume_from_queue 这条路径(它会把投影写出的 state=None 行
-  当成 parked 进程启动)。
-- P1 按 P1a(搬移)→ P1b(收敛 kernel 对外面)→ P1c(收敛 export 方法定义)→ P1d(trait 隔离)
-  四笔提交推进,见 §3.1/§3.2/§3.3 的清单;P1b 之前不得批量改写 crate::runtime::X 调用点。
-- 收敛 export/ 时:只用具体 Arc<Store>,不要为 executor 造 store 抽象 trait;
-  principal.check(...) 的显式前导保留。
-- P4 的目标形态见 §6:cache/ 模块整体删除并有三个继承者(store/ 行操作、store/writebehind、Runtime 自持 Store);
-  无头 scope 必须挂 no-op 持久化 sink,不得让 $set_step_value 经 writer 写行(§6.5)。
-- P3 之前必须做 §9.5 的 A/B 性能基线;若 kernel 模式的 hop 吞吐 < legacy 的 1/2,
-  先把 P3.5(§9.3.1 effect 不阻塞 driver、§9.3.2 合并 Claim+PrepareCommit)做完再继续删代码。
-- 包 API 的窄 trait(ActPackageRuntime)是跨 crate 公共 API 变更,单独一笔提交并迁移 packages/** 与 examples/**。
-- 一次提交只做一个切面;搬移类提交不得夹带行为变更。
-- 遇到与 KERNEL_CUTOVER_NOTES.md 记载矛盾的事实,先实测确认,再更新该文件,然后继续。
-- 禁止用 #[allow(...)] 压 lint;禁止留 TODO/stub/占位实现。
-- 串行构建(本机 Defender 会锁 rlib)。
-
-# 交付
-每完成一个阶段,在 KERNEL_CUTOVER_NOTES.md 的对应阶段下追加简短记录(改了什么、file:line、
-验收结果、发现的语义差异),格式照 KERNEL_MIGRATION_NOTES.md 的「已完成」小节。
-```
-
----
+> 原 §8「提示词」已删(它服务已完成且路径已过期的 P0-P5;约束仍在 §7)。**提示词只在 §12 原地维护**(编号不重排,以免打断 §10 记录里的 `§9.x` 交叉引用)。
 
 ## 9. 性能:切换的代价与基线
 
@@ -1874,7 +1826,7 @@ src/scheduler/
 ### Feature B 完成(2026-10-15):容器包的内联 acts 成为内核子执行
 
 **目标**:`acts.core.block{ mode, acts }` / `acts.core.sequence{ in, acts }` / `acts.core.parallel{ in, acts }` 的内联 acts 变成内核**子执行** ——
-`examples/message`(block 里的两条 msg)与 `examples/approve`(pm/gm 审批)按模型本意运行。原任务书与"原设计"见 §11 的同名小节(已在原文处标注完成)。
+`examples/message`(block 里的两条 msg)与 `examples/approve`(pm/gm 审批)按模型本意运行。原任务书与"原设计"所在的 §11 小节已随本轮合并重写(结论留在此处);本节即该轮的完整记录。
 
 **1) 落地的机制(三处)**
 
@@ -1993,88 +1945,165 @@ src/scheduler/
 
 **验收**:`cargo test -p acts --lib --tests` = **870 passed / 0 failed**;`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = EXIT 0;`cargo fmt --check` 干净。
 
+### 设计成文(2026-10-15):scheduler 重构设计(7 条思路 + 身份模型)
+
+用户提出 7 条重构思路(聚合命名 / task 身份 / 投影出行 / outbox 消息 / 立即投递 / `core/plan` 拆目录 / `core/model/view` 去留;末条为追加)。**只写设计、不动生产代码**,成文于
+`KERNEL_REFACTOR_DESIGN.md`。逐条对着代码核完后,与直觉不同的几点:
+
+- **③ 投影出行与 ⑤ 立即投递已经实现**:投影早已幂等产出 `procs`/`tasks`/`vars` 三张行表(`shell/projection.rs:141/148/224/315`,构造在
+  `runtime.rs:555-559`),`deliver_plan` 早已在提交**之前**发本 plan 的 outbox 并把 receipt 随提交落成 `Delivered`(`shell/mod.rs:907-958`)。
+  ③ 的真实改动只有"**一行一实例**"(今天 `latest: node → ExecutionId` 最新代胜,一个节点只有一行),而它依赖 ②;⑤ 是**决策**(已定:保留现状,
+  只把 at-least-once 窗口与"无 handler 时 `messages`/`deliveries` 不落行"写进文档)。
+- **① 的前提有偏差**:仓库里没有 `Aggregate` 类型(`grep` = 0),`AggregateSnapshot` 就是聚合根;`Process`/`Task` 已被 legacy 内存视图占用
+  (`shell/process/process.rs:20`)。`Operation` 是**一次持久化 hop**(`OperationKind` 含 `DeliverMessage`/`FireTrigger`/`RunPostCommit`/`ApplyAction`),
+  不该改叫 `Task*`;真正的实例是 `Execution*`。`Action` 已三义(线上事件 / 内核 `ActionKind` / ACL 动词面),不宜再扩。
+- **② 是唯一动持久化格式的改动**,且形态被 `durable/async_document_store.rs:412-432` 卡死:幂等判定靠**整份快照相等** ⇒ 实例 id 必须是
+  `(node, generation)` 的**纯函数**(随机 `shortid` 会让"模糊重试"变成"多造一个实例";legacy 用随机 tid 没事,是因为 legacy 没有聚合 + CAS + 重放)。
+- **⑥ 零风险前置**:`core/plan` 10 文件 4436 行,`container.rs` 独占 1842 行(其中 ~979 行是 `mod tests`);`plan/mod.rs` 无 re-export 且
+  `core::plan::` 在 `scheduler/` 之外 0 命中 ⇒ 拆成同名目录 + re-export 后**调用方一行不用改**;守卫只分类 `src/scheduler` 的直接子项,对拆目录中立。
+- **⑦(`core/model/view/**`,用户追加)**:**整体不可删**,它不是 legacy 残留 —— ①`NodeData` 就是 `tasks.node_data` 列的持久化形状(写 `shell/process/task.rs:294`/`shell/projection.rs:349`,
+  读 `store/process_rows.rs:91`/`model/info.rs:191`)②`NodeTree::load` 就是 `model:deploy` 的校验实现(`Workflow::valid` → `model_executor.rs:36`,还校验 trigger/event id)
+  ③`Workflow::tree_output` 是生产 API(`model:get fmt=tree`,`model_executor.rs:58`)④**每 effect hop 建一整棵树**(`shell/scope.rs:47-66`)。但可瘦身:`visit.rs` 整簇 + `Node::from_str` +
+  `NodeTree::build`/`build_workflow` + `build.rs:183-213` 注释掉的 `build_act` + `Workflow::print` 全是死件(且 `visit.rs:45-65` 有**循环守卫缺陷**:每 `Visitor` 克隆 `Box<VisitRoot>` ⇒ 计数恒 0 ⇒
+  循环 `next` 链无界递归);id 分配(`view/build.rs` 的 `prepare_*_ids` 与 `shell/model.rs:83-113` 的 `assign_ids`)写了两遍。另**登记待验证**:动态 act 簇的唯一生产闸门 `Context::build_acts`
+  的结果可能被 effect seam 丢弃(`shell/model.rs:122-133`、`shell/effects.rs:201-205`),若成立即"每 hop 跑了但不生效"的白付开销。→ 设计 §3.7 + 计划 C8a/C8b/C8c。
+- **字符集不是审美**:索引键的 `id` 段**裸拼**(`store/collection.rs:190-193`),而 `utils/consts.rs:58-74` 写明"**ids are alphanumeric**、`.` 绝不出现
+  在 id 里"是 `KEY_SEP_SUCC` 组边界技巧的前提;内核自己处理同类问题的做法就是 hex(`document_store.rs:207-226`、`recovery_entry.rs:28-47`)。
+  因此讨论里最初提的 `{node}#{gen}` 形态**被否掉**(`#` 不在转义覆盖内且违反该不变量),改为 `TaskId{node, generation}` + 纯 hex `wire()`。
+
+**待拍 4 项**(设计文档 §2.2):D1 命名词汇(`{Process,Task,Operation}` 推荐)、D2 实例 id 形态(甲 可逆定宽 hex / **乙 不可逆定长摘要**;注意"一律 hex"
+与"gen==0 沿用裸 node id 以保 golden"**互斥**)、D3 行内 `prev/next/parent` 取值(推荐保持 node id)、D4 `view` 是否挪出 `core`(推荐先瘦身、挪位登记)。**任务清单与逐笔门禁**见 `KERNEL_CUTOVER_NOTES.md` §11(主线段 C1-C8c = 设计文档 §4 的切分);
+C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另有 C8a/C8b。
+
+### C1 完成(2026-10-15):`core/plan/**` 拆成同名目录(纯搬移,零行为变更)
+
+**做了什么**:6 个文件按 `KERNEL_REFACTOR_DESIGN.md` §3.6 的分段拆成同名目录(tests 按主题归位);
+`concurrency.rs`(95)/`cron.rs`(67)/`execution_admission.rs`(100)/`plan/mod.rs`(11)**未动**。
+
+**目录树前后**(`crates/acts/src/scheduler/core/plan/`,行数为 `wc -l`):
+
+| 前 | 后 |
+|---|---|
+| `branch.rs` 152 | `branch/{mod,errors}.rs` 144+13 |
+| `container.rs` 1842 | `container/{mod,flow,child,fanout,join,catch_join,errors}.rs` 65+95+41+420+96+142+32 · `container/tests/{mod,fanout,join,flow,catch_join}.rs` 102+300+206+39+335 |
+| `generation.rs` 614 | `generation/{mod,errors,tests}.rs` 235+28+354 |
+| `propagation.rs` 734 | `propagation/{mod,cascade,join,errors,tests}.rs` 94+346+56+30+215 |
+| `timeout.rs` 568 | `timeout/{mod,marker,dispatch,tests}.rs` 39+126+79+327 |
+| `upward.rs` 253 | `upward/{mod,errors,tests}.rs` 104+19+132 |
+| 合计 4436 | 合计 4487(**净 +51** = 20 个 `use super::*;` + 6 个 `mod.rs` 的 `mod`/re-export 行 − rustfmt 去掉的尾随空行) |
+
+**做法(三条,都可复核)**
+
+1. **按行范围逐段搬运**:先按 §3.6 的分段把每个文件按行划段,写脚本断言"所有段 + 有意吸收的行(属性行、`mod tests {`)
+   **恰好平铺 1..N,无缺无重**",再逐段原样落到新文件。段内容除"整体减 4 空格缩进"(tests 从 `mod tests { }` 内提到模块顶层)
+   外**逐字不变**;减缩进后 rustfmt 只在少数表达式上重排了换行(语义不变)。
+2. **子模块 `use super::*;` + `mod.rs` glob re-export**:与 `shell/mod.rs` 既有约定一致(子模块看得见父模块的作用域与私有项);
+   `mod.rs` 里 `pub(crate) use <child>::*;` 把每个子模块的整个 `pub(crate)` 面**原样**抬回模块路径
+   (先用逐个具名 re-export 试过:`TimeoutDispatch`/`has_live_child`/`ExecutionFlow`/`execution_flow` 这类
+   只被 tests 命名、或根本不被命名的项会被 `unused_imports` 打红 ⇒ 改用 glob,既保面又零 warning)。
+3. **tests 归位**:`container` 的 979 行 tests 按主题拆 4 个文件(`fanout`/`join`/`flow`/`catch_join`)+ `tests/mod.rs` 放共享夹具;
+   其余模块的 tests 收进 `<mod>/tests.rs`。
+
+**验收(逐条命令与结果)**
+
+| 检查 | 结果 |
+|---|---|
+| `core/plan/**` 里的 `fn ` 清单(含 fixtures/helper/`#[test]`) | 112 → 112,**集合完全相同**;`#[test]` 49 → 49 |
+| `plan::<mod>::<name>` 路径集合(全仓 grep;搬前取 HEAD 的 `plan/*.rs` + 工作区其余文件) | **43 → 43,集合完全相同** |
+| `pub(crate)` 项可达性(逐模块比对 HEAD 的 `pub(crate) fn/struct/enum/const`) | branch 7 / upward 3 / generation 3 / timeout 12 / propagation 7 / container 19 项**一个不少**,且无新增 |
+| 搬移纯度(把 HEAD 按同一分段重新展开成"未格式化的落盘内容",与当前文件逐字比) | 23/29 个非 `mod.rs` 文件**忽略空白与逗号后完全相同**;6 个 `mod.rs` 的差异**只有** `mod`/re-export 那几行(已逐行核对) |
+| 调用点 | `git diff HEAD -- crates/acts/src` 里除 `core/plan/**` 外**没有一行 `plan::`**;`shell/mod.rs`、`shell/{planning,facts,predicate,model}.rs`、`core/commit/aggregate.rs`、`runtime.rs`、`scheduler/mod.rs`、`core/coverage.rs` 都**不在本笔 diff 里** |
+| `git diff --cached -M --stat` | 33 文件,**+3728 / −3677**(净 +51 = 上表的 glue);`branch.rs => branch/mod.rs`、`propagation.rs => propagation/cascade.rs` 被认成 rename(1→N 的拆分低于 git 50% 相似度阈值,只能显示成 delete+add —— 这正是"纯搬移"要用行数/内容校验而不是 git 启发式来证的原因) |
+| `cargo test -p acts --lib --tests` | **870 passed / 0 failed / 1 ignored**(143.74 s);本笔不增删任何用例,所以与基线同数(C1 之后的新基线) |
+| `cargo clippy --all-targets --all-features --workspace --locked` | 全 workspace **仅 1 条 warning**,见下(与本笔无关) |
+| `rustfmt --edition 2024 --check`(29 个新文件) | 干净 |
+
+**本笔无关的两条既有红(工作区里未提交的性能探针 WIP,不是 C1 造成)**
+
+- `crates/acts/src/scheduler/shell/mod.rs:4764` 的 `pub(crate) const HOPS: usize = 0;`(`#[cfg(not(test))] mod hop_trace` 的桩)在非 test 构建里 dead
+  ⇒ `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 101**,全 workspace 只此一条。
+  证据:`hop_trace` 在 HEAD 的 `shell/mod.rs` 出现 **0** 次、在工作区出现 **23** 次,全在那份未提交 diff 里;本笔对该文件 **0 行改动**。
+- `cargo fmt --all --check` 只报 `shell/mod.rs:4723`(同一份 WIP 新加的 `NAMES` 数组);C1 的 29 个文件已 rustfmt 干净。
+- 处置:本笔**没有**动这两处(不碰别人的在飞改动),也**没有**新增任何 `#[allow(...)]`。要全绿,先落那份探针 WIP 或给它一个 `#[expect(dead_code)]`。
+
+**与设计文档/提示词的两处口径差异(登记,不改)**
+
+- §12 提示词的"不动"清单写作 `concurrency.rs`(95)/`execution_admission.rs`(100)/`cron.rs`(67)/**`upward.rs`(253)** 不动,
+  但 `KERNEL_REFACTOR_DESIGN.md` §3.6 的切分表把 `upward.rs` 列为**要拆**(28-100 Planner · 101-117 Error · 118-253 tests),
+  目标文件树也给了 `core/plan/upward/{mod.rs,errors.rs,tests.rs}`。**按 §3.6 与目标树执行**(upward 已拆);
+  提示词那半句按笔误处理(§3.6 的"≤100 不动"行只列了 3 个文件)。
+- §3.6 的 `container.rs` 分段(`233-682 ContainerPlanner`)没写清 impl 的去处。本笔按目标文件名把三个方法分落到
+  `fanout.rs`(`plan_fanout` + `empty_container_plan` + 8 个私有 helper)、`join.rs`(`plan_join`)、`catch_join.rs`(`plan_catch_join`),
+  `mod.rs` 只留 `ContainerPlanner` 声明 —— 三个 `impl ContainerPlanner` 块分居三文件合法(inherent impl 只需同 crate),
+  调用方路径与行为都不受影响。
+
 ---
 
-## 11. 任务(P6 + P7 合并,按序;清单在提示词**外**)
+## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
 > 每执行完一项:**原地更新下一节的提示词**(改成下一项)+ 只改本节的状态标记,**不追加新提示词、不新增小节**。
 >
-> **状态(2026-10-15)**:第 1 项已完成两笔 —— §5m(提交把快照交回)与 §10「P6-1」(hop 自己的 close 并进
-> effect 提交,归一后 **≈ −25…30%/hop**,无持久化格式变更);(ii) 按聚合版本缓存派生**实测收益不足、已放弃**
-> (§10「P6-1」)。**下一步 = 第 1 项 b 的 (iv):给 engine 形状那 ~1 ms/hop 做分阶段画像**(插桩已在工作区、
-> 未提交,见下一节)。**第 2–7 项未做。**
+> **本节是唯一任务清单。** 设计细节(事实表、命名表、身份模型、切分理由、风险)在 `KERNEL_REFACTOR_DESIGN.md`;
+> 本节只记"做什么、顺序、状态、验收"。**已完成项已从本节删除** —— §1.a(合并 Claim+PrepareCommit)、§1.b 的两笔 codec 削减
+> (§5m、§10「P6-1」)、§1.b(ii)(按聚合版本缓存;实测收益不足、已放弃)、原第 7a 项(节点寻址;已并入 C4/C5),
+> 逐笔记录见 §10,本节不复述历史。
+>
+> **执行顺序(2026-10-15 用户裁决)**:先按 `KERNEL_REFACTOR_DESIGN.md` 重构 scheduler(**第一波 = C1→C8c,严格按序**),
+> 再做其他工作(**第二波 = P1 性能画像 + L\* 遗留,可与彼此交错**)。
+>
+> **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
+> `P*` = 性能项、`L*` = 其他遗留项(属第二波)。
 
-1. **P4c 性能收口(强制,已有基线)**:30 步纯 step 线性 workflow。
-   **基线一律用 release(§10 §5n):93 hops / 0.684 s = 7.4 ms/hop ≈ 136 hop/s**(内存 store)。
-   ~~debug 的 11.2 hop/s 与 §9.5 legacy 2778–5099 hop/s 的对比~~ **作废**:debug 下两次 SHA-256
-   (`envelope::seal`/`decode`)占整 run ~65%,那是构建产物的假差距;release 下真实差距 ~20–37×。
-   按序做,每项独立提交并在 §10 记录复测值:
-   a. ~~**§9.3.2 合并 Claim + PrepareCommit**~~ —— **已做,实测无收益**(§10 §5g):`ClaimAndPrepare` 一个事件
-      取代两次 CAS(普通 hop + `apply_action`),恢复语义/持久化格式不变,但探针 3 次为 11.0/10.5/12.3 hop/s
-      (改前 11.2),在噪声内。**别再指望这一项的 2x,直接从 §9.3.4 下手。**
-   b. **性能主项(画像已量,§5h/§5i),按此顺序做**:
-      ①**派生索引 + 投影行的写合并/懒写**(§5i:每 hop 42.6 次写里 37 次是它们;不改持久化格式,收益最大)。
-      **已做第一笔(§5j)**:投影行"内容未变则不写" —— 写次数 42.6→35.6/hop、字节 16.0→14.8 MB,`procs` 家族
-      614→14 次。**剩余**:`tasks` 家族 10.9 写/hop 里 ~9 是**行自己的索引键**,`kernel/indexes` 18.6 写/hop 是
-      recovery/outbox 派生索引 —— 这两块要合并索引键或懒写索引;**但 §10「P6-1」的微基准说明这块对 hop 吞吐无关**
-      (`recovery_entries`、两个索引文档每 hop 各 < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义,别再当吞吐项;
-      ②**投影降频**(§9.3.3:proc 行那 6.6 次/hop 已被 ① 的"未变不写"消掉,剩下的是任务行自身的状态迁移);
-      ③**减字节**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合 → 拆分文档/append-only 操作日志,属**持久化格式变更**,
-      必须单独立项:迁移 + golden fingerprint 更新)。
-      **读 §10 §5l/§5n/§5o/「P6-1」再动手**:store 只占 hop 时间的 **1.4%**,瓶颈是**每 hop 的 O(run 长度) CPU**
-      (run 总成本 O(n²)),其中整包编解码是大头。真正该做的顺序:
-      **(i) 砍整包编解码次数**:
-      - **已做第一笔(§5m)**:提交把快照交回,`load2`/`load3` 归零(每 hop 少 2 次整包解码,账内 CPU −14.4%);
-      - **已做第二笔(§10「P6-1」,本次)**:hop 自己的 `Complete`(close)并进 effect 提交 —— 每 hop 从 **4 decode + 3 encode**
-        降到 **3 + 2**,无持久化格式变更。实测(同探针、`--test-threads=1`、改前用 `git stash` 在同一棵树上复测):
-        lean 形状 **3.48 → 1.79 ms/hop**、engine 形状 **4.51 → 4.16 ms/hop**;两轮 per-call 微基准差 ~1.3×(环境比),
-        **归一后两个形状都是 ≈ −25…30%/hop**。engine 形状自身噪声 ±15%,单看它测不出,别再拿它的 raw 值当基线。
-      - **剩余①:少一次 load**。hop 起始的 `load1` **不能直接删**:`DispatchTimeout` 的预检必须在 claim **之前**判 idle
-        (否则每 tick 的 idle timer 从 0 次提交变成 2 次),`place_run` 也用它。真要省就得把 claim 提前、预检挪到 claim 之后。
-      - **剩余②:拆文档 / append-only 操作日志**(§9.3.4②)—— 这才是"每次编解码的常数 + 写字节"的正解,
-        **必须单独立项**(V2 → 新版本:迁移 + golden fingerprint 更新)。
-      **(ii) 按聚合版本缓存 per-hop 全量派生**(model JSON、execution_graph、validate):§10「P6-1」**实测收益不足,建议跳过** ——
-      `execution_graph` 72–108 µs/次(每 hop 3–6%)、`model_of` 42–56 µs/次(只在真实 workflow 形状存在;`ProcessSpec::linear`
-      的聚合**根本没有 model 变量**,所以 old 探针测不到它),为这点收益在 shell 里加有状态缓存 + 淘汰不值当。
-      **(iii) 拆文档/append-only**:与 (i)-② 同一件事,已并入 (i);当前每 hop 的整包工作量 = 3 decode + 2 encode 一个随 run 增长的聚合。
-      **(iv) 新发现(§10「P6-1」):engine 形状里还有 ~1 ms/hop 既不是 codec 也不是 store** —— 那是 hop 的 plan/记账 CPU
-      (计划构造、消息 payload、`place_run`/`deliver_plan` 等)。**下一步该给它做画像**(用 §10「P6-1」的 engine 探针形状 +
-      `#[cfg(test)]` 分阶段计时),再决定动哪一块;这比 (ii) 更值得做。
-   c. **§9.3.3 投影降频或 wake 驱动**:现在每跳都重投影行;先量投影占每 hop 的比例,再降频或改成按需,
-      注意别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f)。**未动**:§10「P6-1」的 engine 探针里行投影是开着的,
-      但它的耗时还没从那 ~1 ms 里分解出来(见 (iv))。
-   验收:hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿(§10「P6-1」删了 2 条 pin 旧 close 边界的 cell、新增 1 条);
-   §10 记录前后对比数值与探针形状(**本轮的探针与数值见 §10「P6-1」,探针代码已删,可按那里的形状重建**)。
-   (**Feature B 轮未动性能**;另注:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读,
-   即"每次读解码整包 + 两个派生索引、每次提交整包重编码"是主因 —— §10「Feature B 完成」前一段与 §9.3.4。)
-2. **唯一保留的语义边界复核**:`sealed` 快照不进读模型(vars 行 sealed 恒空、聚合不存 sealed)。
-   要么实现(聚合持久化 sealed 或投影携带),要么在 §10/CHANGELOG 明确写成已知边界(现状)。
-3. **收口门禁(全 workspace)**:clippy / fmt / `cargo test -p acts --lib --tests` / `-p acts-store`
-   (sled,sqlite,postgres)/ `-p acts-server` / `-p acts-plugin-*` / `-p acts-package-*` / `-p acts-cli`
-   (按 AGENTS.md);不动 manifest 就不必跑 `cargo deny check bans`。`acts-server` 若只有"全部 target 一条命令"
-   会红,逐 target 跑并在 §10 记录该环境现象。
-4. **文档**:`lib.rs` 顶部注释、`CHANGELOG.md`(配置开关已删:`kernel_engine` 不存在;`cache_cap` 语义 =
-   在飞 run 数上限)、`README` 里可能残留的 legacy 说法;§10 追加本轮记录,并把本节提示词更新为 P7(如仍需)。
-5. **删死掉的 `ops` 族(BREAKING,见 §10「可靠性矩阵回归」§6 T1)**:内核 outbox 记录在聚合里,`ops` 集合生产侧无
-   writer/reader,仅剩 `remove_proc_rows` 的家族清单 + 单测借用。删 `Store::ops()`/`StoreIden::Ops`/`store/data/op.rs`
-   与那一行,单测示例集合换成 messages/deliveries;先决定老库遗留 `ops-*` 孤儿行的处理(接受/保留只删不建/一次性清理),
-   并记 CHANGELOG BREAKING。验收:`grep` 生产侧为 0 + 全量门禁绿。
-6. **聚合文档的回收/归档(见 §10「可靠性矩阵回归」§6 T2)**:`kernel/aggregates/<hex pid>` 现在无删除路径,
-   sweeper 只删行 + workdir,导致 pid 终身不可复用且聚合无界增长(§5i:字节大头)。先定三件事:保留策略(静默 N 时间 /
-   运维归档 / 容量触发)、pid 复用语义(若要保留"pid 永久唯一"就另存墓碑/pid-epoch)、历史取舍(行回收后聚合是唯一记录)。
-   实现:新增 `AsyncAggregateRepository::remove(pid, expected_version)`,一个守卫批删聚合 + 两个索引;GC 只取
-   "`settled` 且 `operations` 为空 且 行已回收"的 run,崩溃幂等。验收见 §10 T2。
-7. **Feature B 轮新登记的两条边界,逐条决定(实现或写成永久边界)**(逐条证据见 §10「Feature B 完成」§4):
-   a. **节点寻址的 action 无法区分同一节点的多个实例**:action/message 只带 `tid` = 模型节点 id,而一个 run 可以让同一节点同时有
-      多个 generation(参数式 fan-out 的逐项实例、`sequence{in}` 预建的下一项),客户端只能按投递顺序逐条作答;乱序作答或"给不同实例
-      不同的 options"表达不了。要做就两条路之一:**运行期按 `in` 扩展模型出逐项副本**(每项独立 node id = legacy 的 fresh id 语义,
-      但要处理模型扩展 + `__auto` 追加 + `declaration_successor` 的实例内链),或 **让 message/action 带实例号**(动 message/action
-      的身份面)。两条都属**身份/持久化模型改动** —— 先写设计再动手,别顺手改 `action_target` 的选法。
-   b. **逐项绑定的上浮**:`index`/`value` 是模板 execution 自己的 scope 变量(作用域链继承,`${{ value }}` 因此可用),而 completed
-      execution 的非引擎变量会折进父作用域 —— 于是它们出现在祖先作用域与 run 的 outputs(`examples/approve` 的 outputs 里就有)。
-      legacy 把这两者放在 act 的 **options**(不是 task data),没有这一路上浮。要贴近 legacy 就得给逐项绑定一个不参与折叠的载体
-      (或者反过来:接受并在 `已知边界` 写明"逐项绑定会成为 outputs 的一部分")。
+### A. 第一波:重构主线(设计 C1-C8c,按序)
+
+> 顺序/依赖图/每笔内容/回滚见 `KERNEL_REFACTOR_DESIGN.md` §4;每笔的收口门禁见本节 §11.C。**严格按序,不跳笔、不合笔。**
+
+| 编号 | 任务 | 阻塞/前置 | 状态 |
+|---|---|---|---|
+| **C1** | 拆 `core/plan/**` 成同名目录 + `pub(crate) use` 保路径 + tests 归位(纯搬移,调用方一行不改) | — | **已做(§10「C1 完成」)** |
+| **C2** | `Aggregate*` 全族 → `Process*`(纯改名) | C1;**D1 需先拍** | 未做 |
+| **C3** | `Execution*` → `Task*` + `task_state::TaskState` 改名让位(纯改名) | C2 | 未做 |
+| **C4** | `TaskId` 显式化 + `OperationId.task` 换类型(`wire()` 派生,输出仍是 node id ⇒ golden 全绿) | C3 | 未做(**承载原 §7a**) |
+| **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG BREAKING | C4;**D2/D3 必须先拍** | 未做(**BREAKING**) |
+| **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | 未做 |
+| **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | 未做 |
+| **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | 未做 |
+| **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_kind_and_name` 替投影、`NodeKind` 合一) | C8a | 未做 |
+| **C8c** | `view` 挪位(§3.7 c)+ §3.7(d) 的登记项 —— **先验证 effect seam 是否丢弃 `Context::build_acts` 的结果**(若成立即"每 hop 跑了但不生效"的白付开销) | C8b;**D4 需先拍** | 未做(登记待验证) |
+
+**与第二波的关系**:C1/C8a/C8b 是纯搬移/删死件,与性能项零冲突;从 C4 起动的是 `core/model` + `commit/aggregate` + `shell/mod.rs`,
+与性能探针同一批文件 ⇒ **性能项一律排在 C8c 之后**(第二波),不在第一波中途插入。
+
+### B. 第二波:性能与遗留(可与彼此交错)
+
+**P1(原 §1.b(iv),本清单此前的 A1)** —— 给 engine 形状那 ~1 ms/hop 的 plan/记账 CPU 做分阶段画像(**只量不改代码**;
+用 §10「P6-1」的 engine 探针形状 + `#[cfg(test)]` 分阶段计时,插桩在工作区、未提交)。
+
+- 验收:把 ~1 ms 分解到具体块(计划构造、消息 payload、`place_run`/`deliver_plan`、行投影),据此决定下一块动谁;完成后原地更新 §12 的提示词。
+- 性能口径(**release**,§10 §5n):93 hops / 0.684 s = 7.4 ms/hop ≈ 136 hop/s(内存 store)。debug 的 11.2 hop/s 与 §9.5 legacy
+  2778–5099 hop/s 的对比**作废**(debug 下两次 SHA-256 占整 run ~65%,是构建产物的假差距;release 下真实差距 ~20–37×)。
+- 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
+  (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
+
+| 编号 | 任务 | 来源 | 状态 / 验收 |
+|---|---|---|---|
+| **L1** | 删死掉的 `ops` 族(**BREAKING**):`Store::ops()`/`StoreIden::Ops`/`store/data/op.rs` + `remove_proc_rows` 家族清单那一行;先决定老库 `ops-*` 孤儿行的处理(接受 / 保留只删不建 / 一次性清理) | 原 §5 | 未做。验收:生产侧 `grep` 为 0 + 全量门禁绿 + CHANGELOG BREAKING |
+| **L2** | 聚合文档回收/归档:先定三件事(保留策略 / pid 复用语义 / 历史取舍),再实现 `AsyncAggregateRepository::remove(pid, expected_version)`(守卫批删聚合 + 两索引;GC 只取"`settled` 且 `operations` 为空 且 行已回收"的 run,崩溃幂等) | 原 §6 | 未做。验收见 §10「可靠性矩阵回归」§6 T2 |
+| **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | 未做(现状 = 写成边界) |
+| **L4** | 逐项绑定 `index`/`value` 的上浮:给一个不参与折叠的载体,或写成永久边界 | 原 §7b | 未做(证据见 §10「Feature B 完成」§4) |
+| **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | 未做,**低优先**:§10「P6-1」已证与 hop 吞吐无关(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义 |
+| **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
+| **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
+| **L8** | **减字节:整包聚合 → 拆分文档 / append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**,必须单独立项(迁移 + golden fingerprint 更新);与 C5 的 codec V3 **是同一批格式工作** ⇒ 建议与 C5 合并排期 | 原 §1.b③ / §1.b(i)② / §1.b(iii) | 未做。现状:每 hop 整包工作量 = 3 decode + 2 encode 一个随 run 增长的聚合 |
+
+### C. 每笔的收口门禁(原 §3;不是"一项",是每笔都要过的闸)
+
+`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` / `cargo fmt`(或 `--check`);
+`-p acts` 至少 `--lib --tests`;动到 store/CLI/server/package/channel 或 intent 面时跑全 workspace 的 per-crate 套件
+(`-p acts`、`-p acts-acl`、`-p acts-expr --all-features`、`-p acts-channel`、`-p acts-plugin-*`、`-p acts-package-*`、
+`-p acts-store --features sled,sqlite,postgres`、`-p acts-cli`、`-p acts-server`);不动 manifest 就不必跑 `cargo deny check bans`。
+`acts-server` 若只有"全部 target 一条命令"会红,逐 target 跑并在 §10 记录该环境现象。C5/L1/L8 另需 CHANGELOG BREAKING;C5 另需 golden 重冻结的书面理由。
 
 ## 12. 下一步提示词(只含**当前任务**与限制约束;每轮**原地更新**,不追加)
 
@@ -2083,63 +2112,73 @@ src/scheduler/
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:给 engine 形状的 hop 做分阶段画像(§11 第 1 项里标着 **(iv)** 的那一条;**只量不改代码**)
+# 当前任务:C2 —— `Aggregate*` 全族 → `Process*`(§11 A 段第二笔;**纯改名,零行为变更**)
 
-**背景**:§10「P6-1」测得端到端 engine 形状(30 步真实 workflow、release、内存 store、93 hops)约 4.2 ms/hop,
-整包 codec(每 hop 3 decode + 2 encode 一个 ~30–44 KB 的聚合)与 store 之外**还有约 1 ms/hop 无法归属**;
-§9.3.3 要的"行投影占每 hop 的比例"也还没有。
+**前置(必须先做,做不到就停下问用户)**:C2 依赖待拍项 **D1(命名词汇)**,它在 `KERNEL_REFACTOR_DESIGN.md` §2.2 里**尚未拍板**。
+因此本笔第一步**不是动手,而是把 D1 摆给用户裁决**:
 
-**做法**:
-1. **插桩已在工作区(未提交)**:`crates/acts/src/scheduler/shell/mod.rs` 末尾有 `hop_trace`(`#[cfg(test)]` 与
-   `#[cfg(not(test))]` 两个孪生 + 11 个阶段常量),`execute_one` 里有 9 处 hook(hop / load / place1 / claim /
-   plan / deliver / commit / wake / lifecycle / project / place2 —— 纯增行,不改逻辑);
-   `crates/acts/src/scheduler/shell/tests/perf_probe.rs` 是画像探针(`#[ignore]`),`shell/tests/mod.rs` 里有
-   `mod perf_probe;`。已 `cargo check -p acts --lib --tests` 通过。工作区若被丢弃,按上述阶段名重建即可。
-2. 跑 `cargo test --release -p acts --lib perf_probe -- --nocapture --ignored --test-threads=1`(release 构建 ~7 min),
-   3 轮;记下每阶段 ms/hop、占整 run 的比例、timed sum 与 wall 的差额。
-3. **先出分解,写进 §10 的新小节「P7-1a」**(探针形状 + 3 轮原始数值 + 每阶段占比 + 结论指向下一笔),**再决定下一笔动哪里**;
-   没有分解不动手改生产代码。
-4. 收口:写完 §10 后**回滚插桩与探针**(`git checkout -- crates/acts/src/scheduler/shell/mod.rs
-   crates/acts/src/scheduler/shell/tests/mod.rs && rm crates/acts/src/scheduler/shell/tests/perf_probe.rs`),
-   按分解的结论把 §11 第 1 项的状态与本节「当前任务」改成下一项(1b 拆文档 / 1c 少一次 load / 1d 投影降频,或第 2 项),
-   然后提交一笔 docs(notes 改动即可;**插桩与探针不得进提交**)。
+- 推荐档:`{Process, Task, Operation}` —— 不取 `Action`(它在 §1.1 已三义,再加一义会同时污染公共面 `acts::Action`、
+  内核 `ActionKind`、ACL 动词面);也不取 `Operation* → Task*`(那把 `DeliverMessage`/`FireTrigger`/`RunPostCommit`
+  变成"Task 的一种");用户心里的 task 是 **`Execution*`**,所以正确方向是 `Execution* → Task*`(那是 C3),本笔只是
+  `Aggregate* → Process*`;`*Command` 一律不动(它已一致地表示 planner 输入)。
+- 拿到裁决后:按裁决把 `Aggregate*` 全族改到对应的 `Process*` 名字;**用户若选别的词,以用户为准**。
 
-**验收**:§10 里有一张可复核的分阶段表(每阶段 ms/hop + 占比 + 与 wall 的差额),结论明确指向下一笔;
-`git status` 干净(只剩 notes 的改动或已提交)。
+**设计依据**:`KERNEL_REFACTOR_DESIGN.md` §2.2(D1)、§3.1/§3.2(命名表终态)、§4(C2 那一行:依赖/行为变更/回滚)、§11 A 段;
+§10「C1 完成」(刚做完的目录化,本笔在它之上动)。
+
+**本笔只改名不改行为**:不改任何逻辑、不改持久化字节(codec tag/版本、存储键的 `id` 段、golden 常量),不改消息取值,
+不顺手修 bug;发现的问题写进 §10 登记。
+
+**现状(已实测,C1 之后)**:`crates/acts/src/scheduler/core/plan/` 已是同名目录(6 个 `<mod>/` + 4 个未动的单文件);
+`Aggregate*` 全族横跨 `core/commit/aggregate.rs`(类型本体)、`core/plan/**`(planner 输入/快照)、`durable/**`(仓库与 codec)、
+`shell/**`(读写侧)、`core/model/transition_plan.rs`;`plan::…` 调用点共 43 条路径,本笔**不新增/不删除**任何路径。
+
+**硬性做法**:
+
+1. 先列全清单再动手:`git grep -nE 'Aggregate|AsyncAggregateRepository|...'`(含 **doc 链接**、`README`/`CHANGELOG` 里的字面、
+   `KERNEL_*.md` 里指路用的名字);逐条决定"改 / 刻意保留",保留项(例如 `core/commit/aggregate.rs` 的**文件名**)逐条写进 §10。
+   文件名/模块名若要跟着改,`core/commit/aggregate/**` 的目录化**另立一笔**,不要混进来。
+2. 改名要成组:类型 + `impl` + `use` + 字段/方法名里的同族词(`AggregateSnapshot`/`AggregateVersion`/`AggregateState`…)一起改,
+   不许留一半;`cargo check` 的 `E0433/E0412` 是清单是否漏项的判据。
+3. **不动 `core/architecture.rs` 的守卫规则**;若改名触发 `RUNTIME_ROOT`/tier 清单,同步改并在 §10 说明。
+4. 改完跑一次 §10「§5f」形状的 30 步纯 step 探针(或 `examples/simple`)对照 hop 行为与 golden,证"字节面没动"。
+
+**验收**:
+
+- `git diff -M --stat` 显示成组的改名(行数 reuse,不是 delete+add);`git grep` 收尾只剩刻意保留项并逐条列出。
+- 第 1 条列出的调用点(除改名本身)**不因本笔改变调用关系**;`plan::…` 路径集合仍与 C1 后一致(43 条)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt` 干净
+  (**动手前先确认工作区没有在飞的 WIP 红**:§10「C1 完成」记了 `shell/mod.rs:4764` 的 `HOPS` dead-code 与
+  `shell/mod.rs:4723` 的 fmt 偏差来自未提交的探针 WIP;本笔收口前需那份 WIP 落地或已被用户处理);
+  `cargo test -p acts --lib --tests` 与基线**同数**(C1 后基线 = **870 passed / 0 failed / 1 ignored**)。
+- §10 追加一节「C2 完成」:改名清单前后、`git diff -M --stat` 摘要、刻意保留项、验收命令与结果。
 
 # 限制与约束
 
-- **先读**:§10「P6-1」(最近一次性能落地与实测)、§10 §5l/§5n/§5o(性能画像与"一律用 release")、§9.3.3/§9.3.4、§11 的任务清单。
-- **性能结论一律以 release + 内存 store + `--test-threads=1` 为准**;前后对比用**同一个探针**,改前用
-  `git stash push -- <生产侧文件>` 在同一棵树上复测;engine 形状的单次 raw 值噪声 ±15%,不能当基线;
-  结论按同轮测到的环境比**归一后**再宣称(§10「P6-1」就是这么写的)。
-- **已经量过、不要再做**(逐条见 §10):§9.3.2 合并 Claim+PrepareCommit(§5g,无收益);§5j 投影行"内容未变则不写";
-  §5m 提交把快照交回;§5o 就地推进快照;§10「P6-1」的 close 折叠。**特别是 (ii) 按聚合版本缓存 per-hop 派生**
-  (`execution_graph` 72–108 µs/次、`model_of` 42–56 µs/次)与"派生索引/投影行的写合并/懒写"
-  (`recovery_entries` 与两个索引文档每 hop 各 < 1 µs,只对真后端 sled/pg 的写次数有意义)。
-- **不改行为**:这一项只加临时插桩;`hop_trace` 与探针必须在本轮结束前删除。
-- **每次改动前后都跑真正的用例与真探针,并把实测数值写进 §10**。
-- 守卫 `crates/acts/src/scheduler/core/architecture.rs` 不可删(只随分层演进改规则);`core/`、`durable/` 不得命名
-  `crate::scheduler::shell`(`SHELL_MODULES`);`RUNTIME_ROOT`/tier 清单随目录改动同步。
-- 禁止新 `#[allow(...)]` 压 lint(除 §10 已登记的那几条,属性处必须写理由);新增一条就在 §10 登记。
+- **先读**:`KERNEL_REFACTOR_DESIGN.md` §1.1(命名面事实)/§2.2(D1)/§3.1/§3.2/§4;§11 A 段;§10「C1 完成」+ §6(文件改写的两条事故口径)。
+- **一次提交只做一个切面**:只改名;不得夹带行为变更、结构重构、清理或顺手修 bug。
+- **不新增 `#[allow(...)]`**;需要就写进 §10 申请并在属性处写理由。
 - **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故:把 `export/actions.rs` 截断为空);
-  串行构建(Defender 会锁 rlib/exe);工作区 CRLF,批量改写后 `file` 复核。
+  串行构建(Defender 会锁 rlib/exe);批量改写后 `file` 复核行尾。
 - 全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4);读**投影行**之前 `runtime.flush_writer()`。
 - 测试环境:`acts-server`"全部 target 一条命令"本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
 - 容器包的内联 acts 已在导入期物化(`materialize_container_acts` + `param_fanout_children` 是唯一入口):改容器包、
-  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」(按父定位、`sequence` 链式、`action_target` 的选法
-  都有实测依据),不要另开第二条展开路径,也不要为了绕开它们去改 `GenerationAdmissionPolicy` 的既有语义。
+  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」,不要另开第二条展开路径,也不要为了绕开它们去改
+  `GenerationAdmissionPolicy` 的既有语义。
 
 # 每阶段收口(必须全绿才算完成)
 
 cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
 cargo fmt
 cargo test -p acts --lib --tests
-…(其余 crate 见任务 3;动了 manifest 才跑 cargo deny check bans)
+…(其余 crate 见 §11 C 的门禁;动了 manifest 才跑 cargo deny check bans)
 
 # 交付
 
-每完成一个任务 → 一笔提交(conventional 前缀,单行 imperative 主语)+ §10 追加该任务的记录(改了什么、file:line、前后实测数值与探针形状、发现的语义差异)
-→ **原地重写本节的「当前任务」**(改成下一项)+ 改 §11 的状态标记(**不追加新的提示词小节**)+ 停下等用户确认。
+一笔提交(conventional 前缀 `refactor` 或 `chore`,单行 imperative 主语,例:`refactor(acts): rename the Aggregate* family to Process*`)
++ §10 追加一节「C2 完成」(改名清单前后、`git diff -M --stat` 摘要、刻意保留项、验收命令与结果)
+→ 把 §11 A 段 **C2** 的状态改成「已做(§10「C2 完成」)」+ **原地重写本节的「当前任务」**
++ **停下等用户确认**:下一笔 **C3**(`Execution*` → `Task*` + `task_state::TaskState` 改名让位)由 D1 的同一裁决覆盖
+  ("用户心里的 task = `Execution*`"),但 C3 会碰上 `task_state.rs` 里既有的 `TaskState` 撞名,落地前把让名方案给用户过一眼。
 ```
 
