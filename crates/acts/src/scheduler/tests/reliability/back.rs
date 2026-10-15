@@ -1,8 +1,8 @@
 //! BACK reliability cells: the `Back` client action — the rewind that closes
 //! the waiting act's generation `Backed` and re-enters the step the client
 //! named with a fresh generation — under a crash between its intent and its
-//! effect, an applied rewind whose completion was lost, a store fault on the
-//! rewind's first durable write, a duplicate delivery, and a race with `Next`.
+//! effect, a store fault on the rewind's first durable write, a duplicate
+//! delivery, and a race with `Next`.
 //!
 //! The kernel decides a client action by committing against the aggregate and
 //! projects the rows from the committed snapshot afterwards. Its `Back` is the
@@ -17,8 +17,10 @@
 //!   count (the read model keeps one row per model node, so a count cannot see
 //!   a rewind at all);
 //! - a durable intent a crash left behind is replayed by recovery exactly
-//!   once, and a rewind whose effect already committed is finalized rather
-//!   than re-applied;
+//!   once (an aggregate a writer from before the hop's close was folded into
+//!   its effect commit left `Committed` is finalized rather than re-applied —
+//!   that state is pinned by `async_document_store.rs`'s finalize cell, since
+//!   no hop produces it any more);
 //! - a store fault the rewind's own durable commit runs into is surfaced to
 //!   the client and consumes nothing, so the retry rewinds exactly once;
 //! - a duplicate `Back` is refused by the decision guard — after the rewind
@@ -326,141 +328,6 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
     assert!(
         !has_unsettled_operation(&reloaded, &pid, "step2").await,
         "the replayed intent must be completed, not left pending"
-    );
-
-    finish_by_hand(&reloaded, &pid).await;
-    assert_settled(&reloaded, &pid).await;
-    sweep_until_gone(&reloaded, &pid).await;
-    reloaded.close().await;
-}
-
-// ---------------------------------------------------------------------------
-// BACK × restart — an applied rewind whose completion was lost
-// ---------------------------------------------------------------------------
-
-/// A `Back` whose effect committed but whose own completion never landed (a
-/// crash between the two, here a write cut) must be *finalized*, not
-/// re-applied: the aggregate already carries the source generation `Backed`
-/// and the `ReenterTask` rewind the deciding commit created, so recovery
-/// completes the deciding operation's bookkeeping and drives the rewind
-/// exactly once — replaying the `Back` itself would ask for a generation the
-/// client never asked for.
-///
-/// The cut is placed at the back's fourth durable write (the deciding
-/// operation's own completion), so the decision is durable while its
-/// completion is lost — the kernel's counterpart of the legacy cell that lost
-/// only the action record's close after the action had applied. The kernel
-/// plans the rewind inside the same commit that decides the back, so there is
-/// no state where a decision sits without its rewind; what a lost completion
-/// leaves is the deciding operation unfinalized, and this cell pins the
-/// difference: the rewind is finalized into exactly one new generation, and
-/// the operation is closed rather than replayed.
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn an_applied_backs_lost_completion_is_finalized_without_a_second_rewind() {
-    bounded(
-        "an_applied_backs_lost_completion_is_finalized_without_a_second_rewind",
-        an_applied_backs_lost_completion_is_finalized_without_a_second_rewind_inner(),
-    )
-    .await;
-}
-
-async fn an_applied_backs_lost_completion_is_finalized_without_a_second_rewind_inner() {
-    let kv = CutKv::new();
-    let store = kv.store();
-    let engine = engine_on(store.clone()).await;
-    let (pid, step1) = waiting_chain(&engine).await;
-
-    // the deciding commit lands (source Backed + the rewind operation created);
-    // the completion that follows it is cut, and with it every later write —
-    // the rewind hop's own commit included
-    let before = kv.writes();
-    kv.cut_at(before + 4);
-    let lost = back_act(&engine, &pid, "step2", &step1).await;
-    assert!(
-        lost.is_err(),
-        "a cut writer must reach the client, got {lost:?}"
-    );
-    assert!(
-        kv.refused() >= 1,
-        "the cut must have refused the deciding completion"
-    );
-
-    // the crash state: the decision is durable, its completion is not, and the
-    // rewind operation the decision created is still pending
-    assert_eq!(
-        generation_state(&engine, &pid, "step2", 0).await,
-        Some(ExecutionState::Backed),
-        "the decision must be durable before the crash"
-    );
-    assert_eq!(
-        rewind_operations(&engine, &pid, "step2").await,
-        1,
-        "the deciding commit must have created the rewind exactly once"
-    );
-    assert!(
-        has_unsettled_operation(&engine, &pid, "step2").await,
-        "the crash must leave the decision unfinalized"
-    );
-    assert_eq!(
-        generations(&engine, &pid, &step1).await,
-        vec![0],
-        "the unfinished rewind must not have re-entered the step yet"
-    );
-
-    // the crash and the finalization: the fresh engine's recovery completes the
-    // decision and drives the rewind once, without replaying the back. The
-    // rewind's own `Created` is registered first — the re-enter commits on the
-    // fresh engine's hop and its message rides the outbox pass after it.
-    let reloaded = crash_and_reboot(&engine, store.clone(), &kv).await;
-    let rewind = capture_created(&reloaded, "act1");
-
-    let what = format!("the recovered back of {pid} to run its one rewind");
-    poll_until_dumped(
-        &what,
-        || async { generations(&reloaded, &pid, &step1).await == vec![0, 1] },
-        || async {
-            format!(
-                "{} | head gens={:?} source={:?} rewind-ops={} unsettled={}",
-                dump_state(&reloaded, &pid).await,
-                generations(&reloaded, &pid, &step1).await,
-                generation_state(&reloaded, &pid, "step2", 0).await,
-                rewind_operations(&reloaded, &pid, "step2").await,
-                has_unsettled_operation(&reloaded, &pid, "step2").await,
-            )
-        },
-    )
-    .await;
-    // the redone act is dispatched to the client exactly once: it waits, and
-    // its announcement is the node's second `Created`
-    wait_waiting_task(&reloaded, &pid, &step1).await;
-    let (announced, redone) = expect_created(&rewind).await;
-    assert_eq!(announced, pid, "the rewind names its own run");
-    assert_eq!(
-        redone, step1,
-        "the one rewind re-enters the node the client named"
-    );
-
-    // finalized, not re-applied: one generation each, one rewind operation,
-    // and nothing left for recovery to drive
-    assert_eq!(
-        generations(&reloaded, &pid, &step1).await,
-        vec![0, 1],
-        "the applied back's rewind must run exactly once, never twice"
-    );
-    assert_eq!(
-        generations(&reloaded, &pid, "step2").await,
-        vec![0, 1],
-        "the rewind's forward chain must be recreated exactly once"
-    );
-    assert_eq!(
-        rewind_operations(&reloaded, &pid, "step2").await,
-        1,
-        "a finalized completion must not add a second rewind"
-    );
-    assert!(
-        !has_unsettled_operation(&reloaded, &pid, "step2").await,
-        "recovery must finalize the decision, not leave it pending"
     );
 
     finish_by_hand(&reloaded, &pid).await;

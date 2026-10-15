@@ -744,4 +744,76 @@ mod tests {
         );
         assert_eq!(reads.load(Ordering::SeqCst), LOAD_ATTEMPTS);
     }
+
+    /// An operation a writer from *before* the hop's close was folded into its
+    /// effect commit left `Committed` — the effect durable, the completion
+    /// lost, which used to be a commit of its own — must still be finalized by
+    /// recovery: the policy routes that state to `FinalizeCommit`, and the
+    /// `Complete` event it carries applies to the durable record
+    /// (`Committed` → `Completed`), so a store an older engine left behind
+    /// converges instead of being stranded. No hop produces the state any more,
+    /// but the V2 documents keep it.
+    #[tokio::test]
+    async fn a_committed_operation_left_by_an_older_writer_is_finalized() {
+        use crate::scheduler::core::model::operation::{CommitToken, OperationEvent};
+        use crate::scheduler::core::recovery::planner::{RecoveryDisposition, RecoveryPlanner};
+
+        let claim = ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 1,
+            lease_until_ms: 9_000,
+            heartbeat_revision: 0,
+        };
+        let commit = CommitToken {
+            process_version: 3,
+            digest: "legacy".into(),
+        };
+        let operation_id = OperationId {
+            process_id: "process".into(),
+            task_id: "step".into(),
+            generation: 0,
+            sequence: 0,
+        };
+        // The pair the pre-fold hop committed in two rounds: claim-and-prepare,
+        // then the effect commit.
+        let committed = OperationRecord::pending(operation_id.clone(), OperationKind::ExecuteTask)
+            .evolve(OperationEvent::ClaimAndPrepare(claim.clone()))
+            .unwrap()
+            .evolve(OperationEvent::Commit {
+                claim,
+                commit: commit.clone(),
+            })
+            .unwrap();
+        assert!(matches!(committed.state, OperationState::Committed(_)));
+
+        let mut aggregate = snapshot(false);
+        aggregate.version.operations = committed.revision;
+        aggregate
+            .operations
+            .insert(operation_id.clone(), committed.clone());
+
+        let store: Arc<dyn KvStore> = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncAggregateRepository::new(Arc::new(KvDocumentStore::new(store)));
+        repository.create(&aggregate).await.unwrap();
+
+        assert_eq!(
+            RecoveryPlanner::classify(&committed, 0),
+            RecoveryDisposition::FinalizeCommit,
+            "the older writer's state is finalized, not re-driven"
+        );
+        let outcome = repository
+            .commit_operation_event(
+                &operation_id,
+                committed.revision,
+                OperationEvent::Complete {
+                    commit: commit.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let OperationCommitOutcome::Committed { operation, .. } = outcome else {
+            panic!("the finalize must commit, not lose a compare-and-swap: {outcome:?}");
+        };
+        assert_eq!(operation.state, OperationState::Completed(commit));
+    }
 }

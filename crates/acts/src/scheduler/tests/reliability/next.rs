@@ -5,15 +5,16 @@
 //! recovery scan sees, a crash at each write boundary of the hop, and a
 //! container that may not finish before its children.
 //!
-//! The kernel decides a client action in four writes against the aggregate —
+//! The kernel decides a client action in three writes against the aggregate —
 //! the durable *intent* (the operation plus the private action fact its hop
-//! replays), the claim that prepares it, the effect commit, and the close — and
-//! projects the rows from those commits afterwards. The effect commit decides the
-//! act and records the hop as its `action:` outbox record, and in the same batch
-//! it seeds the `PropagateTask` operation that *is* the propagation: that hop,
-//! with a claim, an effect commit and a close of its own, writes the `propagate:`
-//! record and moves the step the flow schedules into `Ready` with an
-//! `ExecuteTask` operation of its own. So a cell reads "exactly once" off
+//! replays), the claim that prepares it, and the effect commit, which closes the
+//! operation with it — and projects the rows from those commits afterwards. The
+//! effect commit decides the act and records the hop as its `action:` outbox
+//! record, and in the same batch it seeds the `PropagateTask` operation that
+//! *is* the propagation: that hop, with a claim and an effect commit of its own,
+//! writes the `propagate:` record and moves the step the flow schedules into
+//! `Ready` with an `ExecuteTask` operation of its own. So a cell reads
+//! "exactly once" off
 //! the surfaces that hold it: the aggregate's executions (one per model node and
 //! generation) and its outbox records, whose keys are deterministic per
 //! `(pid, tid, generation, sequence)` — a hop that applied twice shows up as a
@@ -37,14 +38,14 @@ use crate::scheduler::core::model::operation::OperationState;
 
 use super::*;
 
-/// The four writes of one client action's hop, in order: the durable intent,
-/// the claim that prepares it, the effect commit (which decides the act and seeds
-/// the propagation the flow runs next), and the close. They are the boundaries a
-/// crash cell cuts the writer at.
+/// The three writes of one client action's hop, in order: the durable intent,
+/// the claim that prepares it, and the effect commit (which decides the act,
+/// seeds the propagation the flow runs next, and closes the operation). They
+/// are the boundaries a crash cell cuts the writer at. There is no fourth: the
+/// close is applied inside the effect commit.
 const INTENT_WRITE: usize = 1;
 const CLAIM_WRITE: usize = 2;
 const EFFECT_WRITE: usize = 3;
-const CLOSE_WRITE: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -821,7 +822,7 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
 // NEXT × restart — each write boundary of the propagation
 // ---------------------------------------------------------------------------
 
-/// Cutting the writer at each of the hop's four writes and booting a fresh engine
+/// Cutting the writer at each of the hop's three writes and booting a fresh engine
 /// over the same store must leave the propagation exactly-once or not-at-all, and
 /// every boundary must converge on the same single child:
 ///
@@ -835,21 +836,18 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
 ///   indistinguishable there), so an expired claim is reclaimed into
 ///   `EffectUnknown` and reported for reconciliation; nothing was applied, and
 ///   the client's retry schedules the child, leaving the ambiguous operation as
-///   the only unfinished business;
-/// - the close write lost: the effect is applied, recovery finalizes it from its
-///   own commit, and the propagation it left pending is woken — the client takes
-///   no part.
+///   the only unfinished business.
+///
+/// The state the legacy writer's "applied but unclosed" cut used to leave — the
+/// effect durable and the propagation it seeds still `Pending` — is not a
+/// boundary of this hop any more: the effect commit closes the operation, so a
+/// cut past it lands on the propagation's own commit. `stall.rs`'s sweep runs
+/// that case (`COMPLETION_COMMITS`, the commit one past the hop) and asserts the
+/// recovered engine drives the seeded propagation.
 ///
 /// In every case the recovered run ends with one execution per node — the source
 /// and the child included — and exactly one record per hop, so no boundary can be
 /// observed as a second child or a second `propagate:` record.
-///
-/// The last three writes of the cascade belong to the propagation hop the effect
-/// commit seeds, and they are reached from the close boundary: the cut there
-/// refuses every write from the close on, so the seeded `PropagateTask` is left
-/// whole — `Pending`, with the source operation applied but unclosed — and the
-/// healed store's recovery pass drives its claim, effect and close before the
-/// client takes any further part.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_child() {
@@ -861,7 +859,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
 }
 
 async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_child_inner() {
-    for boundary in [INTENT_WRITE, CLAIM_WRITE, EFFECT_WRITE, CLOSE_WRITE] {
+    for boundary in [INTENT_WRITE, CLAIM_WRITE, EFFECT_WRITE] {
         let kv = CutKv::new();
         let store = kv.store();
         let engine = engine_on(store.clone()).await;
@@ -911,7 +909,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
                     "boundary 2: the effect never committed"
                 );
             }
-            EFFECT_WRITE => {
+            _ => {
                 assert_eq!(
                     open,
                     vec!["prepared"],
@@ -923,18 +921,6 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
                     "boundary 3: the engine may not decide across the effect boundary"
                 );
             }
-            _ => {
-                assert_eq!(
-                    open,
-                    vec!["committed", "pending"],
-                    "boundary 4: the effect is applied and the propagation it created pending"
-                );
-                assert_eq!(
-                    decided_state(&engine, &pid, &step1).await,
-                    Some(ExecutionState::Completed),
-                    "boundary 4: the crash is after the effect, not before it"
-                );
-            }
         }
         assert_eq!(
             generations(&engine, &pid, &step1).await,
@@ -943,14 +929,13 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
         );
         // The model's executions exist from import; what the propagation owns is
         // *starting* the child, so a hop that lost its effect leaves it
-        // un-started.
-        if boundary != CLOSE_WRITE {
-            assert_eq!(
-                decided_state(&engine, &pid, "step2").await,
-                Some(ExecutionState::Created),
-                "boundary {boundary}: a hop that lost its effect may not start the step it schedules"
-            );
-        }
+        // un-started. Every boundary here loses that effect (the third loses it
+        // with the close the same commit carries).
+        assert_eq!(
+            decided_state(&engine, &pid, "step2").await,
+            Some(ExecutionState::Created),
+            "boundary {boundary}: a hop that lost its effect may not start the step it schedules"
+        );
         assert_eq!(
             generations(&engine, &pid, "step2").await,
             vec![0],
@@ -958,9 +943,9 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
         );
         // The `propagate:` record belongs to the propagation hop the effect
         // commit seeds (it is what moves the successor into `Ready`), so no
-        // boundary of this hop can have written it: three of them never seeded
-        // the propagation, and at the close boundary the cut refuses every
-        // write from the close on — the seeded hop's own commit included.
+        // boundary of this hop can have written it: every one of them refuses
+        // the effect — the third refuses it with the close the same commit
+        // carries — so the seeded hop never even exists.
         assert_eq!(
             records_with_prefix(&engine, &pid, &next_records(&pid, &step1).1).await,
             0,
@@ -972,9 +957,9 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
         kv.heal();
         let recovered = engine_on(store.clone()).await;
 
-        // converge. Only the driver of the remainder differs per boundary:
-        // recovery for the pending intent and for the applied-but-unclosed hop,
-        // the refused client for the two boundaries that lost their decision.
+        // converge. Only the driver of the remainder differs per boundary: the
+        // refused client where the decision never landed, recovery where the
+        // intent or the claim survived.
         match boundary {
             INTENT_WRITE => {
                 assert_eq!(

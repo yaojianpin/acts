@@ -506,13 +506,32 @@ pub(crate) fn advance_transition(
             .operations
             .get(&source.id)
             .ok_or_else(|| CommitError::OperationNotFound(source.id.clone()))?;
+        // The hop's own operation closes inside the *same* commit as its
+        // business effect. The two used to be two whole-aggregate compare-and-
+        // swaps (`OperationEvent::Commit`, then a second plan that carried only
+        // `OperationEvent::Complete`), and nothing observed the state between
+        // them: the close committed the flag and nothing else, the effect
+        // commit having written the new operations and outbox records in the
+        // first place. Applying the pair in order here leaves the aggregate in
+        // exactly the state the two commits left — the operation `Completed`,
+        // its successors and records `Pending` in the recovery index, which is
+        // what the next scan wakes either way.
+        //
+        // `Committed` stays a persisted state: the V2 tags decode it and
+        // `RecoveryPlanner::FinalizeCommit` still finishes the aggregates a
+        // writer from before this fold left there. No hop produces it any more.
         let committed = operation
             .evolve(OperationEvent::Commit {
                 claim: source.claim.clone(),
                 commit: token.clone(),
             })
             .map_err(|_| CommitError::InvalidOperationState(operation.state.clone()))?;
-        next.operations.insert(source.id.clone(), committed);
+        let completed = committed
+            .evolve(OperationEvent::Complete {
+                commit: token.clone(),
+            })
+            .map_err(|_| CommitError::InvalidOperationState(committed.state.clone()))?;
+        next.operations.insert(source.id.clone(), completed);
     }
     next.validate()?;
     Ok(CommitReceipt {
@@ -979,7 +998,7 @@ mod tests {
         assert_eq!(snapshot.outbox.len(), 1);
     }
     #[test]
-    fn source_operation_is_committed_in_same_atomic_batch() {
+    fn source_operation_is_committed_and_closed_in_same_atomic_batch() {
         use crate::scheduler::core::model::operation::ClaimToken;
         use crate::scheduler::core::model::operation::OperationEvent;
         use crate::scheduler::core::model::transition_plan::OperationCommit;
@@ -1015,9 +1034,13 @@ mod tests {
         });
         let receipt = repo.compare_and_commit(&p).unwrap();
         let snapshot = repo.load("p1").unwrap().unwrap();
+        // The operation's own commit and its close are one transition of the
+        // batch: the hop leaves `Completed`, never an intermediate `Committed`
+        // (nothing would observe it, and a second commit for it bought a second
+        // whole-aggregate round trip).
         assert_eq!(
             snapshot.operations[&source_id].state,
-            OperationState::Committed(receipt.token)
+            OperationState::Completed(receipt.token)
         );
         assert_eq!(snapshot.executions[&id()].state, ExecutionState::Completed);
     }
@@ -1068,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_claim_prepare_commit_complete_has_one_revision_chain() {
+    fn durable_claim_prepare_commit_has_one_revision_chain() {
         use crate::scheduler::core::model::operation::ClaimToken;
         let id = OperationId {
             process_id: "p1".into(),
@@ -1109,10 +1132,23 @@ mod tests {
         );
         let receipt = repo.compare_and_commit(&p).unwrap();
         let committed = repo.load("p1").unwrap().unwrap().operations[&id].clone();
-        let completed = repo
-            .complete_operation(&id, committed.revision, receipt.token.clone())
-            .unwrap();
-        assert_eq!(completed.state, OperationState::Completed(receipt.token));
+        // The effect commit carries the close: the operation reaches `Completed`
+        // on the commit's own token, one revision past `CommitPrepared`.
+        assert_eq!(
+            committed.state,
+            OperationState::Completed(receipt.token.clone()),
+            "the commit closes its own source operation"
+        );
+        // The commit applies both lifecycle steps in the one batch — `Commit`
+        // then `Complete` — so the revision advances by two, exactly as it did
+        // across the two commits the fold replaces.
+        assert_eq!(committed.revision, prepared.revision + 2);
+        // A second close is refused: the effect commit already closed the
+        // operation, so nothing may close it again.
+        assert!(
+            repo.complete_operation(&id, committed.revision, receipt.token)
+                .is_err()
+        );
     }
 
     #[test]

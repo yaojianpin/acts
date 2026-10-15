@@ -2,20 +2,21 @@
 //! recovery a later engine has to perform from whatever the durable state was
 //! left in at a cut.
 //!
-//! The kernel decides a client action in four commits against the aggregate —
+//! The kernel decides a client action in three commits against the aggregate —
 //! the durable *intent* (the operation plus the private action fact its hop
-//! replays), the claim that prepares it, the effect commit, and the close — and
-//! projects the rows from those commits afterwards. A crash is therefore a
-//! *cut*: the writer stops landing writes at exactly one boundary, and whatever
-//! the aggregate holds at that boundary is the state a later engine boots onto.
-//! Every cell here cuts the run's own *commit* stream (a file-local store),
-//! never its raw write stream: a completion's commits interleave with the row
-//! projections and outbox deliveries of earlier work, so a raw write counter
-//! would land on a delivery — whose fenced claim then waits out its own lease —
-//! and the cell would assert the wrong boundary. The commit boundaries are the
-//! intent, the claim, the effect, the close, and the propagation the completion
-//! seeds. The runtime's own passes must then finish the run: on demand with no
-//! restart, on the periodic tick, and across a second restart.
+//! replays), the claim that prepares it, and the effect commit, which closes
+//! the operation in the same batch — and projects the rows from those commits
+//! afterwards. A crash is therefore a *cut*: the writer stops landing writes at
+//! exactly one boundary, and whatever the aggregate holds at that boundary is
+//! the state a later engine boots onto. Every cell here cuts the run's own
+//! *commit* stream (a file-local store), never its raw write stream: a
+//! completion's commits interleave with the row projections and outbox
+//! deliveries of earlier work, so a raw write counter would land on a delivery
+//! — whose fenced claim then waits out its own lease — and the cell would
+//! assert the wrong boundary. The commit boundaries are the intent, the claim,
+//! the effect, and the propagation the completion seeds. The runtime's own
+//! passes must then finish the run: on demand with no restart, on the periodic
+//! tick, and across a second restart.
 //!
 //! Two kernel facts shape the cells, and each one says where it matters:
 //!
@@ -47,9 +48,10 @@ use crate::scheduler::core::outbox::records::OutboxState;
 use super::*;
 
 /// The commits of one client action's hop, in order: the durable intent (the
-/// operation plus its action fact), the claim that prepares it, the effect
-/// commit, and the close. `CLAIM_WRITE` is the commit the strand cells let the
-/// intent precede and then refuse — the intent is the commit before it.
+/// operation plus its action fact), the claim that prepares it, and the effect.
+/// `CLAIM_WRITE` is the commit the strand cells let the intent precede and then
+/// refuse — the intent is the commit before it. The effect commit is also the
+/// close (the operation's `Committed` → `Completed` runs inside it).
 const CLAIM_WRITE: usize = 2;
 
 // ---------------------------------------------------------------------------
@@ -376,8 +378,10 @@ async fn wait_fully_settled(engine: &Engine, pid: &str) {
 
 /// Whether the engine still has work it will drive by itself: an operation
 /// `Pending`/`RetryScheduled` (the next wake or tick re-drives it) or
-/// `Committed` (recovery finalizes it). Read-only, so a cell can ask it while
-/// the driver's hops are in flight — a `Claimed`/`CommitPrepared` operation
+/// `Committed` (recovery finalizes it; no hop produces that state any more — it
+/// survives in a store a writer from before the close was folded into the
+/// effect commit left behind). Read-only, so a cell can ask it while the
+/// driver's hops are in flight — a `Claimed`/`CommitPrepared` operation
 /// whose owner died is deliberately *not* drivable: only the claim's lease
 /// releases it.
 async fn engine_drivable(engine: &Engine, pid: &str) -> bool {
@@ -696,19 +700,20 @@ impl KvStore for DocCutKv {
 /// The cut is swept across the commit boundaries of a completion: the client
 /// completion that drives `act → root` is applied while the store stops
 /// honouring commits of the run's aggregate document at exactly the k-th one.
-/// Whatever the cut leaves durable — the intent `Pending`, the effect applied
-/// but unclosed, the propagation seeded but undriven — the reloaded engine must
+/// Whatever the cut leaves durable — the intent `Pending`, the claim
+/// `prepared`, the propagation seeded but undriven — the reloaded engine must
 /// carry the run to its end, and the end must be exactly once: one generation
 /// per node, one record per hop, and the finished run settled (its rows
 /// reclaimed through the sweeper).
 ///
 /// The sweep is over the *completion's own commits* (the legacy cheaper
-/// variant): the intent, the claim, the effect, the close, and — one past the
-/// hop — the claim of the propagation it seeds. Those are the boundaries the
-/// completion owns; a hop's *row projection* is a derived write whose failure is
-/// absorbed, and is pinned by the row-fault cells in `action.rs` and `next.rs`,
-/// while the propagation's own effect boundary is the kernel's fail-safe
-/// (surfaced for reconciliation), pinned by `next.rs`'s propagation cells.
+/// variant): the intent, the claim, the effect (the operation's close included),
+/// and — one past the hop — the claim of the propagation it seeds. Those are the
+/// boundaries the completion owns; a hop's *row projection* is a derived write
+/// whose failure is absorbed, and is pinned by the row-fault cells in `action.rs`
+/// and `next.rs`, while the propagation's own effect boundary is the kernel's
+/// fail-safe (surfaced for reconciliation), pinned by `next.rs`'s propagation
+/// cells.
 ///
 /// What each boundary may leave is bounded: nothing durable is decided by the
 /// client's retry (exactly as the refusal promised); a claim the crash stranded
@@ -727,9 +732,10 @@ async fn a_cut_swept_across_a_completion_converges_at_every_write_boundary() {
     .await;
 }
 
-/// The completion hop's own commits: the intent, the claim, the effect and the
-/// close. Cutting the commit *after* them is the propagation's claim.
-const COMPLETION_COMMITS: usize = 4;
+/// The completion hop's own commits: the intent, the claim, and the effect
+/// (which closes the operation with it). Cutting the commit *after* them is the
+/// propagation's claim.
+const COMPLETION_COMMITS: usize = 3;
 
 async fn cut_sweep_inner() {
     for refused_commit in 0..=COMPLETION_COMMITS {

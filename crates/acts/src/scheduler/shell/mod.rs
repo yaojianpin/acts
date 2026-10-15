@@ -22,8 +22,9 @@
 //!   operations; join readiness omits waiting successors idempotently.
 //!
 //! Every hop is one `commit_transition` with the hop's own operation as the
-//! `source_operation`, so the operation is committed inside the same atomic
-//! batch as its business effect. When a hop's durable remainder already
+//! `source_operation`, so the operation is committed *and closed* inside the
+//! same atomic batch as its business effect (the `Committed` → `Completed`
+//! pair is applied in order there). When a hop's durable remainder already
 //! exists (a wake redelivered after the commit), the hop commits an empty
 //! plan sourced by its own operation, which completes the operation without
 //! touching business state.
@@ -1575,19 +1576,9 @@ impl KernelHost {
                     }
                 };
                 let (receipt, committed_snapshot) = receipt;
-                let committed = committed_snapshot
-                    .operations
-                    .get(&operation_id)
-                    .cloned()
-                    .ok_or_else(|| ActError::Runtime("action operation lost".into()))?;
-                self.operation_event(
-                    &operation_id,
-                    committed.revision,
-                    OperationEvent::Complete {
-                        commit: receipt.token.clone(),
-                    },
-                )
-                .await?;
+                // The effect commit closed the action's own operation inside
+                // its batch (see `advance_transition`), so the decision is
+                // durable in one commit rather than two.
                 let wake = QueueWake {
                     tx: self.wake_tx.clone(),
                 };
@@ -2320,21 +2311,8 @@ impl KernelHost {
                 )));
             }
         };
-        // The commit's own snapshot is the committed state: read the operation
-        // straight off it instead of decoding the aggregate again.
-        let committed = loaded
-            .operations
-            .get(id)
-            .cloned()
-            .ok_or_else(|| ActError::Runtime("operation lost after commit".into()))?;
-        self.operation_event(
-            id,
-            committed.revision,
-            OperationEvent::Complete {
-                commit: receipt.token.clone(),
-            },
-        )
-        .await?;
+        // The commit closed the hop's own operation inside its batch (see
+        // `advance_transition`): there is no second, close-only commit to run.
         let wake = QueueWake {
             tx: self.wake_tx.clone(),
         };

@@ -1946,6 +1946,55 @@ src/scheduler/
 
 ---
 
+### P6-1 性能收口(2026-10-15):hop 自己的 close 并进 effect 提交
+
+**任务**:§11 的 P6 第 1 项,1b(i) 的"剩余:`Complete` 事件并进计划提交(省 1 解码 + 1 编码)"。
+
+**改动**(一笔提交):
+- `core/commit/aggregate.rs::advance_transition`:提交 business effect 的**同一批**里把 hop 自己的操作就地推进两步 —— `Commit{claim, token}` → `Complete{token}`。token 仍只铸一次、digest 仍在推进 source op **之前**算(所以 token 与旧实现逐字节相同),`version.operations` 的净增量也不变(+2,与旧的两笔提交各 +1 相同)。
+- `shell/mod.rs`:`execute_one` 与 `apply_action_once` 删掉那次独立的 close 提交(`operation_event(… Complete{commit})`),以及它为拿 revision 而多读的一次快照。
+- **理由**(写进代码注释):两次提交之间没有任何东西观察 `Committed`;close 提交除 flag 外没有任何新状态(effect 提交已写下新的 operation 与 outbox 记录);而它真正的代价是每 hop 一次整包 decode + encode。
+- `Committed` **仍是持久化状态**:V2 tag 照旧解码它,`RecoveryPlanner::FinalizeCommit` 照旧收尾"旧 writer 留下的"这种聚合 —— 只是**没有 hop 再产出它**。
+
+**实测**(release,内存 store,30 步线性 = 93 hops,同一台机、同一探针、`--test-threads=1`;探针已删,形状见下)。
+"改前"用 `git stash push`(只 stash 生产侧 4 个文件、保留探针)在同一棵树上复测,所以两边探针代码完全相同:
+
+| 探针 | 改前(best of 3) | 改后(best of 3) |
+|---|---|---|
+| `KernelHost` 直驱(`ProcessSpec::linear`,无 model/无行投影/无 transport) | 3.478 ms/hop(288 hop/s);轮内 3.478/4.721/4.287 | **1.788 ms/hop(559 hop/s)**;轮内 1.788/1.809/1.819 |
+| `Engine` 端到端(真实 30 步 workflow,含 model、行投影、outbox transport) | 4.510 ms/hop(222 hop/s);轮内 4.510/5.181/6.190 | 4.163 ms/hop(240 hop/s);轮内 4.163/4.465/5.006 |
+| 同探针的 3/10/30 步伸缩(lean) | 0.461 / 1.267 / 2.889 ms/hop | **0.315 / 0.694 / 1.749 ms/hop** |
+
+**两次运行的环境差约 1.3×**(同一次运行里测的 per-call 微基准:`AggregateDocumentCodec::encode` 改前 662 µs / 改后 878 µs、`decode` 593 / 720 —— 微基准与被测 hop 无关,所以这个比值就是环境比)。按它归一后**两个形状都是 ≈ −25…30%/hop**;raw 的 −49%(lean)高估、−8%(engine)被 ±15% 的噪声吞掉。**不改持久化格式、不需要迁移**。
+
+**分解(同轮实测,release,单线程,per-call 微基准)**:
+| 量 | lean 形状(聚合 17 KB,无 model) | engine 形状(聚合 44.5 KB,含 model) |
+|---|---|---|
+| `model_of` | 0.1 µs(**`ProcessSpec::linear` 的聚合没有 model 变量**) | 42–56 µs |
+| `execution_graph` | 72–73 µs(31 个 execution) | 86–108 µs |
+| `AggregateDocumentCodec::encode` | 281–327 µs | 662–878 µs |
+| `AggregateDocumentCodec::decode` | 263–292 µs | 593–720 µs |
+| `snapshot.validate()` | 15–25 µs | — |
+| `recovery_entries` / recovery index / outbox index | 各 < 1 µs | — |
+- 折叠后每 hop 的整包工作量:**3 次 decode + 2 次 encode**(改前 4 + 3),lean 形状折算 1.4 ms/hop、engine 形状更多;
+- 3/10/30 步的 ms/hop 仍近似线性(聚合 3.4/9.0/25.0 KB)⇒ **§5l 的 O(n²) 结论在折叠后依然成立**;
+- **索引投影/编码确认无关**(与 §5n 一致):`recovery_entries`、两个索引文档每 hop 各 < 1 µs。
+
+**剩下的杠杆(按实测改写 §5l 的排序)**:
+1. **整包 decode/encode 仍是每 hop 的大头**。要再降只有两条路:①少一次 load —— hop 起始的 `load1` 不能直接删(`DispatchTimeout` 的预检要在 claim **之前**判定,`place_run` 也要它),除非把 claim 提前、预检挪到 claim 之后,那会把"每 tick 一次 idle timer 从 0 次提交变成 2 次";②**拆文档 / append-only**(§9.3.4②,持久化格式变更,必须单独立项:迁移 + golden fingerprint)。
+2. **按聚合版本缓存 per-hop 派生(§5l ②)实测收益不足**:`execution_graph` 72–108 µs/次 ≈ 每 hop 的 3–6%,`model_of` 42–56 µs/次(只在真实 workflow 形状存在);为此在 shell 里加有状态缓存 + 淘汰不值当。**建议跳过,除非 ①② 都做完。**
+3. 端到端的 engine 形状里还有约 1 ms/hop 既不是 codec 也不是 store(§5l 实测 store 只占 1.4%)—— 那是 hop 的 plan/记账 CPU,**需要新画像**才能定位。
+
+**测试影响(必须记录的语义面)**:
+- **删除** `reliability/action.rs::a_crash_that_loses_the_close_of_an_applied_completion_advances_once` 与 `reliability/back.rs::an_applied_backs_lost_completion_is_finalized_without_a_second_rewind`:它们 pin 的"effect 已落、close 未落"这一 **crash 边界不再存在**(close 与 effect 同批)。覆盖不丢:同一状态现在由"hop 之后那一次提交被拒"表达,`stall.rs` 的 sweep 覆盖它。
+- `reliability/next.rs`:四写边界收敛为三写(intent / claim / effect+close),`CLOSE_WRITE` 删除;`stall.rs` 的 `COMPLETION_COMMITS` 4 → 3。`stall.rs` 的 sweep 仍覆盖"effect 已落、它 seed 的 propagation 还 Pending"(`arm(COMPLETION_COMMITS)` = 拒掉 hop 之后那一次提交)。
+- `aggregate.rs`:`source_operation_is_committed_in_same_atomic_batch` → `…_and_closed_in_same_atomic_batch`(断言 `Completed`);`durable_claim_prepare_commit_complete_has_one_revision_chain` → `durable_claim_prepare_commit_has_one_revision_chain`(单批内推进 2 个 revision 步、净增量与旧两提交一致、二次 close 被拒)。
+- **新增** `durable/async_document_store.rs::a_committed_operation_left_by_an_older_writer_is_finalized`:手工构造旧 writer 会留下的 `Committed` 聚合,断言 `RecoveryPlanner::classify` → `FinalizeCommit` 且 `Complete` 事件仍能应用到持久记录 —— 升级路径的兼容回归(否则删除上面两条 cell 会让这条 recovery 分支失去覆盖)。
+
+**验收**:`cargo test -p acts --lib --tests` = **870 passed / 0 failed**;`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = EXIT 0;`cargo fmt --check` 干净。
+
+---
+
 ## 11. P6 提示词(下一轮,可整段复制)
 
 ```
@@ -1975,7 +2024,11 @@ src/scheduler/
 - **`acts-server` 的环境现象**(§10 §5k 有原始输出):"全部 target 一条命令"本机报
   `failed to mmap file '...\libacts-*.rlib': 页面文件太小 (os error 1455)`(Windows 提交限额),`-j 2` 即全绿,CI(Linux)不受影响。
 
-# P6 任务(按序)
+# P6 任务(按序), 每执行完一个任务，更新下一步提示词并等待用户确认
+
+> **进度(2026-10-15)**:第 1 项的性能主项完成第二笔(§10「P6-1」:hop 自己的 close 并进 effect 提交,
+> 归一后 **≈ −25…30%/hop**,无持久化格式变更)。第 1 项的 (i)-②(拆文档/append-only)、(iv)(plan/记账 CPU 画像)、
+> c(投影降频)以及**第 2–7 项全部未做**。
 
 1. **P4c 性能收口(强制,已有基线)**:30 步纯 step 线性 workflow。
    **基线一律用 release(§10 §5n):93 hops / 0.684 s = 7.4 ms/hop ≈ 136 hop/s**(内存 store)。
@@ -1989,21 +2042,35 @@ src/scheduler/
       ①**派生索引 + 投影行的写合并/懒写**(§5i:每 hop 42.6 次写里 37 次是它们;不改持久化格式,收益最大)。
       **已做第一笔(§5j)**:投影行"内容未变则不写" —— 写次数 42.6→35.6/hop、字节 16.0→14.8 MB,`procs` 家族
       614→14 次。**剩余**:`tasks` 家族 10.9 写/hop 里 ~9 是**行自己的索引键**,`kernel/indexes` 18.6 写/hop 是
-      recovery/outbox 派生索引 —— 这两块要合并索引键或懒写索引;
+      recovery/outbox 派生索引 —— 这两块要合并索引键或懒写索引;**但 §10「P6-1」的微基准说明这块对 hop 吞吐无关**
+      (`recovery_entries`、两个索引文档每 hop 各 < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义,别再当吞吐项;
       ②**投影降频**(§9.3.3:proc 行那 6.6 次/hop 已被 ① 的"未变不写"消掉,剩下的是任务行自身的状态迁移);
       ③**减字节**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合 → 拆分文档/append-only 操作日志,属**持久化格式变更**,
       必须单独立项:迁移 + golden fingerprint 更新)。
-      **读 §10 §5l 再动手**:store 只占 hop 时间的 **1.4%**,瓶颈是**每 hop 的 O(run 长度) CPU**
-      (run 总成本 O(n²)),其中 **9 次整包编解码 = 28%**。真正该做的顺序改为:
-      **(i) 砍整包编解码次数**:**已做第一笔(§5m)**——提交把快照交回,`load2`/`load3` 归零(每 hop 少 2 次整包解码,
-      账内 CPU −14.4%)。**剩余**:`Complete` 事件并进计划提交(省 1 解码 + 1 编码);
-      以及 §5m 揭示的"**每次提交内部 ~9–14ms 的其它整包工作**"(两个索引文档的投影/编码、guard 字节克隆、
-      `encode` 内含的全量 `validate()`)——那是比 load 更大的一块,优先做;
-      **(ii) 按聚合版本缓存 per-hop 全量派生**(model JSON、execution_graph、validate);
-      **(iii) 拆文档/append-only**(解决每次编解码的常数,不是当前主因)。
+      **读 §10 §5l/§5n/§5o/「P6-1」再动手**:store 只占 hop 时间的 **1.4%**,瓶颈是**每 hop 的 O(run 长度) CPU**
+      (run 总成本 O(n²)),其中整包编解码是大头。真正该做的顺序:
+      **(i) 砍整包编解码次数**:
+      - **已做第一笔(§5m)**:提交把快照交回,`load2`/`load3` 归零(每 hop 少 2 次整包解码,账内 CPU −14.4%);
+      - **已做第二笔(§10「P6-1」,本次)**:hop 自己的 `Complete`(close)并进 effect 提交 —— 每 hop 从 **4 decode + 3 encode**
+        降到 **3 + 2**,无持久化格式变更。实测(同探针、`--test-threads=1`、改前用 `git stash` 在同一棵树上复测):
+        lean 形状 **3.48 → 1.79 ms/hop**、engine 形状 **4.51 → 4.16 ms/hop**;两轮 per-call 微基准差 ~1.3×(环境比),
+        **归一后两个形状都是 ≈ −25…30%/hop**。engine 形状自身噪声 ±15%,单看它测不出,别再拿它的 raw 值当基线。
+      - **剩余①:少一次 load**。hop 起始的 `load1` **不能直接删**:`DispatchTimeout` 的预检必须在 claim **之前**判 idle
+        (否则每 tick 的 idle timer 从 0 次提交变成 2 次),`place_run` 也用它。真要省就得把 claim 提前、预检挪到 claim 之后。
+      - **剩余②:拆文档 / append-only 操作日志**(§9.3.4②)—— 这才是"每次编解码的常数 + 写字节"的正解,
+        **必须单独立项**(V2 → 新版本:迁移 + golden fingerprint 更新)。
+      **(ii) 按聚合版本缓存 per-hop 全量派生**(model JSON、execution_graph、validate):§10「P6-1」**实测收益不足,建议跳过** ——
+      `execution_graph` 72–108 µs/次(每 hop 3–6%)、`model_of` 42–56 µs/次(只在真实 workflow 形状存在;`ProcessSpec::linear`
+      的聚合**根本没有 model 变量**,所以 old 探针测不到它),为这点收益在 shell 里加有状态缓存 + 淘汰不值当。
+      **(iii) 拆文档/append-only**:与 (i)-② 同一件事,已并入 (i);当前每 hop 的整包工作量 = 3 decode + 2 encode 一个随 run 增长的聚合。
+      **(iv) 新发现(§10「P6-1」):engine 形状里还有 ~1 ms/hop 既不是 codec 也不是 store** —— 那是 hop 的 plan/记账 CPU
+      (计划构造、消息 payload、`place_run`/`deliver_plan` 等)。**下一步该给它做画像**(用 §10「P6-1」的 engine 探针形状 +
+      `#[cfg(test)]` 分阶段计时),再决定动哪一块;这比 (ii) 更值得做。
    c. **§9.3.3 投影降频或 wake 驱动**:现在每跳都重投影行;先量投影占每 hop 的比例,再降频或改成按需,
-      注意别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f)。
-   验收:hop 吞吐显著上升(目标 legacy 量级);`871+` 用例仍全绿;§10 记录前后对比数值与探针形状。
+      注意别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f)。**未动**:§10「P6-1」的 engine 探针里行投影是开着的,
+      但它的耗时还没从那 ~1 ms 里分解出来(见 (iv))。
+   验收:hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿(§10「P6-1」删了 2 条 pin 旧 close 边界的 cell、新增 1 条);
+   §10 记录前后对比数值与探针形状(**本轮的探针与数值见 §10「P6-1」,探针代码已删,可按那里的形状重建**)。
    (**Feature B 轮未动性能**;另注:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读,
    即"每次读解码整包 + 两个派生索引、每次提交整包重编码"是主因 —— §10「Feature B 完成」前一段与 §9.3.4。)
 2. **唯一保留的语义边界复核**:`sealed` 快照不进读模型(vars 行 sealed 恒空、聚合不存 sealed)。
@@ -2034,67 +2101,3 @@ src/scheduler/
       legacy 把这两者放在 act 的 **options**(不是 task data),没有这一路上浮。要贴近 legacy 就得给逐项绑定一个不参与折叠的载体
       (或者反过来:接受并在 `已知边界` 写明"逐项绑定会成为 outputs 的一部分")。
 
----
-
-### 下一步任务(2026-10-15):容器包参数式 fan-out 收尾 —— Feature B
-
-> **已完成(2026-10-15)**:见 §10「Feature B 完成(2026-10-15)」。下面的做法全部照做,但原设计漏了三处,必须一并修才能按本意运行
-> (逐条见 §10:① admission 的子槽位要**按父定位**——否则第 2 个 item 的分支/act 会被 `Ignore` 收编到第 1 个 item 的同名节点上;
-> ② `sequence{in}` 的 item 要**链式**接纳(legacy `build_acts(&true)`),不是全部并行;③ `action_identity` 要取"能接受该动作的最新 generation",
-> 否则 approve 的第二个 `pm_act` 会被拒绝)。本节保留原文,作为当时的任务书。
-
-**目标**:`acts.core.block{ mode, acts }` / `acts.core.sequence{ in, acts }` / `acts.core.parallel{ in, acts }` 的内联 acts 变成内核**子执行**,
-`examples/approve`(pm/gm 审批)与 `examples/message`(block 里的两条 msg)按模型本意运行。现状见本⽂「已知边界」第 1 条:这些包"解析成功但无子节点、直接完成"
-(`server`/`shell` 的 `Runtime::fanout_command → container_shape` 只认显式 `branches` 与嵌套 `steps`;`ctx.build_acts` 写的是 effect seam 用完即弃的无头 process)。
-
-**本轮已实测的中间结论(探针做完即回退,未提交;证据在会话记录)**:
-- 导入期把 `block{ mode: sequence }` 的 acts 物化为"恒选分支"(`if: "true"`,steps 即各 act)**可用**:探针里 `m1`/`m2` 两条 msg act 都被内核跑到(该 run 正常完成)。
-- `parallel{ in }` 的**逐项实例化尚未实现**:探针 `in: ${{ users }}`(2 项)只跑了模板一次,`value` 为空。
-
-**做法(设计已定,可直接照做)**:
-1. `scheduler/shell/model.rs::ProcessSpec::from_workflow`(`assign_ids` 之后)新增 `materialize_container_acts(&mut Workflow)`:递归遍历
-   top-level steps、各 step 的 branches 内 steps、`catches`、`timeouts`(含本轮新加的分支),对命中容器包的 step 物化:
-   - `mode: sequence` → **1 个恒选分支**(`id = <step>#acts`,`if: "true"`),steps = 各 act(声明链即顺序);
-   - `mode: parallel` → **每个 act 一个恒选分支**(`<step>#act<i>`)——容器天然并行接纳自己的 branches;
-   - 带 `in` → **1 个恒选分支**(`<step>#in`),其 steps = **1 个模板 step**(`<step>#item`,`uses: acts.core.block`,
-     `params = { mode: 内部模式, acts }`);内部模式:`acts.core.parallel` → `parallel`,`acts.core.sequence` → `sequence`
-     (legacy 两者都用 block 包一层:`parallel.rs`/`sequence.rs` 的 `execute` 逐项建 `BlockPackageParams`)。
-   Act→Step 映射:`uses`(空则 None)/`params`/`vars`/`if`/`options`/`metadata`/`exposes`;`id` 为空则 `shortid()`(与 `assign_ids` 同口径)。
-2. 动态实例化:`scheduler/shell/mod.rs::fanout_command` 对"该 step 的 `params` 带 `in`"的节点走动态分支 ——
-   `items = params["in"]` 数组,每项一个 `ContainerChild { task_id = 模板 step id, model_node = 模板 id, plan = Entry,
-   predecessors = [Source], vars = [("index", i), ("value", item)] + 模板自身 vars, auto }`:即 **N 个 generation 并行接纳**
-   (legacy 每项一个 block task,options 带 `index`/`value`;模板的 acts 经作用域链继承这两个变量,故 `${{ value }}`/`${{ index }}` 可用)。
-3. `scheduler/core/plan/container.rs::plan_fanout` 需要**同一 plan 内重复 task_id 的递增收代**:现在 `next_generation(snapshot, …)` 只看快照,
-   同一 fan-out 里的 N 个同名 child 会算出同一个 generation(撞 id)。改为在 plan 内维护 `HashMap<task_id, u64>` 偏移
-   (取 `max(快照, 本 plan 已分配 + 1)`),`resolved`/`creates` 已在同一 plan 内累积,可作依据。
-4. 回归与验收:
-   - 新增内核 cell:静态 block 的 acts 都跑到(act 消息齐全);`parallel{ in }` 产出 `len(in)` 个子执行且各自 `value`/`index` 绑定正确;
-   - `examples/message`(block 的两条 msg 都发出)与 `examples/approve`(`{"pm":[…],"gm":[…]}` 非空、pm/gm 审批 act 都被应答)实测;
-   - **改** `scheduler/tests/reliability/parallel.rs` 的那条 conformance cell(`a_uses_param_fan_out_resolves_its_package_without_children`,
-     其文档已写明:将来补齐必须改这条);
-   - 门禁:`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` / `cargo fmt` / `cargo test -p acts`。
-5. 收口后更新登记:本⽂「已知边界」第 1 条 + `parallel.rs` 的 conformance cell 说明。
-
-**本轮已落地的相关改动(2026-10-15,提交 `449166d`;与上面任务相邻,勿重复做)**:
-- step 自身 `if`/`while` 守卫、显式/backward `next` 重入、`while` 循环回跳与 `ELOOP`(`max_node_run_times`)上界;catch/timeout handler 的守卫与 `next` 归派发器;
-- run 的 outputs = 模型 `exposes` 投影(不再拿整棵 root scope 撞 schema);无 `exposes` 时输出自身变量并剔除引擎事实(`__*`、`auto`、`ecode`/`message`/`error.*`);
-- 失败消息的 `ecode`/`message` 同时进 `outputs` 与 `inputs`,且客户端失败的 `ecode` 不再丢(`root_error` 用 `json_text` 宽容解码);
-- **outbox 即投即递**:hop 在**提交前**把本 plan 的记录交给 transport,确认的记录随同一笔提交落 `Delivered`(attempt/fence/revision=1);
-  被拒的留 `Pending` 并唤醒重投递 pass。曾用"每次提交唤醒一趟全局投递 pass"实现,实测**每条记录多两次整聚合提交**并近似翻倍整轮耗时
-  (`examples/simple` 19.3 s → 10.0 s debug / 1.2 s release),故改为本跳内投递;
-- 读模型每行投影按聚合版本守卫(旧提交的投影不得覆盖新行),`apply_action` 用自己提交返回的 snapshot 投影(避免二次 load 落后);
-- 实测一次 `simple`(≈500 hops,debug,内存 store):**708 次聚合读、726 次提交、569 行读**,每次读要解码聚合 + outbox/recovery 两个派生索引、
-  每次提交要整体重编码 —— 即 §9.3.4 登记的主因(投递与 tick 延迟均已排除),P5 仍应从增量编码下手。
-
-# 硬性约束
-- 守卫 `crates/acts/src/scheduler/core/architecture.rs` 不可删;`core/`、`durable/` 不得命名 `crate::scheduler::shell`
-  (`SHELL_MODULES = ["crate::scheduler::shell"]`);`RUNTIME_ROOT`/tier 清单随目录改动同步(§10 已登记现行判据)。
-- 禁止新 `#[allow(...)]` 压 lint(除 §10 已登记的那几条,且属性处必须写理由);新增一条就在 §10 登记。
-- 串行构建(Defender 会锁 rlib/exe);工作区 CRLF,批量改写后 `file` 复核。
-- **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故:把 `export/actions.rs` 截断为空)。
-- 每次改动前后都跑真正的用例,并在 §10 记录实测数值;不要用"看上去对"或"单测绿"代替实测。
-  全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4 + Feature B 轮实测);读投影行之前 `runtime.flush_writer()`。
-- **容器包的内联 acts 已在导入期物化**(`materialize_container_acts` + `param_fanout_children` 是唯一入口):改容器包、
-  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」(按父定位、`sequence` 链式、`action_target` 的选法都有实测依据),
-  不要另开第二条展开路径,也不要为了绕开它们去改 `GenerationAdmissionPolicy` 的既有语义。
-```

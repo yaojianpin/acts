@@ -2,10 +2,11 @@
 //! completion — under a store fault, a duplicate delivery, N racing deliveries,
 //! and a crash at each write boundary of its durable hop.
 //!
-//! The kernel decides a client action in four writes against the aggregate: the
-//! durable *intent* (the operation plus the private `__action` fact its hop
-//! replays), the claim that prepares it, the effect commit, and the close. The
-//! read model is only projected from those commits afterwards, so a cell reads
+//! The kernel decides a client action in three writes against the aggregate:
+//! the durable *intent* (the operation plus the private `__action` fact its hop
+//! replays), the claim that prepares it, and the effect commit, which closes
+//! the operation inside the same batch. The read model is only projected from
+//! those commits afterwards, so a cell reads
 //! "exactly once" off the surfaces that hold it — the aggregate's executions
 //! and its outbox records (a hop's record key is deterministic per
 //! `(pid, tid, generation, sequence)`, so a hop that applied twice shows up as
@@ -572,12 +573,12 @@ async fn a_duplicate_complete_is_refused_without_effect_inner() {
 // ACTION × restart — each write boundary of the completion
 // ---------------------------------------------------------------------------
 
-/// The completion hop writes the aggregate four times: the durable *intent*
+/// The completion hop writes the aggregate three times: the durable *intent*
 /// (the operation plus the private action fact), the claim that prepares it,
-/// the effect commit, and the close. Cutting the writer at each of the first
-/// three and then booting a fresh engine over the same store must leave the
-/// client's decision exactly-once or not-at-all — never applied twice, never
-/// silently dropped:
+/// and the effect commit (which closes the operation). Cutting the writer at
+/// each of the first three and then booting a fresh engine over the same store
+/// must leave the client's decision exactly-once or not-at-all — never applied
+/// twice, never silently dropped:
 ///
 /// - the intent write lost: nothing is durable, the recovery scan finds nothing
 ///   to replay (`scanned == 0`) and the act still waits for the client, which
@@ -767,95 +768,6 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
         }
         recovered.close().await;
     }
-}
-
-// ---------------------------------------------------------------------------
-// ACTION × restart — the close of an applied completion is finalized
-// ---------------------------------------------------------------------------
-
-/// Cutting the writer at the completion hop's *close* — its fourth write —
-/// leaves the effect applied but the operation unclosed: the aggregate holds
-/// the act's operation `Committed` and the propagation it created `Pending`,
-/// while the client's call was refused.
-///
-/// Recovery closes that operation from its own commit (the `Committed` ->
-/// `Completed` finalize) instead of re-planning it, so the applied completion
-/// is not applied a second time: one execution per node, one record per hop,
-/// the propagation runs exactly once, and the run advances once. Legacy split
-/// this state with its writer's applied-propagation phase; the kernel keeps it
-/// in the operation's state machine, and a crash between the effect and its
-/// close is the same state there.
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn a_crash_that_loses_the_close_of_an_applied_completion_advances_once() {
-    bounded(
-        "a_crash_that_loses_the_close_of_an_applied_completion_advances_once",
-        a_crash_that_loses_the_close_of_an_applied_completion_advances_once_inner(),
-    )
-    .await;
-}
-
-async fn a_crash_that_loses_the_close_of_an_applied_completion_advances_once_inner() {
-    const CLOSE: usize = 4;
-
-    let kv = CutKv::new();
-    let store = kv.store();
-    let engine = engine_on(store.clone()).await;
-    let (pid, step1) = waiting_head(&engine).await;
-
-    let base = kv.writes();
-    kv.cut_at(base + CLOSE);
-    let refused = complete_act(&engine, &pid, &step1).await;
-    assert!(
-        refused.is_err(),
-        "a cut writer must reach the client, got {refused:?}"
-    );
-    assert_eq!(
-        kv.refused(),
-        1,
-        "exactly the completion hop's close must have been cut"
-    );
-
-    // the crash state: the effect is applied (the act is decided and the
-    // propagation it set off is pending), only the close is missing
-    assert_eq!(
-        open_shapes(&open_operations(&engine, &pid, &step1).await),
-        vec!["committed", "pending"],
-        "the crash must leave the decision applied and the propagation pending"
-    );
-    assert_eq!(
-        decided_state(&engine, &pid, &step1).await,
-        Some(ExecutionState::Completed),
-        "the crash must be after the effect, not before it"
-    );
-
-    engine.close().await;
-    kv.heal();
-    let recovered = engine_on(store.clone()).await;
-
-    // recovery closes the applied completion and drives the propagation it
-    // created, and the run reaches the next act
-    let advanced = poll_until_dumped(
-        &format!("the recovered run {pid} to reach its next act"),
-        || async {
-            decided_state(&recovered, &pid, &step1).await == Some(ExecutionState::Completed)
-                && decided_state(&recovered, &pid, "step2").await == Some(ExecutionState::Waiting)
-        },
-        || dump_state(&recovered, &pid),
-    )
-    .await;
-    assert!(advanced, "the recovered run must advance into `step2`");
-
-    // the applied completion was finalized, not applied again
-    assert_completion_once(&recovered, &pid, &step1).await;
-    assert!(
-        open_operations(&recovered, &pid, &step1).await.is_empty(),
-        "the applied completion's operation must be closed, not left open"
-    );
-
-    finish_chain(&recovered, &pid).await;
-    sweep_until_gone(&recovered, &pid).await;
-    recovered.close().await;
 }
 
 // ---------------------------------------------------------------------------
