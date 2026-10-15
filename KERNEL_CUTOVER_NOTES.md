@@ -1387,6 +1387,10 @@ on_complete/on_error)。所以 P1d 的收益是「包 API 不再点名 `Runtime`
   subflow act 现在与其子 run 同时完成;父/子 run 关联(`ACT_USE_PARENT_*`)仍随 inputs 传给子 run,但无消费者。
 - **`acts.core.action`**:`Push`/`Remove`/`SetProcessVars` 仍无 kernel 动作面(`Runtime::kernel_kind` 返回 `None`
   并报错),与 P3 记录一致。
+- **节点寻址的 action 无法区分同一节点的多个实例(2026-10-15 登记,含实测)**:action/message 只带 `tid` = 模型节点 id
+  (legacy 的 per-item act 各有新 id),故一个 run 里同一节点被实例化 N 次(参数式 fan-out、`sequence{in}` 预建的下一项)时,
+  客户端只能按投递顺序逐条作答;乱序作答、或给不同实例不同的 options 现在表达不了。逐条见 §10「Feature B 完成」§4
+  (`action_target` 取"能接受该动作的最新 generation";逐项 `index`/`value` 会随作用域链上浮进祖先作用域与 run 的 outputs)。
 
 ---
 
@@ -1738,11 +1742,11 @@ kernel 期版本,只有 2 处 `cache()` reach-through 待改)+ 重新施加本�
 
 **3) 本轮新登记的边界(未修,均有实测证据)**
 
-- **容器包的参数式 fan-out 没有内核表示**:`acts.core.parallel` / `acts.core.block` / `acts.core.sequence` 的 `{in, acts}` 不会展开成子执行——
-  `Runtime::fanout_command` → `container_shape`(`runtime/shell/planning.rs:200`)只认显式 `branches` 与嵌套 `steps`,`ctx.build_acts` 写的是
-  effect seam 用完即弃的无头 process(`EffectOutcome` 只带 outputs/data/env)。故这些内置包在 kernel 下"解析成功但无子节点、直接完成"。
-  矩阵对此的处理:`parallel.rs` 的可靠性 cell 改用内核真正支持的显式 `branches` 容器,另加 1 条 conformance cell 钉住现状(其文档写明:将来补齐必须改这条)。
-  本文「已知边界」此前只登记了 subflow 与 Push/Remove/SetProcessVars,本条为新登记。
+- ~~**容器包的参数式 fan-out 没有内核表示**~~ → **已实现(2026-10-15,见 §10「Feature B 完成」)**:导入期把内联 acts 物化成模型的
+  `branches`/`steps`(`scheduler/shell/model.rs::materialize_container_acts`),参数式 `{in, acts}` 由
+  `scheduler/shell/mod.rs::fanout_command::param_fanout_children` 逐项实例化模板 step,`plan_fanout` 的 admission 改为"子槽位按父定位"。
+  `parallel.rs` 的那条 conformance cell 已随之改写为正向 cell(2 条:block 两种模式的 acts、`{in,acts}` 每项一个模板实例)。
+  替代本条的新边界见 §10「节点寻址的 action 无法区分同一节点的多个实例」。
 - **claim 之后才失败 → `EffectUnknown`**:任何非 `Conflict` 的失败(operation 记录的 CAS 冲突、store 错误)会以 `CommitPrepared` 挂到 lease 过期,再归
   `EffectUnknown`,此后只由人工对账(现至少会 warn)。"效果可能已落地"的不确定态保守不自动重试是设计选择。
 - **`Runtime::close` 不 join driver task**:`close` 返回后仍可能有一次 hop 提交落库(测试侧用 stop 屏障绕开)。**不要改成 join**:
@@ -1867,35 +1871,111 @@ src/scheduler/
 
 ---
 
-## 11. P5 提示词(下一轮,可整段复制)
+### Feature B 完成(2026-10-15):容器包的内联 acts 成为内核子执行
+
+**目标**:`acts.core.block{ mode, acts }` / `acts.core.sequence{ in, acts }` / `acts.core.parallel{ in, acts }` 的内联 acts 变成内核**子执行** ——
+`examples/message`(block 里的两条 msg)与 `examples/approve`(pm/gm 审批)按模型本意运行。原任务书与"原设计"见 §11 的同名小节(已在原文处标注完成)。
+
+**1) 落地的机制(三处)**
+
+- **导入期物化**(`scheduler/shell/model.rs`):`from_workflow` 在 `assign_ids` 之后调用 `materialize_container_acts`,递归遍历(top-level steps /
+  各 step 的 branches 内 steps / `catches` / `timeouts`,含本轮新加的分支)把命中容器包的 step 改写成内核本来就懂的 `branches`/`steps`:
+  `block{ mode: sequence }` → 1 个恒选分支 `<step>#acts`(steps = 各 act,声明链即顺序);`mode: parallel` → 每个 act 一个恒选分支 `<step>#act<i>`;
+  `parallel|sequence{ in, acts }` → 1 个恒选分支 `<step>#in`,内含 1 个模板 step `<step>#item`(`uses: acts.core.block`、`params = {mode, acts}`,再被递归物化)。
+  Act→Step 是保真映射(`uses` 空 → `None`、id 空 → `shortid()`);容器 step 自身保留包与 params(照旧发消息、params 照旧校验,故 schema 违规仍在原地失败)。
+- **逐项实例化**(`scheduler/shell/mod.rs::fanout_command` 的 `param_fanout_children`):`params` 带 `in` 的 `parallel|sequence` 节点走动态分支 ——
+  从 start hop 钉下的 `__params`(无 effect runner 时回退到模型里的字面 `in`)取数组,每项一个 `ContainerChild{task_id = <step>#item, model_node = 模板,
+  vars = index/value + 模板 vars, auto}`,即同一模型节点 N 个 generation;`parallel` 全 `Entry`/`[Source]`,`sequence` 首项 `Entry`/`[Source]`、其余
+  `Queued`/`[Sibling(i-1)]`。
+- **`plan_fanout` 的两处修正**(`scheduler/core/plan/container.rs`):
+  ① 同一 plan 内重复 task_id 的递增收代(`HashMap<task_id, u64>` 偏移 = `max(快照 next, 本 plan 上次分配 + 1)`,快照看不到本 plan 的 create);
+  ② **子槽位按父定位**:admission 的"已有 generation"观察从"该 task_id 的全局最新"改为**该 source 自己已持有的同名子执行**(按 generation 升序,
+  第 i 次出现取第 i 个)。
+
+**2) 原设计漏掉、由实测逼出来的三处**
+
+- **(a) 不按父定位就没有第 2 个 item**:探针(`parallel{in: '${{ items }}'}` 2 项 + 1 条 msg act)显示只有 1 个模板实例跑起来、
+  `step1#item@1` 停在 `Running`、run 永不完成 —— 第 2 个 item 的分支/act 在该节点已 `Active` 时被 `GenerationAdmissionPolicy` 判 `Ignore`,
+  收编到第 1 个 item 的同名 execution 上。按父定位后:`step1#item@{0,1}` 与 act 节点 `@{0,1}` 各自成立、各自 scope 带 `index/value`、run Completed。
+- **(b) `sequence{in}` 必须链式**:原设计写"N 个 generation 并行接纳",而 legacy `SequencePackage` 走 `build_acts(&acts, true)`(逐项串起来)。
+  照 legacy 实现:首项 `Entry`/`[Source]`,其余 `Queued`/`[Sibling(i-1)]`(cell 直接断言两种接纳边)。
+- **(c) `action_identity` 选不中第 2 个实例**:action 只带 `tid`(模型节点 id),而 `pm_act` 在一个 run 内有 2 个 Waiting generation;原实现恒取"最新 generation",
+  第一笔完成后第二笔打在已 `Completed` 的同一个上 → preflight 拒绝 → `examples/approve` 的客户端 `exit(1)`。改为 `action_target`:取"**能接受该动作的最新
+  generation**"(都不接受时退回最新,如实报拒绝)。客户端按投递顺序逐条作答即逐项落地(emitter 对同一 pid 的 handler 本就串行、按投递顺序);单 generation 的节点行为不变。
+
+**3) 实测(命令 + 数值)**
+
+- 新增/改写 cell(`scheduler/tests/reliability/parallel.rs`,6 条全绿):删掉 conformance cell
+  `a_uses_param_fan_out_resolves_its_package_without_children`,换成 `a_uses_param_fan_out_instantiates_one_template_per_item`
+  (`parallel` 与 `sequence` 各跑一遍:2 项 → `step1#item@{0,1}`、各自 scope 的 `index/value` = `0/"u1"`、`1/"u2"`、各自 act 消息解析出 `0=u1`/`1=u2`、
+  接纳边 `[Source]` vs `[Sibling]`、容器 Completed、行可回收)与 `a_block_packages_inline_acts_run_as_children_in_both_modes`
+  (sequence/parallel 两模式各起一个 run:两条 act 消息齐全、无未终态 execution、容器 Completed)。
+  模型层新增 2 条(`scheduler/shell/model.rs::tests`):`container_package_acts_become_model_children`(durable model 的分支/模板/恒选守卫/auto map 决策)、
+  `only_the_container_packages_are_materialized`(用户包带 `acts` 不被物化;`mode: parallel` 一 act 一分支)。
+  两条新 cell 的通道消息断言先 poll 到齐再断言(消息经 outbox 交给 emitter 的 per-pid worker,run 结算时可能仍在投递 —— 实测踩过一次空集),
+  项序也不作要求(逐项 hop 相互独立)。
+  `cargo test -p acts --lib reliability::parallel` = **6 passed / 0 failed**;`--lib shell::model::tests` = **13 passed / 0 failed**。
+- `examples/message`(`cargo run -p acts --example message`):step3(`block{sequence}` 两条 msg)的两条 act 都跑到(`msg1 a=110`、`msg2 b=120`),
+  run completed、`on_complete: {"value":100}`(逐项绑定未影响它)。**改前** step3 "直接完成"、两条 msg 一条都不发。
+- `examples/approve`(`cargo run -p acts --example approve`):`pm_act` Created ×2 且都被应答、`pm_act_msg` ×2、`gm_act_msg`/`gm_act` 各 1,
+  `on_workflow_complete: pid=… cost=0ms outputs={"gm":["3"],"index":0,"pm":["1","2"],"value":"3"}` —— **pm/gm 都非空**(验收口径),run 正常结束(47 s wall,含编译)。
+- `cargo test -p acts`:本轮共跑 4 次 —— 1 次 = **871 passed / 0 failed**(lib,152 s)+ doctests **11 passed / 1 ignored / 0 failed**;
+  另 3 次各翻 1–2 条**负载/残留状态敏感**的用例,且每次位置不同:`export::actions::tests::a_run_cannot_seal_another_subjects_scope`
+  (在 `on_error` 消息之后立刻读**投影行**、读前不 flush 写后台;单跑 3/3 绿)、`scheduler::shell::tests::kernel_task_and_act_messages_are_emitted`
+  (同样是投影行断言;单跑绿)、`tests::a_backward_next_re_enters_the_node_it_names`(自带 20 s 上限,单跑 12.45 s 绿,`examples/simple` 实测 `{"result":55}`)。
+  **对照实测**:把本轮改动 `git stash` 掉、在同一 target 上跑同命令,**基线同样翻 1 条**(`kernel_task_and_act_messages_are_emitted`)
+  —— 即 §10 §4「harness 的界限」登记过的"并行负载翻转族 + 行投影滞后",与本轮无关,未在本轮修。
+  本轮**受影响**的那些 cell 反而单独连跑 3 次全绿(`cargo test -p acts --lib reliability::parallel` = 6 passed ×3)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = **EXIT 0**(先修 1 条测试侧 `clippy::type_complexity`:cell 捕获的 4 元组换成 `AnnouncedAct` 记录);
+  `cargo fmt` 已跑,`cargo fmt --check` = 干净。
+- **AGENTS.md 的下游 `-p` 套件**(本轮改动只在 `crates/acts`,故只挑会被内核 fan-out/admission 改到的那一个):`cargo test -p acts-package-shell`
+  = 5 个 target 里 4 个全绿(10/7/3/2),`--test vars` 3/4 —— 唯一失败 `the_inputs_of_the_act_embed_in_the_script`
+  (`$inputs().data` 报 `no such member 'data'`,即"上一 act 的输出没到脚本",属 §10 已登记的子执行 outputs 通道族)。
+  **对照实测**:把本轮改动 `git stash` 掉后同一命令**同样** 3/4 同样失败 → 非本轮引入。
+  (`acts-store` 的 postgres、`acts-channel`/`acts-plugin-nats` 的 broker 套件本机无服务,未跑 —— AGENTS.md 已声明该前提。)
+
+**4) 新登记的边界(未修,均有实测证据)**
+
+- **节点寻址的 action 无法区分同一节点的多个实例**:action/message 只带 `tid` = 模型节点 id(legacy 的 per-item act 各有新 id),故同一节点在一个 run 里
+  被实例化 N 次(参数式 fan-out、`sequence{in}` 预建的下一项)时,客户端只能**按投递顺序逐条作答**;若必须乱序作答、或给不同实例不同的 options,现在的内核表达不了 ——
+  需要给实例一个可寻址的身份(运行期扩展模型出逐项副本,或 message 带实例号),属**身份/持久化模型的改动**,本轮不做。
+  `action_target` 的"能接受该动作的最新 generation"是该限制下最能保住模型本意(N 个项目都要被应答)的选法。
+- **逐项绑定会沿作用域链上浮**:`index`/`value` 是模板 execution 自己的 scope 变量(作用域链继承,`${{ value }}` 因此可用),而 completed execution 的非引擎变量会折进
+  父作用域(`PropagateTask`)—— 于是它们出现在祖先作用域与 run 的 outputs(`examples/approve` 的 outputs 里就有 `index`/`value`)。legacy 把这两者放在 act 的
+  **options**(不是 task data),没有这一路上浮;要更贴近 legacy 得给逐项绑定一个不参与折叠的载体。
+
+---
+
+## 11. P6 提示词(下一轮,可整段复制)
 
 ```
-你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的去 legacy 迁移执行 agent(第三轮:性能收口与门禁)。
+你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的去 legacy 迁移执行 agent(第四轮:P4c 性能收口、两条登记边界、门禁与文档)。
 
 # 当前状态(不要重做)
-P4a/P4b 与 P4 收尾续已完成并实测验证(逐项见 KERNEL_CUTOVER_NOTES.md §10 的「P4a 完成」「P4b 完成」
-「P4 收尾续」):
-- 常驻引擎、旧套件、`Config::kernel_engine`、`Cache`/`queue`/`ops`、`ActTask`/`Sign`/`PropagationPhase` 均已删除;
-  `Runtime` 单路 kernel、自持 `Arc<Store>` + `StoreWriter`;写路径在 `store/writebehind.rs`,行方法在
-  `store/{process_rows,delivery_rows}.rs`;`scheduler/` 为无头基座(`Process`/`Task`/`Context`/`tree`/`state`/
-  `validation`/`cron`/`health`)。
-- 未接线纯策略件已删(`replay_policy`/`recovery_format`/`runtime_state`/同步文档库/`BranchPlan::plan`/
-  outbox repository+dispatch 等);两条 `#[allow(dead_code)]` 在属性处写明理由(`OperationEvent`、
-  `DeliveryOutcome`)—— 本轮复核它们是否还能删,不能就保留理由并写明。
-- 本轮又修掉四处 kernel 缺陷(§10 §5b–§5e):非 Func act 的 seal 拒绝卡死 run、向上错误行走不带错误文本、
-  `auto` 引擎事实泄漏进 run 的 outputs(误报 `exposes` 校验)、子执行 outputs 不回灌父作用域;
-  并更正一条误诊(无步骤 workflow 其实会完成)。
-- 当前验收(实测,均绿且稳定):`cargo test -p acts --lib --tests` = **789 passed / 0 failed**(~70 s);
-  `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = EXIT 0;`cargo fmt --check` 干净;
-  `cargo check -p acts --all-targets` 0 error/0 warning;`cargo test -p acts-store --features sled,sqlite,postgres`
-  = 97/97;`cargo test -p acts-server -j 2` = **EXIT 0,全 target 绿**(`--lib` 11、`--test lease` 2、
-  `--test startup` 3、`--test nats` 1、其余 0)。
-  **更正一条早先的误诊**:把全部 target 放进一条命令时本机报的 E0786/E0463 **不是**"rlib flavor"问题。
-  真实原因(§10 §5k 有原始输出)是 **Windows 页面文件/提交限额**:`failed to mmap file '...\libacts-*.rlib':
-  页面文件太小,无法完成操作。 (os error 1455)` —— 默认并行度下 `acts-server` 一条命令要同时 mmap 的 rlib
-  数量超过了本机提交限额。`-j 2` 即全绿,**仓库无需任何改动**;CI(Linux)不受影响。
 
-# P5 任务(按序)
+- **kernel 是唯一引擎**(P4a/P4b/P4 收尾续/P5 名与形均已完成,逐项见 §10):常驻引擎、旧套件、`Config::kernel_engine`、
+  `Cache`/`queue`/`ops` 的运行面、`ActTask`/`Sign`/`PropagationPhase` 均已删除;`Runtime` 单路 kernel、自持 `Arc<Store>` +
+  `StoreWriter`;写路径在 `store/writebehind.rs`,行方法在 `store/{process_rows,delivery_rows}.rs`;`scheduler/` 四层定名
+  (`core`/`durable`/`shell` + `runtime.rs`),门面只有显式 `pub use`。
+- **Feature B 已完成(2026-10-15,§10「Feature B 完成」有完整记录,含原设计漏掉的三处)**:容器包
+  (`acts.core.block`/`sequence`/`parallel`)的内联 acts 现在是内核子执行 —— 导入期 `materialize_container_acts`
+  (`scheduler/shell/model.rs`)把 `{mode, acts}`/`{in, acts}` 改写成模型的 `branches`/`steps`;
+  `fanout_command::param_fanout_children`(`scheduler/shell/mod.rs`)按 `in` 逐项实例化模板(每项一个 generation,
+  scope 带 `index`/`value`);`plan_fanout`(`scheduler/core/plan/container.rs`)的子槽位 admission **按父定位**;
+  `action_identity` 取"能接受该动作的最新 generation"。`examples/message` 两条 msg 都发、`examples/approve` 收
+  `outputs={"gm":["3"],"index":0,"pm":["1","2"],"value":"3"}`。**这四处别再动**。
+- **当前验收(实测)**:`cargo test -p acts` = **871 passed / 0 failed** + doctests 11 passed / 0 failed;
+  `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = EXIT 0;`cargo fmt --check` 干净。
+  `cargo test -p acts-package-shell` = 5 个 target 里 4 个全绿,`--test vars` 3/4(唯一失败在基线(把改动 stash 掉)上同样失败)。
+- **测试环境两个既知事实(§10 §4「harness 的界限」+ Feature B 轮实测)**:① 全量 `cargo test -p acts` 会翻 1–2 条**负载/投影
+  滞后敏感**的用例,每次位置不同(`export::actions::tests::a_run_cannot_seal_another_subjects_scope`、
+  `scheduler::shell::tests::kernel_task_and_act_messages_are_emitted`、`tests::a_backward_next_re_enters_the_node_it_names`
+  自带的 20 s 上限),**单跑都绿** —— 判定"是不是本轮引入"之前先 `git stash` 跑同命令对照基线;
+  ② 读**投影行**之前一律 `runtime.flush_writer()`(行滞后一次提交;不动点断言一律钉聚合)。
+- **`acts-server` 的环境现象**(§10 §5k 有原始输出):"全部 target 一条命令"本机报
+  `failed to mmap file '...\libacts-*.rlib': 页面文件太小 (os error 1455)`(Windows 提交限额),`-j 2` 即全绿,CI(Linux)不受影响。
+
+# P6 任务(按序)
 
 1. **P4c 性能收口(强制,已有基线)**:30 步纯 step 线性 workflow。
    **基线一律用 release(§10 §5n):93 hops / 0.684 s = 7.4 ms/hop ≈ 136 hop/s**(内存 store)。
@@ -1923,7 +2003,9 @@ P4a/P4b 与 P4 收尾续已完成并实测验证(逐项见 KERNEL_CUTOVER_NOTES.
       **(iii) 拆文档/append-only**(解决每次编解码的常数,不是当前主因)。
    c. **§9.3.3 投影降频或 wake 驱动**:现在每跳都重投影行;先量投影占每 hop 的比例,再降频或改成按需,
       注意别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f)。
-   验收:hop 吞吐显著上升(目标 legacy 量级);`789+` 用例仍全绿;§10 记录前后对比数值与探针形状。
+   验收:hop 吞吐显著上升(目标 legacy 量级);`871+` 用例仍全绿;§10 记录前后对比数值与探针形状。
+   (**Feature B 轮未动性能**;另注:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读,
+   即"每次读解码整包 + 两个派生索引、每次提交整包重编码"是主因 —— §10「Feature B 完成」前一段与 §9.3.4。)
 2. **唯一保留的语义边界复核**:`sealed` 快照不进读模型(vars 行 sealed 恒空、聚合不存 sealed)。
    要么实现(聚合持久化 sealed 或投影携带),要么在 §10/CHANGELOG 明确写成已知边界(现状)。
 3. **收口门禁(全 workspace)**:clippy / fmt / `cargo test -p acts --lib --tests` / `-p acts-store`
@@ -1931,7 +2013,7 @@ P4a/P4b 与 P4 收尾续已完成并实测验证(逐项见 KERNEL_CUTOVER_NOTES.
    (按 AGENTS.md);不动 manifest 就不必跑 `cargo deny check bans`。`acts-server` 若只有"全部 target 一条命令"
    会红,逐 target 跑并在 §10 记录该环境现象。
 4. **文档**:`lib.rs` 顶部注释、`CHANGELOG.md`(配置开关已删:`kernel_engine` 不存在;`cache_cap` 语义 =
-   在飞 run 数上限)、`README` 里可能残留的 legacy 说法;§10 追加本轮记录,并把本节提示词更新为 P6(如仍需)。
+   在飞 run 数上限)、`README` 里可能残留的 legacy 说法;§10 追加本轮记录,并把本节提示词更新为 P7(如仍需)。
 5. **删死掉的 `ops` 族(BREAKING,见 §10「可靠性矩阵回归」§6 T1)**:内核 outbox 记录在聚合里,`ops` 集合生产侧无
    writer/reader,仅剩 `remove_proc_rows` 的家族清单 + 单测借用。删 `Store::ops()`/`StoreIden::Ops`/`store/data/op.rs`
    与那一行,单测示例集合换成 messages/deliveries;先决定老库遗留 `ops-*` 孤儿行的处理(接受/保留只删不建/一次性清理),
@@ -1941,10 +2023,25 @@ P4a/P4b 与 P4 收尾续已完成并实测验证(逐项见 KERNEL_CUTOVER_NOTES.
    运维归档 / 容量触发)、pid 复用语义(若要保留"pid 永久唯一"就另存墓碑/pid-epoch)、历史取舍(行回收后聚合是唯一记录)。
    实现:新增 `AsyncAggregateRepository::remove(pid, expected_version)`,一个守卫批删聚合 + 两个索引;GC 只取
    "`settled` 且 `operations` 为空 且 行已回收"的 run,崩溃幂等。验收见 §10 T2。
+7. **Feature B 轮新登记的两条边界,逐条决定(实现或写成永久边界)**(逐条证据见 §10「Feature B 完成」§4):
+   a. **节点寻址的 action 无法区分同一节点的多个实例**:action/message 只带 `tid` = 模型节点 id,而一个 run 可以让同一节点同时有
+      多个 generation(参数式 fan-out 的逐项实例、`sequence{in}` 预建的下一项),客户端只能按投递顺序逐条作答;乱序作答或"给不同实例
+      不同的 options"表达不了。要做就两条路之一:**运行期按 `in` 扩展模型出逐项副本**(每项独立 node id = legacy 的 fresh id 语义,
+      但要处理模型扩展 + `__auto` 追加 + `declaration_successor` 的实例内链),或 **让 message/action 带实例号**(动 message/action
+      的身份面)。两条都属**身份/持久化模型改动** —— 先写设计再动手,别顺手改 `action_target` 的选法。
+   b. **逐项绑定的上浮**:`index`/`value` 是模板 execution 自己的 scope 变量(作用域链继承,`${{ value }}` 因此可用),而 completed
+      execution 的非引擎变量会折进父作用域 —— 于是它们出现在祖先作用域与 run 的 outputs(`examples/approve` 的 outputs 里就有)。
+      legacy 把这两者放在 act 的 **options**(不是 task data),没有这一路上浮。要贴近 legacy 就得给逐项绑定一个不参与折叠的载体
+      (或者反过来:接受并在 `已知边界` 写明"逐项绑定会成为 outputs 的一部分")。
 
 ---
 
 ### 下一步任务(2026-10-15):容器包参数式 fan-out 收尾 —— Feature B
+
+> **已完成(2026-10-15)**:见 §10「Feature B 完成(2026-10-15)」。下面的做法全部照做,但原设计漏了三处,必须一并修才能按本意运行
+> (逐条见 §10:① admission 的子槽位要**按父定位**——否则第 2 个 item 的分支/act 会被 `Ignore` 收编到第 1 个 item 的同名节点上;
+> ② `sequence{in}` 的 item 要**链式**接纳(legacy `build_acts(&true)`),不是全部并行;③ `action_identity` 要取"能接受该动作的最新 generation",
+> 否则 approve 的第二个 `pm_act` 会被拒绝)。本节保留原文,作为当时的任务书。
 
 **目标**:`acts.core.block{ mode, acts }` / `acts.core.sequence{ in, acts }` / `acts.core.parallel{ in, acts }` 的内联 acts 变成内核**子执行**,
 `examples/approve`(pm/gm 审批)与 `examples/message`(block 里的两条 msg)按模型本意运行。现状见本⽂「已知边界」第 1 条:这些包"解析成功但无子节点、直接完成"
@@ -1990,11 +2087,14 @@ P4a/P4b 与 P4 收尾续已完成并实测验证(逐项见 KERNEL_CUTOVER_NOTES.
   每次提交要整体重编码 —— 即 §9.3.4 登记的主因(投递与 tick 延迟均已排除),P5 仍应从增量编码下手。
 
 # 硬性约束
-- 守卫 `runtime/core/architecture.rs` 不可删;`core/`/`durable/` 不得命名 `crate::runtime::{shell,scheduler}`;
-  `RUNTIME_ROOT`/tier 清单随目录改动同步(§10 已登记现行判据)。
-- 禁止新 `#[allow(...)]` 压 lint(除 §10 已登记的两条;新增必须在属性处写理由并在 §10 登记)。
+- 守卫 `crates/acts/src/scheduler/core/architecture.rs` 不可删;`core/`、`durable/` 不得命名 `crate::scheduler::shell`
+  (`SHELL_MODULES = ["crate::scheduler::shell"]`);`RUNTIME_ROOT`/tier 清单随目录改动同步(§10 已登记现行判据)。
+- 禁止新 `#[allow(...)]` 压 lint(除 §10 已登记的那几条,且属性处必须写理由);新增一条就在 §10 登记。
 - 串行构建(Defender 会锁 rlib/exe);工作区 CRLF,批量改写后 `file` 复核。
-- **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(本轮把 `export/actions.rs`
-  截断为空、靠 `git checkout HEAD --` 才恢复,见 §10 §6)。
-- 每次改动前后都跑真正的用例并在 §10 记录实测数值;不要用"看上去对"或"单测绿"代替实测。
+- **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故:把 `export/actions.rs` 截断为空)。
+- 每次改动前后都跑真正的用例,并在 §10 记录实测数值;不要用"看上去对"或"单测绿"代替实测。
+  全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4 + Feature B 轮实测);读投影行之前 `runtime.flush_writer()`。
+- **容器包的内联 acts 已在导入期物化**(`materialize_container_acts` + `param_fanout_children` 是唯一入口):改容器包、
+  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」(按父定位、`sequence` 链式、`action_target` 的选法都有实测依据),
+  不要另开第二条展开路径,也不要为了绕开它们去改 `GenerationAdmissionPolicy` 的既有语义。
 ```
