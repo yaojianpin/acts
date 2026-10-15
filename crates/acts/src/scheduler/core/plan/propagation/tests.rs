@@ -1,10 +1,10 @@
 use super::*;
-use crate::scheduler::core::commit::aggregate::ExecutionSnapshot;
+use crate::scheduler::core::commit::process::ExecutionSnapshot;
 use crate::scheduler::core::model::execution_graph::ExecutionGraphBuilder;
 use crate::scheduler::core::model::execution_graph::ExecutionNode;
 use crate::scheduler::core::model::model_graph::NodeId;
 use crate::scheduler::core::model::operation::ClaimToken;
-use crate::scheduler::core::model::transition_plan::AggregateVersion;
+use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use std::collections::{BTreeMap, HashMap};
 
 fn id(name: &str) -> ExecutionId {
@@ -31,10 +31,10 @@ fn graph() -> ExecutionGraph {
     b.add_successor(id("b"), id("join")).unwrap();
     b.build().unwrap()
 }
-fn snapshot(a: ExecutionState, b: ExecutionState) -> AggregateSnapshot {
-    AggregateSnapshot {
+fn snapshot(a: ExecutionState, b: ExecutionState) -> ProcessSnapshot {
+    ProcessSnapshot {
         process_id: "p1".into(),
-        version: AggregateVersion {
+        version: ProcessVersion {
             graph: 4,
             process: 4,
             operations: 2,

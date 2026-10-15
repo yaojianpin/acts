@@ -47,7 +47,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::scheduler::core::commit::aggregate::AggregateSnapshot;
+use crate::scheduler::core::commit::process::ProcessSnapshot;
 use crate::scheduler::core::model::execution_graph::ExecutionState;
 use crate::{Act, Step};
 
@@ -165,7 +165,7 @@ fn branch_tids(seen: &Arc<Mutex<Vec<(String, String)>>>, pid: &str) -> Vec<Strin
 
 /// The run's aggregate document. A settled run keeps it even after its rows are
 /// swept, so a cell reads a finished run's decision here and never off a row.
-async fn aggregate(engine: &Engine, pid: &str) -> AggregateSnapshot {
+async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
     engine
         .runtime()
         .kernel()
@@ -178,7 +178,7 @@ async fn aggregate(engine: &Engine, pid: &str) -> AggregateSnapshot {
 /// The run's executions as a sorted `(node, generation)` list: the exactly-once
 /// picture a fault, a duplicate or a re-drive must not change.
 async fn node_generations(engine: &Engine, pid: &str) -> Vec<(String, u64)> {
-    let mut nodes: Vec<(String, u64)> = aggregate(engine, pid)
+    let mut nodes: Vec<(String, u64)> = process_snapshot(engine, pid)
         .await
         .executions
         .keys()
@@ -192,7 +192,7 @@ async fn node_generations(engine: &Engine, pid: &str) -> Vec<(String, u64)> {
 /// times the node was instantiated. A second dispatch of a branch, or a rewind,
 /// adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = aggregate(engine, pid)
+    let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
         .executions
         .keys()
@@ -205,7 +205,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 
 /// The aggregate's state for the newest generation of one model node.
 async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .executions
         .iter()
@@ -218,7 +218,7 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<Executio
 /// deterministic per `(pid, tid, generation, sequence)`, so a hop that applied
 /// twice cannot hide behind the count.
 async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .outbox
         .keys()
@@ -263,7 +263,7 @@ async fn complete_act_settled(engine: &Engine, pid: &str, act: &str) {
 /// exactly one execution, and the run holds exactly the model's nodes at
 /// generation 0 — nothing was stranded, duplicated or re-dispatched.
 async fn assert_join_once(engine: &Engine, pid: &str, first: &str, second: &str) {
-    let unfinished: Vec<String> = aggregate(engine, pid)
+    let unfinished: Vec<String> = process_snapshot(engine, pid)
         .await
         .executions
         .iter()
@@ -723,7 +723,7 @@ async fn item_generations(engine: &Engine, pid: &str) -> Vec<u64> {
 /// The `(index, value)` bindings the param fan-out left on the template
 /// executions' own scopes, sorted by index: the item facts the acts read.
 async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
-    let snapshot = aggregate(engine, pid).await;
+    let snapshot = process_snapshot(engine, pid).await;
     let mut bindings: Vec<(String, String)> = snapshot
         .executions
         .keys()
@@ -748,7 +748,7 @@ async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
 /// the container; `sequence` chains each behind the previous item (the legacy
 /// `build_acts(&acts, true)`), which is why its items start one at a time.
 async fn item_predecessors(engine: &Engine, pid: &str) -> Vec<(u64, Vec<String>)> {
-    let snapshot = aggregate(engine, pid).await;
+    let snapshot = process_snapshot(engine, pid).await;
     let mut edges: Vec<(u64, Vec<String>)> = snapshot
         .executions
         .iter()
@@ -906,7 +906,7 @@ async fn a_block_packages_inline_acts_run_as_children_in_both_modes_inner() {
             vec!["block1".to_string(), "block2".to_string()],
             "({mode}) both inline acts must run"
         );
-        let unfinished: Vec<String> = aggregate(&engine, &pid)
+        let unfinished: Vec<String> = process_snapshot(&engine, &pid)
             .await
             .executions
             .iter()

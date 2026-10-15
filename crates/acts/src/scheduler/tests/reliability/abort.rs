@@ -625,7 +625,7 @@ async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(
 
     // the one-shot fault is aimed at the run's aggregate document: the abort's
     // commit (and the hop that carries it) is the next write of it
-    let key = aggregate_key(&pid);
+    let key = process_key(&pid);
     kv.arm_key(&key);
     let refused = abort_act(&engine, &pid, &tid).await;
     assert!(

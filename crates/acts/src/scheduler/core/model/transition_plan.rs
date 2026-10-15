@@ -16,7 +16,7 @@ use std::fmt;
 /// read model drop a projection that is older than the rows it would write
 /// (see `RowProjector::claim`).
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct AggregateVersion {
+pub(crate) struct ProcessVersion {
     /// Immutable execution-topology revision. State-only commits never change it.
     pub(crate) graph: u64,
     pub(crate) process: u64,
@@ -79,7 +79,7 @@ pub(crate) struct OutboxIntent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TransitionPlan {
     pub(crate) process_id: String,
-    pub(crate) expected: AggregateVersion,
+    pub(crate) expected: ProcessVersion,
     pub(crate) execution_creates: Vec<ExecutionCreate>,
     pub(crate) state_changes: Vec<StateChange>,
     pub(crate) variable_writes: Vec<VariableWrite>,
@@ -274,7 +274,7 @@ mod tests {
     fn plan() -> TransitionPlan {
         TransitionPlan {
             process_id: "p1".into(),
-            expected: AggregateVersion {
+            expected: ProcessVersion {
                 graph: 0,
                 process: 3,
                 operations: 7,
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_must_belong_to_aggregate() {
+    fn operation_must_belong_to_process() {
         let mut p = plan();
         p.operations.push(OperationIntent {
             id: OperationId {

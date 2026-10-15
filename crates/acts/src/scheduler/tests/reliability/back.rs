@@ -372,8 +372,8 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
 
     // the one-shot fault is aimed at the run's aggregate document: the back's
     // commit (and the hop that carries it) is the next write of it
-    let aggregate = aggregate_key(&pid);
-    kv.arm_key(&aggregate);
+    let process = process_key(&pid);
+    kv.arm_key(&process);
     let refused = back_act(&engine, &pid, "step2", &step1).await;
     match &refused {
         Err(ActError::Store(_)) => {}
@@ -382,7 +382,7 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
     assert_eq!(kv.fired(), 1, "the armed fault must fire exactly once");
     assert_eq!(
         kv.failed_key(),
-        Some(aggregate),
+        Some(process),
         "the fault must land on the run's aggregate commit"
     );
 

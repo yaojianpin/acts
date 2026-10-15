@@ -1,7 +1,7 @@
 use super::*;
-use crate::scheduler::core::commit::aggregate::ExecutionSnapshot;
+use crate::scheduler::core::commit::process::ExecutionSnapshot;
 use crate::scheduler::core::model::operation::ClaimToken;
-use crate::scheduler::core::model::transition_plan::AggregateVersion;
+use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use std::collections::{BTreeMap, HashMap};
 
 fn id(task: &str, generation: u64) -> ExecutionId {
@@ -45,10 +45,10 @@ fn execution(
         },
     )
 }
-fn snapshot(executions: Vec<(ExecutionId, ExecutionSnapshot)>) -> AggregateSnapshot {
-    AggregateSnapshot {
+fn snapshot(executions: Vec<(ExecutionId, ExecutionSnapshot)>) -> ProcessSnapshot {
+    ProcessSnapshot {
         process_id: "p1".into(),
-        version: AggregateVersion {
+        version: ProcessVersion {
             graph: 1,
             process: 3,
             operations: 2,
@@ -77,7 +77,7 @@ fn fanout_command(
     source: &str,
     source_state: ExecutionState,
     children: Vec<ContainerChild>,
-) -> (AggregateSnapshot, ContainerFanoutCommand) {
+) -> (ProcessSnapshot, ContainerFanoutCommand) {
     let snapshot = snapshot(vec![
         execution(source, 0, source_state),
         execution("$", 0, ExecutionState::Completed),

@@ -40,11 +40,11 @@ pub(crate) enum TimeoutCandidate {
 
 /// The branches that already fired for one execution, from the one-shot marker
 /// (the legacy `__timeouts` task datum, a JSON array).
-pub(crate) fn claimed(snapshot: &AggregateSnapshot, owner: &ExecutionId) -> Vec<String> {
+pub(crate) fn claimed(snapshot: &ProcessSnapshot, owner: &ExecutionId) -> Vec<String> {
     marker(snapshot, owner).unwrap_or_default()
 }
 
-fn marker(snapshot: &AggregateSnapshot, owner: &ExecutionId) -> Option<Vec<String>> {
+fn marker(snapshot: &ProcessSnapshot, owner: &ExecutionId) -> Option<Vec<String>> {
     let raw = snapshot
         .variables
         .get(&(owner.clone(), consts::TASK_TIMEOUTS.to_string()))?;
@@ -74,7 +74,7 @@ pub(crate) fn cost_ms(now_ms: i64, started: Option<&str>) -> i64 {
 /// Whether one declared branch has a live (non-terminal) execution under
 /// `owner` — the "in flight" half of the legacy dispatcher's check.
 pub(crate) fn has_live_child(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     owner: &ExecutionId,
     branch: &str,
 ) -> bool {
@@ -96,7 +96,7 @@ fn is_child_of(
 /// the owner may not complete before the branches it fired settle (the legacy
 /// `auto_complete` counts every child task, timeout ones included).
 pub(crate) fn has_live_children(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     owner: &ExecutionId,
     branches: &[TimeoutBranch],
 ) -> bool {
@@ -108,7 +108,7 @@ pub(crate) fn has_live_children(
 /// Which branch the next round examines: declaration order, skipping the ones
 /// that already fired, stopping at the first branch that is in flight.
 pub(crate) fn candidate(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     owner: &ExecutionId,
     branches: &[TimeoutBranch],
 ) -> TimeoutCandidate {

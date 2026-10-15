@@ -1,4 +1,4 @@
-use crate::scheduler::core::{commit::aggregate::AggregateSnapshot, model::operation::OperationId};
+use crate::scheduler::core::{commit::process::ProcessSnapshot, model::operation::OperationId};
 
 use std::collections::BTreeMap;
 
@@ -9,7 +9,7 @@ const COMPONENT_SEPARATOR: char = '.';
 pub(crate) struct RecoveryEntryDocument;
 
 impl RecoveryEntryDocument {
-    pub(crate) fn project(snapshot: &AggregateSnapshot) -> BTreeMap<String, Vec<u8>> {
+    pub(crate) fn project(snapshot: &ProcessSnapshot) -> BTreeMap<String, Vec<u8>> {
         snapshot
             .operations
             .values()

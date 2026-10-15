@@ -2,7 +2,7 @@ use super::*;
 
 /// Mark one execution as a container parked for its children: the flow
 /// the plain join reads (see [`FLOW_CHILDREN`]).
-fn mark_parked(snapshot: &mut AggregateSnapshot, parent: &str) {
+fn mark_parked(snapshot: &mut ProcessSnapshot, parent: &str) {
     snapshot.variables.insert(
         (id(parent, 0), FLOW_VAR.to_string()),
         FLOW_CHILDREN.to_string(),

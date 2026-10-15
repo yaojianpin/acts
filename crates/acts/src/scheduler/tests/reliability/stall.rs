@@ -39,7 +39,7 @@ use std::sync::Arc;
 use serial_test::serial;
 
 use crate::TaskState;
-use crate::scheduler::core::commit::aggregate::AggregateSnapshot;
+use crate::scheduler::core::commit::process::ProcessSnapshot;
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
 use crate::scheduler::core::model::execution_graph::ExecutionState;
 use crate::scheduler::core::model::operation::OperationState;
@@ -149,7 +149,7 @@ async fn completed(engine: &Engine, pid: &str) -> bool {
 
 /// The run's aggregate document. A settled run keeps it even after its rows are
 /// swept, so a cell reads a finished run's decision here and never off a row.
-async fn aggregate(engine: &Engine, pid: &str) -> AggregateSnapshot {
+async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
     engine
         .runtime()
         .kernel()
@@ -162,7 +162,7 @@ async fn aggregate(engine: &Engine, pid: &str) -> AggregateSnapshot {
 /// The ascending generations the aggregate holds for one model node: how many
 /// times the node was instantiated. A hop applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = aggregate(engine, pid)
+    let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
         .executions
         .keys()
@@ -175,7 +175,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 
 /// The aggregate's state for the newest generation of one model node.
 async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .executions
         .iter()
@@ -187,7 +187,7 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<Executio
 /// The non-terminal operations the aggregate holds for one model node, in
 /// sequence order, as short names: the durable work a cut left for recovery.
 async fn open_shapes(engine: &Engine, pid: &str, tid: &str) -> Vec<&'static str> {
-    let mut open: Vec<(u64, &'static str)> = aggregate(engine, pid)
+    let mut open: Vec<(u64, &'static str)> = process_snapshot(engine, pid)
         .await
         .operations
         .values()
@@ -217,7 +217,7 @@ fn shape(state: &OperationState) -> &'static str {
 /// deterministic per `(pid, tid, generation, sequence)`, so a hop that applied
 /// twice cannot hide behind the count.
 async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .outbox
         .keys()
@@ -292,7 +292,7 @@ async fn assert_still_finished_once(engine: &Engine, pid: &str, tid: &str) {
 /// does not keep the run from being converged (it does keep its *rows* alive;
 /// see [`sweep_finished_run`]).
 async fn fully_settled(engine: &Engine, pid: &str) -> bool {
-    let snapshot = aggregate(engine, pid).await;
+    let snapshot = process_snapshot(engine, pid).await;
     snapshot
         .executions
         .values()
@@ -311,7 +311,7 @@ async fn fully_settled(engine: &Engine, pid: &str) -> bool {
 /// are not delivered and every operation that is neither closed nor surfaced
 /// for reconciliation. No timestamps, so a genuinely stuck state prints once.
 async fn outstanding(engine: &Engine, pid: &str) -> String {
-    let snapshot = aggregate(engine, pid).await;
+    let snapshot = process_snapshot(engine, pid).await;
     let mut out: Vec<String> = snapshot
         .outbox
         .iter()
@@ -340,7 +340,7 @@ async fn outstanding(engine: &Engine, pid: &str) -> String {
 /// undelivered — that is a delivery's business — but no hop is in flight, so a
 /// caller may run the outbox pass without racing one.
 async fn settled_work(engine: &Engine, pid: &str) -> bool {
-    let snapshot = aggregate(engine, pid).await;
+    let snapshot = process_snapshot(engine, pid).await;
     snapshot
         .executions
         .values()
@@ -385,7 +385,7 @@ async fn wait_fully_settled(engine: &Engine, pid: &str) {
 /// whose owner died is deliberately *not* drivable: only the claim's lease
 /// releases it.
 async fn engine_drivable(engine: &Engine, pid: &str) -> bool {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .operations
         .values()
@@ -500,7 +500,7 @@ async fn sweep_finished_run(engine: &Engine, pid: &str) {
         sweep_until_gone(engine, pid).await;
         return;
     }
-    let snapshot = aggregate(engine, pid).await;
+    let snapshot = process_snapshot(engine, pid).await;
     assert!(
         snapshot
             .executions
@@ -585,7 +585,7 @@ impl DocCutKv {
     fn new(pid: &str) -> Arc<Self> {
         Arc::new(Self {
             inner: MemoryStore::new(),
-            key: aggregate_key(pid),
+            key: process_key(pid),
             recovery_key: crate::scheduler::durable::document_store::recovery_index_key(pid)
                 .expect("a pid encodes as an index key"),
             budget: AtomicUsize::new(0),
@@ -1137,10 +1137,10 @@ async fn boot_slot_inner() {
 }
 
 /// The aggregates of `pids`, for a cell to prove which run a boot pass moved.
-async fn snapshot_map(engine: &Engine, pids: &[String]) -> BTreeMap<String, AggregateSnapshot> {
+async fn snapshot_map(engine: &Engine, pids: &[String]) -> BTreeMap<String, ProcessSnapshot> {
     let mut out = BTreeMap::new();
     for pid in pids {
-        out.insert(pid.clone(), aggregate(engine, pid).await);
+        out.insert(pid.clone(), process_snapshot(engine, pid).await);
     }
     out
 }
@@ -1151,7 +1151,7 @@ async fn snapshot_map(engine: &Engine, pids: &[String]) -> BTreeMap<String, Aggr
 async fn wait_admitted(
     engine: &Engine,
     pids: &[String],
-    before: &BTreeMap<String, AggregateSnapshot>,
+    before: &BTreeMap<String, ProcessSnapshot>,
 ) -> String {
     let what = format!("one of {pids:?} to be admitted");
     poll_until_dumped(
@@ -1184,7 +1184,7 @@ async fn wait_admitted(
     let admitted = admitted.expect("one run must be admitted");
     for pid in pids.iter().filter(|pid| **pid != admitted) {
         assert_eq!(
-            &aggregate(engine, pid).await,
+            &process_snapshot(engine, pid).await,
             before.get(pid).expect("a snapshot per run"),
             "a run the slot did not admit may not hop"
         );
@@ -1197,7 +1197,7 @@ async fn wait_admitted(
 /// message was written, and the read model spells the process state `None` —
 /// the legacy parked row.
 async fn assert_parked(engine: &Engine, pid: &str) {
-    let snapshot = aggregate(engine, pid).await;
+    let snapshot = process_snapshot(engine, pid).await;
     assert!(snapshot.outbox.is_empty(), "a parked run writes no message");
     assert!(
         snapshot

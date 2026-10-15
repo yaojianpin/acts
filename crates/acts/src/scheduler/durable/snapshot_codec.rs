@@ -1,12 +1,12 @@
 use crate::scheduler::core::{
-    commit::aggregate::{AggregateSnapshot, CommitError, ExecutionSnapshot},
+    commit::process::{CommitError, ExecutionSnapshot, ProcessSnapshot},
     model::{
         execution_graph::{ExecutionId, ExecutionState},
         model_graph::NodeId,
         operation::{
             ClaimToken, CommitToken, OperationId, OperationKind, OperationRecord, OperationState,
         },
-        transition_plan::AggregateVersion,
+        transition_plan::ProcessVersion,
     },
 };
 
@@ -23,10 +23,10 @@ const MIN_OUTBOX_FIELD_BYTES: usize = 4;
 pub(crate) struct SnapshotCodecV2;
 
 impl SnapshotCodecV2 {
-    pub(crate) fn encode(snapshot: &AggregateSnapshot) -> Result<Vec<u8>, SnapshotCodecError> {
+    pub(crate) fn encode(snapshot: &ProcessSnapshot) -> Result<Vec<u8>, SnapshotCodecError> {
         snapshot
             .validate()
-            .map_err(SnapshotCodecError::InvalidAggregate)?;
+            .map_err(SnapshotCodecError::InvalidProcess)?;
         let mut writer = Writer::default();
         writer.raw(PAYLOAD_MAGIC);
         writer.string(&snapshot.process_id)?;
@@ -76,13 +76,13 @@ impl SnapshotCodecV2 {
         Ok(writer.bytes)
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<AggregateSnapshot, SnapshotCodecError> {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<ProcessSnapshot, SnapshotCodecError> {
         let mut reader = Reader::new(bytes);
         if reader.raw(PAYLOAD_MAGIC.len())? != PAYLOAD_MAGIC {
             return Err(SnapshotCodecError::InvalidMagic);
         }
         let process_id = reader.string()?;
-        let version = AggregateVersion {
+        let version = ProcessVersion {
             graph: reader.u64()?,
             process: reader.u64()?,
             operations: reader.u64()?,
@@ -158,7 +158,7 @@ impl SnapshotCodecV2 {
         if !reader.is_finished() {
             return Err(SnapshotCodecError::TrailingBytes);
         }
-        let snapshot = AggregateSnapshot {
+        let snapshot = ProcessSnapshot {
             process_id,
             version,
             executions,
@@ -168,7 +168,7 @@ impl SnapshotCodecV2 {
         };
         snapshot
             .validate()
-            .map_err(SnapshotCodecError::InvalidAggregate)?;
+            .map_err(SnapshotCodecError::InvalidProcess)?;
         Ok(snapshot)
     }
 }
@@ -507,7 +507,7 @@ pub(crate) enum SnapshotCodecError {
     DuplicateOperation(OperationId),
     DuplicateOutboxKey(String),
     InvalidOutbox(String),
-    InvalidAggregate(CommitError),
+    InvalidProcess(CommitError),
 }
 impl fmt::Display for SnapshotCodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -526,12 +526,12 @@ mod tests {
             .expect("test fixture contains the requested u32 field");
         u32::from_be_bytes(field.try_into().expect("test fixture u32 has four bytes"))
     }
-    use crate::scheduler::core::commit::aggregate::MemoryAggregateRepository;
-    use crate::scheduler::core::commit::aggregate::{
-        AggregateRepository, MemoryAggregateRepositoryAccess,
+    use crate::scheduler::core::commit::process::MemoryProcessRepository;
+    use crate::scheduler::core::commit::process::{
+        MemoryProcessRepositoryAccess, ProcessRepository,
     };
 
-    fn snapshot() -> AggregateSnapshot {
+    fn snapshot() -> ProcessSnapshot {
         let root = ExecutionId::new("root", 0).unwrap();
         let child = ExecutionId::new("child", 1).unwrap();
         let operation_id = OperationId {
@@ -546,9 +546,9 @@ mod tests {
             lease_until_ms: 1000,
             heartbeat_revision: 3,
         };
-        AggregateSnapshot {
+        ProcessSnapshot {
             process_id: "p".into(),
-            version: AggregateVersion {
+            version: ProcessVersion {
                 graph: 2,
                 process: 8,
                 operations: 9,
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn encoding_is_stable_across_map_insertion_order() {
         let source = snapshot();
-        let mut reordered = AggregateSnapshot::empty("p").unwrap();
+        let mut reordered = ProcessSnapshot::empty("p").unwrap();
         reordered.version = source.version.clone();
         let mut executions = source.executions.iter().collect::<Vec<_>>();
         executions.sort_by(|(left, _), (right, _)| right.cmp(left));
@@ -637,7 +637,7 @@ mod tests {
     fn decoded_snapshot_passes_repository_validation_boundary() {
         let decoded =
             SnapshotCodecV2::decode(&SnapshotCodecV2::encode(&snapshot()).unwrap()).unwrap();
-        let mut repository = MemoryAggregateRepository::default();
+        let mut repository = MemoryProcessRepository::default();
         repository.insert_for_test(decoded).unwrap();
         assert!(repository.load("p").unwrap().is_some());
     }
@@ -658,7 +658,7 @@ mod tests {
         let encoded = SnapshotCodecV2::encode(&snapshot()).unwrap();
         assert_eq!(encoded.len(), 286);
         assert_eq!(
-            crate::scheduler::core::commit::aggregate::sha256_hex(&encoded),
+            crate::scheduler::core::commit::process::sha256_hex(&encoded),
             "26dc1279e7f4eddd825ee0c655877f26236ad360ba3ae62adcfac54168b7e693"
         );
     }

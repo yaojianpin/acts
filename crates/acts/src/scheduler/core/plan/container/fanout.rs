@@ -32,11 +32,11 @@ impl ContainerPlanner {
     /// [`Self::plan_catch_join`]) decides it once every child is terminal. An
     /// empty container completes immediately.
     pub(crate) fn plan_fanout(
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         command: &ContainerFanoutCommand,
     ) -> Result<TransitionPlan, ContainerError> {
         if snapshot.process_id != command.process_id {
-            return Err(ContainerError::WrongAggregate);
+            return Err(ContainerError::WrongProcess);
         }
         if !matches!(
             command.source_park,
@@ -225,7 +225,7 @@ impl ContainerPlanner {
     }
 
     fn empty_container_plan(
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         command: &ContainerFanoutCommand,
         state: ExecutionState,
         revision: u64,
@@ -274,7 +274,7 @@ impl ContainerPlanner {
 /// first: the children a re-run of this fan-out reuses (the seed's chain, a
 /// Cancel rewind's recreation) instead of duplicating.
 fn existing_children(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     parent: &ExecutionId,
     task_id: &str,
 ) -> Vec<ExecutionId> {
@@ -293,7 +293,7 @@ fn existing_children(
 /// The admission observation for one already-existing execution: `Created`
 /// never ran (`Unstarted`), so a rewound-and-recreated child is readmitted
 /// rather than duplicated.
-fn generation_state(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> ExistingGeneration {
+fn generation_state(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> ExistingGeneration {
     match snapshot.executions.get(execution).map(|held| held.state) {
         Some(ExecutionState::Created) => ExistingGeneration::Unstarted,
         Some(ExecutionState::Ready | ExecutionState::Running | ExecutionState::Waiting) => {
@@ -303,7 +303,7 @@ fn generation_state(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> Ex
     }
 }
 
-fn next_generation(snapshot: &AggregateSnapshot, task_id: &str) -> Option<u64> {
+fn next_generation(snapshot: &ProcessSnapshot, task_id: &str) -> Option<u64> {
     snapshot
         .executions
         .keys()
@@ -383,7 +383,7 @@ fn child_variables(
 /// A readmitted child is `Created`; the admission moves it to `Ready`. An
 /// unexpected state is refused rather than forced.
 fn readmit_change(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     execution: &ExecutionId,
 ) -> Result<Option<StateChange>, ContainerError> {
     let existing = snapshot

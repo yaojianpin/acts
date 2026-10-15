@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum UpwardError {
-    WrongAggregate,
+    WrongProcess,
     ExecutionNotFound(ExecutionId),
     UnsupportedTarget(ExecutionState),
     SourceNotDecided {

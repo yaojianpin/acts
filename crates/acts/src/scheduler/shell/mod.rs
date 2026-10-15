@@ -56,7 +56,7 @@ use crate::{
             recovery::planner::{RecoveryDisposition, RecoveryPlanner, RecoveryReport},
         },
         durable::async_document_store::{
-            AsyncAggregateRepository, AsyncRecoveryRepository, KvDocumentStore,
+            AsyncProcessRepository, AsyncRecoveryRepository, KvDocumentStore,
         },
     },
     store::KvStore,
@@ -133,7 +133,7 @@ pub(crate) struct RunReport {
 /// and belongs to exactly one driver task ([`KernelHost::serve`]).
 #[derive(Clone)]
 pub(crate) struct KernelHost {
-    aggregates: Arc<AsyncAggregateRepository>,
+    processes: Arc<AsyncProcessRepository>,
     recovery: Arc<AsyncRecoveryRepository>,
     wake_tx: Sender<OperationId>,
     /// The effect seam: when attached, a Func package's work runs inside the
@@ -335,7 +335,7 @@ impl Admissions {
 /// whose root hop already ran has no such operation left, so waking it is a
 /// no-op and the recovery scan re-wakes the run's real work on the next tick.
 fn resume_operation(
-    snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
 ) -> OperationId {
     let root = root_execution(snapshot);
     OperationId {
@@ -383,12 +383,12 @@ impl KernelHost {
         max_node_run_times: u64,
     ) -> (Arc<Self>, Receiver<OperationId>) {
         let store = Arc::new(KvDocumentStore::new(kv));
-        let aggregates = Arc::new(AsyncAggregateRepository::new(store));
-        let recovery = Arc::new(AsyncRecoveryRepository::new(aggregates.clone()));
+        let processes = Arc::new(AsyncProcessRepository::new(store));
+        let recovery = Arc::new(AsyncRecoveryRepository::new(processes.clone()));
         let (wake_tx, wake_rx) = channel(PAGE_SIZE * 8);
         (
             Arc::new(Self {
-                aggregates,
+                processes,
                 recovery,
                 wake_tx,
                 effect: Arc::new(parking_lot::RwLock::new(None)),
@@ -474,7 +474,7 @@ impl KernelHost {
     /// after the iteration re-enters itself.
     async fn flow_of(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
     ) -> Result<Option<crate::scheduler::core::plan::propagation::FlowTarget>> {
         use crate::scheduler::core::plan::propagation::{FlowTarget, is_guard_skip};
@@ -569,7 +569,7 @@ impl KernelHost {
     /// variables, operators and value methods but no engine function.
     async fn evaluate_branch_predicate(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         expr: &str,
         inputs: &[(String, String)],
@@ -600,10 +600,7 @@ impl KernelHost {
     /// is attached. The rows are a derived read model: a store failure is
     /// reported and dropped, never propagated into the hop — the next commit
     /// re-derives them from the aggregate.
-    async fn project(
-        &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
-    ) {
+    async fn project(&self, snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot) {
         let projector = self.projection.read().clone();
         let Some(projector) = projector else {
             return;
@@ -621,7 +618,7 @@ impl KernelHost {
     /// read model's rows for the rest of the run cannot have changed.
     async fn project_touched(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         touched: &std::collections::BTreeSet<String>,
     ) {
         let projector = self.projection.read().clone();
@@ -689,7 +686,7 @@ impl KernelHost {
     /// failure is reported as an error, exactly like the legacy handler).
     fn report_lifecycle(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
     ) {
         let lifecycle = self.lifecycle.read();
         let Some(sink) = lifecycle.as_ref() else {
@@ -840,7 +837,7 @@ impl KernelHost {
             }
         };
         if let Err(error) = self
-            .aggregates
+            .processes
             .create(&snapshot)
             .await
             .map_err(repository_error)
@@ -974,7 +971,7 @@ impl KernelHost {
     ///   no-op, and the next recovery tick re-wakes its real work.
     fn place_run(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
     ) -> bool {
         let mut admissions = self.admissions.lock();
         let mut freed = None;
@@ -1125,7 +1122,7 @@ impl KernelHost {
     /// rewind.
     fn validate_cancel_forward_work(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         source: &crate::scheduler::core::model::execution_graph::ExecutionId,
     ) -> Result<()> {
         let graph = execution_graph(snapshot)?;
@@ -1134,7 +1131,7 @@ impl KernelHost {
         let mut queue: std::collections::VecDeque<
             crate::scheduler::core::model::execution_graph::ExecutionId,
         > = std::collections::VecDeque::from([source.clone()]);
-        let mut forward: Vec<&crate::scheduler::core::commit::aggregate::ExecutionSnapshot> =
+        let mut forward: Vec<&crate::scheduler::core::commit::process::ExecutionSnapshot> =
             Vec::new();
         while let Some(current) = queue.pop_front() {
             if !seen.insert(current.clone()) {
@@ -1186,7 +1183,7 @@ impl KernelHost {
     /// refused — and never resumes an operation whose outcome another client
     /// was already told.
     fn action_identity(
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         process_id: &str,
         task_id: &str,
         action: &crate::scheduler::core::commit::command::ActionKind,
@@ -1259,7 +1256,7 @@ impl KernelHost {
     /// preflight answers the refusal the caller earned (a duplicate delivery, a
     /// decision on a settled node) rather than a missing execution.
     fn action_target(
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         task_id: &str,
         action: &crate::scheduler::core::commit::command::ActionKind,
     ) -> Result<crate::scheduler::core::model::execution_graph::ExecutionId> {
@@ -1283,7 +1280,7 @@ impl KernelHost {
     /// inputs. An operation without that fact, or with another decision's, is
     /// not ours to resume.
     fn action_intent_is_mine(
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         intent: &ActionIntent,
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
@@ -1309,7 +1306,7 @@ impl KernelHost {
         operation: &OperationId,
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
-        expected: crate::scheduler::core::model::transition_plan::AggregateVersion,
+        expected: crate::scheduler::core::model::transition_plan::ProcessVersion,
     ) -> TransitionPlan {
         TransitionPlan {
             process_id: process_id.into(),
@@ -1500,7 +1497,7 @@ impl KernelHost {
                 snapshot.version.clone(),
             );
             match self
-                .aggregates
+                .processes
                 .commit_transition(&plan)
                 .await
                 .map_err(repository_error)?
@@ -1559,7 +1556,7 @@ impl KernelHost {
             Ok(mut plan) => {
                 self.deliver_plan(process_id, &mut plan);
                 let receipt = match self
-                    .aggregates
+                    .processes
                     .commit_transition(&plan)
                     .await
                     .map_err(repository_error)?
@@ -2273,7 +2270,7 @@ impl KernelHost {
         let mut plan = plan;
         self.deliver_plan(&id.process_id, &mut plan);
         let (receipt, loaded) = match self
-            .aggregates
+            .processes
             .commit_transition(&plan)
             .await
             .map_err(repository_error)?
@@ -2390,10 +2387,10 @@ impl KernelHost {
     ///   generation per turn).
     async fn guard_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        execution: &crate::scheduler::core::commit::process::ExecutionSnapshot,
         claim: &OperationCommit,
     ) -> Result<Option<TransitionPlan>> {
         let Some(model) = model_of(snapshot)? else {
@@ -2475,10 +2472,10 @@ impl KernelHost {
     /// step.
     fn guard_skip_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        execution: &crate::scheduler::core::commit::process::ExecutionSnapshot,
         claim: &OperationCommit,
     ) -> Result<TransitionPlan> {
         let propagate_id = OperationId {
@@ -2537,10 +2534,10 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     async fn execute_task_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: Option<&crate::scheduler::core::commit::aggregate::ExecutionSnapshot>,
+        execution: Option<&crate::scheduler::core::commit::process::ExecutionSnapshot>,
         claim: &OperationCommit,
         action_id: &OperationId,
         action_exists: bool,
@@ -2739,10 +2736,10 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     fn task_hop_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: Option<&crate::scheduler::core::commit::aggregate::ExecutionSnapshot>,
+        execution: Option<&crate::scheduler::core::commit::process::ExecutionSnapshot>,
         claim: &OperationCommit,
         note: &str,
         topic: &str,
@@ -2788,10 +2785,10 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     async fn effect_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        execution: &crate::scheduler::core::commit::process::ExecutionSnapshot,
         claim: &OperationCommit,
         action: Option<crate::scheduler::core::commit::command::ActionKind>,
         inputs: Vec<(String, String)>,
@@ -3066,7 +3063,7 @@ impl KernelHost {
     /// package facts.
     fn step_uses(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<(String, serde_json::Value, String, String)>> {
         let Some(model) = model_of(snapshot)? else {
@@ -3097,7 +3094,7 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     fn act_message_payload(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         task_id: &str,
         facts: Option<&ActFacts>,
@@ -3165,7 +3162,7 @@ impl KernelHost {
     /// node's name.
     fn task_message_payload(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         task_id: &str,
         outputs: Option<&[VariableWrite]>,
@@ -3211,7 +3208,7 @@ impl KernelHost {
     /// (`Task::create_message`); only the fact set differs.
     fn hop_message_payload(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         task_id: &str,
         facts: Option<&ActFacts>,
@@ -3231,7 +3228,7 @@ impl KernelHost {
     /// authority, on the acting node of the declaring model.
     fn scope_spec(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         model: crate::model::Workflow,
     ) -> Result<scope::ScopeSpec> {
@@ -3249,7 +3246,7 @@ impl KernelHost {
     /// `None` for a leaf without a package or a host running without the seam.
     fn step_effect(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<(Arc<dyn effects::EffectRunner>, effects::EffectRequest)>> {
@@ -3279,7 +3276,7 @@ impl KernelHost {
     /// error is the legacy act's start error.
     async fn resolve_step(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<ActFacts>> {
@@ -3301,7 +3298,7 @@ impl KernelHost {
     /// round.
     fn timeout_branches(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Vec<crate::scheduler::core::plan::timeout::TimeoutBranch>> {
         let Some(model) = model_of(snapshot)? else {
@@ -3332,7 +3329,7 @@ impl KernelHost {
     /// whose `Step::init` had nothing to test.
     fn timeout_guard(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         branch: &str,
     ) -> Result<Option<String>> {
         let Some(model) = model_of(snapshot)? else {
@@ -3350,9 +3347,9 @@ impl KernelHost {
     /// `__cost` task datum `$cost()`/`$cost_in(...)` read.
     async fn timeout_round(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         owner: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: Option<&crate::scheduler::core::commit::aggregate::ExecutionSnapshot>,
+        execution: Option<&crate::scheduler::core::commit::process::ExecutionSnapshot>,
         now_ms: i64,
     ) -> Result<TimeoutRound> {
         // Only a running or waiting execution times out (the legacy tick's
@@ -3450,10 +3447,10 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     fn timeout_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: Option<&crate::scheduler::core::commit::aggregate::ExecutionSnapshot>,
+        execution: Option<&crate::scheduler::core::commit::process::ExecutionSnapshot>,
         claim: &OperationCommit,
         branch: crate::scheduler::core::plan::timeout::TimeoutBranch,
         guard: TimeoutGuard,
@@ -3514,7 +3511,7 @@ impl KernelHost {
     /// The bare remainder of an operation with nothing to do: its own commit
     /// and nothing else. Completing the operation is the whole effect.
     fn empty_remainder(
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         claim: &OperationCommit,
     ) -> TransitionPlan {
@@ -3537,9 +3534,9 @@ impl KernelHost {
     /// already parked) and the container join finishes it.
     fn waits_for_timeouts(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        execution: &crate::scheduler::core::commit::process::ExecutionSnapshot,
     ) -> Result<bool> {
         let branches = self.timeout_branches(snapshot, &execution.model_node)?;
         Ok(!branches.is_empty()
@@ -3558,7 +3555,7 @@ impl KernelHost {
     /// messages are suppressed once it carries an act.
     fn attach_join_message(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         plan: &mut TransitionPlan,
         parent: &crate::scheduler::core::model::execution_graph::ExecutionId,
         operation: &OperationIntent,
@@ -3601,7 +3598,7 @@ impl KernelHost {
     /// [`crate::scheduler::PARK_CHILDREN`]).
     fn container_fanout_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         command: &crate::scheduler::core::plan::container::ContainerFanoutCommand,
     ) -> Result<TransitionPlan> {
         let mut plan = crate::scheduler::core::plan::container::ContainerPlanner::plan_fanout(
@@ -3656,10 +3653,10 @@ impl KernelHost {
     /// planner's own fact wins over a client input of the same private name.
     fn park_for_children_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        execution: &crate::scheduler::core::commit::process::ExecutionSnapshot,
         claim: &OperationCommit,
         inputs: &[(String, String)],
     ) -> Result<TransitionPlan> {
@@ -3720,7 +3717,7 @@ impl KernelHost {
     /// before the commit re-runs the package against the same pre-state.
     fn fold_effect_outcome(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         outcome: &effects::EffectOutcome,
         plan: &mut TransitionPlan,
@@ -3770,10 +3767,10 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     async fn failure_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        execution: &crate::scheduler::core::commit::process::ExecutionSnapshot,
         claim: &OperationCommit,
         failure: &Failure,
     ) -> Result<TransitionPlan> {
@@ -3840,10 +3837,10 @@ impl KernelHost {
     /// reports, under the kernel's package error code.
     async fn package_failure_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         id: &OperationId,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        execution: &crate::scheduler::core::commit::process::ExecutionSnapshot,
         claim: &OperationCommit,
         error: &crate::ActError,
     ) -> Result<TransitionPlan> {
@@ -3874,10 +3871,10 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     async fn catch_fanout(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         claim: &OperationCommit,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
-        execution: &crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+        execution: &crate::scheduler::core::commit::process::ExecutionSnapshot,
         failure: &Failure,
         inputs: &[(String, String)],
     ) -> Result<Option<TransitionPlan>> {
@@ -4050,7 +4047,7 @@ impl KernelHost {
     /// opaque lifecycle payload becomes the hop's payload.
     fn attach_hop_message(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         plan: &mut TransitionPlan,
     ) -> Result<()> {
@@ -4129,7 +4126,7 @@ impl KernelHost {
     /// previous sibling), like the legacy `build_acts(&acts, true)`.
     fn param_fanout_children(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         model: &crate::model::Workflow,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
@@ -4217,7 +4214,7 @@ impl KernelHost {
     /// behind its first step.
     async fn fanout_command(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         execution_id: &crate::scheduler::core::model::execution_graph::ExecutionId,
         claim: &OperationCommit,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
@@ -4440,10 +4437,10 @@ impl KernelHost {
         event: OperationEvent,
     ) -> Result<(
         crate::scheduler::core::model::operation::OperationRecord,
-        crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        crate::scheduler::core::commit::process::ProcessSnapshot,
     )> {
         match self
-            .aggregates
+            .processes
             .commit_operation_event(id, expected_revision, event)
             .await
             .map_err(runtime)?
@@ -4461,14 +4458,14 @@ impl KernelHost {
     async fn load(
         &self,
         process_id: &str,
-    ) -> Result<Option<crate::scheduler::durable::document_store::LoadedAggregate>> {
-        self.aggregates.load(process_id).await.map_err(runtime)
+    ) -> Result<Option<crate::scheduler::durable::document_store::LoadedProcess>> {
+        self.processes.load(process_id).await.map_err(runtime)
     }
 
     pub(crate) async fn snapshot(
         &self,
         process_id: &str,
-    ) -> Result<Option<crate::scheduler::core::commit::aggregate::AggregateSnapshot>> {
+    ) -> Result<Option<crate::scheduler::core::commit::process::ProcessSnapshot>> {
         Ok(self.load(process_id).await?.map(|loaded| loaded.snapshot))
     }
 
@@ -4591,7 +4588,7 @@ impl KernelHost {
         let mut cursor = None;
         loop {
             let page = self
-                .aggregates
+                .processes
                 .dispatchable_outbox_page(now, cursor.as_ref(), PAGE_SIZE)
                 .await
                 .map_err(runtime)?;
@@ -4606,7 +4603,7 @@ impl KernelHost {
                     heartbeat_revision: 0,
                 };
                 let claimed = match self
-                    .aggregates
+                    .processes
                     .evolve_outbox(
                         &record.id,
                         record.revision,
@@ -4658,7 +4655,7 @@ impl KernelHost {
                         }
                     }
                 };
-                self.aggregates
+                self.processes
                     .evolve_outbox(&record.id, claimed.revision, event)
                     .await
                     .map_err(runtime)?;

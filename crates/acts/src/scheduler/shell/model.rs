@@ -12,7 +12,7 @@
 use crate::{
     ActError, Result,
     scheduler::core::{
-        commit::aggregate::{AggregateSnapshot, ExecutionSnapshot},
+        commit::process::{ExecutionSnapshot, ProcessSnapshot},
         model::{
             execution_graph::{
                 ExecutionGraph, ExecutionGraphBuilder, ExecutionId, ExecutionNode, ExecutionState,
@@ -598,7 +598,7 @@ impl ProcessSpec {
     /// the rest `Created`), the graph is wired, and the root's `ExecuteTask`
     /// operation is the single durable seed. Creation is one atomic
     /// `repository.create`, never a plan.
-    pub(crate) fn seed_snapshot(&self) -> Result<AggregateSnapshot> {
+    pub(crate) fn seed_snapshot(&self) -> Result<ProcessSnapshot> {
         self.seed_snapshot_from(ExecutionState::Ready)
     }
 
@@ -608,15 +608,15 @@ impl ProcessSpec {
     /// has. Its `ExecuteTask` operation is driven only once a slot frees (see
     /// `crate::scheduler::core::plan::concurrency`), so the aggregate is
     /// otherwise indistinguishable from an admitted start's.
-    pub(crate) fn seed_parked_snapshot(&self) -> Result<AggregateSnapshot> {
+    pub(crate) fn seed_parked_snapshot(&self) -> Result<ProcessSnapshot> {
         self.seed_snapshot_from(ExecutionState::Created)
     }
 
     /// The seed both entry points share; `root_state` is the root execution's
     /// state (`Ready` for an admitted start, `Created` for a parked one).
-    fn seed_snapshot_from(&self, root_state: ExecutionState) -> Result<AggregateSnapshot> {
+    fn seed_snapshot_from(&self, root_state: ExecutionState) -> Result<ProcessSnapshot> {
         self.model_graph()?;
-        let mut snapshot = AggregateSnapshot::empty(&self.process_id).map_err(runtime)?;
+        let mut snapshot = ProcessSnapshot::empty(&self.process_id).map_err(runtime)?;
         snapshot.version.graph = 1;
 
         let root = ExecutionId::new(&self.root, 0).map_err(runtime)?;
@@ -732,7 +732,7 @@ impl ProcessSpec {
 /// `ExecutionCreate`. The root is the single parentless execution; the
 /// revision is the aggregate's graph revision, which is what
 /// `PropagationPlanner` checks.
-pub(crate) fn execution_graph(snapshot: &AggregateSnapshot) -> Result<ExecutionGraph> {
+pub(crate) fn execution_graph(snapshot: &ProcessSnapshot) -> Result<ExecutionGraph> {
     let mut builder = ExecutionGraphBuilder::new(&snapshot.process_id, snapshot.version.graph)
         .map_err(runtime)?;
     let mut root: Option<ExecutionId> = None;
@@ -1168,7 +1168,7 @@ mod tests {
 
     /// The durable model of a run, decoded from the root scope's
     /// [`MODEL_VAR`] — what a hop reads the nested structure from.
-    fn durable_model(snapshot: &AggregateSnapshot) -> crate::model::Workflow {
+    fn durable_model(snapshot: &ProcessSnapshot) -> crate::model::Workflow {
         let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         serde_json::from_str(
             snapshot
@@ -1180,7 +1180,7 @@ mod tests {
     }
 
     /// The auto map the import seeded, decoded.
-    fn durable_auto(snapshot: &AggregateSnapshot) -> serde_json::Map<String, serde_json::Value> {
+    fn durable_auto(snapshot: &ProcessSnapshot) -> serde_json::Map<String, serde_json::Value> {
         let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         serde_json::from_str(
             snapshot

@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PropagationError {
-    WrongAggregate,
+    WrongProcess,
     GraphVersionConflict {
         graph: u64,
         snapshot: u64,

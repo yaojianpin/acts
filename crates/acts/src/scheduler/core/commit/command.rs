@@ -1,5 +1,5 @@
 use crate::scheduler::core::{
-    commit::aggregate::AggregateSnapshot,
+    commit::process::ProcessSnapshot,
     model::{
         execution_graph::{ExecutionId, ExecutionState},
         operation::{OperationId, OperationKind},
@@ -51,7 +51,7 @@ impl ActionPlanner {
     }
 
     pub(crate) fn plan(
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         command: &ApplyActionCommand,
     ) -> Result<TransitionPlan, CommandError> {
         Self::validate_command(command)?;
@@ -117,11 +117,11 @@ impl ActionPlanner {
 }
 
 fn validate_envelope(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     command: &ApplyActionCommand,
 ) -> Result<(), CommandError> {
     if snapshot.process_id != command.process_id {
-        return Err(CommandError::WrongAggregate {
+        return Err(CommandError::WrongProcess {
             expected: snapshot.process_id.clone(),
             actual: command.process_id.clone(),
         });
@@ -227,7 +227,7 @@ fn action_name(action: &ActionKind) -> &'static str {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CommandError {
-    WrongAggregate {
+    WrongProcess {
         expected: String,
         actual: String,
     },
@@ -255,10 +255,10 @@ impl std::error::Error for CommandError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::core::commit::aggregate::ExecutionSnapshot;
+    use crate::scheduler::core::commit::process::ExecutionSnapshot;
     use crate::scheduler::core::model::model_graph::NodeId;
     use crate::scheduler::core::model::operation::ClaimToken;
-    use crate::scheduler::core::model::transition_plan::AggregateVersion;
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
     use std::collections::{BTreeMap, HashMap};
 
     fn execution() -> ExecutionId {
@@ -280,10 +280,10 @@ mod tests {
             },
         }
     }
-    fn snapshot(state: ExecutionState) -> AggregateSnapshot {
-        AggregateSnapshot {
+    fn snapshot(state: ExecutionState) -> ProcessSnapshot {
+        ProcessSnapshot {
             process_id: "p1".into(),
-            version: AggregateVersion {
+            version: ProcessVersion {
                 graph: 0,
                 process: 3,
                 operations: 5,

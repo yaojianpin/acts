@@ -111,7 +111,7 @@ async fn wake_loss_is_recovered_by_the_scan() {
     // Create without waking: everything now rides on the recovery scan,
     // exactly like after a crash that lost the in-memory queue.
     let snapshot = spec.seed_snapshot().unwrap();
-    host.aggregates
+    host.processes
         .create(&snapshot)
         .await
         .map_err(runtime)
@@ -141,7 +141,7 @@ async fn wake_loss_is_recovered_by_the_scan() {
 /// plan commit consumes.
 struct ConflictKv {
     inner: MemoryStore,
-    aggregate: String,
+    process_key: String,
     operation: OperationId,
     armed: AtomicBool,
     parks: AtomicUsize,
@@ -157,7 +157,7 @@ impl ConflictKv {
     fn new(process_id: &str, operation: OperationId) -> Arc<Self> {
         Arc::new(Self {
             inner: MemoryStore::new(),
-            aggregate: crate::scheduler::durable::document_store::aggregate_key(process_id)
+            process_key: crate::scheduler::durable::document_store::process_key(process_id)
                 .expect("a process id the aggregate key derives from"),
             operation,
             armed: AtomicBool::new(true),
@@ -172,18 +172,18 @@ impl ConflictKv {
     /// while the hop's own operation already stands `CommitPrepared`, i.e. the
     /// claim landed and the plan is about to.
     async fn is_plan_commit(&self, ops: &[crate::StoreBatchOp]) -> bool {
-        let writes_aggregate = ops.iter().any(|op| match op {
-            crate::StoreBatchOp::Put { key, .. } => key == &self.aggregate,
+        let writes_process = ops.iter().any(|op| match op {
+            crate::StoreBatchOp::Put { key, .. } => key == &self.process_key,
             crate::StoreBatchOp::Delete { .. } => false,
         });
-        if !writes_aggregate {
+        if !writes_process {
             return false;
         }
-        let Ok(Some(bytes)) = self.inner.one(&self.aggregate).await else {
+        let Ok(Some(bytes)) = self.inner.one(&self.process_key).await else {
             return false;
         };
         let Ok(snapshot) =
-            crate::scheduler::durable::document::AggregateDocumentCodec::decode(&bytes)
+            crate::scheduler::durable::document::ProcessDocumentCodec::decode(&bytes)
         else {
             return false;
         };
@@ -349,7 +349,7 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
             operations: Vec::new(),
             outbox: Vec::new(),
         };
-        host.aggregates.commit_transition(&plan).await.unwrap();
+        host.processes.commit_transition(&plan).await.unwrap();
         stored.release();
     };
     let (outcome, ()) = tokio::join!(hop, rival);
@@ -547,7 +547,7 @@ async fn a_run_already_in_flight_at_boot_waits_for_a_slot() {
         // workflow node (`$`), which is what the shell's root facts key on.
         let spec = ProcessSpec::linear(pid, crate::utils::consts::TASK_ROOT_TID, &["only"]);
         let snapshot = spec.seed_snapshot().unwrap();
-        host.aggregates.create(&snapshot).await.unwrap();
+        host.processes.create(&snapshot).await.unwrap();
         seeds.push((pid.to_string(), snapshot));
     }
     let report = host.recover(SystemClock.now_ms()).await.unwrap();
@@ -977,7 +977,7 @@ async fn kernel_engine_projects_the_legacy_read_model() {
 /// the sweeper reclaimed them — the aggregate outlives the rows.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
-async fn kernel_engine_refuses_a_started_pid_via_the_aggregate() {
+async fn kernel_engine_refuses_a_started_pid_via_the_process() {
     let mut config = crate::Config::default();
     config.data.tick_interval_secs = Some(1);
     let engine = crate::Engine::builder()
@@ -1040,7 +1040,7 @@ async fn kernel_engine_refuses_a_started_pid_via_the_aggregate() {
 /// it.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
-async fn effect_write_back_folds_into_the_aggregate() {
+async fn effect_write_back_folds_into_the_process() {
     struct WriteBack;
     #[async_trait::async_trait]
     impl crate::package::ActPackage for WriteBack {
@@ -3410,7 +3410,7 @@ async fn cancelled_head_cascades_skip_through_the_chain() {
 
 // ---- nested model import: the legacy branch-if suite, mirrored ----
 
-type Snapshot = crate::scheduler::core::commit::aggregate::AggregateSnapshot;
+type Snapshot = crate::scheduler::core::commit::process::ProcessSnapshot;
 
 fn state_of(
     snapshot: &Snapshot,
@@ -4109,7 +4109,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
         &[],
         snapshot.version.clone(),
     );
-    host.aggregates.commit_transition(&intent).await.unwrap();
+    host.processes.commit_transition(&intent).await.unwrap();
     assert_eq!(
         state_of(&host.snapshot(PID).await.unwrap().unwrap(), "s1"),
         crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
@@ -4175,7 +4175,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
         }],
         outbox: Vec::new(),
     };
-    bare_host.aggregates.commit_transition(&bare).await.unwrap();
+    bare_host.processes.commit_transition(&bare).await.unwrap();
     bare_host.recover(SystemClock.now_ms()).await.unwrap();
     bare_host
         .run_until_quiescent(&mut bare_wake, 300)

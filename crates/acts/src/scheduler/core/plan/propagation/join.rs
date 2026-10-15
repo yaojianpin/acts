@@ -12,7 +12,7 @@ pub(super) enum JoinReadiness {
 
 pub(super) fn readiness(
     graph: &ExecutionGraph,
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     successor: &ExecutionId,
     policy: JoinPolicy,
 ) -> Result<JoinReadiness, PropagationError> {

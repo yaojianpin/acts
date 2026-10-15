@@ -1,5 +1,5 @@
 use crate::scheduler::core::{
-    commit::aggregate::{AggregateSnapshot, ExecutionSnapshot},
+    commit::process::{ExecutionSnapshot, ProcessSnapshot},
     model::{
         execution_graph::{ExecutionGraph, ExecutionId, ExecutionState},
         operation::{OperationId, OperationKind},
@@ -38,11 +38,11 @@ impl GenerationPlanner {
     /// (rebuilt by the caller).
     pub(crate) fn plan_reentry(
         graph: &ExecutionGraph,
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         command: &ReenterCommand,
     ) -> Result<TransitionPlan, GenerationError> {
         if snapshot.process_id != command.process_id {
-            return Err(GenerationError::WrongAggregate);
+            return Err(GenerationError::WrongProcess);
         }
         let source = snapshot
             .executions

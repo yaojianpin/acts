@@ -24,7 +24,7 @@ pub(crate) struct TimeoutDispatch {
 /// (the pinned failure of a guard that could not be evaluated — the legacy
 /// branch task's `init` error).
 pub(crate) fn dispatch(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     owner: &ExecutionId,
     source_operation: OperationCommit,
     branch: &TimeoutBranch,

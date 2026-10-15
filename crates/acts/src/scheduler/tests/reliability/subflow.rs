@@ -67,10 +67,10 @@ const CHILD_NODE: &str = "s1";
 const ACT_KEY: &str = "act1";
 /// The subflow package id.
 const SUBFLOW: &str = "acts.core.subflow";
-/// The aggregate-key family the harness's [`aggregate_key`] builds. Private in
+/// The aggregate-key family the harness's [`process_key`] builds. Private in
 /// `document_store`, so restated: it is the one write family that *is* the
 /// durable run.
-const AGGREGATE_PREFIX: &str = "kernel/aggregates/";
+const PROCESS_PREFIX: &str = "kernel/aggregates/";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -350,14 +350,14 @@ impl SubflowKv {
 
     /// Refuse the next run start that is not `parent_pid`'s.
     fn arm(&self, parent_pid: &str) {
-        self.allowed.lock().push(aggregate_key(parent_pid));
+        self.allowed.lock().push(process_key(parent_pid));
         self.armed.store(true, Ordering::SeqCst);
     }
 
     /// Let `parent_pid`'s run through without arming anything: the next cell
     /// section starts a run of its own.
     fn allow(&self, parent_pid: &str) {
-        self.allowed.lock().push(aggregate_key(parent_pid));
+        self.allowed.lock().push(process_key(parent_pid));
         self.armed.store(false, Ordering::SeqCst);
     }
 
@@ -376,11 +376,11 @@ impl SubflowKv {
 
     /// Every aggregate the store holds, sorted: the run-level census that shows
     /// whether a child half-exists.
-    async fn aggregates(&self) -> Vec<String> {
-        let options = ScanOptions::new(ScanOperation::Eq, AGGREGATE_PREFIX.to_string(), false);
+    async fn processes(&self) -> Vec<String> {
+        let options = ScanOptions::new(ScanOperation::Eq, PROCESS_PREFIX.to_string(), false);
         let mut keys: Vec<String> = self
             .inner
-            .scan_prefix(AGGREGATE_PREFIX, options)
+            .scan_prefix(PROCESS_PREFIX, options)
             .await
             .unwrap()
             .into_iter()
@@ -400,7 +400,7 @@ impl SubflowKv {
                 return None;
             }
             keys.into_iter()
-                .find(|key| key.starts_with(AGGREGATE_PREFIX) && !allowed.contains(key))?
+                .find(|key| key.starts_with(PROCESS_PREFIX) && !allowed.contains(key))?
         };
         {
             let mut starts = self.starts.lock();
@@ -502,12 +502,12 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
     assert_eq!(kv.fired(), 1, "the armed refusal must fire exactly once");
     let refused = kv.failed_key().expect("the refusal must name its key");
     assert!(
-        refused.starts_with(AGGREGATE_PREFIX),
+        refused.starts_with(PROCESS_PREFIX),
         "the fault must land on an aggregate write, got {refused}"
     );
     assert_ne!(
         refused,
-        aggregate_key(&pid),
+        process_key(&pid),
         "the fault must land on the child's start, never on the parent's own create"
     );
     assert_eq!(
@@ -522,8 +522,8 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
     );
     // no half-created child: the refused start wrote nothing at all
     assert_eq!(
-        kv.aggregates().await,
-        vec![aggregate_key(&pid)],
+        kv.processes().await,
+        vec![process_key(&pid)],
         "a refused child start must leave no child aggregate behind"
     );
     flush(&engine).await;
@@ -708,7 +708,7 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
         "no second child was ever announced across the restart: {announced:?}"
     );
     assert_eq!(
-        kv.aggregates().await.len(),
+        kv.processes().await.len(),
         2,
         "one aggregate per run across the restart — the parent and its one child"
     );
@@ -798,7 +798,7 @@ async fn a_duplicate_child_completion_is_refused_and_starts_no_second_child_inne
         "the subflow act started exactly one child process, never a second"
     );
     assert_eq!(
-        kv.aggregates().await.len(),
+        kv.processes().await.len(),
         2,
         "one aggregate per run: the parent and its one child"
     );
@@ -899,7 +899,7 @@ async fn two_subflow_branches_start_two_children_and_the_parent_completes_once_i
         "no third child was ever announced: {announced:?}"
     );
     assert_eq!(
-        kv.aggregates().await.len(),
+        kv.processes().await.len(),
         3,
         "one aggregate per run: the parent and exactly its two children"
     );

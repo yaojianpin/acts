@@ -127,10 +127,10 @@ async fn finish_chain(engine: &Engine, pid: &str) {
 
 /// The run's aggregate document. A settled run keeps it even after its rows are
 /// swept, so a cell reads a finished run's decision here and never off a row.
-async fn aggregate(
+async fn process_snapshot(
     engine: &Engine,
     pid: &str,
-) -> crate::scheduler::core::commit::aggregate::AggregateSnapshot {
+) -> crate::scheduler::core::commit::process::ProcessSnapshot {
     engine
         .runtime()
         .kernel()
@@ -143,7 +143,7 @@ async fn aggregate(
 /// The ascending generations the aggregate holds for one model node: how many
 /// times the node was instantiated. A hop applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = aggregate(engine, pid)
+    let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
         .executions
         .keys()
@@ -156,7 +156,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 
 /// The aggregate's state for the newest generation of one model node.
 async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .executions
         .iter()
@@ -168,7 +168,7 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<Executio
 /// The non-terminal operations the aggregate holds for one model node, in
 /// sequence order: the durable intent a crash left for recovery to drive.
 async fn open_operations(engine: &Engine, pid: &str, tid: &str) -> Vec<OperationState> {
-    let mut open: Vec<(u64, OperationState)> = aggregate(engine, pid)
+    let mut open: Vec<(u64, OperationState)> = process_snapshot(engine, pid)
         .await
         .operations
         .values()
@@ -201,7 +201,7 @@ fn open_shapes(states: &[OperationState]) -> Vec<&'static str> {
 /// deterministic per `(pid, tid, generation, sequence)`, so a hop that applied
 /// twice cannot hide behind the count.
 async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .outbox
         .keys()
@@ -521,7 +521,7 @@ async fn a_duplicate_complete_is_refused_without_effect_inner() {
     // the duplicate is a retry and not a race with the first delivery
     wait_completed(&engine, &pid).await;
     flush(&engine).await;
-    let before = aggregate(&engine, &pid).await;
+    let before = process_snapshot(&engine, &pid).await;
     let before_rows = task_rows(&engine, &pid).await;
 
     let duplicate = complete_act(&engine, &pid, &tid).await;
@@ -533,7 +533,7 @@ async fn a_duplicate_complete_is_refused_without_effect_inner() {
     // the refusal consumed nothing: same operations, same executions, same
     // records, same rows
     flush(&engine).await;
-    let after = aggregate(&engine, &pid).await;
+    let after = process_snapshot(&engine, &pid).await;
     assert_eq!(
         after.operations.len(),
         before.operations.len(),

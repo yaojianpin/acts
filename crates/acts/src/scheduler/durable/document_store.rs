@@ -1,19 +1,19 @@
 use crate::scheduler::{
     core::{
-        commit::aggregate::AggregateSnapshot,
+        commit::process::ProcessSnapshot,
         outbox::outbox_index::{OutboxIndex, OutboxIndexCodec},
         recovery::{
             recovery_entry::RecoveryEntryDocument,
             recovery_index::{RecoveryIndex, RecoveryIndexCodec},
         },
     },
-    durable::document::{AggregateDocumentCodec, AggregateDocumentError},
+    durable::document::{ProcessDocumentCodec, ProcessDocumentError},
 };
 
 use std::collections::BTreeMap;
 use std::fmt;
 
-const AGGREGATE_KEY_PREFIX: &str = "kernel/aggregates/";
+const PROCESS_KEY_PREFIX: &str = "kernel/aggregates/";
 pub(crate) const RECOVERY_INDEX_KEY_PREFIX: &str = "kernel/indexes/recovery/";
 pub(crate) const OUTBOX_INDEX_KEY_PREFIX: &str = "kernel/indexes/outbox/";
 
@@ -21,14 +21,14 @@ pub(crate) const OUTBOX_INDEX_KEY_PREFIX: &str = "kernel/indexes/outbox/";
 /// are the CAS token. Re-encoding the snapshot is forbidden because a future
 /// codec may normalize legacy documents into different bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LoadedAggregate {
-    pub(crate) snapshot: AggregateSnapshot,
+pub(crate) struct LoadedProcess {
+    pub(crate) snapshot: ProcessSnapshot,
     original_document: Vec<u8>,
     original_recovery_index: Option<Vec<u8>>,
     original_outbox_index: Option<Vec<u8>>,
 }
 
-impl LoadedAggregate {
+impl LoadedProcess {
     pub(crate) fn original_document(&self) -> &[u8] {
         &self.original_document
     }
@@ -173,7 +173,7 @@ pub(crate) fn outbox_index_key(process_id: &str) -> Result<String, DocumentRepos
 }
 
 fn outbox_index_document(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
 ) -> Result<Option<Vec<u8>>, DocumentRepositoryError> {
     OutboxIndex::project(&snapshot.process_id, &snapshot.outbox)
         .map_err(|error| DocumentRepositoryError::OutboxIndex(error.to_string()))?
@@ -189,7 +189,7 @@ pub(crate) fn recovery_index_key(process_id: &str) -> Result<String, DocumentRep
 }
 
 fn recovery_index_document(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
 ) -> Result<Option<Vec<u8>>, DocumentRepositoryError> {
     RecoveryIndex::project(snapshot)
         .map(|index| {
@@ -239,13 +239,13 @@ pub(crate) type TransactionParts = Result<
 /// A repository that advances its loaded aggregate in place must capture these
 /// *before* the advance: the CAS guards for the entry documents compare against
 /// what the store currently holds, which is the pre-advance projection.
-pub(crate) fn recovery_entries(snapshot: &AggregateSnapshot) -> BTreeMap<String, Vec<u8>> {
+pub(crate) fn recovery_entries(snapshot: &ProcessSnapshot) -> BTreeMap<String, Vec<u8>> {
     RecoveryEntryDocument::project(snapshot)
 }
 
 pub(crate) fn build_replace_transaction(
-    loaded: &LoadedAggregate,
-    replacement_snapshot: &AggregateSnapshot,
+    loaded: &LoadedProcess,
+    replacement_snapshot: &ProcessSnapshot,
     current_recovery_entries: &BTreeMap<String, Vec<u8>>,
 ) -> TransactionParts {
     if loaded.snapshot.process_id != replacement_snapshot.process_id {
@@ -255,10 +255,10 @@ pub(crate) fn build_replace_transaction(
         });
     }
     let process_id = &loaded.snapshot.process_id;
-    let key = aggregate_key(process_id)?;
+    let key = process_key(process_id)?;
     let recovery_key = recovery_index_key(process_id)?;
     let outbox_key = outbox_index_key(process_id)?;
-    let document = AggregateDocumentCodec::encode(replacement_snapshot)?;
+    let document = ProcessDocumentCodec::encode(replacement_snapshot)?;
     let recovery_index = recovery_index_document(replacement_snapshot)?;
     let outbox_index = outbox_index_document(replacement_snapshot)?;
     let mut transaction =
@@ -289,7 +289,7 @@ pub(crate) fn build_replace_transaction(
 fn replace_recovery_entries(
     mut transaction: DocumentTransaction,
     current_entries: &BTreeMap<String, Vec<u8>>,
-    replacement: &AggregateSnapshot,
+    replacement: &ProcessSnapshot,
 ) -> Result<DocumentTransaction, DocumentStoreError> {
     let replacement_entries = RecoveryEntryDocument::project(replacement);
     for (key, value) in current_entries {
@@ -311,11 +311,11 @@ fn replace_recovery_entries(
     Ok(transaction)
 }
 
-pub(crate) fn build_create_transaction(snapshot: &AggregateSnapshot) -> TransactionParts {
-    let key = aggregate_key(&snapshot.process_id)?;
+pub(crate) fn build_create_transaction(snapshot: &ProcessSnapshot) -> TransactionParts {
+    let key = process_key(&snapshot.process_id)?;
     let recovery_key = recovery_index_key(&snapshot.process_id)?;
     let outbox_key = outbox_index_key(&snapshot.process_id)?;
-    let document = AggregateDocumentCodec::encode(snapshot)?;
+    let document = ProcessDocumentCodec::encode(snapshot)?;
     let recovery_index = recovery_index_document(snapshot)?;
     let outbox_index = outbox_index_document(snapshot)?;
     let mut transaction = DocumentTransaction::new()
@@ -341,12 +341,12 @@ pub(crate) fn build_create_transaction(snapshot: &AggregateSnapshot) -> Transact
 }
 
 pub(crate) fn loaded_after_write(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     document: Vec<u8>,
     recovery_index: Option<Vec<u8>>,
     outbox_index: Option<Vec<u8>>,
-) -> LoadedAggregate {
-    LoadedAggregate {
+) -> LoadedProcess {
+    LoadedProcess {
         snapshot: snapshot.clone(),
         original_document: document,
         original_recovery_index: recovery_index,
@@ -354,14 +354,14 @@ pub(crate) fn loaded_after_write(
     }
 }
 
-pub(crate) fn decode_loaded_aggregate(
+pub(crate) fn decode_loaded_process(
     process_id: &str,
     original_document: Vec<u8>,
     original_recovery_index: Option<Vec<u8>>,
     original_outbox_index: Option<Vec<u8>>,
-) -> Result<LoadedAggregate, DocumentRepositoryError> {
-    let snapshot = AggregateDocumentCodec::decode(&original_document).map_err(|source| {
-        DocumentRepositoryError::CorruptAggregate {
+) -> Result<LoadedProcess, DocumentRepositoryError> {
+    let snapshot = ProcessDocumentCodec::decode(&original_document).map_err(|source| {
+        DocumentRepositoryError::CorruptProcess {
             process_id: process_id.into(),
             source,
         }
@@ -384,7 +384,7 @@ pub(crate) fn decode_loaded_aggregate(
             process_id: process_id.into(),
         });
     }
-    Ok(LoadedAggregate {
+    Ok(LoadedProcess {
         snapshot,
         original_document,
         original_recovery_index,
@@ -392,8 +392,8 @@ pub(crate) fn decode_loaded_aggregate(
     })
 }
 
-pub(crate) fn aggregate_key(process_id: &str) -> Result<String, DocumentRepositoryError> {
-    encoded_process_key(AGGREGATE_KEY_PREFIX, process_id)
+pub(crate) fn process_key(process_id: &str) -> Result<String, DocumentRepositoryError> {
+    encoded_process_key(PROCESS_KEY_PREFIX, process_id)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -404,11 +404,11 @@ pub(crate) enum DocumentRepositoryError {
         requested: String,
         stored: String,
     },
-    CorruptAggregate {
+    CorruptProcess {
         process_id: String,
-        source: AggregateDocumentError,
+        source: ProcessDocumentError,
     },
-    Codec(AggregateDocumentError),
+    Codec(ProcessDocumentError),
     RecoveryIndex(String),
     RecoveryIndexMismatch {
         process_id: String,
@@ -419,8 +419,8 @@ pub(crate) enum DocumentRepositoryError {
     },
     Store(DocumentStoreError),
 }
-impl From<AggregateDocumentError> for DocumentRepositoryError {
-    fn from(error: AggregateDocumentError) -> Self {
+impl From<ProcessDocumentError> for DocumentRepositoryError {
+    fn from(error: ProcessDocumentError) -> Self {
         Self::Codec(error)
     }
 }
@@ -463,12 +463,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn aggregate_key_is_unambiguous_for_separator_characters() {
-        assert_ne!(
-            aggregate_key("a/b").unwrap(),
-            aggregate_key("a:2fb").unwrap()
-        );
-        assert_eq!(aggregate_key("é").unwrap(), "kernel/aggregates/c3a9");
+    fn process_key_is_unambiguous_for_separator_characters() {
+        assert_ne!(process_key("a/b").unwrap(), process_key("a:2fb").unwrap());
+        assert_eq!(process_key("é").unwrap(), "kernel/aggregates/c3a9");
     }
 
     #[test]

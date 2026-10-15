@@ -3,7 +3,7 @@ use crate::scheduler::core::{
         execution_graph::{ExecutionId, ExecutionState},
         model_graph::NodeId,
         operation::{CommitToken, OperationEvent, OperationRecord, OperationState},
-        transition_plan::{AggregateVersion, TransitionPlan},
+        transition_plan::{ProcessVersion, TransitionPlan},
     },
     outbox::records::{OutboxId, OutboxRecord},
 };
@@ -21,9 +21,9 @@ pub(crate) struct ExecutionSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AggregateSnapshot {
+pub(crate) struct ProcessSnapshot {
     pub(crate) process_id: String,
-    pub(crate) version: AggregateVersion,
+    pub(crate) version: ProcessVersion,
     pub(crate) executions: HashMap<ExecutionId, ExecutionSnapshot>,
     pub(crate) variables: BTreeMap<(ExecutionId, String), String>,
     pub(crate) operations:
@@ -34,7 +34,7 @@ pub(crate) struct AggregateSnapshot {
     >,
 }
 
-impl AggregateSnapshot {
+impl ProcessSnapshot {
     /// The next free operation sequence for one execution: operation ids are
     /// unique per (task, generation), and an execution that already ran hops
     /// (a fan-out child, a rewound generation) owns earlier sequences, so
@@ -55,7 +55,7 @@ impl AggregateSnapshot {
         }
         Ok(Self {
             process_id,
-            version: AggregateVersion {
+            version: ProcessVersion {
                 graph: 0,
                 process: 0,
                 operations: 0,
@@ -128,8 +128,8 @@ impl AggregateSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommitReceipt {
     pub(crate) token: CommitToken,
-    pub(crate) previous: AggregateVersion,
-    pub(crate) current: AggregateVersion,
+    pub(crate) previous: ProcessVersion,
+    pub(crate) current: ProcessVersion,
     pub(crate) new_operations: Vec<crate::scheduler::core::model::operation::OperationId>,
     pub(crate) new_outbox: Vec<OutboxId>,
 }
@@ -138,8 +138,8 @@ pub(crate) struct CommitReceipt {
 /// and commit one indivisible operation. A backend unable to do that must
 /// refuse the commit rather than perform check-then-write.
 #[cfg(test)]
-pub(crate) trait AggregateRepository {
-    fn load(&self, process_id: &str) -> Result<Option<AggregateSnapshot>, CommitError>;
+pub(crate) trait ProcessRepository {
+    fn load(&self, process_id: &str) -> Result<Option<ProcessSnapshot>, CommitError>;
     fn compare_and_commit(&mut self, plan: &TransitionPlan) -> Result<CommitReceipt, CommitError>;
 }
 
@@ -198,25 +198,24 @@ pub(crate) trait OperationRepository {
 
 #[cfg(test)]
 #[derive(Default)]
-pub(crate) struct MemoryAggregateRepository {
-    aggregates: HashMap<String, AggregateSnapshot>,
+pub(crate) struct MemoryProcessRepository {
+    processes: HashMap<String, ProcessSnapshot>,
 }
 
 #[cfg(test)]
-impl MemoryAggregateRepository {
-    pub(crate) fn insert(&mut self, snapshot: AggregateSnapshot) -> Result<(), CommitError> {
+impl MemoryProcessRepository {
+    pub(crate) fn insert(&mut self, snapshot: ProcessSnapshot) -> Result<(), CommitError> {
         snapshot.validate()?;
-        if self.aggregates.contains_key(&snapshot.process_id) {
-            return Err(CommitError::AggregateAlreadyExists(snapshot.process_id));
+        if self.processes.contains_key(&snapshot.process_id) {
+            return Err(CommitError::ProcessAlreadyExists(snapshot.process_id));
         }
-        self.aggregates
-            .insert(snapshot.process_id.clone(), snapshot);
+        self.processes.insert(snapshot.process_id.clone(), snapshot);
         Ok(())
     }
 }
 
 #[cfg(test)]
-impl RecoveryRepository for MemoryAggregateRepository {
+impl RecoveryRepository for MemoryProcessRepository {
     fn recoverable_page(
         &self,
         after: Option<&RecoveryCursor>,
@@ -226,7 +225,7 @@ impl RecoveryRepository for MemoryAggregateRepository {
             return Err(CommitError::InvalidPageLimit);
         }
         let mut operations = self
-            .aggregates
+            .processes
             .values()
             .flat_map(|snapshot| snapshot.operations.values().cloned())
             .filter(|operation| !operation.is_terminal())
@@ -239,7 +238,7 @@ impl RecoveryRepository for MemoryAggregateRepository {
         operations.truncate(limit);
         let next = if has_more {
             let last = operations.last().ok_or_else(|| {
-                CommitError::CorruptAggregate(
+                CommitError::CorruptProcess(
                     "recovery pagination reported more rows for an empty page".into(),
                 )
             })?;
@@ -252,19 +251,19 @@ impl RecoveryRepository for MemoryAggregateRepository {
 }
 
 #[cfg(test)]
-pub(crate) trait MemoryAggregateRepositoryAccess {
-    fn insert_for_test(&mut self, snapshot: AggregateSnapshot) -> Result<(), CommitError>;
+pub(crate) trait MemoryProcessRepositoryAccess {
+    fn insert_for_test(&mut self, snapshot: ProcessSnapshot) -> Result<(), CommitError>;
 }
 
 #[cfg(test)]
-impl MemoryAggregateRepositoryAccess for MemoryAggregateRepository {
-    fn insert_for_test(&mut self, snapshot: AggregateSnapshot) -> Result<(), CommitError> {
+impl MemoryProcessRepositoryAccess for MemoryProcessRepository {
+    fn insert_for_test(&mut self, snapshot: ProcessSnapshot) -> Result<(), CommitError> {
         self.insert(snapshot)
     }
 }
 
 #[cfg(test)]
-impl OperationRepository for MemoryAggregateRepository {
+impl OperationRepository for MemoryProcessRepository {
     fn claim_operation(
         &mut self,
         id: &crate::scheduler::core::model::operation::OperationId,
@@ -319,7 +318,7 @@ impl OperationRepository for MemoryAggregateRepository {
 /// a clone of the whole aggregate per commit. Every check runs before the
 /// first mutation.
 pub(crate) fn advance_operation_event(
-    next: &mut AggregateSnapshot,
+    next: &mut ProcessSnapshot,
     id: &crate::scheduler::core::model::operation::OperationId,
     expected_revision: u64,
     event: OperationEvent,
@@ -353,7 +352,7 @@ pub(crate) fn advance_operation_event(
 }
 
 #[cfg(test)]
-impl MemoryAggregateRepository {
+impl MemoryProcessRepository {
     fn evolve_operation(
         &mut self,
         id: &crate::scheduler::core::model::operation::OperationId,
@@ -361,20 +360,20 @@ impl MemoryAggregateRepository {
         event: OperationEvent,
     ) -> Result<OperationRecord, CommitError> {
         let current = self
-            .aggregates
+            .processes
             .get(&id.process_id)
-            .ok_or_else(|| CommitError::AggregateNotFound(id.process_id.clone()))?;
+            .ok_or_else(|| CommitError::ProcessNotFound(id.process_id.clone()))?;
         let mut next = current.clone();
         let operation = advance_operation_event(&mut next, id, expected_revision, event)?;
-        self.aggregates.insert(id.process_id.clone(), next);
+        self.processes.insert(id.process_id.clone(), next);
         Ok(operation)
     }
 }
 
 #[cfg(test)]
-impl AggregateRepository for MemoryAggregateRepository {
-    fn load(&self, process_id: &str) -> Result<Option<AggregateSnapshot>, CommitError> {
-        let snapshot = self.aggregates.get(process_id).cloned();
+impl ProcessRepository for MemoryProcessRepository {
+    fn load(&self, process_id: &str) -> Result<Option<ProcessSnapshot>, CommitError> {
+        let snapshot = self.processes.get(process_id).cloned();
         if let Some(value) = &snapshot {
             value.validate()?;
         }
@@ -383,12 +382,12 @@ impl AggregateRepository for MemoryAggregateRepository {
 
     fn compare_and_commit(&mut self, plan: &TransitionPlan) -> Result<CommitReceipt, CommitError> {
         let current = self
-            .aggregates
+            .processes
             .get(&plan.process_id)
-            .ok_or_else(|| CommitError::AggregateNotFound(plan.process_id.clone()))?;
+            .ok_or_else(|| CommitError::ProcessNotFound(plan.process_id.clone()))?;
         let mut next = current.clone();
         let receipt = advance_transition(&mut next, plan)?;
-        self.aggregates.insert(plan.process_id.clone(), next);
+        self.processes.insert(plan.process_id.clone(), next);
         Ok(receipt)
     }
 }
@@ -396,7 +395,7 @@ impl AggregateRepository for MemoryAggregateRepository {
 /// Advance one aggregate in place (see [`advance_operation_event`] for why the
 /// durable repository may hand its snapshot over).
 pub(crate) fn advance_transition(
-    next: &mut AggregateSnapshot,
+    next: &mut ProcessSnapshot,
     plan: &TransitionPlan,
 ) -> Result<CommitReceipt, CommitError> {
     plan.validate()
@@ -544,7 +543,7 @@ pub(crate) fn advance_transition(
 }
 
 fn validate_preconditions(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     plan: &TransitionPlan,
 ) -> Result<(), CommitError> {
     if snapshot.version != plan.expected {
@@ -730,9 +729,7 @@ fn operation_state_tag(state: &crate::scheduler::core::model::operation::Operati
     }
 }
 
-pub(crate) fn canonical_aggregate_bytes(
-    snapshot: &AggregateSnapshot,
-) -> Result<Vec<u8>, CommitError> {
+pub(crate) fn canonical_process_bytes(snapshot: &ProcessSnapshot) -> Result<Vec<u8>, CommitError> {
     // Canonical, unambiguous change token over every persisted field. Strings
     // are length-prefixed so user data containing separators cannot collide.
     fn field(output: &mut String, value: &str) {
@@ -803,8 +800,8 @@ pub(crate) fn canonical_aggregate_bytes(
     Ok(output.into_bytes())
 }
 
-fn deterministic_digest(snapshot: &AggregateSnapshot) -> Result<String, CommitError> {
-    Ok(sha256_hex(&canonical_aggregate_bytes(snapshot)?))
+fn deterministic_digest(snapshot: &ProcessSnapshot) -> Result<String, CommitError> {
+    Ok(sha256_hex(&canonical_process_bytes(snapshot)?))
 }
 
 pub(crate) fn sha256_hex(input: &[u8]) -> String {
@@ -823,12 +820,12 @@ pub(crate) fn sha256_hex(input: &[u8]) -> String {
 pub(crate) enum CommitError {
     EmptyProcessId,
     #[cfg(test)]
-    AggregateAlreadyExists(String),
-    AggregateNotFound(String),
+    ProcessAlreadyExists(String),
+    ProcessNotFound(String),
     InvalidPlan(String),
     VersionConflict {
-        expected: AggregateVersion,
-        actual: AggregateVersion,
+        expected: ProcessVersion,
+        actual: ProcessVersion,
     },
     ExecutionNotFound(ExecutionId),
     ExecutionAlreadyExists(ExecutionId),
@@ -868,7 +865,7 @@ pub(crate) enum CommitError {
     RevisionOverflow,
     InvalidPageLimit,
     InvalidOperationState(OperationState),
-    CorruptAggregate(String),
+    CorruptProcess(String),
 }
 impl fmt::Display for CommitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -891,8 +888,8 @@ mod tests {
     fn id() -> ExecutionId {
         ExecutionId::new("t1", 0).unwrap()
     }
-    fn repository() -> MemoryAggregateRepository {
-        let mut snapshot = AggregateSnapshot::empty("p1").unwrap();
+    fn repository() -> MemoryProcessRepository {
+        let mut snapshot = ProcessSnapshot::empty("p1").unwrap();
         snapshot.executions.insert(
             id(),
             ExecutionSnapshot {
@@ -903,14 +900,14 @@ mod tests {
                 revision: 2,
             },
         );
-        let mut repo = MemoryAggregateRepository::default();
+        let mut repo = MemoryProcessRepository::default();
         repo.insert(snapshot).unwrap();
         repo
     }
     fn plan() -> TransitionPlan {
         TransitionPlan {
             process_id: "p1".into(),
-            expected: AggregateVersion {
+            expected: ProcessVersion {
                 graph: 0,
                 process: 0,
                 operations: 0,
@@ -962,7 +959,7 @@ mod tests {
         );
         assert_eq!(
             receipt.current,
-            AggregateVersion {
+            ProcessVersion {
                 graph: 0,
                 process: 1,
                 operations: 1
@@ -1024,7 +1021,7 @@ mod tests {
             })
             .unwrap();
         snapshot.operations.insert(source_id.clone(), prepared);
-        repo = MemoryAggregateRepository::default();
+        repo = MemoryProcessRepository::default();
         repo.insert(snapshot).unwrap();
 
         let mut p = plan();
@@ -1076,7 +1073,7 @@ mod tests {
             .unwrap();
         snapshot.operations.insert(source_id.clone(), prepared);
         let before = snapshot.clone();
-        let mut repo = MemoryAggregateRepository::default();
+        let mut repo = MemoryProcessRepository::default();
         repo.insert(snapshot).unwrap();
         let mut p = plan();
         p.source_operation = Some(OperationCommit {
@@ -1110,7 +1107,7 @@ mod tests {
             id.clone(),
             OperationRecord::pending(id.clone(), OperationKind::ApplyAction),
         );
-        let mut repo = MemoryAggregateRepository::default();
+        let mut repo = MemoryProcessRepository::default();
         repo.insert(snapshot).unwrap();
 
         let claimed = repo.claim_operation(&id, 0, claim.clone()).unwrap();
@@ -1165,7 +1162,7 @@ mod tests {
             id.clone(),
             OperationRecord::pending(id.clone(), OperationKind::ApplyAction),
         );
-        let mut repo = MemoryAggregateRepository::default();
+        let mut repo = MemoryProcessRepository::default();
         repo.insert(snapshot).unwrap();
         let error = repo
             .claim_operation(
@@ -1255,7 +1252,7 @@ mod tests {
             id.clone(),
             OperationRecord::pending(id.clone(), OperationKind::ExecuteTask),
         );
-        let mut repo = MemoryAggregateRepository::default();
+        let mut repo = MemoryProcessRepository::default();
         repo.insert(snapshot).unwrap();
         let claimed = repo.claim_operation(&id, 0, current.clone()).unwrap();
         let heartbeat = repo
@@ -1269,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_rejects_operation_key_value_identity_mismatch() {
+    fn process_rejects_operation_key_value_identity_mismatch() {
         let mut snapshot = repository().load("p1").unwrap().unwrap();
         let key = OperationId {
             process_id: "p1".into(),
@@ -1295,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_rejects_foreign_operation_and_dangling_variable_scope() {
+    fn process_rejects_foreign_operation_and_dangling_variable_scope() {
         let mut foreign = repository().load("p1").unwrap().unwrap();
         let foreign_id = OperationId {
             process_id: "other".into(),
@@ -1362,7 +1359,7 @@ mod tests {
             }
             snapshot.operations.insert(id, record);
         }
-        let mut repo = MemoryAggregateRepository::default();
+        let mut repo = MemoryProcessRepository::default();
         repo.insert(snapshot).unwrap();
         let first = repo.recoverable_page(None, 2).unwrap();
         let second = repo.recoverable_page(first.next.as_ref(), 2).unwrap();
@@ -1454,7 +1451,7 @@ mod tests {
         assert_eq!(receipt.current, next.version);
     }
 
-    fn pending_operation_snapshot() -> (AggregateSnapshot, OperationId, ClaimToken) {
+    fn pending_operation_snapshot() -> (ProcessSnapshot, OperationId, ClaimToken) {
         let claim = ClaimToken {
             owner: "runtime".into(),
             fence: 1,
@@ -1506,9 +1503,9 @@ mod tests {
         assert_eq!(next, current);
     }
     #[test]
-    fn canonical_aggregate_and_commit_digest_match_golden_fingerprint() {
+    fn canonical_process_and_commit_digest_match_golden_fingerprint() {
         let snapshot = repository().load("p1").unwrap().unwrap();
-        let bytes = canonical_aggregate_bytes(&snapshot).unwrap();
+        let bytes = canonical_process_bytes(&snapshot).unwrap();
         const GOLDEN_DIGEST: &str =
             "a47d4bd489ffc8d817e121a5d1743a93b612d8bdd7da8a1ee2c5e1288967028e";
         assert_eq!(bytes.len(), 76);

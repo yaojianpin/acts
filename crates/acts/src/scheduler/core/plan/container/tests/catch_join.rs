@@ -23,7 +23,7 @@ fn catch_graph() -> ExecutionGraph {
 /// A failed step deciding its caught error: the step carries the ERROR
 /// sign, its CATCH children carry theirs, and the children's states are
 /// the argument.
-fn catch_snapshot(c1: ExecutionState, c2: ExecutionState) -> AggregateSnapshot {
+fn catch_snapshot(c1: ExecutionState, c2: ExecutionState) -> ProcessSnapshot {
     let mut snapshot = snapshot(vec![
         (
             id("step1", 0),

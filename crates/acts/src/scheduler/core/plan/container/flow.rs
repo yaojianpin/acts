@@ -58,7 +58,7 @@ pub(crate) enum ExecutionFlow {
 /// execution is in its own act's flow — `Running` with it in flight, `Waiting`
 /// for a client, or not started yet.
 pub(crate) fn execution_flow(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     execution: &ExecutionId,
 ) -> Option<ExecutionFlow> {
     match snapshot
@@ -73,19 +73,19 @@ pub(crate) fn execution_flow(
 }
 
 /// Whether one execution is parked in `Running` for the children it admitted.
-pub(crate) fn parked_for_children(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> bool {
+pub(crate) fn parked_for_children(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> bool {
     execution_flow(snapshot, execution) == Some(ExecutionFlow::Children)
 }
 
 /// Whether one execution is deciding its `catches` (the legacy `Sign::ERROR`
 /// on the failed step).
-pub(crate) fn deciding_catches(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> bool {
+pub(crate) fn deciding_catches(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> bool {
     execution_flow(snapshot, execution) == Some(ExecutionFlow::Catches)
 }
 
 /// The sign fact ([`SIGN_VAR`]) of one execution, if any.
 pub(crate) fn execution_sign<'a>(
-    snapshot: &'a AggregateSnapshot,
+    snapshot: &'a ProcessSnapshot,
     execution: &ExecutionId,
 ) -> Option<&'a str> {
     snapshot

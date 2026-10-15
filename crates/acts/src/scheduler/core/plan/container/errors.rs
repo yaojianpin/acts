@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ContainerError {
-    WrongAggregate,
+    WrongProcess,
     ExecutionNotFound(ExecutionId),
     SourceNotContainer {
         source: ExecutionId,

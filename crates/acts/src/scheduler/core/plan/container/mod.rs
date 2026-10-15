@@ -28,7 +28,7 @@
 //! duplicates.
 
 use crate::scheduler::core::{
-    commit::aggregate::AggregateSnapshot,
+    commit::process::ProcessSnapshot,
     model::{
         execution_graph::{ExecutionGraph, ExecutionId, ExecutionState},
         model_graph::NodeId,

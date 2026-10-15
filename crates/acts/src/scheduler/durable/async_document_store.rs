@@ -9,7 +9,7 @@ use crate::{
     ActError,
     scheduler::{
         core::{
-            commit::aggregate::{
+            commit::process::{
                 CommitError, CommitReceipt, RecoveryCursor, RecoveryPage, advance_operation_event,
                 advance_transition,
             },
@@ -21,10 +21,10 @@ use crate::{
             recovery::recovery_index::{RecoveryIndexCodec, operation_order},
         },
         durable::document_store::{
-            DocumentGuard, DocumentMutation, DocumentRepositoryError, LoadedAggregate,
-            OUTBOX_INDEX_KEY_PREFIX, RECOVERY_INDEX_KEY_PREFIX, aggregate_key,
-            build_create_transaction, build_replace_transaction, decode_loaded_aggregate,
-            loaded_after_write, outbox_index_key, recovery_entries, recovery_index_key,
+            DocumentGuard, DocumentMutation, DocumentRepositoryError, LoadedProcess,
+            OUTBOX_INDEX_KEY_PREFIX, RECOVERY_INDEX_KEY_PREFIX, build_create_transaction,
+            build_replace_transaction, decode_loaded_process, loaded_after_write, outbox_index_key,
+            process_key, recovery_entries, recovery_index_key,
         },
     },
     store::{KvStore, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard},
@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 const MAX_RECOVERY_PAGE_SIZE: usize = 1_024;
 /// How many times a load re-reads after finding an aggregate paired with its
-/// derived indexes from another version (see [`AsyncAggregateRepository::load`]).
+/// derived indexes from another version (see [`AsyncProcessRepository::load`]).
 /// Bounded: a store that keeps serving an inconsistent triple is damage, and
 /// the caller must see it.
 const LOAD_ATTEMPTS: usize = 4;
@@ -115,19 +115,19 @@ impl AsyncDocumentStore for KvDocumentStore {
 /// Async aggregate repository for production I/O. It batch-loads the aggregate
 /// and both derived indexes in one round trip, then delegates all integrity
 /// checks to the same decoder used by the deterministic synchronous repository.
-pub(crate) struct AsyncAggregateRepository {
+pub(crate) struct AsyncProcessRepository {
     store: Arc<dyn AsyncDocumentStore>,
 }
 
-impl AsyncAggregateRepository {
+impl AsyncProcessRepository {
     pub(crate) fn new(store: Arc<dyn AsyncDocumentStore>) -> Self {
         Self { store }
     }
 
     pub(crate) async fn create(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
-    ) -> Result<LoadedAggregate, AsyncRepositoryError> {
+        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    ) -> Result<LoadedProcess, AsyncRepositoryError> {
         let (transaction, document, recovery_index, outbox_index) =
             build_create_transaction(snapshot)?;
         if !self
@@ -162,7 +162,7 @@ impl AsyncAggregateRepository {
         let mut entries = Vec::with_capacity(candidate_limit);
         for (key, bytes) in self.store.scan_prefix(RECOVERY_INDEX_KEY_PREFIX).await? {
             let index = RecoveryIndexCodec::decode(&bytes).map_err(|source| {
-                AsyncRepositoryError::Domain(CommitError::CorruptAggregate(format!(
+                AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
                     "recovery index {key:?}: {source}",
                 )))
             })?;
@@ -178,11 +178,11 @@ impl AsyncAggregateRepository {
         let has_more = entries.len() > limit;
         entries.truncate(limit);
 
-        let mut aggregates = HashMap::new();
+        let mut processes = HashMap::new();
         let mut operations = Vec::with_capacity(entries.len());
         for entry in entries {
             let process_id = entry.operation_id.process_id.clone();
-            if !aggregates.contains_key(&process_id) {
+            if !processes.contains_key(&process_id) {
                 // The aggregates are loaded at a later instant than the index
                 // documents the entries came from, so the two can disagree: a
                 // run swept (or a commit landing) in between leaves the index
@@ -192,17 +192,17 @@ impl AsyncAggregateRepository {
                 // skipped; the next pass re-reads the index.
                 match self.load(&process_id).await? {
                     Some(loaded) => {
-                        aggregates.insert(process_id.clone(), loaded);
+                        processes.insert(process_id.clone(), loaded);
                     }
                     None => continue,
                 }
             }
-            let aggregate = aggregates.get(&process_id).ok_or_else(|| {
-                AsyncRepositoryError::Domain(CommitError::CorruptAggregate(format!(
+            let process = processes.get(&process_id).ok_or_else(|| {
+                AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
                     "aggregate cache lost process {process_id:?}",
                 )))
             })?;
-            let Some(operation) = aggregate.snapshot.operations.get(&entry.operation_id) else {
+            let Some(operation) = process.snapshot.operations.get(&entry.operation_id) else {
                 // The operation left the aggregate (it settled, and a terminal
                 // operation is dropped from the index in the same commit) after
                 // the index doc was scanned: stale, not damage.
@@ -233,7 +233,7 @@ impl AsyncAggregateRepository {
         event: crate::scheduler::core::model::operation::OperationEvent,
     ) -> Result<OperationCommitOutcome, AsyncRepositoryError> {
         let mut loaded = self.load(&id.process_id).await?.ok_or_else(|| {
-            AsyncRepositoryError::Domain(CommitError::AggregateNotFound(id.process_id.clone()))
+            AsyncRepositoryError::Domain(CommitError::ProcessNotFound(id.process_id.clone()))
         })?;
         // The advance runs on the loaded aggregate itself: this repository owns
         // it and drops it on failure (the caller reports and recovery
@@ -247,11 +247,11 @@ impl AsyncAggregateRepository {
                 operation,
                 snapshot: loaded.snapshot,
             }),
-            ReplaceOutcome::AlreadyCommitted(aggregate) => {
-                let operation = authoritative_operation(&aggregate, id)?;
+            ReplaceOutcome::AlreadyCommitted(process) => {
+                let operation = authoritative_operation(&process, id)?;
                 Ok(OperationCommitOutcome::AlreadyCommitted {
                     operation,
-                    snapshot: aggregate.snapshot.clone(),
+                    snapshot: process.snapshot.clone(),
                 })
             }
             ReplaceOutcome::Conflict => Ok(OperationCommitOutcome::Conflict {}),
@@ -265,7 +265,7 @@ impl AsyncAggregateRepository {
         plan: &crate::scheduler::core::model::transition_plan::TransitionPlan,
     ) -> Result<TransitionCommitOutcome, AsyncRepositoryError> {
         let mut loaded = self.load(&plan.process_id).await?.ok_or_else(|| {
-            AsyncRepositoryError::Domain(CommitError::AggregateNotFound(plan.process_id.clone()))
+            AsyncRepositoryError::Domain(CommitError::ProcessNotFound(plan.process_id.clone()))
         })?;
         // In place, like the operation event above.
         let entries = recovery_entries(&loaded.snapshot);
@@ -277,10 +277,10 @@ impl AsyncAggregateRepository {
                 receipt,
                 snapshot: loaded.snapshot,
             }),
-            ReplaceOutcome::AlreadyCommitted(aggregate) => {
+            ReplaceOutcome::AlreadyCommitted(process) => {
                 Ok(TransitionCommitOutcome::AlreadyCommitted {
                     receipt,
-                    snapshot: aggregate.snapshot.clone(),
+                    snapshot: process.snapshot.clone(),
                 })
             }
             ReplaceOutcome::Conflict => Ok(TransitionCommitOutcome::Conflict {}),
@@ -325,14 +325,14 @@ impl AsyncAggregateRepository {
         }
         let has_more = entries.len() > limit;
         entries.truncate(limit);
-        let mut aggregates: HashMap<
+        let mut processes: HashMap<
             String,
-            crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+            crate::scheduler::core::commit::process::ProcessSnapshot,
         > = HashMap::new();
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
             let process_id = entry.id.process_id.clone();
-            let snapshot = match aggregates.get(&process_id) {
+            let snapshot = match processes.get(&process_id) {
                 Some(snapshot) => snapshot.clone(),
                 None => {
                     let loaded = self
@@ -344,7 +344,7 @@ impl AsyncAggregateRepository {
                                 "outbox index references missing aggregate {process_id:?}"
                             ))
                         })?;
-                    aggregates.insert(process_id.clone(), loaded.snapshot.clone());
+                    processes.insert(process_id.clone(), loaded.snapshot.clone());
                     loaded.snapshot
                 }
             };
@@ -411,8 +411,8 @@ impl AsyncAggregateRepository {
 
     pub(crate) async fn replace(
         &self,
-        loaded: &LoadedAggregate,
-        replacement_snapshot: &crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        loaded: &LoadedProcess,
+        replacement_snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
         current_recovery_entries: &std::collections::BTreeMap<String, Vec<u8>>,
     ) -> Result<ReplaceOutcome, AsyncRepositoryError> {
         let (transaction, ..) =
@@ -445,21 +445,21 @@ impl AsyncAggregateRepository {
     pub(crate) async fn load(
         &self,
         process_id: &str,
-    ) -> Result<Option<LoadedAggregate>, AsyncRepositoryError> {
+    ) -> Result<Option<LoadedProcess>, AsyncRepositoryError> {
         let keys = vec![
-            aggregate_key(process_id)?,
+            process_key(process_id)?,
             recovery_index_key(process_id)?,
             outbox_index_key(process_id)?,
         ];
         for attempt in 0..LOAD_ATTEMPTS {
             let mut documents = self.store.read_many(&keys).await?.into_iter();
-            let aggregate = documents.next().flatten();
+            let process = documents.next().flatten();
             let recovery_index = documents.next().flatten();
             let outbox_index = documents.next().flatten();
-            let Some(aggregate) = aggregate else {
+            let Some(process) = process else {
                 return Ok(None);
             };
-            match decode_loaded_aggregate(process_id, aggregate, recovery_index, outbox_index) {
+            match decode_loaded_process(process_id, process, recovery_index, outbox_index) {
                 Ok(loaded) => return Ok(Some(loaded)),
                 Err(error) if error.is_read_race() && attempt + 1 < LOAD_ATTEMPTS => {
                     tracing::debug!(
@@ -476,15 +476,15 @@ impl AsyncAggregateRepository {
 }
 
 /// Recovery-specific production port. Recovery owns scanning and paging;
-/// aggregate mutation remains on `AsyncAggregateRepository`, so workers cannot
+/// aggregate mutation remains on `AsyncProcessRepository`, so workers cannot
 /// bypass domain transitions or write raw documents.
 pub(crate) struct AsyncRecoveryRepository {
-    aggregates: Arc<AsyncAggregateRepository>,
+    processes: Arc<AsyncProcessRepository>,
 }
 
 impl AsyncRecoveryRepository {
-    pub(crate) fn new(aggregates: Arc<AsyncAggregateRepository>) -> Self {
-        Self { aggregates }
+    pub(crate) fn new(processes: Arc<AsyncProcessRepository>) -> Self {
+        Self { processes }
     }
 
     pub(crate) async fn recoverable_page(
@@ -492,7 +492,7 @@ impl AsyncRecoveryRepository {
         after: Option<&RecoveryCursor>,
         limit: usize,
     ) -> Result<RecoveryPage, AsyncRepositoryError> {
-        self.aggregates.load_recovery_page(after, limit).await
+        self.processes.load_recovery_page(after, limit).await
     }
 }
 
@@ -511,10 +511,10 @@ fn insert_recovery_candidate(
 }
 
 fn authoritative_operation(
-    aggregate: &LoadedAggregate,
+    process: &LoadedProcess,
     id: &crate::scheduler::core::model::operation::OperationId,
 ) -> Result<crate::scheduler::core::model::operation::OperationRecord, AsyncRepositoryError> {
-    aggregate
+    process
         .snapshot
         .operations
         .get(id)
@@ -528,12 +528,12 @@ pub(crate) enum OperationCommitOutcome {
         operation: crate::scheduler::core::model::operation::OperationRecord,
         /// The snapshot this commit installed. Handed back so the driver does
         /// not have to decode the whole aggregate again to form the hop's plan.
-        snapshot: crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: crate::scheduler::core::commit::process::ProcessSnapshot,
     },
     AlreadyCommitted {
         operation: crate::scheduler::core::model::operation::OperationRecord,
         /// The authoritative aggregate another writer installed.
-        snapshot: crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: crate::scheduler::core::commit::process::ProcessSnapshot,
     },
     Conflict {},
 }
@@ -542,11 +542,11 @@ pub(crate) enum OperationCommitOutcome {
 pub(crate) enum TransitionCommitOutcome {
     Committed {
         receipt: CommitReceipt,
-        snapshot: crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: crate::scheduler::core::commit::process::ProcessSnapshot,
     },
     AlreadyCommitted {
         receipt: CommitReceipt,
-        snapshot: crate::scheduler::core::commit::aggregate::AggregateSnapshot,
+        snapshot: crate::scheduler::core::commit::process::ProcessSnapshot,
     },
     Conflict {},
 }
@@ -554,7 +554,7 @@ pub(crate) enum TransitionCommitOutcome {
 #[derive(Debug)]
 pub(crate) enum ReplaceOutcome {
     Committed,
-    AlreadyCommitted(Box<LoadedAggregate>),
+    AlreadyCommitted(Box<LoadedProcess>),
     Conflict,
 }
 
@@ -599,8 +599,8 @@ impl std::error::Error for AsyncRepositoryError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::core::commit::aggregate::AggregateSnapshot;
-    use crate::scheduler::core::commit::aggregate::ExecutionSnapshot;
+    use crate::scheduler::core::commit::process::ExecutionSnapshot;
+    use crate::scheduler::core::commit::process::ProcessSnapshot;
     use crate::scheduler::core::model::execution_graph::ExecutionId;
     use crate::scheduler::core::model::execution_graph::ExecutionState;
     use crate::scheduler::core::model::model_graph::NodeId;
@@ -609,9 +609,9 @@ mod tests {
     use crate::scheduler::core::model::operation::OperationKind;
     use crate::scheduler::core::model::operation::OperationRecord;
     use crate::scheduler::core::model::operation::OperationState;
-    use crate::scheduler::core::model::transition_plan::AggregateVersion;
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
     use crate::scheduler::core::recovery::recovery_index::{RecoveryIndex, RecoveryIndexCodec};
-    use crate::scheduler::durable::document::AggregateDocumentCodec;
+    use crate::scheduler::durable::document::ProcessDocumentCodec;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -619,7 +619,7 @@ mod tests {
     /// when it carries the non-terminal operation: two such snapshots are two
     /// versions of the same aggregate as far as a load's consistency check is
     /// concerned.
-    fn snapshot(with_operation: bool) -> AggregateSnapshot {
+    fn snapshot(with_operation: bool) -> ProcessSnapshot {
         let execution = ExecutionId::new("step", 0).unwrap();
         let operation_id = OperationId {
             process_id: "process".into(),
@@ -633,9 +633,9 @@ mod tests {
             lease_until_ms: 9_000,
             heartbeat_revision: 0,
         };
-        AggregateSnapshot {
+        ProcessSnapshot {
             process_id: "process".into(),
-            version: AggregateVersion {
+            version: ProcessVersion {
                 graph: 1,
                 process: 2,
                 operations: u64::from(with_operation),
@@ -673,7 +673,7 @@ mod tests {
     /// the three single-key reads produces — and a consistent pair after.
     /// `torn: usize::MAX` keeps serving the torn pair.
     struct TornIndexStore {
-        aggregate: Vec<u8>,
+        process: Vec<u8>,
         torn_index: Vec<u8>,
         torn: usize,
         reads: Arc<AtomicUsize>,
@@ -685,7 +685,7 @@ mod tests {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
             let index = (read < self.torn).then(|| self.torn_index.clone());
             assert_eq!(keys.len(), 3, "aggregate + recovery index + outbox index");
-            Ok(vec![Some(self.aggregate.clone()), index, None])
+            Ok(vec![Some(self.process.clone()), index, None])
         }
 
         async fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
@@ -704,7 +704,7 @@ mod tests {
     fn torn_store(torn: usize) -> (Arc<TornIndexStore>, Arc<AtomicUsize>) {
         let reads = Arc::new(AtomicUsize::new(0));
         let store = Arc::new(TornIndexStore {
-            aggregate: AggregateDocumentCodec::encode(&snapshot(false)).unwrap(),
+            process: ProcessDocumentCodec::encode(&snapshot(false)).unwrap(),
             torn_index: RecoveryIndexCodec::encode(
                 &RecoveryIndex::project(&snapshot(true)).unwrap(),
             )
@@ -721,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn load_retries_a_read_that_raced_a_writer() {
         let (store, reads) = torn_store(1);
-        let repository = AsyncAggregateRepository::new(store);
+        let repository = AsyncProcessRepository::new(store);
         let loaded = repository
             .load("process")
             .await
@@ -736,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn load_surfaces_a_mismatch_that_never_heals() {
         let (store, reads) = torn_store(usize::MAX);
-        let repository = AsyncAggregateRepository::new(store);
+        let repository = AsyncProcessRepository::new(store);
         let error = repository.load("process").await.unwrap_err();
         assert!(
             format!("{error}").contains("RecoveryIndexMismatch"),
@@ -786,15 +786,15 @@ mod tests {
             .unwrap();
         assert!(matches!(committed.state, OperationState::Committed(_)));
 
-        let mut aggregate = snapshot(false);
-        aggregate.version.operations = committed.revision;
-        aggregate
+        let mut process = snapshot(false);
+        process.version.operations = committed.revision;
+        process
             .operations
             .insert(operation_id.clone(), committed.clone());
 
         let store: Arc<dyn KvStore> = Arc::new(crate::store::MemoryStore::new());
-        let repository = AsyncAggregateRepository::new(Arc::new(KvDocumentStore::new(store)));
-        repository.create(&aggregate).await.unwrap();
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(store)));
+        repository.create(&process).await.unwrap();
 
         assert_eq!(
             RecoveryPlanner::classify(&committed, 0),

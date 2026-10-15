@@ -36,7 +36,7 @@ use std::sync::atomic::Ordering;
 use serial_test::serial;
 
 use crate::Step;
-use crate::scheduler::core::commit::aggregate::AggregateSnapshot;
+use crate::scheduler::core::commit::process::ProcessSnapshot;
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
 use crate::scheduler::core::model::execution_graph::{ExecutionId, ExecutionState};
 use crate::utils::test::{USES_IRQ, USES_MSG};
@@ -131,7 +131,7 @@ fn created_count(engine: &Engine, key: &str) -> Arc<AtomicUsize> {
 
 /// The run's aggregate document. A settled run keeps it even after its rows are
 /// swept, so a cell reads the timeout facts here and never off a row.
-async fn aggregate(engine: &Engine, pid: &str) -> AggregateSnapshot {
+async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
     engine
         .runtime()
         .kernel()
@@ -146,7 +146,7 @@ async fn aggregate(engine: &Engine, pid: &str) -> AggregateSnapshot {
 /// first generation is terminal — allocates a second one (the admission policy
 /// allocates for a completed slot), so this is the exactly-once surface.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = aggregate(engine, pid)
+    let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
         .executions
         .keys()
@@ -164,7 +164,7 @@ async fn generation_state(
     tid: &str,
     generation: u64,
 ) -> Option<ExecutionState> {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .executions
         .iter()
@@ -176,7 +176,7 @@ async fn generation_state(
 /// `owner` of generation 0: the claim the tick wrote. It advances one branch per
 /// round, and holds each branch at most once.
 async fn claimed(engine: &Engine, pid: &str, owner: &str) -> Vec<String> {
-    let snapshot = aggregate(engine, pid).await;
+    let snapshot = process_snapshot(engine, pid).await;
     let owner = ExecutionId::new(owner, 0).expect("a node id parses");
     snapshot
         .variables
@@ -189,7 +189,7 @@ async fn claimed(engine: &Engine, pid: &str, owner: &str) -> Vec<String> {
 /// quarantined): the outbox dispatch pass has no aggregate write left to make,
 /// so the next write to the run's aggregate is a hop's own commit.
 async fn outbox_settled(engine: &Engine, pid: &str) -> bool {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .outbox
         .values()
@@ -200,13 +200,13 @@ async fn outbox_settled(engine: &Engine, pid: &str) -> bool {
 /// one node: a settled run's total, so a later tick that admits anything moves
 /// it.
 async fn executions(engine: &Engine, pid: &str) -> usize {
-    aggregate(engine, pid).await.executions.len()
+    process_snapshot(engine, pid).await.executions.len()
 }
 
 /// The number of outbox records the run's aggregate holds (the kernel keeps the
 /// outbox inside the aggregate): a later pass that records anything moves it.
 async fn outbox_records(engine: &Engine, pid: &str) -> usize {
-    aggregate(engine, pid).await.outbox.len()
+    process_snapshot(engine, pid).await.outbox.len()
 }
 
 /// How many settle windows ([`SETTLE`]) span `ticks` engine ticks. The driver
@@ -227,7 +227,7 @@ fn tick_windows(ticks: u64) -> usize {
 /// leaves the timer's operation to be re-woken: the branch fires once on the
 /// next round, with one execution, one marker entry and one message.
 ///
-/// The fault is armed on the run's aggregate (`aggregate_key`), after the outbox
+/// The fault is armed on the run's aggregate (`process_key`), after the outbox
 /// pass has settled so the next aggregate write is that decision and not a
 /// delivery. The kernel has no per-task claim write (legacy's
 /// `Task::claim_timeout` slot); the nearest durable unit is the run's aggregate
@@ -259,8 +259,8 @@ async fn a_store_that_refuses_the_branchs_commit_fires_it_exactly_once_inner() {
     )
     .await;
 
-    let aggregate = aggregate_key(&pid);
-    kv.arm_key(&aggregate);
+    let process = process_key(&pid);
+    kv.arm_key(&process);
 
     // the arm fires on that commit; the one-shot fault then leaves the next
     // round to land the branch exactly once
@@ -274,7 +274,7 @@ async fn a_store_that_refuses_the_branchs_commit_fires_it_exactly_once_inner() {
     assert_eq!(kv.fired(), 1, "the armed fault must fire exactly once");
     assert_eq!(
         kv.failed_key(),
-        Some(aggregate),
+        Some(process),
         "the fault must land on the run's aggregate commit"
     );
 

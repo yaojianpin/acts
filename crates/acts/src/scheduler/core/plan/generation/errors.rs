@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum GenerationError {
-    WrongAggregate,
+    WrongProcess,
     ExecutionNotFound(ExecutionId),
     SourceNotReenterable {
         source: ExecutionId,

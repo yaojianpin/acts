@@ -1,7 +1,7 @@
 use super::*;
-use crate::scheduler::core::commit::aggregate::ExecutionSnapshot;
+use crate::scheduler::core::commit::process::ExecutionSnapshot;
 use crate::scheduler::core::model::operation::OperationId;
-use crate::scheduler::core::model::transition_plan::AggregateVersion;
+use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use crate::scheduler::core::model::transition_plan::TransitionPlan;
 use std::collections::{BTreeMap, HashMap};
 
@@ -41,7 +41,7 @@ fn branch(task: &str) -> TimeoutBranch {
 
 /// A snapshot with `root` (Running) and one owner execution `s1` (Waiting),
 /// plus whatever the test adds.
-fn snapshot(extra: Vec<(ExecutionId, ExecutionSnapshot)>) -> AggregateSnapshot {
+fn snapshot(extra: Vec<(ExecutionId, ExecutionSnapshot)>) -> ProcessSnapshot {
     let root = id("$", 0);
     let owner = id("s1", 0);
     let mut executions = HashMap::from_iter([
@@ -69,9 +69,9 @@ fn snapshot(extra: Vec<(ExecutionId, ExecutionSnapshot)>) -> AggregateSnapshot {
     for (id, execution) in extra {
         executions.insert(id, execution);
     }
-    AggregateSnapshot {
+    ProcessSnapshot {
         process_id: "p1".into(),
-        version: AggregateVersion {
+        version: ProcessVersion {
             graph: 1,
             process: 2,
             operations: 2,

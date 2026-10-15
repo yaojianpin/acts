@@ -164,10 +164,10 @@ fn branched_workflow() -> Workflow {
 
 /// The run's aggregate document. A settled run keeps it even after its rows are
 /// swept, so a cell reads a finished run's decision here and never off a row.
-async fn aggregate(
+async fn process_snapshot(
     engine: &Engine,
     pid: &str,
-) -> crate::scheduler::core::commit::aggregate::AggregateSnapshot {
+) -> crate::scheduler::core::commit::process::ProcessSnapshot {
     engine
         .runtime()
         .kernel()
@@ -180,7 +180,7 @@ async fn aggregate(
 /// The ascending generations the aggregate holds for one model node: how many
 /// times the node was instantiated. A hop applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = aggregate(engine, pid)
+    let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
         .executions
         .keys()
@@ -193,7 +193,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 
 /// The aggregate's state for the newest generation of one model node.
 async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .executions
         .iter()
@@ -205,7 +205,7 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<Executio
 /// The non-terminal operations the aggregate holds for one model node, in
 /// sequence order: the durable remainder a crash left for recovery to drive.
 async fn open_operations(engine: &Engine, pid: &str, tid: &str) -> Vec<OperationState> {
-    let mut open: Vec<(u64, OperationState)> = aggregate(engine, pid)
+    let mut open: Vec<(u64, OperationState)> = process_snapshot(engine, pid)
         .await
         .operations
         .values()
@@ -238,7 +238,7 @@ fn open_shapes(states: &[OperationState]) -> Vec<&'static str> {
 /// deterministic per `(pid, tid, generation, sequence)`, so a hop that applied
 /// twice cannot hide behind the count.
 async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize {
-    aggregate(engine, pid)
+    process_snapshot(engine, pid)
         .await
         .outbox
         .keys()
@@ -489,7 +489,7 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
 
     // the run's durable truth breaks exactly once: the first commit of the hop
     // the client's completion runs into
-    let durable = aggregate_key(&pid);
+    let durable = process_key(&pid);
     kv.arm_key(&durable);
     let refused = complete_act(&engine, &pid, &step1).await;
     match &refused {

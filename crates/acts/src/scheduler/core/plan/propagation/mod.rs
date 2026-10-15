@@ -1,5 +1,5 @@
 use crate::scheduler::core::{
-    commit::aggregate::AggregateSnapshot,
+    commit::process::ProcessSnapshot,
     model::{
         execution_graph::{ExecutionGraph, ExecutionId, ExecutionState},
         model_graph::NodeId,
@@ -67,7 +67,7 @@ pub(crate) struct FlowTarget {
 pub(crate) const GUARD_SKIP_VAR: &str = "__guard_skip";
 
 /// Whether one execution was skipped by its own guard (see [`GUARD_SKIP_VAR`]).
-pub(crate) fn is_guard_skip(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> bool {
+pub(crate) fn is_guard_skip(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> bool {
     snapshot
         .variables
         .contains_key(&(execution.clone(), GUARD_SKIP_VAR.to_string()))

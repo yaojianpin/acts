@@ -14,7 +14,7 @@
 //! operations whose hops spread the death into the remaining subtrees.
 
 use crate::scheduler::core::{
-    commit::aggregate::AggregateSnapshot,
+    commit::process::ProcessSnapshot,
     model::{
         execution_graph::{ExecutionId, ExecutionState},
         operation::OperationKind,
@@ -40,11 +40,11 @@ pub(crate) struct UpwardPlanner;
 impl UpwardPlanner {
     #[allow(clippy::type_complexity)]
     pub(crate) fn plan_upward(
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         command: &UpwardCommand,
     ) -> Result<(Vec<StateChange>, Vec<OperationIntent>), UpwardError> {
         if snapshot.process_id != command.process_id {
-            return Err(UpwardError::WrongAggregate);
+            return Err(UpwardError::WrongProcess);
         }
         if !matches!(command.to, ExecutionState::Aborted | ExecutionState::Failed) {
             return Err(UpwardError::UnsupportedTarget(command.to));

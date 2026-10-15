@@ -18,7 +18,7 @@
 //!
 //! | family | key |
 //! |---|---|
-//! | the authoritative aggregate | [`aggregate_key`] |
+//! | the authoritative aggregate | [`process_key`] |
 //! | the recovery / outbox indexes | `kernel/indexes/{recovery,outbox}/<hex pid>` |
 //! | the projected proc row | `procs-id-<pid>` |
 //! | a projected task row | `tasks-id-<pid><tid>` |
@@ -634,8 +634,8 @@ pub(crate) fn two_step_irq_workflow() -> Workflow {
 
 /// The key of one run's authoritative aggregate document (the process segment
 /// is hex-encoded; build it with this, never by hand).
-pub(crate) fn aggregate_key(pid: &str) -> String {
-    crate::scheduler::durable::document_store::aggregate_key(pid).expect("a pid encodes as a key")
+pub(crate) fn process_key(pid: &str) -> String {
+    crate::scheduler::durable::document_store::process_key(pid).expect("a pid encodes as a key")
 }
 
 /// The data key of one process's row in a collection (`<prefix>-id-<pid>`).

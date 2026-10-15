@@ -1,4 +1,4 @@
-use crate::scheduler::core::commit::aggregate::sha256_hex;
+use crate::scheduler::core::commit::process::sha256_hex;
 use std::fmt;
 
 const MAGIC: &[u8; 8] = b"ACTSAGR\0";
@@ -9,13 +9,13 @@ pub(crate) const AGGREGATE_SCHEMA_VERSION: u16 = 1;
 /// separate so schema migration and corruption detection cannot be bypassed by
 /// repository implementations.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AggregateEnvelope {
+pub(crate) struct ProcessEnvelope {
     pub(crate) schema_version: u16,
     pub(crate) payload_digest: String,
     pub(crate) payload: Vec<u8>,
 }
 
-impl AggregateEnvelope {
+impl ProcessEnvelope {
     pub(crate) fn seal(payload: Vec<u8>) -> Self {
         Self {
             schema_version: AGGREGATE_SCHEMA_VERSION,
@@ -128,53 +128,51 @@ mod tests {
 
     #[test]
     fn envelope_round_trip_is_exact_and_self_validating() {
-        let envelope = AggregateEnvelope::seal(b"deterministic payload".to_vec());
+        let envelope = ProcessEnvelope::seal(b"deterministic payload".to_vec());
         let encoded = envelope.encode().unwrap();
-        assert_eq!(AggregateEnvelope::decode(&encoded).unwrap(), envelope);
+        assert_eq!(ProcessEnvelope::decode(&encoded).unwrap(), envelope);
     }
 
     #[test]
     fn corruption_is_detected_before_payload_decode() {
-        let envelope = AggregateEnvelope::seal(b"payload".to_vec());
+        let envelope = ProcessEnvelope::seal(b"payload".to_vec());
         let mut encoded = envelope.encode().unwrap();
         *encoded.last_mut().unwrap() ^= 0x01;
         assert!(matches!(
-            AggregateEnvelope::decode(&encoded),
+            ProcessEnvelope::decode(&encoded),
             Err(EnvelopeError::DigestMismatch { .. })
         ));
     }
 
     #[test]
     fn unsupported_schema_and_trailing_bytes_are_rejected() {
-        let envelope = AggregateEnvelope::seal(Vec::new());
+        let envelope = ProcessEnvelope::seal(Vec::new());
         let mut unsupported = envelope.encode().unwrap();
         unsupported[8..10].copy_from_slice(&2u16.to_be_bytes());
         assert_eq!(
-            AggregateEnvelope::decode(&unsupported),
+            ProcessEnvelope::decode(&unsupported),
             Err(EnvelopeError::UnsupportedSchema(2))
         );
 
         let mut trailing = envelope.encode().unwrap();
         trailing.push(0);
         assert_eq!(
-            AggregateEnvelope::decode(&trailing),
+            ProcessEnvelope::decode(&trailing),
             Err(EnvelopeError::TrailingBytes)
         );
     }
 
     #[test]
     fn truncation_never_panics_and_is_classified() {
-        let encoded = AggregateEnvelope::seal(b"payload".to_vec())
-            .encode()
-            .unwrap();
+        let encoded = ProcessEnvelope::seal(b"payload".to_vec()).encode().unwrap();
         for length in 0..HEADER_LEN {
             assert_eq!(
-                AggregateEnvelope::decode(&encoded[..length]),
+                ProcessEnvelope::decode(&encoded[..length]),
                 Err(EnvelopeError::TruncatedHeader)
             );
         }
         assert_eq!(
-            AggregateEnvelope::decode(&encoded[..HEADER_LEN]),
+            ProcessEnvelope::decode(&encoded[..HEADER_LEN]),
             Err(EnvelopeError::TruncatedPayload)
         );
     }

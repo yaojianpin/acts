@@ -1,4 +1,4 @@
-use crate::scheduler::core::{commit::aggregate::AggregateSnapshot, model::operation::OperationId};
+use crate::scheduler::core::{commit::process::ProcessSnapshot, model::operation::OperationId};
 
 use std::collections::HashSet;
 use std::fmt;
@@ -19,7 +19,7 @@ pub(crate) struct RecoveryIndex {
 }
 
 impl RecoveryIndex {
-    pub(crate) fn project(snapshot: &AggregateSnapshot) -> Option<Self> {
+    pub(crate) fn project(snapshot: &ProcessSnapshot) -> Option<Self> {
         let mut entries = snapshot
             .operations
             .values()

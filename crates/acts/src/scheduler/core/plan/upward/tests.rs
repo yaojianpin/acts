@@ -1,7 +1,7 @@
 use super::*;
-use crate::scheduler::core::commit::aggregate::ExecutionSnapshot;
+use crate::scheduler::core::commit::process::ExecutionSnapshot;
 use crate::scheduler::core::model::model_graph::NodeId;
-use crate::scheduler::core::model::transition_plan::AggregateVersion;
+use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use std::collections::{BTreeMap, HashMap};
 
 fn id(task: &str, generation: u64) -> ExecutionId {
@@ -24,10 +24,10 @@ fn execution(
         },
     )
 }
-fn snapshot(executions: Vec<(ExecutionId, ExecutionSnapshot)>) -> AggregateSnapshot {
-    AggregateSnapshot {
+fn snapshot(executions: Vec<(ExecutionId, ExecutionSnapshot)>) -> ProcessSnapshot {
+    ProcessSnapshot {
         process_id: "p1".into(),
-        version: AggregateVersion {
+        version: ProcessVersion {
             graph: 2,
             process: 5,
             operations: 3,

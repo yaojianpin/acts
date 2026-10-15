@@ -16,11 +16,11 @@ impl ContainerPlanner {
     /// own act decides nothing.
     pub(crate) fn plan_join(
         graph: &ExecutionGraph,
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         command: &ContainerJoinCommand,
     ) -> Result<Option<(StateChange, OperationIntent)>, ContainerError> {
         if snapshot.process_id != command.process_id || graph.process_id != command.process_id {
-            return Err(ContainerError::WrongAggregate);
+            return Err(ContainerError::WrongProcess);
         }
         if graph.revision != snapshot.version.graph {
             return Err(ContainerError::GraphVersionConflict {

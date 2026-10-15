@@ -49,11 +49,11 @@ impl ContainerPlanner {
     /// and the last one to settle is what completes the gate.
     pub(crate) fn plan_catch_join(
         graph: &ExecutionGraph,
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         command: &CatchJoinCommand,
     ) -> Result<Option<CatchJoinOutcome>, ContainerError> {
         if snapshot.process_id != command.process_id || graph.process_id != command.process_id {
-            return Err(ContainerError::WrongAggregate);
+            return Err(ContainerError::WrongProcess);
         }
         if graph.revision != snapshot.version.graph {
             return Err(ContainerError::GraphVersionConflict {

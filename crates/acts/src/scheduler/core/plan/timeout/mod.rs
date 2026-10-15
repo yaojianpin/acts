@@ -17,7 +17,7 @@
 
 use crate::{
     scheduler::core::{
-        commit::aggregate::AggregateSnapshot,
+        commit::process::ProcessSnapshot,
         model::{
             execution_graph::ExecutionId,
             model_graph::NodeId,

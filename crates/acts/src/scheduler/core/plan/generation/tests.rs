@@ -1,17 +1,17 @@
 use super::*;
-use crate::scheduler::core::commit::aggregate::ExecutionSnapshot;
+use crate::scheduler::core::commit::process::ExecutionSnapshot;
 use crate::scheduler::core::model::model_graph::NodeId;
 use crate::scheduler::core::model::operation::ClaimToken;
-use crate::scheduler::core::model::transition_plan::AggregateVersion;
+use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use std::collections::{BTreeMap, HashMap};
 
 fn id(task: &str, generation: u64) -> ExecutionId {
     ExecutionId::new(task, generation).unwrap()
 }
-fn snapshot() -> AggregateSnapshot {
-    AggregateSnapshot {
+fn snapshot() -> ProcessSnapshot {
+    ProcessSnapshot {
         process_id: "p1".into(),
-        version: AggregateVersion {
+        version: ProcessVersion {
             graph: 3,
             process: 8,
             operations: 6,
@@ -176,9 +176,9 @@ fn back_reenters_the_named_step_and_carries_the_backed_source() {
     // The source is the Backed downstream execution; the client named
     // `target` as the redo point. The closure roots at the target's
     // latest generation and must carry the source with it.
-    let snapshot = AggregateSnapshot {
+    let snapshot = ProcessSnapshot {
         process_id: "p1".into(),
-        version: AggregateVersion {
+        version: ProcessVersion {
             graph: 3,
             process: 8,
             operations: 6,
@@ -264,9 +264,9 @@ fn back_to_a_step_outside_the_redo_closure_is_refused() {
     // A source with no path from the named step cannot be a redo. The
     // graph stays connected: one root with two children, and the named
     // `target` spawns a closure that misses the backed `stray`.
-    let snapshot = AggregateSnapshot {
+    let snapshot = ProcessSnapshot {
         process_id: "p1".into(),
-        version: AggregateVersion {
+        version: ProcessVersion {
             graph: 4,
             process: 9,
             operations: 7,

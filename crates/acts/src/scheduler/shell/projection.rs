@@ -33,11 +33,11 @@ use super::{model_of, root_variable};
 use crate::{
     ActError, Result, Vars,
     scheduler::core::{
-        commit::aggregate::AggregateSnapshot,
+        commit::process::ProcessSnapshot,
         model::{
             execution_graph::{ExecutionId, ExecutionState},
             task_state::TaskState,
-            transition_plan::AggregateVersion,
+            transition_plan::ProcessVersion,
             view::NodeTree,
         },
     },
@@ -87,7 +87,7 @@ pub(crate) struct RowProjector {
     /// wins the CAS and the losing writer re-plans from the winner's version),
     /// which makes the check sound; the map is in-process, and after a restart
     /// the first projection of a run writes (the rows are re-derived anyway).
-    projected: Arc<parking_lot::Mutex<std::collections::HashMap<String, AggregateVersion>>>,
+    projected: Arc<parking_lot::Mutex<std::collections::HashMap<String, ProcessVersion>>>,
 }
 
 impl RowProjector {
@@ -111,7 +111,7 @@ impl RowProjector {
     /// the process row alone: one claim for both would let the narrower
     /// projection lock the wider one out of a version they share.
     /// Drop a claim whose projection failed (see [`Self::claim`]).
-    fn release(&self, snapshot: &AggregateSnapshot, row: &str) {
+    fn release(&self, snapshot: &ProcessSnapshot, row: &str) {
         let key = format!("{pid}\u{1f}{row}", pid = snapshot.process_id);
         let mut projected = self.projected.lock();
         if projected.get(&key) == Some(&snapshot.version) {
@@ -119,7 +119,7 @@ impl RowProjector {
         }
     }
 
-    fn claim(&self, snapshot: &AggregateSnapshot, row: &str) -> bool {
+    fn claim(&self, snapshot: &ProcessSnapshot, row: &str) -> bool {
         let mut projected = self.projected.lock();
         let key = format!("{pid}\u{1f}{row}", pid = snapshot.process_id);
         match projected.get(&key) {
@@ -138,7 +138,7 @@ impl RowProjector {
     /// Project the whole process (proc row, task rows, vars rows) from the
     /// committed snapshot. Idempotent: projecting the same snapshot twice
     /// writes the same rows.
-    pub(crate) async fn project(&self, snapshot: &AggregateSnapshot) -> Result<()> {
+    pub(crate) async fn project(&self, snapshot: &ProcessSnapshot) -> Result<()> {
         self.project_nodes(snapshot, None).await
     }
 
@@ -147,7 +147,7 @@ impl RowProjector {
     /// the ones the commit touched instead of rewriting every row of the run.
     pub(crate) async fn project_nodes(
         &self,
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         nodes: Option<&std::collections::BTreeSet<String>>,
     ) -> Result<()> {
         let Some(model) = model_of(snapshot)? else {
@@ -202,7 +202,7 @@ impl RowProjector {
 
     /// Project only the process row: what the outbox's settling pass needs
     /// (the `removable` flag), with nothing else changed.
-    pub(crate) async fn project_proc_row(&self, snapshot: &AggregateSnapshot) -> Result<()> {
+    pub(crate) async fn project_proc_row(&self, snapshot: &ProcessSnapshot) -> Result<()> {
         let Some(model) = model_of(snapshot)? else {
             return Ok(());
         };
@@ -217,7 +217,7 @@ impl RowProjector {
 
     async fn project_proc(
         &self,
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         model: &crate::model::Workflow,
     ) -> Result<()> {
         let Some(root) = snapshot
@@ -270,7 +270,7 @@ impl RowProjector {
     /// kernel must not sweep it away. The process's own write shard is
     /// barriered first: a delivery row the transport queued this instant must
     /// be seen, or the sweeper would delete behind it.
-    async fn removable(&self, snapshot: &AggregateSnapshot) -> Result<bool> {
+    async fn removable(&self, snapshot: &ProcessSnapshot) -> Result<bool> {
         if !settled(snapshot) {
             return Ok(false);
         }
@@ -284,7 +284,7 @@ impl RowProjector {
     /// The process env, as the legacy proc row carries it: the caller
     /// authority, the run's directory, and whatever a package wrote through
     /// `Context::set_env` (the durable `__env` map).
-    fn proc_env(&self, snapshot: &AggregateSnapshot, root: &ExecutionId) -> Result<String> {
+    fn proc_env(&self, snapshot: &ProcessSnapshot, root: &ExecutionId) -> Result<String> {
         let mut env = Vars::new();
         if let Some(owner) = snapshot
             .variables
@@ -307,7 +307,7 @@ impl RowProjector {
 
     async fn project_task(
         &self,
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         tree: &NodeTree,
         latest: &BTreeMap<String, ExecutionId>,
         task_id: &str,
@@ -409,7 +409,7 @@ impl RowProjector {
 
 /// The process env a package wrote through `Context::set_env`, read from the
 /// durable root-scope map.
-pub(crate) fn env_map(snapshot: &AggregateSnapshot) -> Result<Vec<(String, serde_json::Value)>> {
+pub(crate) fn env_map(snapshot: &ProcessSnapshot) -> Result<Vec<(String, serde_json::Value)>> {
     let Some(raw) = root_variable(snapshot, ENV_MAP_VAR)? else {
         return Ok(Vec::new());
     };
@@ -425,7 +425,7 @@ pub(crate) fn env_map(snapshot: &AggregateSnapshot) -> Result<Vec<(String, serde
 /// outbox record delivered. A record the transport could not classify
 /// (`DeliveryUnknown`, `Quarantined`) keeps the rows alive for reconciliation,
 /// exactly like an open legacy delivery row.
-pub(crate) fn settled(snapshot: &AggregateSnapshot) -> bool {
+pub(crate) fn settled(snapshot: &ProcessSnapshot) -> bool {
     !snapshot.executions.is_empty()
         && snapshot
             .executions
@@ -442,7 +442,7 @@ pub(crate) fn settled(snapshot: &AggregateSnapshot) -> bool {
 /// The successor task ids of one execution: every node (newest generation)
 /// that names it a predecessor. Deterministic (sorted).
 fn successors(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     latest: &BTreeMap<String, ExecutionId>,
     execution_id: &ExecutionId,
 ) -> Vec<String> {
@@ -465,7 +465,7 @@ fn successors(
 /// engine's private facts and the `auto` marker left out — the task data a
 /// legacy row holds.
 fn scope_data(
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     execution: &ExecutionId,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut data = serde_json::Map::new();
@@ -483,7 +483,7 @@ fn scope_data(
 
 /// The failed execution's error, in the legacy `Error` shape
 /// (`{"ecode":...,"message":...}`).
-fn error_of(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> Option<String> {
+fn error_of(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> Option<String> {
     let execution_state = snapshot.executions.get(execution)?.state;
     if execution_state != ExecutionState::Failed {
         return None;

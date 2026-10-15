@@ -1,5 +1,5 @@
 use crate::scheduler::core::{
-    commit::aggregate::AggregateSnapshot,
+    commit::process::ProcessSnapshot,
     model::{execution_graph::ExecutionId, model_graph::NodeId, transition_plan::OperationCommit},
 };
 
@@ -36,7 +36,7 @@ pub(crate) struct PredicateBasis {
 }
 
 impl PredicateBasis {
-    pub(crate) fn from_snapshot(snapshot: &AggregateSnapshot) -> Self {
+    pub(crate) fn from_snapshot(snapshot: &ProcessSnapshot) -> Self {
         Self {
             graph: snapshot.version.graph,
             process: snapshot.version.process,
@@ -49,7 +49,7 @@ pub(crate) struct BranchCommand {
     pub(crate) process_id: String,
     pub(crate) branch: ExecutionId,
     pub(crate) candidates: Vec<BranchCandidate>,
-    /// Aggregate version against which every predicate value was evaluated.
+    /// Process version against which every predicate value was evaluated.
     pub(crate) predicate_basis: PredicateBasis,
     pub(crate) unresolved_dependencies: Vec<String>,
     pub(crate) source_operation: OperationCommit,

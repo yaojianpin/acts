@@ -10,7 +10,7 @@ fn is_error_fact(name: &str) -> bool {
 impl PropagationPlanner {
     pub(crate) fn plan(
         graph: &ExecutionGraph,
-        snapshot: &AggregateSnapshot,
+        snapshot: &ProcessSnapshot,
         command: &PropagateCommand,
     ) -> Result<TransitionPlan, PropagationError> {
         validate_envelope(graph, snapshot, command)?;
@@ -302,11 +302,11 @@ impl PropagationPlanner {
 /// The newest generation of one model node, with its snapshot. `None` when the
 /// run never instantiated it.
 fn newest_generation<'a>(
-    snapshot: &'a AggregateSnapshot,
+    snapshot: &'a ProcessSnapshot,
     node: &str,
 ) -> Option<(
     ExecutionId,
-    &'a crate::scheduler::core::commit::aggregate::ExecutionSnapshot,
+    &'a crate::scheduler::core::commit::process::ExecutionSnapshot,
 )> {
     snapshot
         .executions
@@ -318,11 +318,11 @@ fn newest_generation<'a>(
 
 fn validate_envelope(
     graph: &ExecutionGraph,
-    snapshot: &AggregateSnapshot,
+    snapshot: &ProcessSnapshot,
     command: &PropagateCommand,
 ) -> Result<(), PropagationError> {
     if graph.process_id != command.process_id || snapshot.process_id != command.process_id {
-        return Err(PropagationError::WrongAggregate);
+        return Err(PropagationError::WrongProcess);
     }
     if graph.revision != snapshot.version.graph {
         return Err(PropagationError::GraphVersionConflict {

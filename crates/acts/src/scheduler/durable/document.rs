@@ -1,7 +1,7 @@
 use crate::scheduler::{
-    core::commit::aggregate::AggregateSnapshot,
+    core::commit::process::ProcessSnapshot,
     durable::{
-        envelope::{AggregateEnvelope, EnvelopeError},
+        envelope::{EnvelopeError, ProcessEnvelope},
         snapshot_codec::{SnapshotCodecError, SnapshotCodecV2},
     },
 };
@@ -11,54 +11,54 @@ use std::fmt;
 /// The only supported conversion between a domain aggregate and persisted
 /// document bytes. Repositories must not compose envelope and payload codecs
 /// themselves because doing so would allow validation steps to drift.
-pub(crate) struct AggregateDocumentCodec;
+pub(crate) struct ProcessDocumentCodec;
 
-impl AggregateDocumentCodec {
-    pub(crate) fn encode(snapshot: &AggregateSnapshot) -> Result<Vec<u8>, AggregateDocumentError> {
+impl ProcessDocumentCodec {
+    pub(crate) fn encode(snapshot: &ProcessSnapshot) -> Result<Vec<u8>, ProcessDocumentError> {
         snapshot
             .validate()
-            .map_err(SnapshotCodecError::InvalidAggregate)?;
+            .map_err(SnapshotCodecError::InvalidProcess)?;
         let payload = SnapshotCodecV2::encode(snapshot)?;
-        let sealed = AggregateEnvelope::seal(payload).encode()?;
+        let sealed = ProcessEnvelope::seal(payload).encode()?;
         Ok(sealed)
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<AggregateSnapshot, AggregateDocumentError> {
-        let envelope = AggregateEnvelope::decode(bytes)?;
+    pub(crate) fn decode(bytes: &[u8]) -> Result<ProcessSnapshot, ProcessDocumentError> {
+        let envelope = ProcessEnvelope::decode(bytes)?;
         let snapshot = SnapshotCodecV2::decode(&envelope.payload)?;
         snapshot
             .validate()
-            .map_err(SnapshotCodecError::InvalidAggregate)?;
+            .map_err(SnapshotCodecError::InvalidProcess)?;
         Ok(snapshot)
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum AggregateDocumentError {
+pub(crate) enum ProcessDocumentError {
     Envelope(EnvelopeError),
     Snapshot(SnapshotCodecError),
 }
-impl From<EnvelopeError> for AggregateDocumentError {
+impl From<EnvelopeError> for ProcessDocumentError {
     fn from(error: EnvelopeError) -> Self {
         Self::Envelope(error)
     }
 }
-impl From<SnapshotCodecError> for AggregateDocumentError {
+impl From<SnapshotCodecError> for ProcessDocumentError {
     fn from(error: SnapshotCodecError) -> Self {
         Self::Snapshot(error)
     }
 }
-impl fmt::Display for AggregateDocumentError {
+impl fmt::Display for ProcessDocumentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "aggregate document error: {self:?}")
     }
 }
-impl std::error::Error for AggregateDocumentError {}
+impl std::error::Error for ProcessDocumentError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::core::commit::aggregate::ExecutionSnapshot;
+    use crate::scheduler::core::commit::process::ExecutionSnapshot;
     use crate::scheduler::core::model::execution_graph::ExecutionId;
     use crate::scheduler::core::model::execution_graph::ExecutionState;
     use crate::scheduler::core::model::model_graph::NodeId;
@@ -67,10 +67,10 @@ mod tests {
     use crate::scheduler::core::model::operation::OperationKind;
     use crate::scheduler::core::model::operation::OperationRecord;
     use crate::scheduler::core::model::operation::OperationState;
-    use crate::scheduler::core::model::transition_plan::AggregateVersion;
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
     use std::collections::{BTreeMap, HashMap};
 
-    fn snapshot() -> AggregateSnapshot {
+    fn snapshot() -> ProcessSnapshot {
         let execution = ExecutionId::new("step", 2).unwrap();
         let operation_id = OperationId {
             process_id: "process".into(),
@@ -84,9 +84,9 @@ mod tests {
             lease_until_ms: 9_000,
             heartbeat_revision: 4,
         };
-        AggregateSnapshot {
+        ProcessSnapshot {
             process_id: "process".into(),
-            version: AggregateVersion {
+            version: ProcessVersion {
                 graph: 2,
                 process: 4,
                 operations: 8,
@@ -118,17 +118,17 @@ mod tests {
     #[test]
     fn document_round_trip_crosses_every_validation_layer() {
         let source = snapshot();
-        let bytes = AggregateDocumentCodec::encode(&source).unwrap();
-        assert_eq!(AggregateDocumentCodec::decode(&bytes).unwrap(), source);
+        let bytes = ProcessDocumentCodec::encode(&source).unwrap();
+        assert_eq!(ProcessDocumentCodec::decode(&bytes).unwrap(), source);
     }
 
     #[test]
     fn corrupted_envelope_is_not_misreported_as_snapshot_failure() {
-        let mut bytes = AggregateDocumentCodec::encode(&snapshot()).unwrap();
+        let mut bytes = ProcessDocumentCodec::encode(&snapshot()).unwrap();
         *bytes.last_mut().unwrap() ^= 1;
         assert!(matches!(
-            AggregateDocumentCodec::decode(&bytes),
-            Err(AggregateDocumentError::Envelope(
+            ProcessDocumentCodec::decode(&bytes),
+            Err(ProcessDocumentError::Envelope(
                 EnvelopeError::DigestMismatch { .. }
             ))
         ));
@@ -136,12 +136,12 @@ mod tests {
 
     #[test]
     fn valid_envelope_with_invalid_payload_is_reported_as_snapshot_failure() {
-        let bytes = AggregateEnvelope::seal(b"not a snapshot".to_vec())
+        let bytes = ProcessEnvelope::seal(b"not a snapshot".to_vec())
             .encode()
             .unwrap();
         assert_eq!(
-            AggregateDocumentCodec::decode(&bytes),
-            Err(AggregateDocumentError::Snapshot(
+            ProcessDocumentCodec::decode(&bytes),
+            Err(ProcessDocumentError::Snapshot(
                 SnapshotCodecError::InvalidMagic
             )),
         );

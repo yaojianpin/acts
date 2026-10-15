@@ -273,8 +273,8 @@ async fn a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_on
 
     // the run's durable truth — the aggregate the cancel decides in — breaks
     // exactly once, on the cancel's own commit
-    let aggregate = aggregate_key(&pid);
-    kv.arm_key(&aggregate);
+    let process = process_key(&pid);
+    kv.arm_key(&process);
     let rewind = capture_created(&engine, "act1");
     let refused = cancel_act(&engine, &pid, &step1).await;
     match &refused {
@@ -284,7 +284,7 @@ async fn a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_on
     assert_eq!(kv.fired(), 1, "the armed fault must fire exactly once");
     assert_eq!(
         kv.failed_key(),
-        Some(aggregate),
+        Some(process),
         "the fault must land on the run's aggregate commit"
     );
 
