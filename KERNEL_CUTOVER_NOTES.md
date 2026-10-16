@@ -2080,6 +2080,53 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 提交 C2 后按同一改名管线放回;放回时只做了 rustfmt 必需的换行(改名把 `project` 的签名从 102 列降到 100 列 ⇒ 合行;顺带把
 `NAMES` 数组排成 rustfmt 想要的样子)。WIP 语义一字未动(`hop_trace` 23 处、`mod perf_probe;`、`examples/simple/main.rs` 都在),它**仍未提交**。
 
+### C3 完成(2026-10-16):`Execution*` → `Task*`,并把 `task_id` 让给身份
+
+**做了什么**(纯改名:无行为、无持久化字节、无字段形态变更 —— 字段的*类型*是 C4):
+
+- 类型族:`ExecutionId`→`TaskId`、`ExecutionState`→`TaskState`、`ExecutionSnapshot`→`TaskSnapshot`、`ExecutionNode`/`ExecutionGraph`(含 `Builder`/`Error`)→`TaskNode`/`TaskGraph`、
+  `ExecutionCreate`→`TaskCreate`、`ExecutionFlow`→`TaskFlow`、`Execution{NotFound,AlreadyExists,Conflict,NotInGraph}`→`Task*`、
+  `{Duplicate,Unknown}Execution`/`UnreachableExecutions`/`InvalidExecutionTopology`→`…Task…`、`SourceOperationTargetsDifferentExecution`→`…DifferentTask`、`ExecutionSlotKind`→`TaskSlotKind`。
+- **`TaskId` 不再把 task 说两遍**:`TaskId { task_id, generation }` → `TaskId { node, generation }`(`OperationId` 的同类字段一起:
+  `OperationId { process_id, node, generation, sequence }`;C4 把这对字段收成 `task: TaskId`,并把 `node` 类型化成 `NodeId`)。
+  字段腾出来之后,原先把**身份**当参数名用的 `execution_id`(216 处)改成 `task_id` —— 设计给"实例引用"留的名字。
+  节点串遇到**已经绑了 `node`** 的作用域(投影里那棵视图节点、`act_message_payload` 里 `NodeId::parse` 出来的那个)时叫 `node_id`;
+  这类作用域一共 3 个,编译器逐个点了出来。
+- 让名:`TaskState` 现在是引擎自己的状态,于是 legacy 的 12 态读模型/消息词汇让位成 `LegacyTaskState`
+  (`core::model::task_state`→`core::model::legacy_task_state`,映射函数 `task_state(...)`→`legacy_task_state(...)`)。
+  名字自带解释:**行(`tasks.state`)与消息层仍在说这套词汇**,由那个函数从引擎状态映射过去。
+- 模块随类型改名:`core::model::execution_graph`→`core::model::task_graph`、`core::plan::execution_admission`→`core::plan::task_admission`、
+  `core::model::task_state`→`core::model::legacy_task_state`。
+- 字段/参数/局部带名词的:`snapshot.executions`→`snapshot.tasks`、`execution_creates`→`task_creates`、`execution_flow`/`execution_sign`→`task_flow`/`task_sign`、测试夹具 `execution(...)`→`task(...)`。
+- **散文与人读消息仍说 execution**(321 行注释、44 行字符串)—— 与 C2 同一条边界,原因也一样(shell 里的 legacy `Task`/`Process` 视图还在)。
+  只有 6 个 `format!` **占位符**变了(`"{execution_id:?} not found"` → `"{task_id:?} not found"`):占位符写的是它插值的那**变量名**,渲染出的文本一字不差。
+
+**证据**:`crates/acts/src` 内 `Execution` / `Aggregate` / `execution_id` 各 **0** 命中;`TaskId { node, generation }`、`OperationId { …, node, … }` 成型;
+字面量多重集审计:除上述 6 个占位符外**无任何字面量变化** ⇒ 键、codec 分隔符、消息文本没动,存储格式/codec 版本/golden 指纹不变。
+`git diff -M --stat` = 75 文件,+2445/−2762(净 −317:**改名让标识符变短,rustfmt 因此合掉一批换行**,不是删代码)。
+门禁:`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**、`cargo fmt --all --check` 干净。
+
+**套件与既有抖动(已按 §10 §4 口径归因)**:`cargo test -p acts --lib --tests` 有整绿(870/0)的跑次;另有跑次挂 1–2 条,**全是计时敏感用例且会轮换**
+(`export::actions::tests::a_run_cannot_seal_another_subjects_scope`、`tests/reliability/**` 的竞态单元、`shell::tests::kernel_task_and_act_messages_are_emitted`),每条**单独跑都过**。
+本轮在 `HEAD`(C2)的 worktree 上跑同一套件做对照:**基线同样挂 `a_run_cannot_seal_another_subjects_scope`**(869/1)⇒ 既有抖动,与本笔无关。
+该用例的机理也定位了:它在 transport 的 error 信号之后直接读投影行,而**投递发生在提交之前**(§1.5)⇒ 读到的行可能还没写;药方是等提交(或 `flush_writer()`)后再读,属测试问题,不在本笔修。
+
+**本轮顺带核实(回答用户追问,登记给后面几笔)**:
+
+1. **`TaskState` 与 `LegacyTaskState` 不是重复定义**:变体不同(前者 12 态含 `Created`/`Waiting`/`Failed`;后者含 `None`/`Pending`/`Interrupt`/`Error`),
+   用途不同(聚合内的引擎状态 vs 行/消息的对外词汇),中间有唯一映射 `projection::legacy_task_state`。名字原先取的 `NodeState` 是错的(它按**实例**、不按节点),
+   已按上述改名纠正。**要不要只留一套**是设计问题:行的 `state` 字符串是外部契约(`task:get`/CLI),归 C5/后续的读模型重塑,不在改名笔里动。
+2. **`model_graph::NodeKind` 缺 `Step`/`Branch`,而且是死重**:它只有 `Workflow`/`Act` 两个变体,`shell/model.rs:554-568` 把**每个**子节点一律标成 `Act`
+   (step/branch/act 不分);而 `NodeDefinition.kind`(连同 `name`)**没有任何读者** —— `ModelGraph` 只留 `declaration_next`/`explicit_next` 两张表,
+   定义在 `build()` 时被丢掉。⇒ C8b③ 的"两份 `NodeKind` 合一"应改成**直接删掉 policy 侧这个 enum**(4 值的 `view::NodeKind` 才是真值来源,`node_kind_and_name` 从模型算)。
+3. **`ContainerChild`/`BranchCandidate` 各自带了同一个节点的两份**(`task_id`(String)与 `model_node`(NodeId))⇒ 候选去重项,登记。
+4. `utils/consts.rs::STEP_TASK_ID = "task_id"` 是**契约字面量**(step 数据的键名),值钉死不改;本轮只改了同名标识符,字面量原样(审计已证)。
+
+**过程登记(探针 WIP)**:本轮同样把 `shell/mod.rs`/`shell/tests/mod.rs` 旁置、提交后按同一改名管线回填(语义未动;回填时 rustfmt 只做了因标识符变短而必需的合行)。
+**另有一处真实损失,记在这里**:`examples/simple/main.rs` 里那笔探针驱动 WIP(+9/−3)在 C3 中途被我一次 `git reset --hard HEAD` 抹掉了
+(那次重置只旁置了两个 shell 文件,漏了它;它从未进过索引,`git fsck --unreachable` 里也没有它的 blob ⇒ **不可恢复**)。
+教训:要硬重置就先旁置**工作区里每一处**改动;`git reset --hard` 不是"回退我自己的改动",是回退**全树**。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2106,7 +2153,7 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 |---|---|---|---|
 | **C1** | 拆 `core/plan/**` 成同名目录 + `pub(crate) use` 保路径 + tests 归位(纯搬移,调用方一行不改) | — | **已做(§10「C1 完成」)** |
 | **C2** | `Aggregate*` 全族 → `Process*`(纯改名) | C1;**D1 已拍**(`{Process, Task, Operation}`) | **已做(§10「C2 完成」)** |
-| **C3** | `Execution*` → `Task*` + `task_state::TaskState` 改名让位(纯改名) | C2 | 未做 |
+| **C3** | `Execution*` → `Task*` + `task_state::TaskState` 改名让位(纯改名) | C2 | **已做(§10「C3 完成」)** |
 | **C4** | `TaskId` 显式化 + `OperationId.task` 换类型(`wire()` 派生,输出仍是 node id ⇒ golden 全绿) | C3 | 未做(**承载原 §7a**) |
 | **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG BREAKING | C4;**D2/D3 必须先拍** | 未做(**BREAKING**) |
 | **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | 未做 |
@@ -2155,47 +2202,47 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:C3 —— `Execution*` → `Task*` + `task_state::TaskState` 改名让位(§11 A 段第三笔;**纯改名,零行为变更**)
+# 当前任务:C4 —— `TaskId` 显式化 + `OperationId.task` 换类型(§11 A 段第四笔;**输出不变 ⇒ golden 全绿**)
 
-**前置(先做;让名方案拿不准就先问用户)**:`ExecutionState → TaskState` 会撞上既有的 `core::model::task_state::TaskState`
-(legacy 的 12 态:`None/Pending/Interrupt/Error`…)。设计 §3.2 的推荐是**给旧的那个让名**(例如 `NodeState`);
-它不落线上(`pub(crate)`)。把候选摆给用户过一眼再落笔。
+**目标就是设计 §3.1/§2.2 D2 写的那个身份** —— C3 只把名字腾出来,这一步把形体补上:
 
-**设计依据**:`KERNEL_REFACTOR_DESIGN.md` §2.2(D1 **已拍**:`{Process, Task, Operation}`)、§3.1(身份模型)、§3.2(命名表:
-`ExecutionId → TaskId`、`ExecutionSnapshot → TaskSnapshot`、`ExecutionState → TaskState`、`ExecutionGraph/ExecutionNode → TaskGraph/TaskNode`)、
-§4(C3 那一行)、§11 A 段;§10「C2 完成」(照它的边界与管线口径做)。
+- `TaskId { node: NodeId, generation: u64 }`:`node` 从 `String` **类型化**成 `model_graph::NodeId`(聚合里 `TaskSnapshot.model_node` 早就是 `NodeId`,这里对齐);
+  构造点、比较、格式化、测试夹具全跟着走。
+- `OperationId { process_id, task: TaskId, sequence }`:`node` + `generation` 两个字段收成**一个 `task: TaskId`**(设计 §3.1 的"`OperationId.task` 换类型")。
+- `wire()` 先立成身份的**唯一派生入口**(`TaskId::wire()`),**输出仍是 node id** ⇒ golden 不动;切 hex 是 C5(D2 待拍)。
+- **编解码字节不变**:`snapshot_codec` 仍写同一个 node 字符串 + 同一个 gen;恢复条目键仍是 `hex(pid).hex(node).gen.seq`(§1.6);行表不动。
 
-**本笔只改名不改行为**:不改逻辑、不改持久化字节、**不改字段形态** —— `ExecutionId` 改名成 `TaskId` 之后它的字段一个字不动
-(`{task_id, generation}` 的形态、`wire()`、`OperationId.task` 换类型全是 C4 的事);不顺手修 bug,发现问题写进 §10。
+**前置/边界**:动的面 = `core/model/{task_graph,operation}.rs`、`commit/process.rs`、`durable/{snapshot_codec,recovery_entry,document_store}.rs`、
+`core/recovery/**`、`shell/**`、`core/plan/**` 的 identity 用法。**D2/D3 不是本笔前置**(它们是 C5 的):本笔不碰 `wire()` 的字符集、
+不碰行表 `prev/next/parent` 的取值、不动 codec 版本。先读 §4 的 C4 行 + §5 的风险表("键长/存储字节""旧库兼容"两行)。
 
-**现状(已实测,C2 之后)**:`Execution*` 全族横跨 `core/model/{execution_graph,transition_plan,operation}.rs`、`core/commit/process.rs`、
-`core/plan/**`(已是目录)、`core/recovery/**`、`durable/**`(仓库/codec/envelope)、`shell/**`、`store/**`、`tests/**`;
-`Aggregate*` 已全清(`git grep -w Aggregate` = 0),别在这笔里把它带回来。
+**现状(已实测,C3 之后)**:`Execution`/`Aggregate`/`execution_id` 在 `crates/acts/src` 内均为 0 命中;
+`TaskId { node: String, generation }` 与 `OperationId { process_id, node, generation, sequence }` 已是 C3 的形状;
+`TaskId::new(impl Into<String>, u64) -> Result<Self, TaskGraphError>` 是唯一构造入口,`task_id` = 身份用法、`node` = 节点串用法(216/233 处)。
 
-**硬性做法**(沿用 C2 已跑通的口径):
+**硬性做法**(沿用 C2/C3 的口径):
 
-1. 先列全清单再动手:`git grep -nE 'Execution'`(类型/`impl`/`use`/函数/字段/常量/模块/文件/doc 链接),逐条决定"改 / 刻意保留";
-   保留项逐条写进 §10。C2 的边界照搬:**字符串字面量与散文不动** —— 键、codec tag、golden 指纹的字节面一字不改。
-2. 让名要成组:`ExecutionState → TaskState` 与旧 `TaskState` 的改名**同一笔**做完,不许留中间态;`task_state` 的模块名/文件名
-   若随之改,确认 `core/architecture.rs` 的 `RUNTIME_ROOT`/tier 清单同步(它按目录/文件名分类)。
-3. 代码位置的裸名词按 C2 的规则处理:名里带 `execution` 的字段/局部/助手(如 `executions` 字段、测试里的 `execution(...)` 夹具)
-   一并改,散文与消息不动;`cargo check` 的 `E0433/E0412` 是漏项的判据,收尾再 `grep -w execution` 核一遍。
-4. **不碰 C4 的东西**:`wire()`、`OperationId.task` 的类型、`tasks` 行的按实例化、codec 版本 —— 混进来就破了切面。
-5. 改完跑一次 §10「§5f」形状的 30 步纯 step 探针(或 `examples/simple`)对照 hop 行为与 golden,证"字节面没动"。
+1. 先列全清单:`git grep -nE '\.node\b|OperationId|TaskId|wire\('`,逐条决定"改 / 保留";保留项写进 §10。
+2. **字节面钉死**:改完必须证明"编解码输入没变" —— 跑 golden 指纹用例(`canonical_process_and_commit_digest_match_golden_fingerprint`)
+   与恢复条目键用例,再做一次字面量多重集对照(办法见 §10「C3 完成」)。
+3. 类型化会引来 `NodeId` 与 `String` 的比较/格式化/`serde` 面:哪里要 `.as_str()`、哪里要 `NodeId::parse` 逐个定,
+   别用 `to_string()` 抹平(那会悄悄把类型丢掉);`cargo check` 的 `E0308/E0277` 就是清单。
+4. `OperationId` 两字段合并后,持有它的地方(`recovery_entry::recovery_entry_key`、索引扫描、`shell` 的构造点)一起改;
+   **键的字节形状不变**是硬验收。
+5. **不碰 C5 的东西**:`wire()` 的字符集、codec V3、行按实例化、`prev/next/parent` 取值、CHANGELOG BREAKING。
 
 **验收**:
 
-- `crates/acts/src` 内 `Execution` 只剩刻意保留项(逐条列出;让名后的 `NodeState` 不算残留);代码位置的 `execution`/`executions`
-  标识符为 0。
-- `git diff -M --stat` 显示成组改名(行数 reuse,不是 delete+add);调用点除改名外不改变调用关系。
+- `TaskId { node: NodeId, generation }` 与 `OperationId { process_id, task: TaskId, sequence }` 成型;`TaskId::wire()` 是唯一派生入口且**输出 node id**。
+- golden 指纹与恢复条目键用例原样通过;字面量多重集除刻意项外不变(逐条列出)。
 - `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt --all --check` 干净
-  (**动手前先处理工作区那笔未提交探针 WIP 的 `HOPS` 红**,见 §10「C2 完成」的过程登记 —— 它会让 `-D warnings` EXIT 101);
-  `cargo test -p acts --lib --tests` 与基线**同数**(C2 后基线 = **870 passed / 0 failed**)。
-- §10 追加一节「C3 完成」:改名清单前后、`git diff -M --stat` 摘要、刻意保留项、让名裁决、验收命令与结果。
+  (**动手前先看工作区那笔探针 WIP**:它的 `HOPS` 红会让 `-D warnings` EXIT 101,见 §10「C2 完成」的过程登记与「C3 完成」的损失登记);
+  `cargo test -p acts --lib --tests` 与基线同数(C3 后 870/0);既有计时抖动按 §10 §4 的 worktree 对照口径判,别当成回归。
+- §10 追加一节「C4 完成」:身份前后、键字节对照、`git diff -M --stat` 摘要、验收命令与结果。
 
 # 限制与约束
 
-- **先读**:`KERNEL_REFACTOR_DESIGN.md` §1.1(命名面事实)/§2.2(D1 已拍)/§3.1/§3.2/§4;§11 A 段;§10「C2 完成」+「C1 完成」+ §6(文件改写的两条事故口径)。
+- **先读**:`KERNEL_REFACTOR_DESIGN.md` §1.2(身份面)/§1.6(存储键面)/§2.2(D2 的甲/乙)/§3.1/§4;§11 A 段;§10「C3 完成」+「C2 完成」+ §6(文件改写的两条事故口径)。
 - **一次提交只做一个切面**:只改名;不得夹带行为变更、结构重构、清理或顺手修 bug。
 - **不新增 `#[allow(...)]`**;需要就写进 §10 申请并在属性处写理由。
 - **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故:把 `export/actions.rs` 截断为空);
@@ -2215,10 +2262,10 @@ cargo test -p acts --lib --tests
 
 # 交付
 
-一笔提交(conventional 前缀 `refactor` 或 `chore`,单行 imperative 主语,例:`refactor(acts): rename the Execution* family to Task*`)
-+ §10 追加一节「C3 完成」(改名清单前后、`git diff -M --stat` 摘要、刻意保留项、让名裁决、验收命令与结果)
-→ 把 §11 A 段 **C3** 的状态改成「已做(§10「C3 完成」)」+ **原地重写本节的「当前任务」**
-+ **停下等用户确认**:下一笔 **C4**(`TaskId` 显式化 + `OperationId.task` 换类型,`wire()` 派生但**输出仍是 node id**)
-  要动 `core/model` 与 `commit/process.rs` 的身份面,落地前把方案与它对 golden 的影响给用户过一眼。
+一笔提交(conventional 前缀 `refactor` 或 `chore`,单行 imperative 主语,例:`refactor(acts): type TaskId's node and make OperationId carry the identity`)
++ §10 追加一节「C4 完成」(身份前后、键字节对照、`git diff -M --stat` 摘要、验收命令与结果)
+→ 把 §11 A 段 **C4** 的状态改成「已做(§10「C4 完成」)」+ **原地重写本节的「当前任务」**
++ **停下等用户确认**:下一笔 **C5** 是 **BREAKING**(`wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG),
+  且 **D2(甲 可逆定宽 hex / 乙 不可逆定长摘要)与 D3 必须先拍** —— 把这三件事摆给用户:C5 的形态、golden 重冻结的书面理由、老库 upcast 的退化口径。
 ```
 

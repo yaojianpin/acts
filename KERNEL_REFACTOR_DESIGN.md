@@ -229,9 +229,11 @@ pub(crate) struct OperationId {                              // task_id 换类�
 | `Operation*` | **不变** | 它是 hop,不是 task |
 | shell `Process`/`Task` | 不动,等删 | 与 `ProcessSnapshot` 临时并存 |
 
-> **C2 已落地(2026-10-16)**:上表第一行(`Aggregate*` 全族)已按其"终态"列执行 —— `AggregateSnapshot → ProcessSnapshot`
-> 及同族全部改名,模块也随之成了 `core::commit::process`。逐项映射与边界(字面量/散文不动)见
-> `KERNEL_CUTOVER_NOTES.md` §10「C2 完成」;下表其余各行仍在待做。
+> **C2/C3 已落地(2026-10-16)**:上表第一行(`Aggregate*` 全族)与其后的 `Execution*` 行都已按其"终态"列执行
+> —— `AggregateSnapshot → ProcessSnapshot`、`ExecutionId → TaskId`、`ExecutionState → TaskState`(旧 `TaskState` 让位成 `LegacyTaskState`)、
+> `ExecutionSnapshot → TaskSnapshot`、`ExecutionGraph/Node → TaskGraph/Node`;模块随之成了 `core::commit::process` / `core::model::task_graph`。
+> 逐项映射、边界(字面量/散文不动)与验收见 `KERNEL_CUTOVER_NOTES.md` §10「C2 完成」「C3 完成」;
+> `TaskId`/`OperationId` 的**类型化**(`node: NodeId`、`OperationId.task: TaskId`、`wire()`)是 C4,`shell Process/Task` 仍按"不动,等删"。
 
 ### 3.3 投影(第 ③ 条)
 
