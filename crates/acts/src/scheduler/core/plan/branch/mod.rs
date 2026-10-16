@@ -1,6 +1,6 @@
 use crate::scheduler::core::{
     commit::process::ProcessSnapshot,
-    model::{execution_graph::ExecutionId, model_graph::NodeId, transition_plan::OperationCommit},
+    model::{model_graph::NodeId, task_graph::TaskId, transition_plan::OperationCommit},
 };
 
 use std::fmt;
@@ -15,7 +15,7 @@ pub(crate) enum PredicateValue {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BranchCandidate {
-    pub(crate) task_id: String,
+    pub(crate) node: String,
     pub(crate) model_node: NodeId,
     pub(crate) predicate: PredicateValue,
     pub(crate) is_else: bool,
@@ -47,7 +47,7 @@ impl PredicateBasis {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BranchCommand {
     pub(crate) process_id: String,
-    pub(crate) branch: ExecutionId,
+    pub(crate) branch: TaskId,
     pub(crate) candidates: Vec<BranchCandidate>,
     /// Process version against which every predicate value was evaluated.
     pub(crate) predicate_basis: PredicateBasis,
@@ -72,8 +72,8 @@ impl BranchPlanner {
             ));
         }
         for candidate in &command.candidates {
-            if candidate.task_id.trim().is_empty() {
-                return Err(BranchError::InvalidTargetTaskId(candidate.task_id.clone()));
+            if candidate.node.trim().is_empty() {
+                return Err(BranchError::InvalidTargetTaskId(candidate.node.clone()));
             }
             if candidate.is_else {
                 continue;
@@ -83,7 +83,7 @@ impl BranchPlanner {
                 PredicateValue::Null => {
                     return Err(BranchError::InvalidDecision(format!(
                         "branch '{}' predicate evaluated to null",
-                        candidate.task_id
+                        candidate.node
                     )));
                 }
                 PredicateValue::Invalid { message } => {

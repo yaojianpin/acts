@@ -9,18 +9,18 @@ fn is_error_fact(name: &str) -> bool {
 
 impl PropagationPlanner {
     pub(crate) fn plan(
-        graph: &ExecutionGraph,
+        graph: &TaskGraph,
         snapshot: &ProcessSnapshot,
         command: &PropagateCommand,
     ) -> Result<TransitionPlan, PropagationError> {
         validate_envelope(graph, snapshot, command)?;
         let source = snapshot
-            .executions
-            .get(&command.execution)
-            .ok_or_else(|| PropagationError::ExecutionNotFound(command.execution.clone()))?;
+            .tasks
+            .get(&command.task)
+            .ok_or_else(|| PropagationError::TaskNotFound(command.task.clone()))?;
         if !source.state.is_terminal() {
             return Err(PropagationError::SourceNotTerminal {
-                execution: command.execution.clone(),
+                task: command.task.clone(),
                 state: source.state,
             });
         }
@@ -33,11 +33,11 @@ impl PropagationPlanner {
         // admitted successors join it) or the source is merely *done*: a step
         // its own guard skipped is the legacy fall-through — its flow runs on
         // into the next declared step.
-        let source_alive = is_success(source.state) || is_guard_skip(snapshot, &command.execution);
+        let source_alive = is_success(source.state) || is_guard_skip(snapshot, &command.task);
         // The targets this propagation flows into: the one node the model
         // names when the host decided the flow (see [`PropagateCommand::flow`]),
         // otherwise the graph's own successors.
-        let targets: Vec<ExecutionId> = match &command.flow {
+        let targets: Vec<TaskId> = match &command.flow {
             Some(flow) => {
                 let Some(latest) = newest_generation(snapshot, &flow.node) else {
                     // A `next` naming a node the run never instantiated: the
@@ -63,7 +63,7 @@ impl PropagationPlanner {
                         .generation
                         .checked_add(1)
                         .ok_or(PropagationError::GenerationOverflow)?;
-                    let execution = ExecutionId::new(flow.node.clone(), generation)
+                    let task = TaskId::new(flow.node.clone(), generation)
                         .map_err(|_| PropagationError::EmptyFlowTarget)?;
                     // The re-entered generation inherits the dead one's edges,
                     // and it is admitted like any other execution: `Ready` with
@@ -80,27 +80,27 @@ impl PropagationPlanner {
                     let predecessors_ready = latest.1.predecessors.iter().all(|predecessor| {
                         Some(predecessor) == latest.1.parent.as_ref()
                             || snapshot
-                                .executions
+                                .tasks
                                 .get(predecessor)
-                                .is_some_and(|execution| execution.state.is_terminal())
+                                .is_some_and(|task| task.state.is_terminal())
                     });
-                    creates.push(ExecutionCreate {
-                        execution: execution.clone(),
+                    creates.push(TaskCreate {
+                        task: task.clone(),
                         model_node: NodeId::parse(flow.node.clone())
                             .map_err(|_| PropagationError::EmptyFlowTarget)?,
                         parent: latest.1.parent.clone(),
                         predecessors: latest.1.predecessors.clone(),
                         initial_state: if predecessors_ready {
-                            ExecutionState::Ready
+                            TaskState::Ready
                         } else {
-                            ExecutionState::Created
+                            TaskState::Created
                         },
                     });
                     if predecessors_ready {
                         operations.push(OperationIntent {
                             id: OperationId {
                                 process_id: command.process_id.clone(),
-                                task_id: flow.node.clone(),
+                                node: flow.node.clone(),
                                 generation,
                                 sequence: snapshot.next_operation_sequence(&flow.node, generation),
                             },
@@ -111,13 +111,13 @@ impl PropagationPlanner {
                     // other execution's does: its auto decision and its declared
                     // model variables.
                     writes.push(VariableWrite {
-                        scope: execution.clone(),
+                        scope: task.clone(),
                         name: "auto".to_string(),
                         value: if flow.auto { "1" } else { "0" }.to_string(),
                     });
                     for (name, value) in &flow.vars {
                         writes.push(VariableWrite {
-                            scope: execution.clone(),
+                            scope: task.clone(),
                             name: name.clone(),
                             value: value.clone(),
                         });
@@ -132,7 +132,7 @@ impl PropagationPlanner {
                     // parent).
                     if let Some(parent) = latest.1.parent.clone() {
                         for ((scope, name), value) in &snapshot.variables {
-                            if scope != &command.execution
+                            if scope != &command.task
                                 || crate::utils::consts::is_private_key(name)
                                 || name == "auto"
                                 // The failure vocabulary travels up the
@@ -164,14 +164,14 @@ impl PropagationPlanner {
                     vec![latest.0]
                 }
             }
-            None => graph.successors(&command.execution).to_vec(),
+            None => graph.successors(&command.task).to_vec(),
         };
         for successor in &targets {
             let target = snapshot
-                .executions
+                .tasks
                 .get(successor)
-                .ok_or_else(|| PropagationError::ExecutionNotFound(successor.clone()))?;
-            if target.state != ExecutionState::Created {
+                .ok_or_else(|| PropagationError::TaskNotFound(successor.clone()))?;
+            if target.state != TaskState::Created {
                 // A committed successor is already scheduled or finished. The
                 // source operation may still be completing after recovery, so
                 // this is idempotent rather than an error — except when the
@@ -183,7 +183,7 @@ impl PropagationPlanner {
                 if !source_alive
                     && matches!(
                         target.state,
-                        ExecutionState::Ready | ExecutionState::Running | ExecutionState::Waiting
+                        TaskState::Ready | TaskState::Running | TaskState::Waiting
                     )
                 {
                     // The hop owns the state change (it re-reads the
@@ -191,8 +191,8 @@ impl PropagationPlanner {
                     // aborted source's `Running` successor is `Aborted` (the
                     // legacy ancestor walk aborts running children); every
                     // other death skips its successors.
-                    let kind = if source.state == ExecutionState::Aborted
-                        && target.state == ExecutionState::Running
+                    let kind = if source.state == TaskState::Aborted
+                        && target.state == TaskState::Running
                     {
                         OperationKind::AbortTask
                     } else {
@@ -201,10 +201,10 @@ impl PropagationPlanner {
                     operations.push(OperationIntent {
                         id: OperationId {
                             process_id: command.process_id.clone(),
-                            task_id: successor.task_id.clone(),
+                            node: successor.node.clone(),
                             generation: successor.generation,
                             sequence: snapshot
-                                .next_operation_sequence(&successor.task_id, successor.generation),
+                                .next_operation_sequence(&successor.node, successor.generation),
                         },
                         kind,
                     });
@@ -221,18 +221,18 @@ impl PropagationPlanner {
             match readiness {
                 JoinReadiness::Ready => {
                     state_changes.push(StateChange {
-                        execution: successor.clone(),
+                        task: successor.clone(),
                         expected_revision: target.revision,
-                        from: ExecutionState::Created,
-                        to: ExecutionState::Ready,
+                        from: TaskState::Created,
+                        to: TaskState::Ready,
                     });
                     operations.push(OperationIntent {
                         id: OperationId {
                             process_id: command.process_id.clone(),
-                            task_id: successor.task_id.clone(),
+                            node: successor.node.clone(),
                             generation: successor.generation,
                             sequence: snapshot
-                                .next_operation_sequence(&successor.task_id, successor.generation),
+                                .next_operation_sequence(&successor.node, successor.generation),
                         },
                         kind: OperationKind::ExecuteTask,
                     });
@@ -244,18 +244,18 @@ impl PropagationPlanner {
                 // operation.
                 JoinReadiness::SkipCascade { predecessor, state } => {
                     state_changes.push(StateChange {
-                        execution: successor.clone(),
+                        task: successor.clone(),
                         expected_revision: target.revision,
-                        from: ExecutionState::Created,
-                        to: ExecutionState::Ready,
+                        from: TaskState::Created,
+                        to: TaskState::Ready,
                     });
                     operations.push(OperationIntent {
                         id: OperationId {
                             process_id: command.process_id.clone(),
-                            task_id: successor.task_id.clone(),
+                            node: successor.node.clone(),
                             generation: successor.generation,
                             sequence: snapshot
-                                .next_operation_sequence(&successor.task_id, successor.generation),
+                                .next_operation_sequence(&successor.node, successor.generation),
                         },
                         kind: OperationKind::SkipTask,
                     });
@@ -272,7 +272,7 @@ impl PropagationPlanner {
         let plan = TransitionPlan {
             process_id: command.process_id.clone(),
             expected: snapshot.version.clone(),
-            execution_creates: creates,
+            task_creates: creates,
             state_changes,
             variable_writes: writes,
             source_operation: Some(command.source_operation.clone()),
@@ -281,15 +281,12 @@ impl PropagationPlanner {
                 key: format!(
                     "propagate:{}:{}:{}:{}",
                     command.process_id,
-                    command.execution.task_id,
-                    command.execution.generation,
+                    command.task.node,
+                    command.task.generation,
                     command.source_operation.id.sequence,
                 ),
                 topic: "task.propagated".into(),
-                payload: format!(
-                    "{}:{}",
-                    command.execution.task_id, command.execution.generation
-                ),
+                payload: format!("{}:{}", command.task.node, command.task.generation),
                 receipt: None,
             }],
         };
@@ -305,19 +302,19 @@ fn newest_generation<'a>(
     snapshot: &'a ProcessSnapshot,
     node: &str,
 ) -> Option<(
-    ExecutionId,
-    &'a crate::scheduler::core::commit::process::ExecutionSnapshot,
+    TaskId,
+    &'a crate::scheduler::core::commit::process::TaskSnapshot,
 )> {
     snapshot
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == node)
+        .filter(|(id, _)| id.node == node)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(id, execution)| (id.clone(), execution))
+        .map(|(id, task)| (id.clone(), task))
 }
 
 fn validate_envelope(
-    graph: &ExecutionGraph,
+    graph: &TaskGraph,
     snapshot: &ProcessSnapshot,
     command: &PropagateCommand,
 ) -> Result<(), PropagationError> {
@@ -332,15 +329,13 @@ fn validate_envelope(
     }
     let source = &command.source_operation.id;
     if source.process_id != command.process_id
-        || source.task_id != command.execution.task_id
-        || source.generation != command.execution.generation
+        || source.node != command.task.node
+        || source.generation != command.task.generation
     {
-        return Err(PropagationError::SourceOperationTargetsDifferentExecution);
+        return Err(PropagationError::SourceOperationTargetsDifferentTask);
     }
-    if graph.node(&command.execution).is_none() {
-        return Err(PropagationError::ExecutionNotInGraph(
-            command.execution.clone(),
-        ));
+    if graph.node(&command.task).is_none() {
+        return Err(PropagationError::TaskNotInGraph(command.task.clone()));
     }
     Ok(())
 }

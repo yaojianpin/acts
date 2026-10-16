@@ -36,8 +36,8 @@ use std::time::{Duration, Instant};
 use serial_test::serial;
 
 use crate::ActError;
-use crate::scheduler::core::model::execution_graph::ExecutionState;
 use crate::scheduler::core::model::operation::OperationKind;
+use crate::scheduler::core::model::task_graph::TaskState;
 
 use super::*;
 
@@ -129,9 +129,9 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .unwrap()
         .expect("the aggregate exists");
     let mut generations: Vec<u64> = snapshot
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == tid)
+        .filter(|id| id.node == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -144,7 +144,7 @@ async fn generation_state(
     pid: &str,
     tid: &str,
     generation: u64,
-) -> Option<ExecutionState> {
+) -> Option<TaskState> {
     let snapshot = engine
         .runtime()
         .kernel()
@@ -153,10 +153,10 @@ async fn generation_state(
         .unwrap()
         .expect("the aggregate exists");
     snapshot
-        .executions
+        .tasks
         .iter()
-        .find(|(id, _)| id.task_id == tid && id.generation == generation)
-        .map(|(_, execution)| execution.state)
+        .find(|(id, _)| id.node == tid && id.generation == generation)
+        .map(|(_, task)| task.state)
 }
 
 /// Whether the aggregate still holds a non-terminal operation for `tid`: the
@@ -172,7 +172,7 @@ async fn has_unsettled_operation(engine: &Engine, pid: &str, tid: &str) -> bool 
     snapshot
         .operations
         .values()
-        .any(|operation| operation.id.task_id == tid && !operation.is_terminal())
+        .any(|operation| operation.id.node == tid && !operation.is_terminal())
 }
 
 /// How many `ReenterTask` operations the aggregate holds for one node: the
@@ -190,7 +190,7 @@ async fn rewind_operations(engine: &Engine, pid: &str, tid: &str) -> usize {
         .operations
         .values()
         .filter(|operation| {
-            operation.kind == OperationKind::ReenterTask && operation.id.task_id == tid
+            operation.kind == OperationKind::ReenterTask && operation.id.node == tid
         })
         .count()
 }
@@ -268,7 +268,7 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
     );
     assert_eq!(
         generation_state(&engine, &pid, "step2", 0).await,
-        Some(ExecutionState::Waiting),
+        Some(TaskState::Waiting),
         "the source act is still waiting, the state the replayed back reads"
     );
 
@@ -317,7 +317,7 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
     );
     assert_eq!(
         generation_state(&reloaded, &pid, "step2", 0).await,
-        Some(ExecutionState::Backed),
+        Some(TaskState::Backed),
         "the replayed back must close the waiting source generation Backed"
     );
     assert_eq!(
@@ -394,7 +394,7 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
     );
     assert_eq!(
         generation_state(&engine, &pid, "step2", 0).await,
-        Some(ExecutionState::Waiting)
+        Some(TaskState::Waiting)
     );
     assert_eq!(
         generations(&engine, &pid, &step1).await,
@@ -485,7 +485,7 @@ async fn a_duplicate_back_is_refused_without_a_second_rewind_inner() {
     // duplicate will be resolved against
     assert_eq!(
         generation_state(&engine, &pid, "step2", 1).await,
-        Some(ExecutionState::Created),
+        Some(TaskState::Created),
         "the rewind's forward act must exist and not yet be running"
     );
 
@@ -591,9 +591,9 @@ async fn back_racing_complete_converges_on_one_terminal_decision_inner() {
         assert_eq!(
             generation_state(&engine, &pid, "step2", 0).await,
             Some(if rewound {
-                ExecutionState::Backed
+                TaskState::Backed
             } else {
-                ExecutionState::Completed
+                TaskState::Completed
             }),
             "round {round}: the raced act must hold exactly one terminal decision"
         );

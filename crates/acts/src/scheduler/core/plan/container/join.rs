@@ -3,7 +3,7 @@ use super::*;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ContainerJoinCommand {
     pub(crate) process_id: String,
-    pub(crate) parent: ExecutionId,
+    pub(crate) parent: TaskId,
 }
 
 impl ContainerPlanner {
@@ -15,7 +15,7 @@ impl ContainerPlanner {
     /// so a child settling under an execution that is still waiting for its
     /// own act decides nothing.
     pub(crate) fn plan_join(
-        graph: &ExecutionGraph,
+        graph: &TaskGraph,
         snapshot: &ProcessSnapshot,
         command: &ContainerJoinCommand,
     ) -> Result<Option<(StateChange, OperationIntent)>, ContainerError> {
@@ -29,15 +29,15 @@ impl ContainerPlanner {
             });
         }
         let parent = snapshot
-            .executions
+            .tasks
             .get(&command.parent)
-            .ok_or_else(|| ContainerError::ExecutionNotFound(command.parent.clone()))?;
+            .ok_or_else(|| ContainerError::TaskNotFound(command.parent.clone()))?;
         // A parent in its own act's flow is not a container: `Waiting` means it
         // owes the client (the legacy `Interrupt`), `Running` means its act is
         // in flight — and a child settling under either must not decide it. The
         // flow fact is what tells a container apart from those; the state alone
         // cannot, since a container is `Running` too.
-        if parent.state != ExecutionState::Running {
+        if parent.state != TaskState::Running {
             return Ok(None);
         }
         if !parked_for_children(snapshot, &command.parent) {
@@ -49,14 +49,14 @@ impl ContainerPlanner {
         }
         for child in children {
             let state = snapshot
-                .executions
+                .tasks
                 .get(child)
-                .ok_or_else(|| ContainerError::ExecutionNotFound(child.clone()))?
+                .ok_or_else(|| ContainerError::TaskNotFound(child.clone()))?
                 .state;
             if !state.is_terminal() {
                 return Ok(None);
             }
-            if state == ExecutionState::Aborted {
+            if state == TaskState::Aborted {
                 // The abort walk owns this container's outcome; completing it
                 // here would double-decide (legacy `auto_complete` refuses).
                 return Ok(None);
@@ -67,7 +67,7 @@ impl ContainerPlanner {
             .keys()
             .filter(|id| {
                 id.process_id == command.process_id
-                    && id.task_id == command.parent.task_id
+                    && id.node == command.parent.node
                     && id.generation == command.parent.generation
             })
             .map(|id| id.sequence)
@@ -77,15 +77,15 @@ impl ContainerPlanner {
             .ok_or(ContainerError::SequenceOverflow)?;
         Ok(Some((
             StateChange {
-                execution: command.parent.clone(),
+                task: command.parent.clone(),
                 expected_revision: parent.revision,
-                from: ExecutionState::Running,
-                to: ExecutionState::Completed,
+                from: TaskState::Running,
+                to: TaskState::Completed,
             },
             OperationIntent {
                 id: OperationId {
                     process_id: command.process_id.clone(),
-                    task_id: command.parent.task_id.clone(),
+                    node: command.parent.node.clone(),
                     generation: command.parent.generation,
                     sequence,
                 },

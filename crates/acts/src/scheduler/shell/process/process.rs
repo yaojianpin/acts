@@ -3,7 +3,7 @@ use crate::{
     scheduler::{
         Runtime,
         core::model::{
-            task_state::TaskState,
+            legacy_task_state::LegacyTaskState,
             view::{Node, NodeTree},
         },
         shell::{Context, Task, task_tree::TaskTree},
@@ -21,7 +21,7 @@ pub struct Process {
     id: String,
     tree: ShareLock<NodeTree>,
     tasks: ShareLock<TaskTree>,
-    state: ShareLock<TaskState>,
+    state: ShareLock<LegacyTaskState>,
     start_time: ShareLock<i64>,
     err: ShareLock<Option<Error>>,
     end_time: ShareLock<i64>,
@@ -55,7 +55,7 @@ impl Process {
         Arc::new(Process {
             id: pid.to_string(),
             tree: Arc::new(RwLock::new(tree)),
-            state: Arc::new(RwLock::new(TaskState::None)),
+            state: Arc::new(RwLock::new(LegacyTaskState::None)),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
             tasks: Arc::new(RwLock::new(TaskTree::new())),
@@ -114,13 +114,13 @@ impl Process {
         f(&self.tree().model)
     }
 
-    pub fn state(&self) -> TaskState {
+    pub fn state(&self) -> LegacyTaskState {
         self.state.read().clone()
     }
 
     pub fn set_err(&self, err: &Error) {
         *self.err.write() = Some(err.clone());
-        self.set_state(TaskState::Error);
+        self.set_state(LegacyTaskState::Error);
     }
 
     pub fn err(&self) -> Option<Error> {
@@ -313,7 +313,7 @@ impl Process {
         Context::new(self, task)
     }
 
-    pub fn set_state(&self, state: TaskState) {
+    pub fn set_state(&self, state: LegacyTaskState) {
         if state.is_completed() {
             self.set_end_time(utils::time::time_millis());
         } else if state.is_running() {
@@ -329,7 +329,7 @@ impl Process {
         *self.end_time.write() = time;
     }
 
-    pub(crate) fn set_pure_state(&self, state: TaskState) {
+    pub(crate) fn set_pure_state(&self, state: LegacyTaskState) {
         *self.state.write() = state;
     }
 

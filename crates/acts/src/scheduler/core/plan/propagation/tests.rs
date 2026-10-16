@@ -1,25 +1,25 @@
 use super::*;
-use crate::scheduler::core::commit::process::ExecutionSnapshot;
-use crate::scheduler::core::model::execution_graph::ExecutionGraphBuilder;
-use crate::scheduler::core::model::execution_graph::ExecutionNode;
+use crate::scheduler::core::commit::process::TaskSnapshot;
 use crate::scheduler::core::model::model_graph::NodeId;
 use crate::scheduler::core::model::operation::ClaimToken;
+use crate::scheduler::core::model::task_graph::TaskGraphBuilder;
+use crate::scheduler::core::model::task_graph::TaskNode;
 use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use std::collections::{BTreeMap, HashMap};
 
-fn id(name: &str) -> ExecutionId {
-    ExecutionId::new(name, 0).unwrap()
+fn id(name: &str) -> TaskId {
+    TaskId::new(name, 0).unwrap()
 }
-fn node(name: &str) -> ExecutionNode {
-    ExecutionNode {
+fn node(name: &str) -> TaskNode {
+    TaskNode {
         id: id(name),
         model_node: NodeId::parse(name).unwrap(),
-        state: ExecutionState::Created,
+        state: TaskState::Created,
         revision: 0,
     }
 }
-fn graph() -> ExecutionGraph {
-    let mut b = ExecutionGraphBuilder::new("p1", 4).unwrap();
+fn graph() -> TaskGraph {
+    let mut b = TaskGraphBuilder::new("p1", 4).unwrap();
     for name in ["root", "a", "b", "join"] {
         b.add_node(node(name)).unwrap();
     }
@@ -31,7 +31,7 @@ fn graph() -> ExecutionGraph {
     b.add_successor(id("b"), id("join")).unwrap();
     b.build().unwrap()
 }
-fn snapshot(a: ExecutionState, b: ExecutionState) -> ProcessSnapshot {
+fn snapshot(a: TaskState, b: TaskState) -> ProcessSnapshot {
     ProcessSnapshot {
         process_id: "p1".into(),
         version: ProcessVersion {
@@ -39,20 +39,20 @@ fn snapshot(a: ExecutionState, b: ExecutionState) -> ProcessSnapshot {
             process: 4,
             operations: 2,
         },
-        executions: HashMap::from([
+        tasks: HashMap::from([
             (
                 id("root"),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: NodeId::parse("node").unwrap(),
                     parent: None,
                     predecessors: vec![],
-                    state: ExecutionState::Running,
+                    state: TaskState::Running,
                     revision: 0,
                 },
             ),
             (
                 id("a"),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: NodeId::parse("node").unwrap(),
                     parent: None,
                     predecessors: vec![],
@@ -62,7 +62,7 @@ fn snapshot(a: ExecutionState, b: ExecutionState) -> ProcessSnapshot {
             ),
             (
                 id("b"),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: NodeId::parse("node").unwrap(),
                     parent: None,
                     predecessors: vec![],
@@ -72,11 +72,11 @@ fn snapshot(a: ExecutionState, b: ExecutionState) -> ProcessSnapshot {
             ),
             (
                 id("join"),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: NodeId::parse("node").unwrap(),
                     parent: None,
                     predecessors: vec![],
-                    state: ExecutionState::Created,
+                    state: TaskState::Created,
                     revision: 0,
                 },
             ),
@@ -89,12 +89,12 @@ fn snapshot(a: ExecutionState, b: ExecutionState) -> ProcessSnapshot {
 fn command(source: &str, policy: JoinPolicy) -> PropagateCommand {
     PropagateCommand {
         process_id: "p1".into(),
-        execution: id(source),
+        task: id(source),
         join_policy: policy,
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                task_id: source.into(),
+                node: source.into(),
                 generation: 0,
                 sequence: 1,
             },
@@ -113,7 +113,7 @@ fn command(source: &str, policy: JoinPolicy) -> PropagateCommand {
 fn join_waits_until_every_predecessor_is_terminal() {
     let plan = PropagationPlanner::plan(
         &graph(),
-        &snapshot(ExecutionState::Completed, ExecutionState::Running),
+        &snapshot(TaskState::Completed, TaskState::Running),
         &command("a", JoinPolicy::AllSucceeded),
     )
     .unwrap();
@@ -125,12 +125,12 @@ fn join_waits_until_every_predecessor_is_terminal() {
 fn last_successful_predecessor_schedules_join_once() {
     let plan = PropagationPlanner::plan(
         &graph(),
-        &snapshot(ExecutionState::Completed, ExecutionState::Completed),
+        &snapshot(TaskState::Completed, TaskState::Completed),
         &command("b", JoinPolicy::AllSucceeded),
     )
     .unwrap();
     assert_eq!(plan.state_changes.len(), 1);
-    assert_eq!(plan.state_changes[0].execution, id("join"));
+    assert_eq!(plan.state_changes[0].task, id("join"));
     assert_eq!(plan.operations[0].kind, OperationKind::ExecuteTask);
 }
 
@@ -138,27 +138,27 @@ fn last_successful_predecessor_schedules_join_once() {
 fn dead_predecessor_puts_success_join_into_the_skip_cascade() {
     let plan = PropagationPlanner::plan(
         &graph(),
-        &snapshot(ExecutionState::Failed, ExecutionState::Completed),
+        &snapshot(TaskState::Failed, TaskState::Completed),
         &command("b", JoinPolicy::AllSucceeded),
     )
     .unwrap();
     // The join is admitted and handed a skip cascade: its one operation
     // is a SkipTask, not an execution.
     assert_eq!(plan.state_changes.len(), 1);
-    assert_eq!(plan.state_changes[0].execution, id("join"));
-    assert_eq!(plan.state_changes[0].to, ExecutionState::Ready);
+    assert_eq!(plan.state_changes[0].task, id("join"));
+    assert_eq!(plan.state_changes[0].to, TaskState::Ready);
     assert_eq!(plan.operations.len(), 1);
     assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
-    assert_eq!(plan.operations[0].id.task_id, "join");
+    assert_eq!(plan.operations[0].id.node, "join");
 }
 
 #[test]
 fn dead_source_sends_admitted_unfinished_successors_into_the_cascade() {
     // `join` is already `Ready` (admitted, start hop pending) when its
     // predecessor is cancelled: it must skip, not run behind a dead path.
-    let mut snap = snapshot(ExecutionState::Cancelled, ExecutionState::Completed);
-    if let Some(target) = snap.executions.get_mut(&id("join")) {
-        target.state = ExecutionState::Ready;
+    let mut snap = snapshot(TaskState::Cancelled, TaskState::Completed);
+    if let Some(target) = snap.tasks.get_mut(&id("join")) {
+        target.state = TaskState::Ready;
     }
     let plan =
         PropagationPlanner::plan(&graph(), &snap, &command("a", JoinPolicy::AllSucceeded)).unwrap();
@@ -166,17 +166,17 @@ fn dead_source_sends_admitted_unfinished_successors_into_the_cascade() {
     assert!(plan.state_changes.is_empty());
     assert_eq!(plan.operations.len(), 1);
     assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
-    assert_eq!(plan.operations[0].id.task_id, "join");
+    assert_eq!(plan.operations[0].id.node, "join");
 }
 
 #[test]
 fn a_running_successor_of_a_dead_source_is_skipped_in_place() {
-    let mut b = ExecutionGraphBuilder::new("p1", 4).unwrap();
+    let mut b = TaskGraphBuilder::new("p1", 4).unwrap();
     for name in ["root", "a", "b"] {
-        b.add_node(ExecutionNode {
+        b.add_node(TaskNode {
             id: id(name),
             model_node: NodeId::parse(name).unwrap(),
-            state: ExecutionState::Created,
+            state: TaskState::Created,
             revision: 0,
         })
         .unwrap();
@@ -187,8 +187,8 @@ fn a_running_successor_of_a_dead_source_is_skipped_in_place() {
     b.add_successor(id("a"), id("b")).unwrap();
     let graph = b.build().unwrap();
 
-    let mut snapshot = snapshot(ExecutionState::Cancelled, ExecutionState::Running);
-    if let Some(target) = snapshot.executions.get_mut(&id("b")) {
+    let mut snapshot = snapshot(TaskState::Cancelled, TaskState::Running);
+    if let Some(target) = snapshot.tasks.get_mut(&id("b")) {
         target.revision = 6;
     }
     let plan = PropagationPlanner::plan(&graph, &snapshot, &command("a", JoinPolicy::AllSucceeded))
@@ -198,7 +198,7 @@ fn a_running_successor_of_a_dead_source_is_skipped_in_place() {
     assert!(plan.state_changes.is_empty());
     assert_eq!(plan.operations.len(), 1);
     assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
-    assert_eq!(plan.operations[0].id.task_id, "b");
+    assert_eq!(plan.operations[0].id.node, "b");
     assert_eq!(plan.operations[0].id.sequence, 0, "no prior hops on b");
 }
 
@@ -206,7 +206,7 @@ fn a_running_successor_of_a_dead_source_is_skipped_in_place() {
 fn a_live_source_leaves_admitted_successors_alone() {
     let plan = PropagationPlanner::plan(
         &graph(),
-        &snapshot(ExecutionState::Completed, ExecutionState::Ready),
+        &snapshot(TaskState::Completed, TaskState::Ready),
         &command("a", JoinPolicy::AllSucceeded),
     )
     .unwrap();

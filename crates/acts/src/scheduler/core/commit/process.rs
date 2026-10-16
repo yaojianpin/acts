@@ -1,8 +1,8 @@
 use crate::scheduler::core::{
     model::{
-        execution_graph::{ExecutionId, ExecutionState},
         model_graph::NodeId,
         operation::{CommitToken, OperationEvent, OperationRecord, OperationState},
+        task_graph::{TaskId, TaskState},
         transition_plan::{ProcessVersion, TransitionPlan},
     },
     outbox::records::{OutboxId, OutboxRecord},
@@ -12,11 +12,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExecutionSnapshot {
+pub(crate) struct TaskSnapshot {
     pub(crate) model_node: NodeId,
-    pub(crate) parent: Option<ExecutionId>,
-    pub(crate) predecessors: Vec<ExecutionId>,
-    pub(crate) state: ExecutionState,
+    pub(crate) parent: Option<TaskId>,
+    pub(crate) predecessors: Vec<TaskId>,
+    pub(crate) state: TaskState,
     pub(crate) revision: u64,
 }
 
@@ -24,8 +24,8 @@ pub(crate) struct ExecutionSnapshot {
 pub(crate) struct ProcessSnapshot {
     pub(crate) process_id: String,
     pub(crate) version: ProcessVersion,
-    pub(crate) executions: HashMap<ExecutionId, ExecutionSnapshot>,
-    pub(crate) variables: BTreeMap<(ExecutionId, String), String>,
+    pub(crate) tasks: HashMap<TaskId, TaskSnapshot>,
+    pub(crate) variables: BTreeMap<(TaskId, String), String>,
     pub(crate) operations:
         HashMap<crate::scheduler::core::model::operation::OperationId, OperationRecord>,
     pub(crate) outbox: HashMap<
@@ -39,10 +39,10 @@ impl ProcessSnapshot {
     /// unique per (task, generation), and an execution that already ran hops
     /// (a fan-out child, a rewound generation) owns earlier sequences, so
     /// every newly seeded operation takes the one after the highest known.
-    pub(crate) fn next_operation_sequence(&self, task_id: &str, generation: u64) -> u64 {
+    pub(crate) fn next_operation_sequence(&self, node: &str, generation: u64) -> u64 {
         self.operations
             .keys()
-            .filter(|id| id.task_id == task_id && id.generation == generation)
+            .filter(|id| id.node == node && id.generation == generation)
             .map(|id| id.sequence)
             .max()
             .map_or(0, |sequence| sequence + 1)
@@ -60,7 +60,7 @@ impl ProcessSnapshot {
                 process: 0,
                 operations: 0,
             },
-            executions: HashMap::new(),
+            tasks: HashMap::new(),
             variables: BTreeMap::new(),
             operations: HashMap::new(),
             outbox: HashMap::new(),
@@ -94,28 +94,28 @@ impl ProcessSnapshot {
             }
             record.validate().map_err(CommitError::InvalidOutbox)?;
         }
-        for (id, execution) in &self.executions {
-            if let Some(parent) = &execution.parent
-                && !self.executions.contains_key(parent)
+        for (id, task) in &self.tasks {
+            if let Some(parent) = &task.parent
+                && !self.tasks.contains_key(parent)
             {
-                return Err(CommitError::ExecutionNotFound(parent.clone()));
+                return Err(CommitError::TaskNotFound(parent.clone()));
             }
             let mut predecessors = HashSet::new();
-            for predecessor in &execution.predecessors {
+            for predecessor in &task.predecessors {
                 if predecessor == id || !predecessors.insert(predecessor.clone()) {
-                    return Err(CommitError::InvalidExecutionTopology {
-                        execution: id.clone(),
+                    return Err(CommitError::InvalidTaskTopology {
+                        task: id.clone(),
                         predecessor: predecessor.clone(),
                     });
                 }
-                if !self.executions.contains_key(predecessor) {
-                    return Err(CommitError::ExecutionNotFound(predecessor.clone()));
+                if !self.tasks.contains_key(predecessor) {
+                    return Err(CommitError::TaskNotFound(predecessor.clone()));
                 }
             }
         }
-        for (execution, name) in self.variables.keys() {
-            if !self.executions.contains_key(execution) {
-                return Err(CommitError::ExecutionNotFound(execution.clone()));
+        for (task, name) in self.variables.keys() {
+            if !self.tasks.contains_key(task) {
+                return Err(CommitError::TaskNotFound(task.clone()));
             }
             if name.trim().is_empty() {
                 return Err(CommitError::EmptyVariableName);
@@ -404,10 +404,10 @@ pub(crate) fn advance_transition(
     validate_preconditions(next, plan)?;
 
     let previous = next.version.clone();
-    for create in &plan.execution_creates {
-        next.executions.insert(
-            create.execution.clone(),
-            ExecutionSnapshot {
+    for create in &plan.task_creates {
+        next.tasks.insert(
+            create.task.clone(),
+            TaskSnapshot {
                 model_node: create.model_node.clone(),
                 parent: create.parent.clone(),
                 predecessors: create.predecessors.clone(),
@@ -417,12 +417,12 @@ pub(crate) fn advance_transition(
         );
     }
     for change in &plan.state_changes {
-        let execution = next
-            .executions
-            .get_mut(&change.execution)
-            .ok_or_else(|| CommitError::ExecutionNotFound(change.execution.clone()))?;
-        execution.state = change.to;
-        execution.revision = execution
+        let task = next
+            .tasks
+            .get_mut(&change.task)
+            .ok_or_else(|| CommitError::TaskNotFound(change.task.clone()))?;
+        task.state = change.to;
+        task.revision = task
             .revision
             .checked_add(1)
             .ok_or(CommitError::RevisionOverflow)?;
@@ -472,7 +472,7 @@ pub(crate) fn advance_transition(
         next.outbox.insert(id, record);
     }
 
-    let graph_delta = u64::from(!plan.execution_creates.is_empty());
+    let graph_delta = u64::from(!plan.task_creates.is_empty());
     let process_delta =
         u64::from(!plan.state_changes.is_empty() || !plan.variable_writes.is_empty());
     let operation_delta = u64::try_from(plan.operations.len())
@@ -553,43 +553,41 @@ fn validate_preconditions(
         });
     }
     let created = plan
-        .execution_creates
+        .task_creates
         .iter()
-        .map(|item| item.execution.clone())
+        .map(|item| item.task.clone())
         .collect::<HashSet<_>>();
-    for create in &plan.execution_creates {
-        if snapshot.executions.contains_key(&create.execution) {
-            return Err(CommitError::ExecutionAlreadyExists(
-                create.execution.clone(),
-            ));
+    for create in &plan.task_creates {
+        if snapshot.tasks.contains_key(&create.task) {
+            return Err(CommitError::TaskAlreadyExists(create.task.clone()));
         }
         if let Some(parent) = &create.parent
-            && !snapshot.executions.contains_key(parent)
+            && !snapshot.tasks.contains_key(parent)
             && !created.contains(parent)
         {
-            return Err(CommitError::ExecutionNotFound(parent.clone()));
+            return Err(CommitError::TaskNotFound(parent.clone()));
         }
         for predecessor in &create.predecessors {
-            if !snapshot.executions.contains_key(predecessor) && !created.contains(predecessor) {
-                return Err(CommitError::ExecutionNotFound(predecessor.clone()));
+            if !snapshot.tasks.contains_key(predecessor) && !created.contains(predecessor) {
+                return Err(CommitError::TaskNotFound(predecessor.clone()));
             }
         }
-        if snapshot.executions.keys().any(|id| {
-            id.task_id == create.execution.task_id && id.generation >= create.execution.generation
-        }) {
-            return Err(CommitError::GenerationNotMonotonic(
-                create.execution.clone(),
-            ));
+        if snapshot
+            .tasks
+            .keys()
+            .any(|id| id.node == create.task.node && id.generation >= create.task.generation)
+        {
+            return Err(CommitError::GenerationNotMonotonic(create.task.clone()));
         }
     }
     for change in &plan.state_changes {
         let current = snapshot
-            .executions
-            .get(&change.execution)
-            .ok_or_else(|| CommitError::ExecutionNotFound(change.execution.clone()))?;
+            .tasks
+            .get(&change.task)
+            .ok_or_else(|| CommitError::TaskNotFound(change.task.clone()))?;
         if current.revision != change.expected_revision || current.state != change.from {
-            return Err(CommitError::ExecutionConflict {
-                execution: change.execution.clone(),
+            return Err(CommitError::TaskConflict {
+                task: change.task.clone(),
                 expected_revision: change.expected_revision,
                 actual_revision: current.revision,
                 expected_state: change.from,
@@ -600,8 +598,8 @@ fn validate_preconditions(
     for write in &plan.variable_writes {
         // A recreated generation is created and seeded with variables in the
         // same plan: the scope exists once the creates install.
-        if !snapshot.executions.contains_key(&write.scope) && !created.contains(&write.scope) {
-            return Err(CommitError::ExecutionNotFound(write.scope.clone()));
+        if !snapshot.tasks.contains_key(&write.scope) && !created.contains(&write.scope) {
+            return Err(CommitError::TaskNotFound(write.scope.clone()));
         }
     }
     if let Some(source) = &plan.source_operation {
@@ -636,25 +634,25 @@ fn operation_order(
 ) -> std::cmp::Ordering {
     left.process_id
         .cmp(&right.process_id)
-        .then_with(|| left.task_id.cmp(&right.task_id))
+        .then_with(|| left.node.cmp(&right.node))
         .then_with(|| left.generation.cmp(&right.generation))
         .then_with(|| left.sequence.cmp(&right.sequence))
 }
 
-fn execution_state_tag(state: ExecutionState) -> &'static str {
+fn task_state_tag(state: TaskState) -> &'static str {
     match state {
-        ExecutionState::Created => "Created",
-        ExecutionState::Ready => "Ready",
-        ExecutionState::Running => "Running",
-        ExecutionState::Waiting => "Waiting",
-        ExecutionState::Completed => "Completed",
-        ExecutionState::Submitted => "Submitted",
-        ExecutionState::Backed => "Backed",
-        ExecutionState::Cancelled => "Cancelled",
-        ExecutionState::Failed => "Failed",
-        ExecutionState::Aborted => "Aborted",
-        ExecutionState::Skipped => "Skipped",
-        ExecutionState::Removed => "Removed",
+        TaskState::Created => "Created",
+        TaskState::Ready => "Ready",
+        TaskState::Running => "Running",
+        TaskState::Waiting => "Waiting",
+        TaskState::Completed => "Completed",
+        TaskState::Submitted => "Submitted",
+        TaskState::Backed => "Backed",
+        TaskState::Cancelled => "Cancelled",
+        TaskState::Failed => "Failed",
+        TaskState::Aborted => "Aborted",
+        TaskState::Skipped => "Skipped",
+        TaskState::Removed => "Removed",
     }
 }
 
@@ -737,8 +735,8 @@ pub(crate) fn canonical_process_bytes(snapshot: &ProcessSnapshot) -> Result<Vec<
         output.push(':');
         output.push_str(value);
     }
-    fn execution_id(output: &mut String, id: &ExecutionId) {
-        field(output, &id.task_id);
+    fn task_id(output: &mut String, id: &TaskId) {
+        field(output, &id.node);
         field(output, &id.generation.to_string());
     }
 
@@ -749,16 +747,16 @@ pub(crate) fn canonical_process_bytes(snapshot: &ProcessSnapshot) -> Result<Vec<
     field(&mut output, &snapshot.version.process.to_string());
     field(&mut output, &snapshot.version.operations.to_string());
 
-    let mut executions = snapshot.executions.iter().collect::<Vec<_>>();
-    executions.sort_by_key(|(id, _)| *id);
-    for (id, value) in executions {
+    let mut tasks = snapshot.tasks.iter().collect::<Vec<_>>();
+    tasks.sort_by_key(|(id, _)| *id);
+    for (id, value) in tasks {
         field(&mut output, "execution");
-        execution_id(&mut output, id);
+        task_id(&mut output, id);
         field(&mut output, value.model_node.as_str());
         match &value.parent {
             Some(parent) => {
                 field(&mut output, "parent");
-                execution_id(&mut output, parent);
+                task_id(&mut output, parent);
             }
             None => field(&mut output, "no-parent"),
         }
@@ -766,14 +764,14 @@ pub(crate) fn canonical_process_bytes(snapshot: &ProcessSnapshot) -> Result<Vec<
         predecessors.sort();
         field(&mut output, &predecessors.len().to_string());
         for predecessor in predecessors {
-            execution_id(&mut output, &predecessor);
+            task_id(&mut output, &predecessor);
         }
-        field(&mut output, execution_state_tag(value.state));
+        field(&mut output, task_state_tag(value.state));
         field(&mut output, &value.revision.to_string());
     }
     for ((id, name), value) in &snapshot.variables {
         field(&mut output, "variable");
-        execution_id(&mut output, id);
+        task_id(&mut output, id);
         field(&mut output, name);
         field(&mut output, value);
     }
@@ -782,7 +780,7 @@ pub(crate) fn canonical_process_bytes(snapshot: &ProcessSnapshot) -> Result<Vec<
     for operation in operations {
         field(&mut output, "operation");
         field(&mut output, &operation.id.process_id);
-        field(&mut output, &operation.id.task_id);
+        field(&mut output, &operation.id.node);
         field(&mut output, &operation.id.generation.to_string());
         field(&mut output, &operation.id.sequence.to_string());
         field(&mut output, operation_kind_tag(operation.kind));
@@ -827,15 +825,15 @@ pub(crate) enum CommitError {
         expected: ProcessVersion,
         actual: ProcessVersion,
     },
-    ExecutionNotFound(ExecutionId),
-    ExecutionAlreadyExists(ExecutionId),
-    GenerationNotMonotonic(ExecutionId),
-    ExecutionConflict {
-        execution: ExecutionId,
+    TaskNotFound(TaskId),
+    TaskAlreadyExists(TaskId),
+    GenerationNotMonotonic(TaskId),
+    TaskConflict {
+        task: TaskId,
         expected_revision: u64,
         actual_revision: u64,
-        expected_state: ExecutionState,
-        actual_state: ExecutionState,
+        expected_state: TaskState,
+        actual_state: TaskState,
     },
     OperationNotFound(crate::scheduler::core::model::operation::OperationId),
     OperationIdentityMismatch {
@@ -843,9 +841,9 @@ pub(crate) enum CommitError {
         record: crate::scheduler::core::model::operation::OperationId,
     },
     ForeignOperation(crate::scheduler::core::model::operation::OperationId),
-    InvalidExecutionTopology {
-        execution: ExecutionId,
-        predecessor: ExecutionId,
+    InvalidTaskTopology {
+        task: TaskId,
+        predecessor: TaskId,
     },
     EmptyVariableName,
     OperationRevisionConflict {
@@ -885,18 +883,18 @@ mod tests {
     use crate::scheduler::core::model::transition_plan::StateChange;
     use crate::scheduler::core::model::transition_plan::VariableWrite;
 
-    fn id() -> ExecutionId {
-        ExecutionId::new("t1", 0).unwrap()
+    fn id() -> TaskId {
+        TaskId::new("t1", 0).unwrap()
     }
     fn repository() -> MemoryProcessRepository {
         let mut snapshot = ProcessSnapshot::empty("p1").unwrap();
-        snapshot.executions.insert(
+        snapshot.tasks.insert(
             id(),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: NodeId::parse("t1").unwrap(),
                 parent: None,
                 predecessors: vec![],
-                state: ExecutionState::Running,
+                state: TaskState::Running,
                 revision: 2,
             },
         );
@@ -912,12 +910,12 @@ mod tests {
                 process: 0,
                 operations: 0,
             },
-            execution_creates: Vec::new(),
+            task_creates: Vec::new(),
             state_changes: vec![StateChange {
-                execution: id(),
+                task: id(),
                 expected_revision: 2,
-                from: ExecutionState::Running,
-                to: ExecutionState::Completed,
+                from: TaskState::Running,
+                to: TaskState::Completed,
             }],
             variable_writes: vec![VariableWrite {
                 scope: id(),
@@ -928,7 +926,7 @@ mod tests {
             operations: vec![OperationIntent {
                 id: OperationId {
                     process_id: "p1".into(),
-                    task_id: "t1".into(),
+                    node: "t1".into(),
                     generation: 0,
                     sequence: 1,
                 },
@@ -948,7 +946,7 @@ mod tests {
         let mut repo = repository();
         let receipt = repo.compare_and_commit(&plan()).unwrap();
         let snapshot = repo.load("p1").unwrap().unwrap();
-        assert_eq!(snapshot.executions[&id()].state, ExecutionState::Completed);
+        assert_eq!(snapshot.tasks[&id()].state, TaskState::Completed);
         assert_eq!(snapshot.variables[&(id(), "result".into())], "42");
         assert_eq!(snapshot.operations.len(), 1);
         assert!(
@@ -974,7 +972,7 @@ mod tests {
         invalid.state_changes[0].expected_revision = 1;
         assert!(matches!(
             repo.compare_and_commit(&invalid),
-            Err(CommitError::ExecutionConflict { .. })
+            Err(CommitError::TaskConflict { .. })
         ));
         assert_eq!(
             repo.load("p1").unwrap().unwrap(),
@@ -1007,7 +1005,7 @@ mod tests {
         };
         let source_id = OperationId {
             process_id: "p1".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 0,
             sequence: 0,
         };
@@ -1039,7 +1037,7 @@ mod tests {
             snapshot.operations[&source_id].state,
             OperationState::Completed(receipt.token)
         );
-        assert_eq!(snapshot.executions[&id()].state, ExecutionState::Completed);
+        assert_eq!(snapshot.tasks[&id()].state, TaskState::Completed);
     }
 
     #[test]
@@ -1061,7 +1059,7 @@ mod tests {
         };
         let source_id = OperationId {
             process_id: "p1".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 0,
             sequence: 0,
         };
@@ -1092,7 +1090,7 @@ mod tests {
         use crate::scheduler::core::model::operation::ClaimToken;
         let id = OperationId {
             process_id: "p1".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 0,
             sequence: 0,
         };
@@ -1153,7 +1151,7 @@ mod tests {
         use crate::scheduler::core::model::operation::ClaimToken;
         let id = OperationId {
             process_id: "p1".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 0,
             sequence: 0,
         };
@@ -1187,51 +1185,51 @@ mod tests {
     }
 
     #[test]
-    fn execution_creation_advances_graph_and_process_atomically() {
-        use crate::scheduler::core::model::transition_plan::ExecutionCreate;
+    fn task_creation_advances_graph_and_process_atomically() {
+        use crate::scheduler::core::model::transition_plan::TaskCreate;
         let mut repo = repository();
         let mut p = plan();
-        p.execution_creates.push(ExecutionCreate {
-            execution: ExecutionId::new("t1", 1).unwrap(),
+        p.task_creates.push(TaskCreate {
+            task: TaskId::new("t1", 1).unwrap(),
             model_node: NodeId::parse("t1").unwrap(),
             parent: None,
             predecessors: vec![id()],
-            initial_state: ExecutionState::Ready,
+            initial_state: TaskState::Ready,
         });
         let receipt = repo.compare_and_commit(&p).unwrap();
         assert_eq!(receipt.current.graph, 1);
         assert_eq!(receipt.current.process, 1);
         let snapshot = repo.load("p1").unwrap().unwrap();
         assert_eq!(
-            snapshot.executions[&ExecutionId::new("t1", 1).unwrap()].state,
-            ExecutionState::Ready
+            snapshot.tasks[&TaskId::new("t1", 1).unwrap()].state,
+            TaskState::Ready
         );
     }
 
     #[test]
     fn generation_must_move_forward_without_overwriting_history() {
-        use crate::scheduler::core::model::transition_plan::ExecutionCreate;
+        use crate::scheduler::core::model::transition_plan::TaskCreate;
         let mut repo = repository();
         let mut p = plan();
-        p.execution_creates.push(ExecutionCreate {
-            execution: id(),
+        p.task_creates.push(TaskCreate {
+            task: id(),
             model_node: NodeId::parse("t1").unwrap(),
             parent: None,
             predecessors: vec![],
-            initial_state: ExecutionState::Ready,
+            initial_state: TaskState::Ready,
         });
         assert!(matches!(
             repo.compare_and_commit(&p),
-            Err(CommitError::ExecutionAlreadyExists(_))
+            Err(CommitError::TaskAlreadyExists(_))
         ));
-        assert_eq!(repo.load("p1").unwrap().unwrap().executions.len(), 1);
+        assert_eq!(repo.load("p1").unwrap().unwrap().tasks.len(), 1);
     }
 
     #[test]
     fn repository_heartbeat_uses_operation_revision_cas() {
         let id = OperationId {
             process_id: "p1".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 0,
             sequence: 0,
         };
@@ -1270,7 +1268,7 @@ mod tests {
         let mut snapshot = repository().load("p1").unwrap().unwrap();
         let key = OperationId {
             process_id: "p1".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 0,
             sequence: 10,
         };
@@ -1296,7 +1294,7 @@ mod tests {
         let mut foreign = repository().load("p1").unwrap().unwrap();
         let foreign_id = OperationId {
             process_id: "other".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 0,
             sequence: 1,
         };
@@ -1310,14 +1308,11 @@ mod tests {
         );
 
         let mut dangling = repository().load("p1").unwrap().unwrap();
-        let missing = ExecutionId::new("missing", 0).unwrap();
+        let missing = TaskId::new("missing", 0).unwrap();
         dangling
             .variables
             .insert((missing.clone(), "value".into()), "1".into());
-        assert_eq!(
-            dangling.validate(),
-            Err(CommitError::ExecutionNotFound(missing))
-        );
+        assert_eq!(dangling.validate(), Err(CommitError::TaskNotFound(missing)));
     }
 
     #[test]
@@ -1332,7 +1327,7 @@ mod tests {
         for sequence in 0..5 {
             let id = OperationId {
                 process_id: "p1".into(),
-                task_id: "t1".into(),
+                node: "t1".into(),
                 generation: 0,
                 sequence,
             };
@@ -1390,9 +1385,8 @@ mod tests {
     fn commit_digest_covers_graph_topology_and_model_identity() {
         let mut left = repository().load("p1").unwrap().unwrap();
         let mut right = left.clone();
-        let execution = id();
-        right.executions.get_mut(&execution).unwrap().model_node =
-            NodeId::parse("different-model").unwrap();
+        let task = id();
+        right.tasks.get_mut(&task).unwrap().model_node = NodeId::parse("different-model").unwrap();
         assert_ne!(
             deterministic_digest(&left).unwrap(),
             deterministic_digest(&right).unwrap()
@@ -1461,7 +1455,7 @@ mod tests {
         let mut current = repository().load("p1").unwrap().unwrap();
         let operation_id = OperationId {
             process_id: "p1".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 0,
             sequence: 9,
         };

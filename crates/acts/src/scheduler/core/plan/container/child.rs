@@ -21,7 +21,7 @@ pub(crate) enum ContainerChildPlan {
 /// One child execution to admit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ContainerChild {
-    pub(crate) task_id: String,
+    pub(crate) node: String,
     pub(crate) model_node: NodeId,
     pub(crate) plan: ContainerChildPlan,
     /// Edges of the created execution. `Source` is the fanning-out

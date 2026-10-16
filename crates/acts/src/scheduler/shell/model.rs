@@ -2,7 +2,7 @@
 //!
 //! P1 seeded a flat workflow: one root and a declared child chain with
 //! optional explicit join edges. The nested import (P2) keeps the same
-//! vocabulary — `crate::scheduler::core::model::model_graph::ModelGraph`/`crate::scheduler::core::model::execution_graph::ExecutionGraph` — for the
+//! vocabulary — `crate::scheduler::core::model::model_graph::ModelGraph`/`crate::scheduler::core::model::task_graph::TaskGraph` — for the
 //! seeded top chain, and carries the nested structure (branch subtrees) as
 //! durable aggregate variables (`__model`, `__auto`): the fan-out hop reads
 //! them from the snapshot, so recovery replays never need the declaring
@@ -12,15 +12,13 @@
 use crate::{
     ActError, Result,
     scheduler::core::{
-        commit::process::{ExecutionSnapshot, ProcessSnapshot},
+        commit::process::{ProcessSnapshot, TaskSnapshot},
         model::{
-            execution_graph::{
-                ExecutionGraph, ExecutionGraphBuilder, ExecutionId, ExecutionNode, ExecutionState,
-            },
             model_graph::{
                 ChildRole, ModelGraph, ModelGraphBuilder, NodeDefinition, NodeId, NodeKind,
             },
             operation::{OperationId, OperationKind, OperationRecord},
+            task_graph::{TaskGraph, TaskGraphBuilder, TaskId, TaskNode, TaskState},
         },
     },
 };
@@ -599,7 +597,7 @@ impl ProcessSpec {
     /// operation is the single durable seed. Creation is one atomic
     /// `repository.create`, never a plan.
     pub(crate) fn seed_snapshot(&self) -> Result<ProcessSnapshot> {
-        self.seed_snapshot_from(ExecutionState::Ready)
+        self.seed_snapshot_from(TaskState::Ready)
     }
 
     /// The seed of a run that starts *parked*: exactly [`Self::seed_snapshot`]
@@ -609,21 +607,21 @@ impl ProcessSpec {
     /// `crate::scheduler::core::plan::concurrency`), so the aggregate is
     /// otherwise indistinguishable from an admitted start's.
     pub(crate) fn seed_parked_snapshot(&self) -> Result<ProcessSnapshot> {
-        self.seed_snapshot_from(ExecutionState::Created)
+        self.seed_snapshot_from(TaskState::Created)
     }
 
     /// The seed both entry points share; `root_state` is the root execution's
     /// state (`Ready` for an admitted start, `Created` for a parked one).
-    fn seed_snapshot_from(&self, root_state: ExecutionState) -> Result<ProcessSnapshot> {
+    fn seed_snapshot_from(&self, root_state: TaskState) -> Result<ProcessSnapshot> {
         self.model_graph()?;
         let mut snapshot = ProcessSnapshot::empty(&self.process_id).map_err(runtime)?;
         snapshot.version.graph = 1;
 
-        let root = ExecutionId::new(&self.root, 0).map_err(runtime)?;
-        let mut executions = std::collections::HashMap::new();
-        executions.insert(
+        let root = TaskId::new(&self.root, 0).map_err(runtime)?;
+        let mut tasks = std::collections::HashMap::new();
+        tasks.insert(
             root.clone(),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node_id(&self.root)?,
                 parent: None,
                 predecessors: Vec::new(),
@@ -632,23 +630,23 @@ impl ProcessSpec {
             },
         );
         for child in &self.children {
-            let id = ExecutionId::new(child, 0).map_err(runtime)?;
-            executions.insert(
+            let id = TaskId::new(child, 0).map_err(runtime)?;
+            tasks.insert(
                 id,
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: node_id(child)?,
                     parent: Some(root.clone()),
                     predecessors: Vec::new(),
-                    state: ExecutionState::Created,
+                    state: TaskState::Created,
                     revision: 0,
                 },
             );
         }
-        snapshot.executions = executions;
+        snapshot.tasks = tasks;
         // The auto/waiting decision is durable state, not spec state: the
         // aggregate replays without the model.
-        for id in snapshot.executions.keys() {
-            let auto = id.task_id == self.root || self.auto.contains(&id.task_id);
+        for id in snapshot.tasks.keys() {
+            let auto = id.node == self.root || self.auto.contains(&id.node);
             snapshot.variables.insert(
                 (id.clone(), "auto".to_string()),
                 if auto { "1" } else { "0" }.into(),
@@ -660,7 +658,7 @@ impl ProcessSpec {
         for (scope, name, value) in &self.seed_variables {
             let key = match scope {
                 None => root.clone(),
-                Some(node) => ExecutionId::new(node, 0).map_err(runtime)?,
+                Some(node) => TaskId::new(node, 0).map_err(runtime)?,
             };
             snapshot
                 .variables
@@ -691,14 +689,14 @@ impl ProcessSpec {
         let model = self.model_graph()?;
         let by_node = |node: &NodeId| {
             snapshot
-                .executions
+                .tasks
                 .iter()
                 .find(|(_, candidate)| &candidate.model_node == node)
                 .map(|(id, _)| id.clone())
         };
-        let mut edges: Vec<(ExecutionId, ExecutionId)> = Vec::new();
-        for (id, execution) in &snapshot.executions {
-            if let Some(successor) = model.successor(&execution.model_node) {
+        let mut edges: Vec<(TaskId, TaskId)> = Vec::new();
+        for (id, task) in &snapshot.tasks {
+            if let Some(successor) = model.successor(&task.model_node) {
                 let Some(target) = by_node(successor) else {
                     return Err(ActError::Runtime("successor without execution".into()));
                 };
@@ -706,14 +704,14 @@ impl ProcessSpec {
             }
         }
         for (from, to) in edges {
-            if let Some(target) = snapshot.executions.get_mut(&to) {
+            if let Some(target) = snapshot.tasks.get_mut(&to) {
                 target.predecessors.push(from);
             }
         }
 
         let operation_id = OperationId {
             process_id: self.process_id.clone(),
-            task_id: self.root.clone(),
+            node: self.root.clone(),
             generation: 0,
             sequence: 0,
         };
@@ -727,25 +725,25 @@ impl ProcessSpec {
 }
 
 /// Rebuild the execution graph purely from the snapshot: the parent map
-/// and predecessor lists in `ExecutionSnapshot` are the graph of record,
+/// and predecessor lists in `TaskSnapshot` are the graph of record,
 /// seeded from the model at creation and extended by every
-/// `ExecutionCreate`. The root is the single parentless execution; the
+/// `TaskCreate`. The root is the single parentless execution; the
 /// revision is the aggregate's graph revision, which is what
 /// `PropagationPlanner` checks.
-pub(crate) fn execution_graph(snapshot: &ProcessSnapshot) -> Result<ExecutionGraph> {
-    let mut builder = ExecutionGraphBuilder::new(&snapshot.process_id, snapshot.version.graph)
-        .map_err(runtime)?;
-    let mut root: Option<ExecutionId> = None;
-    for (id, execution) in &snapshot.executions {
+pub(crate) fn task_graph(snapshot: &ProcessSnapshot) -> Result<TaskGraph> {
+    let mut builder =
+        TaskGraphBuilder::new(&snapshot.process_id, snapshot.version.graph).map_err(runtime)?;
+    let mut root: Option<TaskId> = None;
+    for (id, task) in &snapshot.tasks {
         builder
-            .add_node(ExecutionNode {
+            .add_node(TaskNode {
                 id: id.clone(),
-                model_node: execution.model_node.clone(),
-                state: execution.state,
-                revision: execution.revision,
+                model_node: task.model_node.clone(),
+                state: task.state,
+                revision: task.revision,
             })
             .map_err(runtime)?;
-        match &execution.parent {
+        match &task.parent {
             Some(parent) => builder
                 .add_child(parent.clone(), id.clone())
                 .map_err(runtime)?,
@@ -754,8 +752,8 @@ pub(crate) fn execution_graph(snapshot: &ProcessSnapshot) -> Result<ExecutionGra
     }
     let root = root.ok_or_else(|| ActError::Runtime("no root execution".into()))?;
     builder.set_root(root).map_err(runtime)?;
-    for (id, execution) in &snapshot.executions {
-        for predecessor in &execution.predecessors {
+    for (id, task) in &snapshot.tasks {
+        for predecessor in &task.predecessors {
             builder
                 .add_successor(predecessor.clone(), id.clone())
                 .map_err(runtime)?;
@@ -793,7 +791,7 @@ mod tests {
         });
         let imported = spec(&workflow).unwrap();
         let snapshot = imported.seed_snapshot().unwrap();
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         let model: crate::model::Workflow = serde_json::from_str(
             snapshot
                 .variables
@@ -862,7 +860,7 @@ mod tests {
         };
         let spec = spec(&workflow).unwrap().with_owner(owner.clone());
         let snapshot = spec.seed_snapshot().unwrap();
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         let raw = snapshot
             .variables
             .get(&(root, crate::utils::consts::PROC_OWNER.to_string()))
@@ -882,7 +880,7 @@ mod tests {
             .unwrap()
             .with_vars(&crate::Vars::new().with("uid", "input").with("extra", 7));
         let snapshot = spec.seed_snapshot().unwrap();
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         let var = |name: &str| {
             snapshot
                 .variables
@@ -900,10 +898,10 @@ mod tests {
         // Branches and their steps do not seed executions; the top chain does.
         assert_eq!(spec.children, vec!["step1".to_string()]);
         let snapshot = spec.seed_snapshot().unwrap();
-        assert_eq!(snapshot.executions.len(), 2, "root + step1 only");
+        assert_eq!(snapshot.tasks.len(), 2, "root + step1 only");
         // The root scope carries the workflow vars, the model and the auto
         // map — the fan-out's durable inputs.
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         let variable = |name: &str| {
             snapshot
                 .variables
@@ -956,7 +954,7 @@ mod tests {
         let imported = spec(&with_catch).unwrap();
         assert_eq!(imported.children, vec!["s1".to_string()]);
         let snapshot = imported.seed_snapshot().unwrap();
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         let auto: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
             snapshot
                 .variables
@@ -971,14 +969,14 @@ mod tests {
         assert!(
             snapshot
                 .variables
-                .contains_key(&(ExecutionId::new("s1", 0).unwrap(), "own".to_string())),
+                .contains_key(&(TaskId::new("s1", 0).unwrap(), "own".to_string())),
             "a seeded step's declared vars are durable facts"
         );
         assert!(
             !snapshot
                 .variables
                 .keys()
-                .any(|(scope, _)| scope.task_id == "c1"),
+                .any(|(scope, _)| scope.node == "c1"),
             "a nested node's vars are seeded when its hop admits it"
         );
 
@@ -996,13 +994,13 @@ mod tests {
         let snapshot = imported.seed_snapshot().unwrap();
         assert!(
             snapshot
-                .executions
+                .tasks
                 .values()
-                .all(|execution| execution.model_node.as_str() != "t1"),
+                .all(|task| task.model_node.as_str() != "t1"),
             "the timer's hop admits the branch, not the seed"
         );
         // The branch's auto decision is a durable fact like a catch's.
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         let timeout_auto: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
             snapshot
                 .variables
@@ -1034,7 +1032,7 @@ mod tests {
         });
         let imported = spec(&mixed_timeouts).unwrap();
         let snapshot = imported.seed_snapshot().unwrap();
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         let mixed_auto: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
             snapshot
                 .variables
@@ -1062,8 +1060,8 @@ mod tests {
         let imported = spec(&mixed).unwrap();
         let snapshot = imported.seed_snapshot().unwrap();
         assert!(
-            snapshot.executions.values().all(|execution| {
-                execution.model_node.as_str() != "c1" && execution.model_node.as_str() != "b1"
+            snapshot.tasks.values().all(|task| {
+                task.model_node.as_str() != "c1" && task.model_node.as_str() != "b1"
             }),
             "neither set is seeded: the branches fan out on completion, the handlers on failure"
         );
@@ -1083,9 +1081,9 @@ mod tests {
         let snapshot = imported.seed_snapshot().unwrap();
         assert!(
             snapshot
-                .executions
+                .tasks
                 .values()
-                .all(|execution| execution.model_node.as_str() != "c1"),
+                .all(|task| task.model_node.as_str() != "c1"),
             "the handler still seeds no execution"
         );
 
@@ -1163,13 +1161,13 @@ mod tests {
         let spec = spec(&workflow).unwrap();
         assert_eq!(spec.children.len(), 2);
         let snapshot = spec.seed_snapshot().unwrap();
-        assert_eq!(snapshot.executions.len(), 3);
+        assert_eq!(snapshot.tasks.len(), 3);
     }
 
     /// The durable model of a run, decoded from the root scope's
     /// [`MODEL_VAR`] — what a hop reads the nested structure from.
     fn durable_model(snapshot: &ProcessSnapshot) -> crate::model::Workflow {
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         serde_json::from_str(
             snapshot
                 .variables
@@ -1181,7 +1179,7 @@ mod tests {
 
     /// The auto map the import seeded, decoded.
     fn durable_auto(snapshot: &ProcessSnapshot) -> serde_json::Map<String, serde_json::Value> {
-        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         serde_json::from_str(
             snapshot
                 .variables

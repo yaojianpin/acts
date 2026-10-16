@@ -7,13 +7,11 @@ use super::*;
 /// `crate::scheduler::core::plan::concurrency`). A successor is `Created` only
 /// until the propagation hop that schedules it commits its `Created → Ready`
 /// move in the same plan as its `ExecuteTask` operation.
-pub(super) fn startable(
-    state: crate::scheduler::core::model::execution_graph::ExecutionState,
-) -> bool {
+pub(super) fn startable(state: crate::scheduler::core::model::task_graph::TaskState) -> bool {
     matches!(
         state,
-        crate::scheduler::core::model::execution_graph::ExecutionState::Created
-            | crate::scheduler::core::model::execution_graph::ExecutionState::Ready
+        crate::scheduler::core::model::task_graph::TaskState::Created
+            | crate::scheduler::core::model::task_graph::TaskState::Ready
     )
 }
 
@@ -55,14 +53,14 @@ pub(super) enum TimeoutGuard {
 pub(super) fn next_plan_sequence(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
     plan: &TransitionPlan,
-    task_id: &str,
+    node: &str,
     generation: u64,
 ) -> u64 {
-    let from_snapshot = snapshot.next_operation_sequence(task_id, generation);
+    let from_snapshot = snapshot.next_operation_sequence(node, generation);
     let from_plan = plan
         .operations
         .iter()
-        .filter(|intent| intent.id.task_id == task_id && intent.id.generation == generation)
+        .filter(|intent| intent.id.node == node && intent.id.generation == generation)
         .map(|intent| intent.id.sequence.saturating_add(1))
         .max()
         .unwrap_or(0);
@@ -75,15 +73,14 @@ pub(super) fn next_plan_sequence(
 /// client input of the same private name.
 pub(super) fn mark_flow(
     plan: &mut TransitionPlan,
-    execution: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
     value: &str,
 ) {
     plan.variable_writes.retain(|write| {
-        !(write.scope == *execution
-            && write.name == crate::scheduler::core::plan::container::FLOW_VAR)
+        !(write.scope == *task && write.name == crate::scheduler::core::plan::container::FLOW_VAR)
     });
     plan.variable_writes.push(VariableWrite {
-        scope: execution.clone(),
+        scope: task.clone(),
         name: crate::scheduler::core::plan::container::FLOW_VAR.to_string(),
         value: value.to_string(),
     });
@@ -92,11 +89,11 @@ pub(super) fn mark_flow(
 /// Record that one execution parked for the children it admitted.
 pub(super) fn mark_parked_for_children(
     plan: &mut TransitionPlan,
-    execution: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
 ) {
     mark_flow(
         plan,
-        execution,
+        task,
         crate::scheduler::core::plan::container::FLOW_CHILDREN,
     );
 }
@@ -107,9 +104,9 @@ pub(super) fn mark_parked_for_children(
 /// may override.
 pub(super) fn is_catch_decider(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    execution: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> bool {
-    crate::scheduler::core::plan::container::deciding_catches(snapshot, execution)
+    crate::scheduler::core::plan::container::deciding_catches(snapshot, task)
 }
 
 /// The failure one package error reports: the kernel's own code and the
@@ -131,11 +128,11 @@ pub(super) fn package_failure(error: &crate::ActError) -> Failure {
 /// The branch predicate failure a fan-out pinned on `execution`, if any.
 pub(super) fn branch_error(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    execution: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> Option<Failure> {
     let raw = snapshot
         .variables
-        .get(&(execution.clone(), BRANCH_ERROR_VAR.to_string()))?;
+        .get(&(task.clone(), BRANCH_ERROR_VAR.to_string()))?;
     let value: serde_json::Value = serde_json::from_str(raw).ok()?;
     Some(Failure::new(
         value

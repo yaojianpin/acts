@@ -3,29 +3,23 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ExecutionId {
-    pub(crate) task_id: String,
+pub(crate) struct TaskId {
+    pub(crate) node: String,
     pub(crate) generation: u64,
 }
 
-impl ExecutionId {
-    pub(crate) fn new(
-        task_id: impl Into<String>,
-        generation: u64,
-    ) -> Result<Self, ExecutionGraphError> {
-        let task_id = task_id.into();
-        if task_id.trim().is_empty() {
-            return Err(ExecutionGraphError::EmptyTaskId);
+impl TaskId {
+    pub(crate) fn new(node: impl Into<String>, generation: u64) -> Result<Self, TaskGraphError> {
+        let node = node.into();
+        if node.trim().is_empty() {
+            return Err(TaskGraphError::EmptyTaskId);
         }
-        Ok(Self {
-            task_id,
-            generation,
-        })
+        Ok(Self { node, generation })
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ExecutionState {
+pub(crate) enum TaskState {
     Created,
     Ready,
     Running,
@@ -40,7 +34,7 @@ pub(crate) enum ExecutionState {
     Removed,
 }
 
-impl ExecutionState {
+impl TaskState {
     pub(crate) fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -57,38 +51,38 @@ impl ExecutionState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExecutionNode {
-    pub(crate) id: ExecutionId,
+pub(crate) struct TaskNode {
+    pub(crate) id: TaskId,
     pub(crate) model_node: NodeId,
-    pub(crate) state: ExecutionState,
+    pub(crate) state: TaskState,
     pub(crate) revision: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExecutionGraph {
+pub(crate) struct TaskGraph {
     pub(crate) process_id: String,
     pub(crate) revision: u64,
-    nodes: HashMap<ExecutionId, ExecutionNode>,
-    children: HashMap<ExecutionId, Vec<ExecutionId>>,
-    predecessors: HashMap<ExecutionId, Vec<ExecutionId>>,
-    successors: HashMap<ExecutionId, Vec<ExecutionId>>,
+    nodes: HashMap<TaskId, TaskNode>,
+    children: HashMap<TaskId, Vec<TaskId>>,
+    predecessors: HashMap<TaskId, Vec<TaskId>>,
+    successors: HashMap<TaskId, Vec<TaskId>>,
 }
 
-impl ExecutionGraph {
-    pub(crate) fn node(&self, id: &ExecutionId) -> Option<&ExecutionNode> {
+impl TaskGraph {
+    pub(crate) fn node(&self, id: &TaskId) -> Option<&TaskNode> {
         self.nodes.get(id)
     }
 
-    pub(crate) fn children(&self, id: &ExecutionId) -> &[ExecutionId] {
+    pub(crate) fn children(&self, id: &TaskId) -> &[TaskId] {
         self.children.get(id).map(Vec::as_slice).unwrap_or_default()
     }
-    pub(crate) fn predecessors(&self, id: &ExecutionId) -> &[ExecutionId] {
+    pub(crate) fn predecessors(&self, id: &TaskId) -> &[TaskId] {
         self.predecessors
             .get(id)
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
-    pub(crate) fn successors(&self, id: &ExecutionId) -> &[ExecutionId] {
+    pub(crate) fn successors(&self, id: &TaskId) -> &[TaskId] {
         self.successors
             .get(id)
             .map(Vec::as_slice)
@@ -96,25 +90,25 @@ impl ExecutionGraph {
     }
 }
 
-pub(crate) struct ExecutionGraphBuilder {
+pub(crate) struct TaskGraphBuilder {
     process_id: String,
     revision: u64,
-    root: Option<ExecutionId>,
-    nodes: HashMap<ExecutionId, ExecutionNode>,
-    parent: HashMap<ExecutionId, ExecutionId>,
-    children: HashMap<ExecutionId, Vec<ExecutionId>>,
-    predecessors: HashMap<ExecutionId, Vec<ExecutionId>>,
-    successors: HashMap<ExecutionId, Vec<ExecutionId>>,
+    root: Option<TaskId>,
+    nodes: HashMap<TaskId, TaskNode>,
+    parent: HashMap<TaskId, TaskId>,
+    children: HashMap<TaskId, Vec<TaskId>>,
+    predecessors: HashMap<TaskId, Vec<TaskId>>,
+    successors: HashMap<TaskId, Vec<TaskId>>,
 }
 
-impl ExecutionGraphBuilder {
+impl TaskGraphBuilder {
     pub(crate) fn new(
         process_id: impl Into<String>,
         revision: u64,
-    ) -> Result<Self, ExecutionGraphError> {
+    ) -> Result<Self, TaskGraphError> {
         let process_id = process_id.into();
         if process_id.trim().is_empty() {
-            return Err(ExecutionGraphError::EmptyProcessId);
+            return Err(TaskGraphError::EmptyProcessId);
         }
         Ok(Self {
             process_id,
@@ -128,45 +122,41 @@ impl ExecutionGraphBuilder {
         })
     }
 
-    pub(crate) fn add_node(&mut self, node: ExecutionNode) -> Result<(), ExecutionGraphError> {
+    pub(crate) fn add_node(&mut self, node: TaskNode) -> Result<(), TaskGraphError> {
         if self.nodes.contains_key(&node.id) {
-            return Err(ExecutionGraphError::DuplicateExecution(node.id));
+            return Err(TaskGraphError::DuplicateTask(node.id));
         }
         self.nodes.insert(node.id.clone(), node);
         Ok(())
     }
 
-    pub(crate) fn set_root(&mut self, id: ExecutionId) -> Result<(), ExecutionGraphError> {
+    pub(crate) fn set_root(&mut self, id: TaskId) -> Result<(), TaskGraphError> {
         if self.root.replace(id).is_some() {
-            return Err(ExecutionGraphError::MultipleRoots);
+            return Err(TaskGraphError::MultipleRoots);
         }
         Ok(())
     }
 
     pub(crate) fn add_child(
         &mut self,
-        parent: ExecutionId,
-        child: ExecutionId,
-    ) -> Result<(), ExecutionGraphError> {
+        parent: TaskId,
+        child: TaskId,
+    ) -> Result<(), TaskGraphError> {
         if self.parent.contains_key(&child) {
-            return Err(ExecutionGraphError::MultipleParents(child));
+            return Err(TaskGraphError::MultipleParents(child));
         }
         self.parent.insert(child.clone(), parent.clone());
         self.children.entry(parent).or_default().push(child);
         Ok(())
     }
 
-    pub(crate) fn add_successor(
-        &mut self,
-        from: ExecutionId,
-        to: ExecutionId,
-    ) -> Result<(), ExecutionGraphError> {
+    pub(crate) fn add_successor(&mut self, from: TaskId, to: TaskId) -> Result<(), TaskGraphError> {
         if self
             .successors
             .get(&from)
             .is_some_and(|items| items.contains(&to))
         {
-            return Err(ExecutionGraphError::DuplicateSuccessor { from, to });
+            return Err(TaskGraphError::DuplicateSuccessor { from, to });
         }
         self.predecessors
             .entry(to.clone())
@@ -176,11 +166,11 @@ impl ExecutionGraphBuilder {
         Ok(())
     }
 
-    pub(crate) fn build(self) -> Result<ExecutionGraph, ExecutionGraphError> {
-        let root = self.root.clone().ok_or(ExecutionGraphError::MissingRoot)?;
+    pub(crate) fn build(self) -> Result<TaskGraph, TaskGraphError> {
+        let root = self.root.clone().ok_or(TaskGraphError::MissingRoot)?;
         self.require_node(&root)?;
         if self.parent.contains_key(&root) {
-            return Err(ExecutionGraphError::RootHasParent);
+            return Err(TaskGraphError::RootHasParent);
         }
         for (child, parent) in &self.parent {
             self.require_node(child)?;
@@ -211,10 +201,10 @@ impl ExecutionGraphBuilder {
                 .cloned()
                 .collect::<Vec<_>>();
             ids.sort();
-            return Err(ExecutionGraphError::UnreachableExecutions(ids));
+            return Err(TaskGraphError::UnreachableTasks(ids));
         }
 
-        Ok(ExecutionGraph {
+        Ok(TaskGraph {
             process_id: self.process_id,
             revision: self.revision,
             nodes: self.nodes,
@@ -224,53 +214,53 @@ impl ExecutionGraphBuilder {
         })
     }
 
-    fn require_node(&self, id: &ExecutionId) -> Result<(), ExecutionGraphError> {
+    fn require_node(&self, id: &TaskId) -> Result<(), TaskGraphError> {
         if self.nodes.contains_key(id) {
             Ok(())
         } else {
-            Err(ExecutionGraphError::UnknownExecution(id.clone()))
+            Err(TaskGraphError::UnknownTask(id.clone()))
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ExecutionGraphError {
+pub(crate) enum TaskGraphError {
     EmptyProcessId,
     EmptyTaskId,
     MissingRoot,
     MultipleRoots,
     RootHasParent,
-    DuplicateExecution(ExecutionId),
-    UnknownExecution(ExecutionId),
-    MultipleParents(ExecutionId),
-    DuplicateSuccessor { from: ExecutionId, to: ExecutionId },
-    UnreachableExecutions(Vec<ExecutionId>),
+    DuplicateTask(TaskId),
+    UnknownTask(TaskId),
+    MultipleParents(TaskId),
+    DuplicateSuccessor { from: TaskId, to: TaskId },
+    UnreachableTasks(Vec<TaskId>),
 }
-impl fmt::Display for ExecutionGraphError {
+impl fmt::Display for TaskGraphError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "execution graph error: {self:?}")
     }
 }
-impl std::error::Error for ExecutionGraphError {}
+impl std::error::Error for TaskGraphError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn eid(id: &str, generation: u64) -> ExecutionId {
-        ExecutionId::new(id, generation).unwrap()
+    fn eid(id: &str, generation: u64) -> TaskId {
+        TaskId::new(id, generation).unwrap()
     }
-    fn node(id: &str, generation: u64) -> ExecutionNode {
-        ExecutionNode {
+    fn node(id: &str, generation: u64) -> TaskNode {
+        TaskNode {
             id: eid(id, generation),
             model_node: NodeId::parse(id).unwrap(),
-            state: ExecutionState::Created,
+            state: TaskState::Created,
             revision: 0,
         }
     }
 
     #[test]
-    fn generations_are_distinct_execution_identity() {
-        let mut b = ExecutionGraphBuilder::new("p1", 4).unwrap();
+    fn generations_are_distinct_task_identity() {
+        let mut b = TaskGraphBuilder::new("p1", 4).unwrap();
         for n in [node("root", 0), node("step", 0), node("step", 1)] {
             b.add_node(n).unwrap();
         }
@@ -286,7 +276,7 @@ mod tests {
 
     #[test]
     fn join_accepts_multiple_predecessors_but_rejects_duplicate_edge() {
-        let mut b = ExecutionGraphBuilder::new("p1", 0).unwrap();
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
         for n in [node("root", 0), node("a", 0), node("b", 0)] {
             b.add_node(n).unwrap();
         }
@@ -294,7 +284,7 @@ mod tests {
         b.add_successor(eid("a", 0), eid("b", 0)).unwrap();
         assert_eq!(
             b.add_successor(eid("a", 0), eid("b", 0)),
-            Err(ExecutionGraphError::DuplicateSuccessor {
+            Err(TaskGraphError::DuplicateSuccessor {
                 from: eid("a", 0),
                 to: eid("b", 0)
             })
@@ -302,16 +292,14 @@ mod tests {
     }
 
     #[test]
-    fn detached_execution_is_rejected() {
-        let mut b = ExecutionGraphBuilder::new("p1", 0).unwrap();
+    fn detached_task_is_rejected() {
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
         b.add_node(node("root", 0)).unwrap();
         b.add_node(node("lost", 0)).unwrap();
         b.set_root(eid("root", 0)).unwrap();
         assert_eq!(
             b.build(),
-            Err(ExecutionGraphError::UnreachableExecutions(vec![eid(
-                "lost", 0
-            )]))
+            Err(TaskGraphError::UnreachableTasks(vec![eid("lost", 0)]))
         );
     }
 }

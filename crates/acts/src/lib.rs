@@ -56,6 +56,6 @@ pub use store::*;
 pub use tokio_util::sync::CancellationToken;
 pub type Result<T> = std::result::Result<T, ActError>;
 
-pub(crate) use crate::scheduler::{NodeKind, TaskState};
+pub(crate) use crate::scheduler::{LegacyTaskState, NodeKind};
 pub(crate) type ShareLock<T> = Arc<RwLock<T>>;
 pub(crate) use package::Package;

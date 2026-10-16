@@ -24,9 +24,9 @@
 use serial_test::serial;
 
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
-use crate::scheduler::core::model::execution_graph::ExecutionState;
 use crate::scheduler::core::model::operation::OperationState;
-use crate::{ActError, TaskState};
+use crate::scheduler::core::model::task_graph::TaskState;
+use crate::{ActError, LegacyTaskState};
 
 use super::*;
 
@@ -145,9 +145,9 @@ async fn process_snapshot(
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == tid)
+        .filter(|id| id.node == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -155,14 +155,14 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 }
 
 /// The aggregate's state for the newest generation of one model node.
-async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
+async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == tid)
+        .filter(|(id, _)| id.node == tid)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(_, execution)| execution.state)
+        .map(|(_, task)| task.state)
 }
 
 /// The non-terminal operations the aggregate holds for one model node, in
@@ -172,7 +172,7 @@ async fn open_operations(engine: &Engine, pid: &str, tid: &str) -> Vec<Operation
         .await
         .operations
         .values()
-        .filter(|operation| operation.id.task_id == tid && !operation.is_terminal())
+        .filter(|operation| operation.id.node == tid && !operation.is_terminal())
         .map(|operation| (operation.id.sequence, operation.state.clone()))
         .collect();
     open.sort_by_key(|(sequence, _)| *sequence);
@@ -229,7 +229,7 @@ async fn assert_completion_once(engine: &Engine, pid: &str, tid: &str) {
     );
     assert_eq!(
         decided_state(engine, pid, tid).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "the act must hold the completion"
     );
     assert_eq!(
@@ -360,7 +360,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
             match proc_row(&engine, &pid).await {
                 Some(proc) => proc
                     .task(&tid)
-                    .is_none_or(|task| task.state() != TaskState::Interrupt),
+                    .is_none_or(|task| task.state() != LegacyTaskState::Interrupt),
                 None => true,
             }
         },
@@ -375,7 +375,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
     let reloaded = restart(&engine, store.clone()).await;
     assert_eq!(
         decided_state(&reloaded, &pid, &tid).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "the aggregate must outlive the swept rows with the act completed"
     );
     if let Some(proc) = proc_row(&reloaded, &pid).await {
@@ -540,8 +540,8 @@ async fn a_duplicate_complete_is_refused_without_effect_inner() {
         "a refused duplicate may not create an operation"
     );
     assert_eq!(
-        after.executions.len(),
-        before.executions.len(),
+        after.tasks.len(),
+        before.tasks.len(),
         "a refused duplicate may not move an execution"
     );
     let mut before_keys: Vec<&String> = before.outbox.keys().map(|id| &id.key).collect();
@@ -562,7 +562,7 @@ async fn a_duplicate_complete_is_refused_without_effect_inner() {
     );
     assert_eq!(
         decided_state(&engine, &pid, &tid).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "the act must keep the first decision"
     );
     sweep_until_gone(&engine, &pid).await;
@@ -673,7 +673,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                 );
                 assert_eq!(
                     decided_state(&recovered, &pid, &step1).await,
-                    Some(ExecutionState::Waiting),
+                    Some(TaskState::Waiting),
                     "the act must still wait for a decision that never landed"
                 );
                 assert_eq!(
@@ -690,10 +690,9 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                 let advanced = poll_until_dumped(
                     &what,
                     || async {
-                        decided_state(&recovered, &pid, &step1).await
-                            == Some(ExecutionState::Completed)
+                        decided_state(&recovered, &pid, &step1).await == Some(TaskState::Completed)
                             && decided_state(&recovered, &pid, "step2").await
-                                == Some(ExecutionState::Waiting)
+                                == Some(TaskState::Waiting)
                     },
                     || dump_state(&recovered, &pid),
                 )
@@ -717,12 +716,12 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                     shifted
                         .reconciliation_required
                         .iter()
-                        .any(|operation| operation.task_id == step1),
+                        .any(|operation| operation.node == step1),
                     "the effect boundary must be surfaced for reconciliation: {shifted:?}"
                 );
                 assert_eq!(
                     decided_state(&recovered, &pid, &step1).await,
-                    Some(ExecutionState::Waiting),
+                    Some(TaskState::Waiting),
                     "the engine may not decide across the effect boundary"
                 );
                 assert_eq!(
@@ -737,10 +736,9 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                 let advanced = poll_until_dumped(
                     &what,
                     || async {
-                        decided_state(&recovered, &pid, &step1).await
-                            == Some(ExecutionState::Completed)
+                        decided_state(&recovered, &pid, &step1).await == Some(TaskState::Completed)
                             && decided_state(&recovered, &pid, "step2").await
-                                == Some(ExecutionState::Waiting)
+                                == Some(TaskState::Waiting)
                     },
                     || dump_state(&recovered, &pid),
                 )
@@ -867,9 +865,7 @@ async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner() {
         ("surfaced for reconciliation", &scan.reconciliation_required),
     ] {
         assert!(
-            !operations
-                .iter()
-                .any(|operation| operation.task_id == step1),
+            !operations.iter().any(|operation| operation.node == step1),
             "the applied propagation must leave the scan nothing to replay; it may not be {what}: {scan:?}"
         );
     }

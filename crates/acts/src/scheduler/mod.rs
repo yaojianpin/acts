@@ -8,7 +8,7 @@
 //!
 //! The layers are directories, in dependency order:
 //!
-//! - `core/` — the pure deterministic policy: the domain model (the `TaskState`
+//! - `core/` — the pure deterministic policy: the domain model (the `LegacyTaskState`
 //!   vocabulary and the `view` projection model included), the planners (cron
 //!   scheduling included), the commit services, recovery and the outbox. No IO,
 //!   no `tokio`, no storage and no engine vocabulary (`core/architecture.rs`
@@ -51,7 +51,7 @@ mod tests;
 pub use self::shell::Context;
 
 pub(crate) use self::core::model::{
-    task_state::TaskState,
+    legacy_task_state::LegacyTaskState,
     view::{Node, NodeData, NodeKind, NodeTree},
 };
 pub(crate) use self::core::plan::cron::Cron;

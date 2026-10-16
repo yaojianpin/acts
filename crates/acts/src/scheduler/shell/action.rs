@@ -13,7 +13,7 @@ pub(super) const REENTER_TARGET_VAR: &str = "__reenter_target";
 /// every retry re-drives the same operation instead of re-deriving ids from a
 /// snapshot the action's own commit moved.
 pub(super) struct ActionIntent {
-    pub(super) execution: crate::scheduler::core::model::execution_graph::ExecutionId,
+    pub(super) task: crate::scheduler::core::model::task_graph::TaskId,
     pub(super) operation: OperationId,
 }
 

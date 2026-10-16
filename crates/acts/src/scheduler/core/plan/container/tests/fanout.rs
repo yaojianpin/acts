@@ -4,7 +4,7 @@ use super::*;
 fn fanout_keeps_the_source_running_and_admits_entry_and_skip_children() {
     let (snapshot, command) = fanout_command(
         "step1",
-        ExecutionState::Running,
+        TaskState::Running,
         vec![
             child(
                 "b1",
@@ -19,34 +19,34 @@ fn fanout_keeps_the_source_running_and_admits_entry_and_skip_children() {
         ],
     );
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
-    assert_eq!(plan.execution_creates.len(), 2);
+    assert_eq!(plan.task_creates.len(), 2);
     assert!(
-        plan.execution_creates
+        plan.task_creates
             .iter()
             .all(|create| create.parent == Some(id("step1", 0)))
     );
     let entry = plan
-        .execution_creates
+        .task_creates
         .iter()
-        .find(|create| create.execution.task_id == "b1")
+        .find(|create| create.task.node == "b1")
         .unwrap();
-    assert_eq!(entry.initial_state, ExecutionState::Ready);
+    assert_eq!(entry.initial_state, TaskState::Ready);
     let skip = plan
-        .execution_creates
+        .task_creates
         .iter()
-        .find(|create| create.execution.task_id == "b2")
+        .find(|create| create.task.node == "b2")
         .unwrap();
-    assert_eq!(skip.initial_state, ExecutionState::Ready);
+    assert_eq!(skip.initial_state, TaskState::Ready);
     assert_eq!(plan.operations.len(), 2);
     assert!(
         plan.operations
             .iter()
-            .any(|op| op.id.task_id == "b1" && op.kind == OperationKind::ExecuteTask)
+            .any(|op| op.id.node == "b1" && op.kind == OperationKind::ExecuteTask)
     );
     assert!(
         plan.operations
             .iter()
-            .any(|op| op.id.task_id == "b2" && op.kind == OperationKind::SkipTask)
+            .any(|op| op.id.node == "b2" && op.kind == OperationKind::SkipTask)
     );
     assert_eq!(
         plan.state_changes.len(),
@@ -64,7 +64,7 @@ fn fanout_keeps_the_source_running_and_admits_entry_and_skip_children() {
 fn fanout_resumes_a_waiting_source_into_running() {
     let (snapshot, command) = fanout_command(
         "step1",
-        ExecutionState::Waiting,
+        TaskState::Waiting,
         vec![child(
             "b1",
             ContainerChildPlan::Entry,
@@ -74,16 +74,16 @@ fn fanout_resumes_a_waiting_source_into_running() {
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
     assert_eq!(plan.state_changes.len(), 1);
     let change = &plan.state_changes[0];
-    assert_eq!(change.execution, id("step1", 0));
-    assert_eq!(change.from, ExecutionState::Waiting);
-    assert_eq!(change.to, ExecutionState::Running);
+    assert_eq!(change.task, id("step1", 0));
+    assert_eq!(change.from, TaskState::Waiting);
+    assert_eq!(change.to, TaskState::Running);
 }
 
 #[test]
 fn fanout_queues_chain_successors_behind_the_entry() {
     let (snapshot, command) = fanout_command(
         "b1",
-        ExecutionState::Running,
+        TaskState::Running,
         vec![
             child(
                 "s1",
@@ -98,13 +98,13 @@ fn fanout_queues_chain_successors_behind_the_entry() {
         ],
     );
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
-    assert_eq!(plan.execution_creates.len(), 2);
+    assert_eq!(plan.task_creates.len(), 2);
     let queued = plan
-        .execution_creates
+        .task_creates
         .iter()
-        .find(|create| create.execution.task_id == "s2")
+        .find(|create| create.task.node == "s2")
         .unwrap();
-    assert_eq!(queued.initial_state, ExecutionState::Created);
+    assert_eq!(queued.initial_state, TaskState::Created);
     assert_eq!(queued.predecessors, vec![id("s1", 0)]);
     // Only the entry receives an operation; propagation admits the rest.
     assert_eq!(plan.operations.len(), 1);
@@ -113,26 +113,26 @@ fn fanout_queues_chain_successors_behind_the_entry() {
 
 #[test]
 fn empty_container_completes_and_propagates_in_the_same_hop() {
-    let (snapshot, command) = fanout_command("b1", ExecutionState::Running, vec![]);
+    let (snapshot, command) = fanout_command("b1", TaskState::Running, vec![]);
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
-    assert!(plan.execution_creates.is_empty());
-    assert_eq!(plan.state_changes[0].to, ExecutionState::Completed);
+    assert!(plan.task_creates.is_empty());
+    assert_eq!(plan.state_changes[0].to, TaskState::Completed);
     assert_eq!(plan.operations[0].kind, OperationKind::PropagateTask);
 }
 
 #[test]
 fn a_rewound_created_child_is_readmitted_not_duplicated() {
     let mut snapshot = snapshot(vec![
-        execution("step1", 1, ExecutionState::Running),
-        execution("b1", 0, ExecutionState::Cancelled),
+        task("step1", 1, TaskState::Running),
+        task("b1", 0, TaskState::Cancelled),
         // The Cancel rewind recreated b1 at generation 1; it never ran.
         (
             id("b1", 1),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("b1"),
                 parent: Some(id("step1", 1)),
                 predecessors: vec![id("step1", 1)],
-                state: ExecutionState::Created,
+                state: TaskState::Created,
                 revision: 0,
             },
         ),
@@ -144,7 +144,7 @@ fn a_rewound_created_child_is_readmitted_not_duplicated() {
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                task_id: "step1".into(),
+                node: "step1".into(),
                 generation: 1,
                 sequence: 4,
             },
@@ -156,21 +156,21 @@ fn a_rewound_created_child_is_readmitted_not_duplicated() {
             vec![ContainerPredecessor::Source],
         )],
         inputs: Vec::new(),
-        source_park: ExecutionState::Running,
+        source_park: TaskState::Running,
     };
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
-    assert!(plan.execution_creates.is_empty(), "no duplicate generation");
+    assert!(plan.task_creates.is_empty(), "no duplicate generation");
     // The running source stays running (the park is the state it is
     // already in); the readmitted child is the only change.
     assert_eq!(plan.state_changes.len(), 1);
-    assert_eq!(plan.state_changes[0].execution, id("b1", 1));
-    assert_eq!(plan.state_changes[0].from, ExecutionState::Created);
-    assert_eq!(plan.state_changes[0].to, ExecutionState::Ready);
+    assert_eq!(plan.state_changes[0].task, id("b1", 1));
+    assert_eq!(plan.state_changes[0].from, TaskState::Created);
+    assert_eq!(plan.state_changes[0].to, TaskState::Ready);
     assert_eq!(
         plan.operations[0].id,
         OperationId {
             process_id: "p1".into(),
-            task_id: "b1".into(),
+            node: "b1".into(),
             generation: 1,
             sequence: 0,
         }
@@ -180,14 +180,14 @@ fn a_rewound_created_child_is_readmitted_not_duplicated() {
 #[test]
 fn an_active_child_is_ignored_not_doubled() {
     let snapshot = snapshot(vec![
-        execution("step1", 0, ExecutionState::Running),
+        task("step1", 0, TaskState::Running),
         (
             id("b1", 0),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("b1"),
                 parent: Some(id("step1", 0)),
                 predecessors: vec![id("step1", 0)],
-                state: ExecutionState::Running,
+                state: TaskState::Running,
                 revision: 1,
             },
         ),
@@ -202,18 +202,18 @@ fn an_active_child_is_ignored_not_doubled() {
             vec![ContainerPredecessor::Source],
         )],
         inputs: Vec::new(),
-        source_park: ExecutionState::Running,
+        source_park: TaskState::Running,
     };
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
-    assert!(plan.execution_creates.is_empty());
+    assert!(plan.task_creates.is_empty());
     assert!(plan.operations.is_empty());
 }
 
 #[test]
 fn a_completed_child_reruns_as_a_fresh_generation() {
     let snapshot = snapshot(vec![
-        execution("step1", 1, ExecutionState::Running),
-        execution("b1", 0, ExecutionState::Completed),
+        task("step1", 1, TaskState::Running),
+        task("b1", 0, TaskState::Completed),
     ]);
     let command = ContainerFanoutCommand {
         process_id: "p1".into(),
@@ -221,7 +221,7 @@ fn a_completed_child_reruns_as_a_fresh_generation() {
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                task_id: "step1".into(),
+                node: "step1".into(),
                 generation: 1,
                 sequence: 2,
             },
@@ -233,18 +233,18 @@ fn a_completed_child_reruns_as_a_fresh_generation() {
             vec![ContainerPredecessor::Source],
         )],
         inputs: Vec::new(),
-        source_park: ExecutionState::Running,
+        source_park: TaskState::Running,
     };
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
-    let create = &plan.execution_creates[0];
-    assert_eq!(create.execution, id("b1", 1), "next generation allocated");
+    let create = &plan.task_creates[0];
+    assert_eq!(create.task, id("b1", 1), "next generation allocated");
 }
 
 #[test]
 fn a_terminal_source_is_not_a_container() {
     let (snapshot, command) = fanout_command(
         "step1",
-        ExecutionState::Completed,
+        TaskState::Completed,
         vec![child(
             "b1",
             ContainerChildPlan::Entry,
@@ -259,42 +259,44 @@ fn a_terminal_source_is_not_a_container() {
 fn a_failure_fanout_keeps_the_step_running() {
     let (snapshot, mut command) = fanout_command(
         "step1",
-        ExecutionState::Waiting,
+        TaskState::Waiting,
         vec![child(
             "c1",
             ContainerChildPlan::Entry,
             vec![ContainerPredecessor::Source],
         )],
     );
-    command.source_park = ExecutionState::Running;
+    command.source_park = TaskState::Running;
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
     let change = plan
         .state_changes
         .iter()
-        .find(|change| change.execution == id("step1", 0))
+        .find(|change| change.task == id("step1", 0))
         .expect("the waiting step moves to Running");
-    assert_eq!(change.from, ExecutionState::Waiting);
-    assert_eq!(change.to, ExecutionState::Running);
-    assert!(plan.state_changes.iter().all(|change| {
-        change.to != ExecutionState::Waiting && change.to != ExecutionState::Completed
-    }));
+    assert_eq!(change.from, TaskState::Waiting);
+    assert_eq!(change.to, TaskState::Running);
+    assert!(
+        plan.state_changes
+            .iter()
+            .all(|change| { change.to != TaskState::Waiting && change.to != TaskState::Completed })
+    );
 
     // An already-running step keeps its state: the fan-out adds no change.
     let (snapshot, mut command) = fanout_command(
         "step1",
-        ExecutionState::Running,
+        TaskState::Running,
         vec![child(
             "c1",
             ContainerChildPlan::Entry,
             vec![ContainerPredecessor::Source],
         )],
     );
-    command.source_park = ExecutionState::Running;
+    command.source_park = TaskState::Running;
     let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
     assert!(
         plan.state_changes
             .iter()
-            .all(|change| change.execution != id("step1", 0)),
+            .all(|change| change.task != id("step1", 0)),
         "a running source has no state change to park it"
     );
 }

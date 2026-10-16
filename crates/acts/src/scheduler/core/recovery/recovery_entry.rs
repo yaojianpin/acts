@@ -28,7 +28,7 @@ pub(crate) fn recovery_entry_key(id: &OperationId) -> String {
     let mut key = String::with_capacity(
         RECOVERY_ENTRY_KEY_PREFIX.len()
             + id.process_id.len() * 2
-            + id.task_id.len() * 2
+            + id.node.len() * 2
             + 2
             + 16
             + 1
@@ -37,7 +37,7 @@ pub(crate) fn recovery_entry_key(id: &OperationId) -> String {
     key.push_str(RECOVERY_ENTRY_KEY_PREFIX);
     push_hex(&mut key, id.process_id.as_bytes());
     key.push(COMPONENT_SEPARATOR);
-    push_hex(&mut key, id.task_id.as_bytes());
+    push_hex(&mut key, id.node.as_bytes());
     key.push(COMPONENT_SEPARATOR);
     key.push_str(&format_u64(id.generation));
     key.push(COMPONENT_SEPARATOR);
@@ -65,10 +65,10 @@ fn format_u64(value: u64) -> String {
 mod tests {
     use super::*;
 
-    fn id(process_id: &str, task_id: &str, generation: u64, sequence: u64) -> OperationId {
+    fn id(process_id: &str, node: &str, generation: u64, sequence: u64) -> OperationId {
         OperationId {
             process_id: process_id.into(),
-            task_id: task_id.into(),
+            node: node.into(),
             generation,
             sequence,
         }

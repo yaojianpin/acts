@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use serial_test::serial;
 
-use crate::TaskState;
-use crate::scheduler::core::model::execution_graph::ExecutionState;
+use crate::LegacyTaskState;
+use crate::scheduler::core::model::task_graph::TaskState;
 
 use super::*;
 
@@ -93,7 +93,7 @@ async fn a_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once_inn
     );
     assert_eq!(
         proc.task(&tid).map(|t| t.state()),
-        Some(TaskState::Error),
+        Some(LegacyTaskState::Error),
         "the act must hold the decision"
     );
     assert_eq!(
@@ -160,10 +160,10 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
         .unwrap()
         .expect("the aggregate exists");
     let act = snapshot
-        .executions
+        .tasks
         .iter()
-        .find(|(id, _)| id.task_id == tid)
-        .map(|(_, execution)| execution)
+        .find(|(id, _)| id.node == tid)
+        .map(|(_, task)| task)
         .expect("the act's execution");
     assert!(
         act.state.is_terminal(),
@@ -180,7 +180,7 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
             match proc_row(&engine, &pid).await {
                 Some(proc) => proc
                     .task(&tid)
-                    .is_none_or(|t| t.state() != TaskState::Interrupt),
+                    .is_none_or(|t| t.state() != LegacyTaskState::Interrupt),
                 None => true,
             }
         },
@@ -242,7 +242,7 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
     assert_eq!(tasks_of(&before, &tid).len(), 1, "one task for the act");
     assert_eq!(
         before.task(&tid).map(|t| t.state()),
-        Some(TaskState::Error),
+        Some(LegacyTaskState::Error),
         "the first delivery leaves the act errored"
     );
 
@@ -263,7 +263,7 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
     );
     assert_eq!(
         after.task(&tid).map(|t| t.state()),
-        Some(TaskState::Error),
+        Some(LegacyTaskState::Error),
         "the duplicate may not move the decided act"
     );
     assert_eq!(
@@ -402,7 +402,7 @@ async fn a_restart_does_not_reapply_a_decided_fail_inner() {
         );
         assert_eq!(
             proc.task(&tid).map(|t| t.state()),
-            Some(TaskState::Error),
+            Some(LegacyTaskState::Error),
             "the recovered act must hold its decision"
         );
     } else {
@@ -416,7 +416,7 @@ async fn a_restart_does_not_reapply_a_decided_fail_inner() {
     let decided = engine_state(&reloaded, &pid, &tid).await;
     assert_eq!(
         decided,
-        Some(ExecutionState::Failed),
+        Some(TaskState::Failed),
         "the recovered aggregate must keep the act failed"
     );
     sweep_until_gone(&reloaded, &pid).await;
@@ -425,7 +425,7 @@ async fn a_restart_does_not_reapply_a_decided_fail_inner() {
 
 /// The aggregate's state for the node `tid` of one run, if the aggregate is
 /// still there.
-async fn engine_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
+async fn engine_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     engine
         .runtime()
         .kernel()
@@ -434,9 +434,9 @@ async fn engine_state(engine: &Engine, pid: &str, tid: &str) -> Option<Execution
         .unwrap()
         .and_then(|snapshot| {
             snapshot
-                .executions
+                .tasks
                 .iter()
-                .find(|(id, _)| id.task_id == tid)
-                .map(|(_, execution)| execution.state)
+                .find(|(id, _)| id.node == tid)
+                .map(|(_, task)| task.state)
         })
 }

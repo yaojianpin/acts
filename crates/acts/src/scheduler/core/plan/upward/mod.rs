@@ -16,8 +16,8 @@
 use crate::scheduler::core::{
     commit::process::ProcessSnapshot,
     model::{
-        execution_graph::{ExecutionId, ExecutionState},
         operation::OperationKind,
+        task_graph::{TaskId, TaskState},
         transition_plan::{OperationIntent, StateChange},
     },
 };
@@ -29,10 +29,10 @@ pub(crate) struct UpwardCommand {
     pub(crate) process_id: String,
     /// The decided execution whose ancestors the walk rewrites; its state
     /// must already be the walk's target state.
-    pub(crate) source: ExecutionId,
+    pub(crate) source: TaskId,
     /// The decision spreading upward: `Aborted` (the abort walk) or
     /// `Failed` (the error walk).
-    pub(crate) to: ExecutionState,
+    pub(crate) to: TaskState,
 }
 
 pub(crate) struct UpwardPlanner;
@@ -46,13 +46,13 @@ impl UpwardPlanner {
         if snapshot.process_id != command.process_id {
             return Err(UpwardError::WrongProcess);
         }
-        if !matches!(command.to, ExecutionState::Aborted | ExecutionState::Failed) {
+        if !matches!(command.to, TaskState::Aborted | TaskState::Failed) {
             return Err(UpwardError::UnsupportedTarget(command.to));
         }
         let source = snapshot
-            .executions
+            .tasks
             .get(&command.source)
-            .ok_or_else(|| UpwardError::ExecutionNotFound(command.source.clone()))?;
+            .ok_or_else(|| UpwardError::TaskNotFound(command.source.clone()))?;
         if source.state != command.to {
             return Err(UpwardError::SourceNotDecided {
                 source: command.source.clone(),
@@ -65,33 +65,33 @@ impl UpwardPlanner {
         let mut operations = Vec::new();
         let mut cursor = source.parent.clone();
         while let Some(ancestor) = cursor {
-            let execution = snapshot
-                .executions
+            let task = snapshot
+                .tasks
                 .get(&ancestor)
-                .ok_or_else(|| UpwardError::ExecutionNotFound(ancestor.clone()))?;
-            if execution.state != command.to {
+                .ok_or_else(|| UpwardError::TaskNotFound(ancestor.clone()))?;
+            if task.state != command.to {
                 // The legacy walk decides every ancestor unconditionally,
                 // rewriting terminal ones; only an ancestor already carrying
                 // the decision (a racing second walk) keeps its state — its
                 // own cascade ran with the first decision.
                 state_changes.push(StateChange {
-                    execution: ancestor.clone(),
-                    expected_revision: execution.revision,
-                    from: execution.state,
+                    task: ancestor.clone(),
+                    expected_revision: task.revision,
+                    from: task.state,
                     to: command.to,
                 });
                 operations.push(OperationIntent {
                     id: crate::scheduler::core::model::operation::OperationId {
                         process_id: command.process_id.clone(),
-                        task_id: ancestor.task_id.clone(),
+                        node: ancestor.node.clone(),
                         generation: ancestor.generation,
                         sequence: snapshot
-                            .next_operation_sequence(&ancestor.task_id, ancestor.generation),
+                            .next_operation_sequence(&ancestor.node, ancestor.generation),
                     },
                     kind: OperationKind::PropagateTask,
                 });
             }
-            cursor = execution.parent.clone();
+            cursor = task.parent.clone();
         }
         Ok((state_changes, operations))
     }

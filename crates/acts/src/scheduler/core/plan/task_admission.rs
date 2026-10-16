@@ -4,7 +4,7 @@
 //! kernel owns the rule; scheduler code owns only atomic observation/mutation.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ExecutionSlotKind {
+pub(crate) enum TaskSlotKind {
     Once,
 }
 
@@ -50,7 +50,7 @@ pub(crate) enum AdmissionDecision {
 pub(crate) struct GenerationAdmissionPolicy;
 impl GenerationAdmissionPolicy {
     pub(crate) const fn decide(
-        kind: ExecutionSlotKind,
+        kind: TaskSlotKind,
         intent: AdmissionIntent,
         observation: SlotObservation,
     ) -> AdmissionDecision {
@@ -58,18 +58,17 @@ impl GenerationAdmissionPolicy {
             return AdmissionDecision::Ignore;
         }
         if matches!(intent, AdmissionIntent::Forward)
-            && matches!(kind, ExecutionSlotKind::Once)
+            && matches!(kind, TaskSlotKind::Once)
             && observation.predecessor_failed
         {
             return AdmissionDecision::Ignore;
         }
         match (kind, observation.existing) {
             (_, ExistingGeneration::Unstarted) => AdmissionDecision::ReadmitExisting,
-            (
-                ExecutionSlotKind::Once,
-                ExistingGeneration::Absent | ExistingGeneration::Completed,
-            ) => AdmissionDecision::AllocateGeneration,
-            (ExecutionSlotKind::Once, ExistingGeneration::Active) => AdmissionDecision::Ignore,
+            (TaskSlotKind::Once, ExistingGeneration::Absent | ExistingGeneration::Completed) => {
+                AdmissionDecision::AllocateGeneration
+            }
+            (TaskSlotKind::Once, ExistingGeneration::Active) => AdmissionDecision::Ignore,
         }
     }
 }
@@ -81,7 +80,7 @@ mod tests {
     fn terminal_process_and_failed_forward_are_rejected() {
         assert_eq!(
             GenerationAdmissionPolicy::decide(
-                ExecutionSlotKind::Once,
+                TaskSlotKind::Once,
                 AdmissionIntent::Forward,
                 SlotObservation::vacant(true, false)
             ),
@@ -89,11 +88,7 @@ mod tests {
         );
         let failed = SlotObservation::vacant(false, true);
         assert_eq!(
-            GenerationAdmissionPolicy::decide(
-                ExecutionSlotKind::Once,
-                AdmissionIntent::Forward,
-                failed
-            ),
+            GenerationAdmissionPolicy::decide(TaskSlotKind::Once, AdmissionIntent::Forward, failed),
             AdmissionDecision::Ignore
         );
     }

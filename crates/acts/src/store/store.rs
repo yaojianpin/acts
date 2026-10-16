@@ -9,7 +9,7 @@ use tracing::trace;
 use crate::store::KvStore;
 use crate::{
     ActError, Result, Trigger, Workflow,
-    scheduler::TaskState,
+    scheduler::LegacyTaskState,
     store::{Model, Package},
     utils,
 };
@@ -431,7 +431,7 @@ impl Store {
         let Ok(proc) = procs.find(pid).await else {
             return Ok(false);
         };
-        let state = TaskState::from(proc.state.as_str());
+        let state = LegacyTaskState::from(proc.state.as_str());
         if !state.is_completed() || proc.removable {
             return Ok(false);
         }
@@ -621,7 +621,7 @@ impl Store {
     async fn task_closed(&self, pid: &str, tid: &str) -> Result<bool> {
         let id = utils::Id::new(pid, tid).id();
         match self.tasks().find(&id).await {
-            Ok(task) => Ok(TaskState::from(task.state.as_str()).is_completed()),
+            Ok(task) => Ok(LegacyTaskState::from(task.state.as_str()).is_completed()),
             Err(_) => Ok(false),
         }
     }
@@ -728,18 +728,18 @@ impl Store {
     /// terminal states (`state` is indexed), capped at `limit`.
     async fn terminal_proc_rows(&self, limit: usize) -> Result<Vec<data::Proc>> {
         use super::query::{Expr, Filter, Query};
-        use crate::scheduler::TaskState;
+        use crate::scheduler::LegacyTaskState;
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let terminal: Vec<String> = [
-            TaskState::Completed,
-            TaskState::Cancelled,
-            TaskState::Submitted,
-            TaskState::Backed,
-            TaskState::Error,
-            TaskState::Skipped,
-            TaskState::Aborted,
-            TaskState::Removed,
+            LegacyTaskState::Completed,
+            LegacyTaskState::Cancelled,
+            LegacyTaskState::Submitted,
+            LegacyTaskState::Backed,
+            LegacyTaskState::Error,
+            LegacyTaskState::Skipped,
+            LegacyTaskState::Aborted,
+            LegacyTaskState::Removed,
         ]
         .iter()
         .map(String::from)

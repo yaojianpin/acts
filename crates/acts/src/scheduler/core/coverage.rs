@@ -9,17 +9,17 @@
 use crate::scheduler::core::{
     commit::command::ActionKind,
     model::{
-        execution_graph::{ExecutionGraphBuilder, ExecutionId, ExecutionNode, ExecutionState},
         model_graph::{ChildRole, ModelGraphBuilder, NodeDefinition, NodeId, NodeKind},
         operation::{
             ClaimToken, OperationEvent, OperationId, OperationKind, OperationRecord, OperationState,
         },
+        task_graph::{TaskGraphBuilder, TaskId, TaskNode, TaskState},
     },
     plan::branch::PredicateValue,
 };
 
 #[test]
-fn model_and_execution_graph_read_surfaces_are_exercised() {
+fn model_and_task_graph_read_surfaces_are_exercised() {
     let root = NodeId::parse("root").unwrap();
     let child = NodeId::parse("child").unwrap();
     assert_eq!(root.as_str(), "root");
@@ -70,29 +70,27 @@ fn model_and_execution_graph_read_surfaces_are_exercised() {
         .unwrap();
     another.build().unwrap();
 
-    let eroot = ExecutionId::new("root", 0).unwrap();
-    let echild = ExecutionId::new("child", 0).unwrap();
-    let mut execution = ExecutionGraphBuilder::new("p", 0).unwrap();
-    execution
-        .add_node(ExecutionNode {
-            id: eroot.clone(),
-            model_node: NodeId::parse("root").unwrap(),
-            state: ExecutionState::Running,
-            revision: 0,
-        })
-        .unwrap();
-    execution
-        .add_node(ExecutionNode {
-            id: echild.clone(),
-            model_node: NodeId::parse("child").unwrap(),
-            state: ExecutionState::Removed,
-            revision: 0,
-        })
-        .unwrap();
-    execution.set_root(eroot.clone()).unwrap();
-    execution.add_child(eroot.clone(), echild.clone()).unwrap();
-    let execution = execution.build().unwrap();
-    assert_eq!(execution.children(&eroot), &[echild]);
+    let eroot = TaskId::new("root", 0).unwrap();
+    let echild = TaskId::new("child", 0).unwrap();
+    let mut task = TaskGraphBuilder::new("p", 0).unwrap();
+    task.add_node(TaskNode {
+        id: eroot.clone(),
+        model_node: NodeId::parse("root").unwrap(),
+        state: TaskState::Running,
+        revision: 0,
+    })
+    .unwrap();
+    task.add_node(TaskNode {
+        id: echild.clone(),
+        model_node: NodeId::parse("child").unwrap(),
+        state: TaskState::Removed,
+        revision: 0,
+    })
+    .unwrap();
+    task.set_root(eroot.clone()).unwrap();
+    task.add_child(eroot.clone(), echild.clone()).unwrap();
+    let task = task.build().unwrap();
+    assert_eq!(task.children(&eroot), &[echild]);
 }
 
 #[test]
@@ -117,7 +115,7 @@ fn every_action_and_predicate_outcome_is_represented() {
 fn operation_recovery_states_and_kinds_are_exercised() {
     let id = OperationId {
         process_id: "p".into(),
-        task_id: "t".into(),
+        node: "t".into(),
         generation: 0,
         sequence: 0,
     };

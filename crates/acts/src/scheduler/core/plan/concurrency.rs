@@ -11,7 +11,7 @@
 //!
 //! Nothing here reads a clock, a store or a layer above this one.
 
-use crate::scheduler::core::model::execution_graph::ExecutionState;
+use crate::scheduler::core::model::task_graph::TaskState;
 
 /// The creation stamp of one run, written into its seed on the root scope.
 ///
@@ -44,7 +44,7 @@ pub(crate) enum Admission {
 /// own bookkeeping (a timer operation still open) wait behind the cap. Every
 /// other run takes one of the `cap` slots — a cap of zero admits none, exactly
 /// like an empty legacy resident set — or parks.
-pub(crate) fn admit(cap: usize, active: usize, state: ExecutionState) -> Admission {
+pub(crate) fn admit(cap: usize, active: usize, state: TaskState) -> Admission {
     if state.is_terminal() || active < cap {
         Admission::Admit
     } else {
@@ -58,7 +58,7 @@ mod tests {
 
     /// The two states a run can ask for a slot in: a fresh start seeds its
     /// root `Ready`, a parked one is seeded `Created`.
-    const ASKING: [ExecutionState; 2] = [ExecutionState::Created, ExecutionState::Ready];
+    const ASKING: [TaskState; 2] = [TaskState::Created, TaskState::Ready];
 
     #[test]
     fn a_free_slot_admits_and_a_full_set_parks() {
@@ -75,11 +75,11 @@ mod tests {
     #[test]
     fn a_settled_root_never_waits_for_a_slot() {
         for state in [
-            ExecutionState::Completed,
-            ExecutionState::Failed,
-            ExecutionState::Aborted,
-            ExecutionState::Skipped,
-            ExecutionState::Removed,
+            TaskState::Completed,
+            TaskState::Failed,
+            TaskState::Aborted,
+            TaskState::Skipped,
+            TaskState::Removed,
         ] {
             assert_eq!(admit(0, 0, state), Admission::Admit);
             assert_eq!(admit(1, 9, state), Admission::Admit);

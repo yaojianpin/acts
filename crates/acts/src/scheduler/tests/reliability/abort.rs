@@ -40,8 +40,10 @@ use std::time::Duration;
 
 use serial_test::serial;
 
-use crate::scheduler::core::model::execution_graph::ExecutionState;
-use crate::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, TaskState};
+use crate::scheduler::core::model::task_graph::TaskState;
+use crate::{
+    ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, LegacyTaskState,
+};
 
 use super::*;
 
@@ -85,7 +87,7 @@ async fn waiting_first_step(engine: &Engine) -> (String, String) {
 /// Every execution state the run's aggregate holds for node `tid`, one entry
 /// per generation: a decision re-applied would leave a second generation, and
 /// a decision the cascade invented would be an extra entry.
-async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<ExecutionState> {
+async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<TaskState> {
     let snapshot = engine
         .runtime()
         .kernel()
@@ -93,11 +95,11 @@ async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<Execution
         .await
         .unwrap()
         .expect("the aggregate exists");
-    let mut states: Vec<ExecutionState> = snapshot
-        .executions
+    let mut states: Vec<TaskState> = snapshot
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == tid)
-        .map(|(_, execution)| execution.state)
+        .filter(|(id, _)| id.node == tid)
+        .map(|(_, task)| task.state)
         .collect();
     // HashMap iteration order is not stable; the compared form is.
     states.sort_by_key(|state| format!("{state:?}"));
@@ -106,18 +108,18 @@ async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<Execution
 
 /// The aggregate's execution state for node `tid` (the newest generation), if
 /// the aggregate still holds one.
-async fn act_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
+async fn act_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     let snapshot = engine.runtime().kernel().snapshot(pid).await.unwrap()?;
     snapshot
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == tid)
+        .filter(|(id, _)| id.node == tid)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(_, execution)| execution.state)
+        .map(|(_, task)| task.state)
 }
 
 /// The aggregate's state for the run's root node.
-async fn root_state(engine: &Engine, pid: &str) -> Option<ExecutionState> {
+async fn root_state(engine: &Engine, pid: &str) -> Option<TaskState> {
     act_state(engine, pid, utils::consts::TASK_ROOT_TID).await
 }
 
@@ -136,7 +138,7 @@ async fn act_error_variables(engine: &Engine, pid: &str, tid: &str) -> Vec<Strin
         .variables
         .keys()
         .filter(|(scope, name)| {
-            scope.task_id == tid && (name == "error.code" || name == "error.message")
+            scope.node == tid && (name == "error.code" || name == "error.message")
         })
         .map(|(_, name)| name.clone())
         .collect();
@@ -226,12 +228,12 @@ async fn a_restart_never_reapplies_a_decided_abort_inner() {
     // the decision is durable and singular before the crash
     assert_eq!(
         act_generations(&engine, &pid, &tid).await,
-        vec![ExecutionState::Aborted],
+        vec![TaskState::Aborted],
         "the abort must decide the act exactly once, ancestors included"
     );
     assert_eq!(
         root_state(&engine, &pid).await,
-        Some(ExecutionState::Aborted),
+        Some(TaskState::Aborted),
         "the abort must terminate the run"
     );
 
@@ -252,12 +254,12 @@ async fn a_restart_never_reapplies_a_decided_abort_inner() {
     // recovery re-read the decision: one terminal generation, no second apply
     assert_eq!(
         act_generations(&reloaded, &pid, &tid).await,
-        vec![ExecutionState::Aborted],
+        vec![TaskState::Aborted],
         "recovery must re-read the abort, never decide it a second time"
     );
     assert_eq!(
         root_state(&reloaded, &pid).await,
-        Some(ExecutionState::Aborted),
+        Some(TaskState::Aborted),
         "the recovered run must hold its terminal outcome"
     );
     reloaded.close().await;
@@ -299,12 +301,12 @@ async fn an_abort_on_a_waiting_act_decides_the_act_and_the_run_inner() {
     // the decision landed on the act the client named, exactly once
     assert_eq!(
         act_generations(&engine, &pid, &tid).await,
-        vec![ExecutionState::Aborted],
+        vec![TaskState::Aborted],
         "the abort must decide the named act, and only once"
     );
     assert_eq!(
         root_state(&engine, &pid).await,
-        Some(ExecutionState::Aborted),
+        Some(TaskState::Aborted),
         "the abort must terminate the run through its ancestors"
     );
 
@@ -317,7 +319,7 @@ async fn an_abort_on_a_waiting_act_decides_the_act_and_the_run_inner() {
     );
     assert_eq!(
         proc.task(&tid).map(|t| t.state()),
-        Some(TaskState::Aborted),
+        Some(LegacyTaskState::Aborted),
         "the act must read its decision"
     );
     let unfinished: Vec<String> = proc
@@ -372,25 +374,22 @@ async fn a_shutdown_decides_nothing_and_the_run_resumes_undecided_inner() {
     let reloaded = engine_on(store.clone()).await;
     assert_eq!(
         act_state(&reloaded, &pid, &tid).await,
-        Some(ExecutionState::Waiting),
+        Some(TaskState::Waiting),
         "a shutdown must not decide the waiting act: the aggregate keeps it Waiting"
     );
     let proc = read_proc(&reloaded, &pid).await;
     let waiting = waiting_task(&proc, &tid).expect("the recovered run still holds the act waiting");
-    assert_eq!(waiting.state(), TaskState::Interrupt);
+    assert_eq!(waiting.state(), LegacyTaskState::Interrupt);
 
     // the recovered run is still the client's: the recorded action decides it
     abort_act(&reloaded, &pid, &tid).await.unwrap();
     wait_completed(&reloaded, &pid).await;
     assert_eq!(
         act_generations(&reloaded, &pid, &tid).await,
-        vec![ExecutionState::Aborted],
+        vec![TaskState::Aborted],
         "the action served after the restart must decide the act exactly once"
     );
-    assert_eq!(
-        root_state(&reloaded, &pid).await,
-        Some(ExecutionState::Aborted)
-    );
+    assert_eq!(root_state(&reloaded, &pid).await, Some(TaskState::Aborted));
     sweep_until_gone(&reloaded, &pid).await;
     reloaded.close().await;
 }
@@ -536,7 +535,7 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
     abort.expect("the abort must be admitted while the act's effect runs");
     assert_eq!(
         act_state(&engine, &pid, "step1").await,
-        Some(ExecutionState::Aborted),
+        Some(TaskState::Aborted),
         "the abort must decide the act even though its effect is in flight"
     );
 
@@ -551,8 +550,8 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
     let what = "the aborted act to keep its decision while the failed hop is refused";
     let held = poll_settle(
         || async {
-            act_state(&engine, &pid, "step1").await == Some(ExecutionState::Aborted)
-                && root_state(&engine, &pid).await == Some(ExecutionState::Aborted)
+            act_state(&engine, &pid, "step1").await == Some(TaskState::Aborted)
+                && root_state(&engine, &pid).await == Some(TaskState::Aborted)
         },
         50,
     )
@@ -563,7 +562,7 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
     );
     assert_eq!(
         act_generations(&engine, &pid, "step1").await,
-        vec![ExecutionState::Aborted],
+        vec![TaskState::Aborted],
         "the refused failure must not add a generation or move the act off Aborted"
     );
     assert!(
@@ -579,7 +578,7 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
         proc.state()
     );
     let act = proc.task("step1").expect("the act's task");
-    assert_eq!(act.state(), TaskState::Aborted);
+    assert_eq!(act.state(), LegacyTaskState::Aborted);
     assert!(
         act.err().is_none(),
         "an overridden act must not carry the effect's error: {:?}",
@@ -647,7 +646,7 @@ async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(
     );
     assert_eq!(
         act_state(&engine, &pid, &tid).await,
-        Some(ExecutionState::Waiting)
+        Some(TaskState::Waiting)
     );
 
     // the store healed with the one-shot fault; the retry decides exactly once
@@ -657,13 +656,10 @@ async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(
     flush(&engine).await;
     assert_eq!(
         act_generations(&engine, &pid, &tid).await,
-        vec![ExecutionState::Aborted],
+        vec![TaskState::Aborted],
         "the retried abort must decide the act once, not once per attempt"
     );
-    assert_eq!(
-        root_state(&engine, &pid).await,
-        Some(ExecutionState::Aborted)
-    );
+    assert_eq!(root_state(&engine, &pid).await, Some(TaskState::Aborted));
     let proc = wait_rows_terminal(&engine, &pid).await;
     assert!(
         tasks_of(&proc, &tid).len() == 1,
@@ -706,7 +702,7 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
     assert_eq!(tasks_of(&before, &tid).len(), 1, "one task for the act");
     assert_eq!(
         before.task(&tid).map(|t| t.state()),
-        Some(TaskState::Aborted),
+        Some(LegacyTaskState::Aborted),
         "the first delivery leaves the act aborted"
     );
 
@@ -726,7 +722,7 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
     );
     assert_eq!(
         after.task(&tid).map(|t| t.state()),
-        Some(TaskState::Aborted),
+        Some(LegacyTaskState::Aborted),
         "the duplicate may not move the decided act"
     );
     assert_eq!(
@@ -737,7 +733,7 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
     assert!(after.state().is_abort(), "the run keeps its abort");
     assert_eq!(
         act_generations(&engine, &pid, &tid).await,
-        vec![ExecutionState::Aborted],
+        vec![TaskState::Aborted],
         "the durable truth must hold exactly one aborted generation"
     );
     sweep_until_gone(&engine, &pid).await;
@@ -785,7 +781,7 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
         );
         assert_eq!(
             proc.task(&tid).map(|t| t.state()),
-            Some(TaskState::Aborted),
+            Some(LegacyTaskState::Aborted),
             "round {round}: the aborted act keeps its decision"
         );
         let unfinished: Vec<String> = proc
@@ -805,7 +801,7 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
         let downstream = act_generations(&engine, &pid, "step2").await;
         assert_eq!(
             downstream,
-            vec![ExecutionState::Skipped],
+            vec![TaskState::Skipped],
             "round {round}: the abort's cascade must decide the downstream exactly once, skipped"
         );
         let rows: Vec<String> = tasks_of(&proc, "step2")
@@ -814,7 +810,7 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
             .collect();
         assert_eq!(
             rows,
-            vec![format!("step2:{}", TaskState::Skipped)],
+            vec![format!("step2:{}", LegacyTaskState::Skipped)],
             "round {round}: the downstream row must read the cascade's decision"
         );
 
@@ -910,7 +906,7 @@ async fn an_abort_racing_a_completion_converges_on_one_terminal_decision_inner()
             flush(&engine).await;
             assert_eq!(
                 act_generations(&engine, &pid, &tid).await,
-                vec![ExecutionState::Aborted],
+                vec![TaskState::Aborted],
                 "round {round}: the raced act must end Aborted exactly once"
             );
             let proc = wait_rows_terminal(&engine, &pid).await;
@@ -934,7 +930,7 @@ async fn an_abort_racing_a_completion_converges_on_one_terminal_decision_inner()
             assert_settled(&engine, &pid).await;
             assert_eq!(
                 act_generations(&engine, &pid, &tid).await,
-                vec![ExecutionState::Completed],
+                vec![TaskState::Completed],
                 "round {round}: the raced act must end Completed exactly once"
             );
         }
@@ -961,9 +957,9 @@ async fn an_abort_racing_a_completion_converges_on_one_terminal_decision_inner()
         // with the abort, completed once when the completion scheduled it
         let downstream = act_generations(&engine, &pid, "step2").await;
         let expected = if abort_won {
-            vec![ExecutionState::Skipped]
+            vec![TaskState::Skipped]
         } else {
-            vec![ExecutionState::Completed]
+            vec![TaskState::Completed]
         };
         assert_eq!(
             downstream, expected,

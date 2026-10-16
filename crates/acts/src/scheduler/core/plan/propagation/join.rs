@@ -5,15 +5,15 @@ pub(super) enum JoinReadiness {
     Ready,
     Waiting,
     SkipCascade {
-        predecessor: ExecutionId,
-        state: ExecutionState,
+        predecessor: TaskId,
+        state: TaskState,
     },
 }
 
 pub(super) fn readiness(
-    graph: &ExecutionGraph,
+    graph: &TaskGraph,
     snapshot: &ProcessSnapshot,
-    successor: &ExecutionId,
+    successor: &TaskId,
     policy: JoinPolicy,
 ) -> Result<JoinReadiness, PropagationError> {
     let predecessors = graph.predecessors(successor);
@@ -22,11 +22,11 @@ pub(super) fn readiness(
     }
     let mut waiting = false;
     for predecessor in predecessors {
-        let execution = snapshot
-            .executions
+        let task = snapshot
+            .tasks
             .get(predecessor)
-            .ok_or_else(|| PropagationError::ExecutionNotFound(predecessor.clone()))?;
-        let state = execution.state;
+            .ok_or_else(|| PropagationError::TaskNotFound(predecessor.clone()))?;
+        let state = task.state;
         if !state.is_terminal() {
             waiting = true;
             continue;
@@ -34,7 +34,7 @@ pub(super) fn readiness(
         // A step its own `if`/`while` guard skipped is the legacy
         // fall-through, not a dead path: its successor runs (the guard said
         // "not now", not "everything below is dead").
-        if state == ExecutionState::Skipped && is_guard_skip(snapshot, predecessor) {
+        if state == TaskState::Skipped && is_guard_skip(snapshot, predecessor) {
             continue;
         }
         if policy == JoinPolicy::AllSucceeded && !is_success(state) {

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::{
-    Result, TaskState,
+    LegacyTaskState, Result,
     store::{DbCollectionIden, StoreIden},
 };
 
@@ -56,7 +56,7 @@ impl DbCollectionIden for Task {
 }
 
 impl Task {
-    pub fn set_state(&mut self, state: TaskState) {
+    pub fn set_state(&mut self, state: LegacyTaskState) {
         self.state = state.into();
     }
     pub fn set_start_time(&mut self, time: i64) {

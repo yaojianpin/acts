@@ -3,18 +3,18 @@ use super::*;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum GenerationError {
     WrongProcess,
-    ExecutionNotFound(ExecutionId),
+    TaskNotFound(TaskId),
     SourceNotReenterable {
-        source: ExecutionId,
-        state: ExecutionState,
+        source: TaskId,
+        state: TaskState,
     },
-    SourceOperationTargetsDifferentExecution,
+    SourceOperationTargetsDifferentTask,
     EmptyTargetTaskId,
     TargetNeverInstantiated(String),
     /// A Back named a `to` step that is not on the source's path: the redo
     /// closure from that step would not carry the backed source.
     SourceOutsideRedoClosure {
-        source: ExecutionId,
+        source: TaskId,
         target: String,
     },
     GenerationOverflow,

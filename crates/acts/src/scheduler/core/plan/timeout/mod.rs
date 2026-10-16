@@ -19,8 +19,8 @@ use crate::{
     scheduler::core::{
         commit::process::ProcessSnapshot,
         model::{
-            execution_graph::ExecutionId,
             model_graph::NodeId,
+            task_graph::TaskId,
             transition_plan::{OperationCommit, VariableWrite},
         },
         plan::container::{

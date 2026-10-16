@@ -16,7 +16,7 @@ pub(crate) const STARTED_VAR: &str = "__started";
 /// environment).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TimeoutBranch {
-    pub(crate) task_id: String,
+    pub(crate) node: String,
     pub(crate) model_node: NodeId,
     /// The branch's declared model vars, seeded on its own scope.
     pub(crate) vars: Vec<(String, String)>,
@@ -40,11 +40,11 @@ pub(crate) enum TimeoutCandidate {
 
 /// The branches that already fired for one execution, from the one-shot marker
 /// (the legacy `__timeouts` task datum, a JSON array).
-pub(crate) fn claimed(snapshot: &ProcessSnapshot, owner: &ExecutionId) -> Vec<String> {
+pub(crate) fn claimed(snapshot: &ProcessSnapshot, owner: &TaskId) -> Vec<String> {
     marker(snapshot, owner).unwrap_or_default()
 }
 
-fn marker(snapshot: &ProcessSnapshot, owner: &ExecutionId) -> Option<Vec<String>> {
+fn marker(snapshot: &ProcessSnapshot, owner: &TaskId) -> Option<Vec<String>> {
     let raw = snapshot
         .variables
         .get(&(owner.clone(), consts::TASK_TIMEOUTS.to_string()))?;
@@ -73,23 +73,14 @@ pub(crate) fn cost_ms(now_ms: i64, started: Option<&str>) -> i64 {
 
 /// Whether one declared branch has a live (non-terminal) execution under
 /// `owner` — the "in flight" half of the legacy dispatcher's check.
-pub(crate) fn has_live_child(
-    snapshot: &ProcessSnapshot,
-    owner: &ExecutionId,
-    branch: &str,
-) -> bool {
-    snapshot.executions.iter().any(|(id, execution)| {
-        is_child_of(execution.parent.as_ref(), owner, id, branch) && !execution.state.is_terminal()
+pub(crate) fn has_live_child(snapshot: &ProcessSnapshot, owner: &TaskId, branch: &str) -> bool {
+    snapshot.tasks.iter().any(|(id, task)| {
+        is_child_of(task.parent.as_ref(), owner, id, branch) && !task.state.is_terminal()
     })
 }
 
-fn is_child_of(
-    parent: Option<&ExecutionId>,
-    owner: &ExecutionId,
-    id: &ExecutionId,
-    branch: &str,
-) -> bool {
-    parent == Some(owner) && id.task_id == branch
+fn is_child_of(parent: Option<&TaskId>, owner: &TaskId, id: &TaskId, branch: &str) -> bool {
+    parent == Some(owner) && id.node == branch
 }
 
 /// Whether any of the declared timeout branches still has a live execution:
@@ -97,27 +88,27 @@ fn is_child_of(
 /// `auto_complete` counts every child task, timeout ones included).
 pub(crate) fn has_live_children(
     snapshot: &ProcessSnapshot,
-    owner: &ExecutionId,
+    owner: &TaskId,
     branches: &[TimeoutBranch],
 ) -> bool {
     branches
         .iter()
-        .any(|branch| has_live_child(snapshot, owner, &branch.task_id))
+        .any(|branch| has_live_child(snapshot, owner, &branch.node))
 }
 
 /// Which branch the next round examines: declaration order, skipping the ones
 /// that already fired, stopping at the first branch that is in flight.
 pub(crate) fn candidate(
     snapshot: &ProcessSnapshot,
-    owner: &ExecutionId,
+    owner: &TaskId,
     branches: &[TimeoutBranch],
 ) -> TimeoutCandidate {
     let fired = claimed(snapshot, owner);
     for (index, branch) in branches.iter().enumerate() {
-        if fired.iter().any(|id| id == &branch.task_id) {
+        if fired.iter().any(|id| id == &branch.node) {
             continue;
         }
-        if has_live_child(snapshot, owner, &branch.task_id) {
+        if has_live_child(snapshot, owner, &branch.node) {
             return TimeoutCandidate::Blocked;
         }
         return TimeoutCandidate::Branch(index);

@@ -6,7 +6,7 @@
 //! kernel's row projection; nothing here drives a run.
 use crate::{
     ActError, Error, Result, Vars, Workflow,
-    scheduler::{Node, NodeData, Runtime, TaskState},
+    scheduler::{LegacyTaskState, Node, NodeData, Runtime},
     store::{Store, query::*},
     utils,
 };
@@ -99,7 +99,7 @@ impl Store {
                     }
                 };
 
-                let state: TaskState = t.state.into();
+                let state: LegacyTaskState = t.state.into();
                 let mut task = crate::scheduler::Task::new(proc, &t.tid, node, rt);
                 task.set_pure_state(state.clone());
                 task.set_start_time(t.start_time);

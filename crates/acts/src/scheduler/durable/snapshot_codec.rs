@@ -1,11 +1,11 @@
 use crate::scheduler::core::{
-    commit::process::{CommitError, ExecutionSnapshot, ProcessSnapshot},
+    commit::process::{CommitError, ProcessSnapshot, TaskSnapshot},
     model::{
-        execution_graph::{ExecutionId, ExecutionState},
         model_graph::NodeId,
         operation::{
             ClaimToken, CommitToken, OperationId, OperationKind, OperationRecord, OperationState,
         },
+        task_graph::{TaskId, TaskState},
         transition_plan::ProcessVersion,
     },
 };
@@ -34,26 +34,26 @@ impl SnapshotCodecV2 {
         writer.u64(snapshot.version.process);
         writer.u64(snapshot.version.operations);
 
-        let mut executions = snapshot.executions.iter().collect::<Vec<_>>();
-        executions.sort_by_key(|(id, _)| *id);
-        writer.count(executions.len())?;
-        for (id, value) in executions {
-            writer.execution_id(id)?;
+        let mut tasks = snapshot.tasks.iter().collect::<Vec<_>>();
+        tasks.sort_by_key(|(id, _)| *id);
+        writer.count(tasks.len())?;
+        for (id, value) in tasks {
+            writer.task_id(id)?;
             writer.string(value.model_node.as_str())?;
-            writer.optional_execution(value.parent.as_ref())?;
+            writer.optional_task(value.parent.as_ref())?;
             let mut predecessors = value.predecessors.clone();
             predecessors.sort();
             writer.count(predecessors.len())?;
             for predecessor in &predecessors {
-                writer.execution_id(predecessor)?;
+                writer.task_id(predecessor)?;
             }
-            writer.u8(execution_state_tag(value.state));
+            writer.u8(task_state_tag(value.state));
             writer.u64(value.revision);
         }
 
         writer.count(snapshot.variables.len())?;
         for ((scope, name), value) in &snapshot.variables {
-            writer.execution_id(scope)?;
+            writer.task_id(scope)?;
             writer.string(name)?;
             writer.string(value)?;
         }
@@ -88,24 +88,24 @@ impl SnapshotCodecV2 {
             operations: reader.u64()?,
         };
 
-        let execution_count = reader.count_bounded(MIN_EXECUTION_BYTES)?;
-        let mut executions = HashMap::with_capacity(execution_count);
-        for _ in 0..execution_count {
-            let id = reader.execution_id()?;
+        let task_count = reader.count_bounded(MIN_EXECUTION_BYTES)?;
+        let mut tasks = HashMap::with_capacity(task_count);
+        for _ in 0..task_count {
+            let id = reader.task_id()?;
             let model_node =
                 NodeId::parse(reader.string()?).map_err(|_| SnapshotCodecError::InvalidNodeId)?;
-            let parent = reader.optional_execution()?;
+            let parent = reader.optional_task()?;
             let predecessor_count = reader.count_bounded(MIN_EXECUTION_ID_BYTES)?;
             let mut predecessors = Vec::with_capacity(predecessor_count);
             for _ in 0..predecessor_count {
-                predecessors.push(reader.execution_id()?);
+                predecessors.push(reader.task_id()?);
             }
-            let state = decode_execution_state(reader.u8()?)?;
+            let state = decode_task_state(reader.u8()?)?;
             let revision = reader.u64()?;
-            if executions
+            if tasks
                 .insert(
                     id.clone(),
-                    ExecutionSnapshot {
+                    TaskSnapshot {
                         model_node,
                         parent,
                         predecessors,
@@ -115,14 +115,14 @@ impl SnapshotCodecV2 {
                 )
                 .is_some()
             {
-                return Err(SnapshotCodecError::DuplicateExecution(id));
+                return Err(SnapshotCodecError::DuplicateTask(id));
             }
         }
 
         let variable_count = reader.count_bounded(MIN_VARIABLE_BYTES)?;
         let mut variables = BTreeMap::new();
         for _ in 0..variable_count {
-            let scope = reader.execution_id()?;
+            let scope = reader.task_id()?;
             let name = reader.string()?;
             let value = reader.string()?;
             if variables
@@ -161,7 +161,7 @@ impl SnapshotCodecV2 {
         let snapshot = ProcessSnapshot {
             process_id,
             version,
-            executions,
+            tasks,
             variables,
             operations,
             outbox,
@@ -207,16 +207,16 @@ impl Writer {
         self.raw(value.as_bytes());
         Ok(())
     }
-    fn execution_id(&mut self, id: &ExecutionId) -> Result<(), SnapshotCodecError> {
-        self.string(&id.task_id)?;
+    fn task_id(&mut self, id: &TaskId) -> Result<(), SnapshotCodecError> {
+        self.string(&id.node)?;
         self.u64(id.generation);
         Ok(())
     }
-    fn optional_execution(&mut self, id: Option<&ExecutionId>) -> Result<(), SnapshotCodecError> {
+    fn optional_task(&mut self, id: Option<&TaskId>) -> Result<(), SnapshotCodecError> {
         match id {
             Some(id) => {
                 self.u8(1);
-                self.execution_id(id)?;
+                self.task_id(id)?;
             }
             None => self.u8(0),
         }
@@ -224,7 +224,7 @@ impl Writer {
     }
     fn operation_id(&mut self, id: &OperationId) -> Result<(), SnapshotCodecError> {
         self.string(&id.process_id)?;
-        self.string(&id.task_id)?;
+        self.string(&id.node)?;
         self.u64(id.generation);
         self.u64(id.sequence);
         Ok(())
@@ -348,21 +348,20 @@ impl<'a> Reader<'a> {
         let length = self.count()?;
         String::from_utf8(self.raw(length)?.to_vec()).map_err(|_| SnapshotCodecError::InvalidUtf8)
     }
-    fn execution_id(&mut self) -> Result<ExecutionId, SnapshotCodecError> {
-        ExecutionId::new(self.string()?, self.u64()?)
-            .map_err(|_| SnapshotCodecError::InvalidExecutionId)
+    fn task_id(&mut self) -> Result<TaskId, SnapshotCodecError> {
+        TaskId::new(self.string()?, self.u64()?).map_err(|_| SnapshotCodecError::InvalidTaskId)
     }
-    fn optional_execution(&mut self) -> Result<Option<ExecutionId>, SnapshotCodecError> {
+    fn optional_task(&mut self) -> Result<Option<TaskId>, SnapshotCodecError> {
         match self.u8()? {
             0 => Ok(None),
-            1 => Ok(Some(self.execution_id()?)),
+            1 => Ok(Some(self.task_id()?)),
             value => Err(SnapshotCodecError::InvalidTag(value)),
         }
     }
     fn operation_id(&mut self) -> Result<OperationId, SnapshotCodecError> {
         Ok(OperationId {
             process_id: self.string()?,
-            task_id: self.string()?,
+            node: self.string()?,
             generation: self.u64()?,
             sequence: self.u64()?,
         })
@@ -417,8 +416,8 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn execution_state_tag(state: ExecutionState) -> u8 {
-    use ExecutionState::*;
+fn task_state_tag(state: TaskState) -> u8 {
+    use TaskState::*;
     match state {
         Created => 0,
         Ready => 1,
@@ -434,8 +433,8 @@ fn execution_state_tag(state: ExecutionState) -> u8 {
         Removed => 11,
     }
 }
-fn decode_execution_state(tag: u8) -> Result<ExecutionState, SnapshotCodecError> {
-    use ExecutionState::*;
+fn decode_task_state(tag: u8) -> Result<TaskState, SnapshotCodecError> {
+    use TaskState::*;
     match tag {
         0 => Ok(Created),
         1 => Ok(Ready),
@@ -487,7 +486,7 @@ fn decode_operation_kind(tag: u8) -> Result<OperationKind, SnapshotCodecError> {
 fn operation_id_order(left: &OperationId, right: &OperationId) -> std::cmp::Ordering {
     left.process_id
         .cmp(&right.process_id)
-        .then_with(|| left.task_id.cmp(&right.task_id))
+        .then_with(|| left.node.cmp(&right.node))
         .then_with(|| left.generation.cmp(&right.generation))
         .then_with(|| left.sequence.cmp(&right.sequence))
 }
@@ -500,10 +499,10 @@ pub(crate) enum SnapshotCodecError {
     InvalidUtf8,
     CollectionTooLarge,
     InvalidTag(u8),
-    InvalidExecutionId,
+    InvalidTaskId,
     InvalidNodeId,
-    DuplicateExecution(ExecutionId),
-    DuplicateVariable(ExecutionId, String),
+    DuplicateTask(TaskId),
+    DuplicateVariable(TaskId, String),
     DuplicateOperation(OperationId),
     DuplicateOutboxKey(String),
     InvalidOutbox(String),
@@ -532,11 +531,11 @@ mod tests {
     };
 
     fn snapshot() -> ProcessSnapshot {
-        let root = ExecutionId::new("root", 0).unwrap();
-        let child = ExecutionId::new("child", 1).unwrap();
+        let root = TaskId::new("root", 0).unwrap();
+        let child = TaskId::new("child", 1).unwrap();
         let operation_id = OperationId {
             process_id: "p".into(),
-            task_id: "child".into(),
+            node: "child".into(),
             generation: 1,
             sequence: 4,
         };
@@ -553,24 +552,24 @@ mod tests {
                 process: 8,
                 operations: 9,
             },
-            executions: HashMap::from([
+            tasks: HashMap::from([
                 (
                     root.clone(),
-                    ExecutionSnapshot {
+                    TaskSnapshot {
                         model_node: NodeId::parse("model-root").unwrap(),
                         parent: None,
                         predecessors: vec![],
-                        state: ExecutionState::Waiting,
+                        state: TaskState::Waiting,
                         revision: 2,
                     },
                 ),
                 (
                     child.clone(),
-                    ExecutionSnapshot {
+                    TaskSnapshot {
                         model_node: NodeId::parse("model-child").unwrap(),
                         parent: Some(root.clone()),
                         predecessors: vec![root],
-                        state: ExecutionState::Running,
+                        state: TaskState::Running,
                         revision: 4,
                     },
                 ),
@@ -601,10 +600,10 @@ mod tests {
         let source = snapshot();
         let mut reordered = ProcessSnapshot::empty("p").unwrap();
         reordered.version = source.version.clone();
-        let mut executions = source.executions.iter().collect::<Vec<_>>();
-        executions.sort_by(|(left, _), (right, _)| right.cmp(left));
-        for (id, value) in executions {
-            reordered.executions.insert(id.clone(), value.clone());
+        let mut tasks = source.tasks.iter().collect::<Vec<_>>();
+        tasks.sort_by(|(left, _), (right, _)| right.cmp(left));
+        for (id, value) in tasks {
+            reordered.tasks.insert(id.clone(), value.clone());
         }
         let mut operations = source.operations.iter().collect::<Vec<_>>();
         operations.sort_by(|(left, _), (right, _)| operation_id_order(right, left));
@@ -642,12 +641,11 @@ mod tests {
         assert!(repository.load("p").unwrap().is_some());
     }
     #[test]
-    fn impossible_execution_count_is_rejected_before_allocation() {
+    fn impossible_task_count_is_rejected_before_allocation() {
         let mut encoded = SnapshotCodecV2::encode(&snapshot()).unwrap();
         let process_length = usize::try_from(encoded_u32(&encoded, 8)).unwrap();
-        let execution_count_offset = 12 + process_length + 24;
-        encoded[execution_count_offset..execution_count_offset + 4]
-            .copy_from_slice(&u32::MAX.to_be_bytes());
+        let task_count_offset = 12 + process_length + 24;
+        encoded[task_count_offset..task_count_offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(
             SnapshotCodecV2::decode(&encoded),
             Err(SnapshotCodecError::Truncated)

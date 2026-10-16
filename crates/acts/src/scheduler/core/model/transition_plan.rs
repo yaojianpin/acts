@@ -1,8 +1,8 @@
 use crate::scheduler::core::{
     model::{
-        execution_graph::{ExecutionId, ExecutionState},
         model_graph::NodeId,
         operation::{ClaimToken, OperationId, OperationKind},
+        task_graph::{TaskId, TaskState},
     },
     outbox::records::{OutboxError, OutboxId, OutboxRecord},
 };
@@ -24,25 +24,25 @@ pub(crate) struct ProcessVersion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExecutionCreate {
-    pub(crate) execution: ExecutionId,
+pub(crate) struct TaskCreate {
+    pub(crate) task: TaskId,
     pub(crate) model_node: NodeId,
-    pub(crate) parent: Option<ExecutionId>,
-    pub(crate) predecessors: Vec<ExecutionId>,
-    pub(crate) initial_state: ExecutionState,
+    pub(crate) parent: Option<TaskId>,
+    pub(crate) predecessors: Vec<TaskId>,
+    pub(crate) initial_state: TaskState,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StateChange {
-    pub(crate) execution: ExecutionId,
+    pub(crate) task: TaskId,
     pub(crate) expected_revision: u64,
-    pub(crate) from: ExecutionState,
-    pub(crate) to: ExecutionState,
+    pub(crate) from: TaskState,
+    pub(crate) to: TaskState,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VariableWrite {
-    pub(crate) scope: ExecutionId,
+    pub(crate) scope: TaskId,
     pub(crate) name: String,
     pub(crate) value: String,
 }
@@ -80,7 +80,7 @@ pub(crate) struct OutboxIntent {
 pub(crate) struct TransitionPlan {
     pub(crate) process_id: String,
     pub(crate) expected: ProcessVersion,
-    pub(crate) execution_creates: Vec<ExecutionCreate>,
+    pub(crate) task_creates: Vec<TaskCreate>,
     pub(crate) state_changes: Vec<StateChange>,
     pub(crate) variable_writes: Vec<VariableWrite>,
     pub(crate) source_operation: Option<OperationCommit>,
@@ -94,37 +94,35 @@ impl TransitionPlan {
             return Err(PlanError::EmptyProcessId);
         }
         let mut creates = HashSet::new();
-        for create in &self.execution_creates {
-            if !creates.insert(create.execution.clone()) {
-                return Err(PlanError::DuplicateExecutionCreate(
-                    create.execution.clone(),
-                ));
+        for create in &self.task_creates {
+            if !creates.insert(create.task.clone()) {
+                return Err(PlanError::DuplicateTaskCreate(create.task.clone()));
             }
-            if create.initial_state != ExecutionState::Created
-                && create.initial_state != ExecutionState::Ready
+            if create.initial_state != TaskState::Created
+                && create.initial_state != TaskState::Ready
             {
                 return Err(PlanError::InvalidInitialState(
-                    create.execution.clone(),
+                    create.task.clone(),
                     create.initial_state,
                 ));
             }
             let mut predecessors = HashSet::new();
             for predecessor in &create.predecessors {
-                if predecessor == &create.execution || !predecessors.insert(predecessor.clone()) {
+                if predecessor == &create.task || !predecessors.insert(predecessor.clone()) {
                     return Err(PlanError::InvalidPredecessor(
-                        create.execution.clone(),
+                        create.task.clone(),
                         predecessor.clone(),
                     ));
                 }
             }
         }
-        let mut executions = HashSet::new();
+        let mut tasks = HashSet::new();
         for change in &self.state_changes {
-            if !executions.insert(change.execution.clone()) {
-                return Err(PlanError::DuplicateStateChange(change.execution.clone()));
+            if !tasks.insert(change.task.clone()) {
+                return Err(PlanError::DuplicateStateChange(change.task.clone()));
             }
             if change.from == change.to {
-                return Err(PlanError::NoopStateChange(change.execution.clone()));
+                return Err(PlanError::NoopStateChange(change.task.clone()));
             }
             validate_state_change(change)?;
         }
@@ -171,7 +169,7 @@ impl TransitionPlan {
 }
 
 fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
-    use ExecutionState as S;
+    use TaskState as S;
     let allowed = matches!(
         (change.from, change.to),
         (S::Created, S::Ready)
@@ -231,7 +229,7 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
         Ok(())
     } else {
         Err(PlanError::IllegalStateChange {
-            execution: change.execution.clone(),
+            task: change.task.clone(),
             from: change.from,
             to: change.to,
         })
@@ -241,18 +239,18 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PlanError {
     EmptyProcessId,
-    DuplicateExecutionCreate(ExecutionId),
-    InvalidInitialState(ExecutionId, ExecutionState),
-    InvalidPredecessor(ExecutionId, ExecutionId),
-    DuplicateStateChange(ExecutionId),
-    NoopStateChange(ExecutionId),
+    DuplicateTaskCreate(TaskId),
+    InvalidInitialState(TaskId, TaskState),
+    InvalidPredecessor(TaskId, TaskId),
+    DuplicateStateChange(TaskId),
+    NoopStateChange(TaskId),
     IllegalStateChange {
-        execution: ExecutionId,
-        from: ExecutionState,
-        to: ExecutionState,
+        task: TaskId,
+        from: TaskState,
+        to: TaskState,
     },
-    EmptyVariableName(ExecutionId),
-    DuplicateVariableWrite(ExecutionId, String),
+    EmptyVariableName(TaskId),
+    DuplicateVariableWrite(TaskId, String),
     ForeignOperation(OperationId),
     DuplicateOperation(OperationId),
     InvalidOutbox(OutboxError),
@@ -268,8 +266,8 @@ impl std::error::Error for PlanError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn execution() -> ExecutionId {
-        ExecutionId::new("t1", 0).unwrap()
+    fn task() -> TaskId {
+        TaskId::new("t1", 0).unwrap()
     }
     fn plan() -> TransitionPlan {
         TransitionPlan {
@@ -279,12 +277,12 @@ mod tests {
                 process: 3,
                 operations: 7,
             },
-            execution_creates: vec![],
+            task_creates: vec![],
             state_changes: vec![StateChange {
-                execution: execution(),
+                task: task(),
                 expected_revision: 2,
-                from: ExecutionState::Running,
-                to: ExecutionState::Completed,
+                from: TaskState::Running,
+                to: TaskState::Completed,
             }],
             variable_writes: vec![],
             source_operation: None,
@@ -296,8 +294,8 @@ mod tests {
     #[test]
     fn terminal_state_cannot_be_reopened_arbitrarily() {
         let mut p = plan();
-        p.state_changes[0].from = ExecutionState::Completed;
-        p.state_changes[0].to = ExecutionState::Running;
+        p.state_changes[0].from = TaskState::Completed;
+        p.state_changes[0].to = TaskState::Running;
         assert!(matches!(
             p.validate(),
             Err(PlanError::IllegalStateChange { .. })
@@ -305,13 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_mutation_of_one_execution_is_rejected() {
+    fn duplicate_mutation_of_one_task_is_rejected() {
         let mut p = plan();
         p.state_changes.push(p.state_changes[0].clone());
-        assert_eq!(
-            p.validate(),
-            Err(PlanError::DuplicateStateChange(execution()))
-        );
+        assert_eq!(p.validate(), Err(PlanError::DuplicateStateChange(task())));
     }
 
     #[test]
@@ -320,7 +315,7 @@ mod tests {
         p.operations.push(OperationIntent {
             id: OperationId {
                 process_id: "other".into(),
-                task_id: "t1".into(),
+                node: "t1".into(),
                 generation: 0,
                 sequence: 1,
             },

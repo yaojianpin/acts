@@ -1,5 +1,5 @@
 use crate::{
-    TaskState, Vars, data,
+    LegacyTaskState, Vars, data,
     store::DbCollectionIden,
     utils::{self, consts},
 };
@@ -232,21 +232,22 @@ impl fmt::Display for MessageState {
     }
 }
 
-impl From<TaskState> for MessageState {
-    fn from(state: TaskState) -> Self {
+impl From<LegacyTaskState> for MessageState {
+    fn from(state: LegacyTaskState) -> Self {
         match state {
-            TaskState::None => MessageState::None,
-            TaskState::Ready | TaskState::Pending | TaskState::Running | TaskState::Interrupt => {
-                MessageState::Created
-            }
-            TaskState::Completed => MessageState::Completed,
-            TaskState::Submitted => MessageState::Submitted,
-            TaskState::Backed => MessageState::Backed,
-            TaskState::Cancelled => MessageState::Cancelled,
-            TaskState::Error => MessageState::Error,
-            TaskState::Aborted => MessageState::Aborted,
-            TaskState::Skipped => MessageState::Skipped,
-            TaskState::Removed => MessageState::Removed,
+            LegacyTaskState::None => MessageState::None,
+            LegacyTaskState::Ready
+            | LegacyTaskState::Pending
+            | LegacyTaskState::Running
+            | LegacyTaskState::Interrupt => MessageState::Created,
+            LegacyTaskState::Completed => MessageState::Completed,
+            LegacyTaskState::Submitted => MessageState::Submitted,
+            LegacyTaskState::Backed => MessageState::Backed,
+            LegacyTaskState::Cancelled => MessageState::Cancelled,
+            LegacyTaskState::Error => MessageState::Error,
+            LegacyTaskState::Aborted => MessageState::Aborted,
+            LegacyTaskState::Skipped => MessageState::Skipped,
+            LegacyTaskState::Removed => MessageState::Removed,
         }
     }
 }

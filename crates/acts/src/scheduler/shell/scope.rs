@@ -21,7 +21,7 @@ use std::sync::Arc;
 pub(crate) struct ScopeSpec {
     pub(crate) process_id: String,
     /// The acting node id (the kernel execution's task id).
-    pub(crate) task_id: String,
+    pub(crate) node: String,
     /// The declaring model, for the headless scope's tree.
     pub(crate) model: Workflow,
     /// The acting execution's scope chain (nearest wins) as JSON strings,
@@ -60,8 +60,8 @@ pub(crate) fn headless_scope(
     }
     let node = process
         .tree()
-        .node(&spec.task_id)
-        .ok_or_else(|| crate::ActError::Runtime(format!("model has no node '{}'", spec.task_id)))?
+        .node(&spec.node)
+        .ok_or_else(|| crate::ActError::Runtime(format!("model has no node '{}'", spec.node)))?
         .clone();
     let task = process.create_task(&node, None)?;
     if !spec.vars.is_empty() {

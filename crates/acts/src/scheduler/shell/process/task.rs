@@ -2,7 +2,7 @@ use crate::{
     Error, NodeKind, Result, ShareLock, Variant, Vars, data,
     scheduler::{
         Runtime,
-        core::model::{task_state::TaskState, view::Node},
+        core::model::{legacy_task_state::LegacyTaskState, view::Node},
         shell::{Context, Process},
     },
     store::DbCollectionIden,
@@ -44,7 +44,7 @@ pub struct Task {
     vars_gen: Arc<AtomicU64>,
 
     /// task state
-    state: ShareLock<TaskState>,
+    state: ShareLock<LegacyTaskState>,
 
     /// Fired when this task is overridden while it is running (see
     /// [`Task::cancelled`]); the act executing under it reads it through
@@ -81,7 +81,7 @@ impl Task {
             sealed_data: Arc::new(RwLock::new(Vars::new())),
             vars_dirty: Arc::new(AtomicBool::new(false)),
             vars_gen: Arc::new(AtomicU64::new(0)),
-            state: Arc::new(RwLock::new(TaskState::None)),
+            state: Arc::new(RwLock::new(LegacyTaskState::None)),
             // a child of the runtime's shutdown token: this task's token fires
             // when the task is overridden *or* when the engine shuts down
             cancel: rt.shutdown_token().child_token(),
@@ -115,7 +115,7 @@ impl Task {
         *self.end_time.read()
     }
 
-    pub fn state(&self) -> TaskState {
+    pub fn state(&self) -> LegacyTaskState {
         let state = &*self.state.read();
         state.clone()
     }
@@ -258,7 +258,7 @@ impl Task {
         self.err.read().clone()
     }
 
-    pub fn set_pure_state(&self, state: TaskState) {
+    pub fn set_pure_state(&self, state: LegacyTaskState) {
         *self.state.write() = state;
     }
 

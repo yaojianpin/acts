@@ -6,7 +6,7 @@ use super::*;
 use crate::{
     scheduler::core::{
         commit::command::ActionKind,
-        model::execution_graph::ExecutionState,
+        model::task_graph::TaskState,
         outbox::{
             outbox_dispatch::DeliveryOutcome,
             records::{OutboxRecord, OutboxState},
@@ -52,12 +52,12 @@ async fn settle_outbox(host: &KernelHost) {
 
 async fn assert_all_terminal(host: &KernelHost, pid: &str) {
     let snapshot = host.snapshot(pid).await.unwrap().expect("aggregate exists");
-    assert!(!snapshot.executions.is_empty());
-    for (id, execution) in &snapshot.executions {
+    assert!(!snapshot.tasks.is_empty());
+    for (id, task) in &snapshot.tasks {
         assert!(
-            execution.state.is_terminal(),
+            task.state.is_terminal(),
             "execution {id:?} stuck at {:?}",
-            execution.state
+            task.state
         );
     }
     for (id, record) in &snapshot.operations {
@@ -309,7 +309,7 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
     const PID: &str = "p-conflict-release";
     let root = OperationId {
         process_id: PID.into(),
-        task_id: "root".into(),
+        node: "root".into(),
         generation: 0,
         sequence: 0,
     };
@@ -337,11 +337,10 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
         let plan = TransitionPlan {
             process_id: PID.into(),
             expected: current.version.clone(),
-            execution_creates: Vec::new(),
+            task_creates: Vec::new(),
             state_changes: Vec::new(),
             variable_writes: vec![VariableWrite {
-                scope: crate::scheduler::core::model::execution_graph::ExecutionId::new("root", 0)
-                    .unwrap(),
+                scope: crate::scheduler::core::model::task_graph::TaskId::new("root", 0).unwrap(),
                 name: "rival.marker".into(),
                 value: "1".into(),
             }],
@@ -500,9 +499,9 @@ async fn assert_parked(host: &KernelHost, cache: &Arc<crate::store::Store>, pid:
     assert!(snapshot.outbox.is_empty(), "a parked run writes no message");
     assert!(
         snapshot
-            .executions
+            .tasks
             .values()
-            .all(|execution| execution.state == ExecutionState::Created),
+            .all(|task| task.state == TaskState::Created),
         "a parked run's root stays `Created`"
     );
 
@@ -515,7 +514,7 @@ async fn assert_parked(host: &KernelHost, cache: &Arc<crate::store::Store>, pid:
         .expect("proc row");
     assert_eq!(
         proc_row.state,
-        crate::scheduler::core::model::task_state::TaskState::None.to_string(),
+        crate::scheduler::core::model::legacy_task_state::LegacyTaskState::None.to_string(),
         "the parked process state, as the legacy row spells it"
     );
     let root_row = store
@@ -526,7 +525,7 @@ async fn assert_parked(host: &KernelHost, cache: &Arc<crate::store::Store>, pid:
         .expect("root task row");
     assert_eq!(
         root_row.state,
-        crate::scheduler::core::model::task_state::TaskState::Pending.to_string(),
+        crate::scheduler::core::model::legacy_task_state::LegacyTaskState::Pending.to_string(),
         "the parked root task, as the legacy row spells it"
     );
 }
@@ -606,14 +605,10 @@ async fn kernel_path_runs_a_flat_chain_to_completion() {
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     assert!(host.process_completed("k-parity").await.unwrap());
     let snapshot = host.snapshot("k-parity").await.unwrap().unwrap();
-    let mut kernel_tasks: Vec<String> = snapshot
-        .executions
-        .keys()
-        .map(|id| id.task_id.clone())
-        .collect();
+    let mut kernel_tasks: Vec<String> = snapshot.tasks.keys().map(|id| id.node.clone()).collect();
     kernel_tasks.sort();
     assert_eq!(kernel_tasks, expected_tasks);
-    assert!(snapshot.executions.values().all(|e| e.state.is_terminal()));
+    assert!(snapshot.tasks.values().all(|e| e.state.is_terminal()));
 }
 
 /// The kernel engine, end to end: a start seeds the aggregate and no legacy
@@ -658,11 +653,7 @@ async fn kernel_engine_serves_a_run_to_completion() {
     let host = runtime.kernel();
     assert!(host.process_completed(&pid).await.unwrap());
     let snapshot = host.snapshot(&pid).await.unwrap().expect("aggregate");
-    let mut tasks: Vec<String> = snapshot
-        .executions
-        .keys()
-        .map(|id| id.task_id.clone())
-        .collect();
+    let mut tasks: Vec<String> = snapshot.tasks.keys().map(|id| id.node.clone()).collect();
     tasks.sort();
     assert_eq!(
         tasks,
@@ -762,9 +753,9 @@ async fn kernel_engine_serves_client_actions_on_an_irq_workflow() {
         }
         let states = host.snapshot(&pid).await.unwrap().map(|snapshot| {
             snapshot
-                .executions
+                .tasks
                 .iter()
-                .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
                 .collect::<Vec<_>>()
         });
         assert!(
@@ -818,7 +809,7 @@ async fn kernel_engine_scopes_effects_to_the_run_workdir() {
 
     let host = engine.runtime().kernel().clone();
     let snapshot = host.snapshot(&pid).await.unwrap().unwrap();
-    let s1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let s1 = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     let dir = snapshot
         .variables
         .get(&(s1, "dir".to_string()))
@@ -1164,7 +1155,7 @@ async fn effect_write_back_folds_into_the_process() {
         snapshot
             .variables
             .get(&(
-                crate::scheduler::core::model::execution_graph::ExecutionId::new(task, 0).unwrap(),
+                crate::scheduler::core::model::task_graph::TaskId::new(task, 0).unwrap(),
                 name.to_string(),
             ))
             .cloned()
@@ -1791,16 +1782,16 @@ async fn a_failed_step_waits_for_its_timeout_branch_before_the_catch_join() {
     let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
     assert_eq!(
         state_of(&snapshot, "c1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "t1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
+        crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the timeout branch is still in flight"
     );
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
         "a settled handler does not decide the step while its branch runs"
     );
 
@@ -1824,9 +1815,9 @@ async fn a_failed_step_waits_for_its_timeout_branch_before_the_catch_join() {
                 .await
                 .unwrap()
                 .expect("the aggregate")
-                .executions
+                .tasks
                 .iter()
-                .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
                 .collect::<Vec<_>>()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1834,7 +1825,7 @@ async fn a_failed_step_waits_for_its_timeout_branch_before_the_catch_join() {
     let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
         "the caught error completed the step"
     );
     engine.close().await;
@@ -1882,7 +1873,7 @@ async fn kernel_cancel_refuses_a_step_whose_work_is_not_done() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         if host_state(&runtime, PID, "s1").await
-            == Some(crate::scheduler::core::model::execution_graph::ExecutionState::Waiting)
+            == Some(crate::scheduler::core::model::task_graph::TaskState::Waiting)
         {
             break;
         }
@@ -1906,11 +1897,11 @@ async fn kernel_cancel_refuses_a_step_whose_work_is_not_done() {
     // act, one generation, nothing rewound.
     assert_eq!(
         host_state(&runtime, PID, "s1").await,
-        Some(crate::scheduler::core::model::execution_graph::ExecutionState::Waiting)
+        Some(crate::scheduler::core::model::task_graph::TaskState::Waiting)
     );
     let host = runtime.kernel();
     let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
-    assert_eq!(executions_of(&snapshot, "s1"), vec![0]);
+    assert_eq!(tasks_of(&snapshot, "s1"), vec![0]);
     engine.close().await;
 }
 
@@ -2034,14 +2025,14 @@ async fn kernel_cancel_rewinds_a_finished_step() {
     let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
-        executions_of(&snapshot, "s1"),
+        tasks_of(&snapshot, "s1"),
         vec![0, 1],
         "the rewind redid the head step once"
     );
@@ -2159,14 +2150,14 @@ async fn host_state(
     runtime: &Arc<crate::scheduler::Runtime>,
     pid: &str,
     node: &str,
-) -> Option<crate::scheduler::core::model::execution_graph::ExecutionState> {
+) -> Option<crate::scheduler::core::model::task_graph::TaskState> {
     let snapshot = runtime.kernel().snapshot(pid).await.ok()??;
     snapshot
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == node)
+        .filter(|(id, _)| id.node == node)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(_, execution)| execution.state)
+        .map(|(_, task)| task.state)
 }
 
 /// A client's `act:error` carries the legacy inputs (`ecode`, `message`):
@@ -2483,15 +2474,15 @@ async fn kernel_env_function_predicate_decides_branches() {
     let snapshot = host.snapshot(pid).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "b_true"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "b_false"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     assert!(!has_task(&snapshot, "s21"));
 
@@ -2563,13 +2554,10 @@ async fn kernel_invalid_branch_predicate_fails_its_branch() {
     let host = runtime.kernel().clone();
     let snapshot = host.snapshot(pid).await.unwrap().unwrap();
     // The failing branch carries the predicate error as its own failure.
-    let b1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("b1", 0).unwrap();
+    let b1 = crate::scheduler::core::model::task_graph::TaskId::new("b1", 0).unwrap();
     assert_eq!(
-        snapshot
-            .executions
-            .get(&b1)
-            .map(|execution| execution.state),
-        Some(crate::scheduler::core::model::execution_graph::ExecutionState::Failed)
+        snapshot.tasks.get(&b1).map(|task| task.state),
+        Some(crate::scheduler::core::model::task_graph::TaskState::Failed)
     );
     assert!(
         snapshot
@@ -2677,20 +2665,16 @@ async fn wait_kernel_settled(host: &Arc<KernelHost>, pid: &str) -> Snapshot {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let snapshot = host.snapshot(pid).await.unwrap().expect("aggregate exists");
-        if snapshot
-            .executions
-            .values()
-            .all(|execution| execution.state.is_terminal())
-        {
+        if snapshot.tasks.values().all(|task| task.state.is_terminal()) {
             return snapshot;
         }
         assert!(
             std::time::Instant::now() < deadline,
             "the kernel run never settled: {:?}",
             snapshot
-                .executions
+                .tasks
                 .iter()
-                .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
                 .collect::<Vec<_>>()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -2744,7 +2728,7 @@ async fn kernel_catch_runs_the_selected_handler_on_error() {
     for node in ["c1", "b1", "h1"] {
         assert_eq!(
             state_of(&snapshot, node),
-            crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+            crate::scheduler::core::model::task_graph::TaskState::Completed,
             "handler node '{node}'"
         );
     }
@@ -2752,11 +2736,11 @@ async fn kernel_catch_runs_the_selected_handler_on_error() {
     for (node, state) in [
         (
             "s1",
-            crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+            crate::scheduler::core::model::task_graph::TaskState::Completed,
         ),
         (
             crate::utils::consts::TASK_ROOT_TID,
-            crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+            crate::scheduler::core::model::task_graph::TaskState::Completed,
         ),
     ] {
         assert_eq!(state_of(&snapshot, node), state, "node '{node}'");
@@ -2824,11 +2808,11 @@ async fn kernel_catch_skips_handlers_on_success() {
     for (node, state) in [
         (
             "s1",
-            crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+            crate::scheduler::core::model::task_graph::TaskState::Completed,
         ),
         (
             crate::utils::consts::TASK_ROOT_TID,
-            crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+            crate::scheduler::core::model::task_graph::TaskState::Completed,
         ),
     ] {
         assert_eq!(state_of(&snapshot, node), state, "node '{node}'");
@@ -2880,19 +2864,19 @@ async fn kernel_catch_resumes_the_error_when_every_handler_skipped() {
     for (node, state) in [
         (
             "c1",
-            crate::scheduler::core::model::execution_graph::ExecutionState::Skipped,
+            crate::scheduler::core::model::task_graph::TaskState::Skipped,
         ),
         (
             "s2",
-            crate::scheduler::core::model::execution_graph::ExecutionState::Skipped,
+            crate::scheduler::core::model::task_graph::TaskState::Skipped,
         ),
         (
             "s1",
-            crate::scheduler::core::model::execution_graph::ExecutionState::Failed,
+            crate::scheduler::core::model::task_graph::TaskState::Failed,
         ),
         (
             crate::utils::consts::TASK_ROOT_TID,
-            crate::scheduler::core::model::execution_graph::ExecutionState::Failed,
+            crate::scheduler::core::model::task_graph::TaskState::Failed,
         ),
     ] {
         assert_eq!(state_of(&snapshot, node), state, "node '{node}'");
@@ -2917,19 +2901,19 @@ async fn manual_task_waits_for_the_client_action() {
     let snapshot = host.snapshot("p4").await.unwrap().unwrap();
     let state_of = |task: &str| {
         snapshot
-            .executions
+            .tasks
             .iter()
-            .find(|(id, _)| id.task_id == task)
+            .find(|(id, _)| id.node == task)
             .map(|(_, e)| e.state)
             .unwrap()
     };
     assert_eq!(
         state_of("wait"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     assert_eq!(
         state_of("after"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Created
+        crate::scheduler::core::model::task_graph::TaskState::Created
     );
 
     // The client completes the waiting task; the flow moves on.
@@ -2974,7 +2958,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
         snapshot
             .variables
             .get(&(
-                crate::scheduler::core::model::execution_graph::ExecutionId::new(node, 0).unwrap(),
+                crate::scheduler::core::model::task_graph::TaskId::new(node, 0).unwrap(),
                 crate::utils::consts::TASK_TIMEOUTS.to_string(),
             ))
             .map(|raw| serde_json::from_str(raw).unwrap())
@@ -2988,7 +2972,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     assert!(
         !has_task(&snapshot, "t1") && !has_task(&snapshot, "t2"),
@@ -3003,7 +2987,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "t1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
+        crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the branch ran into its own client wait"
     );
     assert_eq!(
@@ -3018,7 +3002,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
     // The legacy task data the tick freezes: the owner's cost start and
     // the frozen cost, and the branch reads the cost through its scope
     // chain exactly like a legacy timeout child read its parent's.
-    let owner = crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let owner = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     assert!(
         snapshot.variables.contains_key(&(
             owner.clone(),
@@ -3035,7 +3019,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
     assert!(
         scope_vars(
             &snapshot,
-            &crate::scheduler::core::model::execution_graph::ExecutionId::new("t1", 0).unwrap()
+            &crate::scheduler::core::model::task_graph::TaskId::new("t1", 0).unwrap()
         )
         .iter()
         .any(|(name, _)| name == crate::utils::consts::TASK_COST),
@@ -3048,7 +3032,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
-        executions_of(&snapshot, "t1").len(),
+        tasks_of(&snapshot, "t1").len(),
         1,
         "a one-shot branch fires once"
     );
@@ -3063,12 +3047,12 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
         "the step stays running while the branch it fired settles (the legacy step's state)"
     );
     assert_eq!(
         state_of(&snapshot, "s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Created
+        crate::scheduler::core::model::task_graph::TaskState::Created
     );
 
     // The branch settles: the join completes the owner, the flow moves on,
@@ -3082,11 +3066,11 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert!(host.process_completed(PID).await.unwrap());
     assert!(
@@ -3123,16 +3107,16 @@ async fn the_root_stays_running_until_its_seeded_chain_settled() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
         "the root waits for its chain"
     );
     assert_eq!(
         state_of(&snapshot, "a"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     assert_eq!(
         state_of(&snapshot, "b"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Created
+        crate::scheduler::core::model::task_graph::TaskState::Created
     );
     assert!(!host.process_completed(PID).await.unwrap());
 
@@ -3144,11 +3128,11 @@ async fn the_root_stays_running_until_its_seeded_chain_settled() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "b"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
         "the root joins once its seeded chain settled"
     );
     assert!(host.process_completed(PID).await.unwrap());
@@ -3196,30 +3180,30 @@ async fn a_handler_container_keeps_its_role_while_parked_for_children() {
     host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
 
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
-    let c1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("c1", 0).unwrap();
+    let c1 = crate::scheduler::core::model::task_graph::TaskId::new("c1", 0).unwrap();
     assert_eq!(
-        crate::scheduler::core::plan::container::execution_sign(&snapshot, &c1),
+        crate::scheduler::core::plan::container::task_sign(&snapshot, &c1),
         Some(crate::scheduler::core::plan::container::SIGN_CATCH),
         "the handler keeps the role its parent's join reads"
     );
     assert_eq!(
-        crate::scheduler::core::plan::container::execution_flow(&snapshot, &c1),
-        Some(crate::scheduler::core::plan::container::ExecutionFlow::Children),
+        crate::scheduler::core::plan::container::task_flow(&snapshot, &c1),
+        Some(crate::scheduler::core::plan::container::TaskFlow::Children),
         "the handler's own fan-out recorded the children flow"
     );
     // Its branch settled and the plain join completed the handler; the
     // catch join then caught the error on the step.
     assert_eq!(
         state_of(&snapshot, "c1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
         "the catch join decided the failed step"
     );
     assert!(host.process_completed(PID).await.unwrap());
@@ -3263,11 +3247,11 @@ async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     assert_eq!(
         state_of(&snapshot, "t1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
+        crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the timer fired its branch while the step waited on its act"
     );
     assert!(
@@ -3284,12 +3268,12 @@ async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
         "the step keeps running while the branches and the timeout it fired settle"
     );
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
         "the selected branch ran (its own inner step is auto)"
     );
 
@@ -3301,7 +3285,7 @@ async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert!(host.process_completed(PID).await.unwrap());
 }
@@ -3360,29 +3344,26 @@ async fn cancelled_head_cascades_skip_through_the_chain() {
     let snapshot = host.snapshot("p6").await.unwrap().unwrap();
     let state_of = |task: &str, generation: u64| {
         snapshot
-            .executions
-            .get(
-                &crate::scheduler::core::model::execution_graph::ExecutionId::new(task, generation)
-                    .unwrap(),
-            )
-            .map(|execution| execution.state)
+            .tasks
+            .get(&crate::scheduler::core::model::task_graph::TaskId::new(task, generation).unwrap())
+            .map(|task| task.state)
             .unwrap()
     };
     assert_eq!(
         state_of("head", 0),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Backed
+        crate::scheduler::core::model::task_graph::TaskState::Backed
     );
     assert_eq!(
         state_of("mid", 0),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     assert_eq!(
         state_of("tail", 0),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     assert_eq!(
         state_of("head", 1),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
 
     // The re-run answers its own action; the recreated downstream runs.
@@ -3398,13 +3379,10 @@ async fn cancelled_head_cascades_skip_through_the_chain() {
     let snapshot = host.snapshot("p6").await.unwrap().unwrap();
     assert_eq!(
         snapshot
-            .executions
-            .get(
-                &crate::scheduler::core::model::execution_graph::ExecutionId::new("head", 1)
-                    .unwrap()
-            )
-            .map(|execution| execution.state),
-        Some(crate::scheduler::core::model::execution_graph::ExecutionState::Completed)
+            .tasks
+            .get(&crate::scheduler::core::model::task_graph::TaskId::new("head", 1).unwrap())
+            .map(|task| task.state),
+        Some(crate::scheduler::core::model::task_graph::TaskState::Completed)
     );
 }
 
@@ -3415,21 +3393,21 @@ type Snapshot = crate::scheduler::core::commit::process::ProcessSnapshot;
 fn state_of(
     snapshot: &Snapshot,
     task: &str,
-) -> crate::scheduler::core::model::execution_graph::ExecutionState {
+) -> crate::scheduler::core::model::task_graph::TaskState {
     snapshot
-        .executions
+        .tasks
         .iter()
-        .filter(|(_, execution)| execution.model_node.as_str() == task)
+        .filter(|(_, task_snapshot)| task_snapshot.model_node.as_str() == task)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(_, execution)| execution.state)
+        .map(|(_, task_snapshot)| task_snapshot.state)
         .unwrap_or_else(|| panic!("execution for node '{task}' missing"))
 }
 
 fn has_task(snapshot: &Snapshot, task: &str) -> bool {
     snapshot
-        .executions
+        .tasks
         .values()
-        .any(|execution| execution.model_node.as_str() == task)
+        .any(|task_snapshot| task_snapshot.model_node.as_str() == task)
 }
 
 async fn run_branched(workflow: &crate::model::Workflow, pid: &str) -> Snapshot {
@@ -3467,19 +3445,19 @@ async fn branched_step_selects_the_true_branch_and_skips_the_else() {
     assert!(host_all_terminal(&snapshot));
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "b2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     assert!(
         !has_task(&snapshot, "s21"),
@@ -3511,16 +3489,16 @@ async fn else_branch_runs_when_no_condition_matches() {
     assert!(host_all_terminal(&snapshot));
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     assert!(!has_task(&snapshot, "s11"));
     assert_eq!(
         state_of(&snapshot, "b2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s21"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 }
 
@@ -3539,12 +3517,12 @@ async fn branch_without_if_or_else_skips_and_the_flow_finishes() {
     assert!(host_all_terminal(&snapshot));
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     assert!(!has_task(&snapshot, "s11") && !has_task(&snapshot, "s12"));
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 }
 
@@ -3572,11 +3550,11 @@ async fn multiple_true_branches_all_run() {
     assert!(host_all_terminal(&snapshot));
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "b2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert!(has_task(&snapshot, "s11") && has_task(&snapshot, "s21"));
 }
@@ -3601,15 +3579,15 @@ async fn branched_step_flows_to_the_next_chain_step() {
     assert!(host_all_terminal(&snapshot));
     assert_eq!(
         state_of(&snapshot, "s12"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "step2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 }
 
@@ -3641,19 +3619,19 @@ async fn nested_branched_step_inside_a_branch() {
     assert!(host_all_terminal(&snapshot));
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "mid"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "c1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "c2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     assert!(!has_task(&snapshot, "c2s"));
 }
@@ -3680,17 +3658,17 @@ async fn waiting_inner_step_resumes_on_the_client_action() {
     let snapshot = host.snapshot("p-wait").await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     // A container whose children run stays Running (the legacy step whose
     // `next` ran): b1 over s11, and step1 over b1.
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running
+        crate::scheduler::core::model::task_graph::TaskState::Running
     );
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running
+        crate::scheduler::core::model::task_graph::TaskState::Running
     );
 
     host.apply_action("p-wait", "s11", ActionKind::Complete, Vec::new())
@@ -3701,11 +3679,11 @@ async fn waiting_inner_step_resumes_on_the_client_action() {
     let snapshot = host.snapshot("p-wait").await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 }
 
@@ -3745,11 +3723,11 @@ async fn waiting_branched_step_fans_out_on_the_client_completion() {
     let snapshot = host.snapshot("p-manual").await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 }
 
@@ -3788,16 +3766,16 @@ async fn cancelling_a_finished_container_rewinds_its_branches() {
     let snapshot = host.snapshot("p-cancel-early").await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
         "the container settled after its branches ran"
     );
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 
     host.apply_action("p-cancel-early", "step1", ActionKind::Cancel, Vec::new())
@@ -3807,22 +3785,19 @@ async fn cancelling_a_finished_container_rewinds_its_branches() {
     let snapshot = host.snapshot("p-cancel-early").await.unwrap().unwrap();
     let state_at = |task: &str, generation: u64| {
         snapshot
-            .executions
-            .get(
-                &crate::scheduler::core::model::execution_graph::ExecutionId::new(task, generation)
-                    .unwrap(),
-            )
-            .map(|execution| execution.state)
+            .tasks
+            .get(&crate::scheduler::core::model::task_graph::TaskId::new(task, generation).unwrap())
+            .map(|task| task.state)
             .unwrap()
     };
     assert_eq!(
         state_at("step1", 0),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Backed,
+        crate::scheduler::core::model::task_graph::TaskState::Backed,
         "the decided generation took the legacy cancelled act's fact"
     );
     assert_eq!(
         state_at("step1", 1),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
+        crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the redone step waits on its own act"
     );
 
@@ -3842,23 +3817,23 @@ async fn cancelling_a_finished_container_rewinds_its_branches() {
     assert!(host_all_terminal(&snapshot));
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "step2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
-    assert_eq!(executions_of(&snapshot, "step1"), vec![0, 1]);
+    assert_eq!(tasks_of(&snapshot, "step1"), vec![0, 1]);
     assert_eq!(
-        executions_of(&snapshot, "b1"),
+        tasks_of(&snapshot, "b1"),
         vec![0, 1],
         "the re-entered container redrew its branches exactly once"
     );
@@ -3902,15 +3877,15 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
     let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running
+        crate::scheduler::core::model::task_graph::TaskState::Running
     );
     assert_eq!(
         state_of(&snapshot, "b2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     host.apply_action("p-cancel-mid", "s11", ActionKind::Complete, Vec::new())
         .await
@@ -3919,7 +3894,7 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
     let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
         "the container settled once its branches did"
     );
 
@@ -3937,36 +3912,36 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
         host_all_terminal_generations_0(&snapshot),
         "gen0 subtree left open: {:?}",
         snapshot
-            .executions
+            .tasks
             .iter()
-            .filter(|(id, execution)| {
+            .filter(|(id, task)| {
                 id.generation == 0
-                    && id.task_id != crate::utils::consts::TASK_ROOT_TID
-                    && !execution.state.is_terminal()
+                    && id.node != crate::utils::consts::TASK_ROOT_TID
+                    && !task.state.is_terminal()
             })
-            .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+            .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
             .collect::<Vec<_>>()
     );
     assert_eq!(
         state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
         "the root outlives the generation its rewind closed"
     );
     // step1 is auto: the re-entered generation re-fans out on its own,
     // READMITTING the rewound branch generations (never a third one).
     assert_eq!(
-        executions_of(&snapshot, "b1"),
+        tasks_of(&snapshot, "b1"),
         vec![0, 1],
         "readmission must not allocate a third generation"
     );
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
         "the readmitted branch container runs over its own inner step"
     );
     assert_eq!(
         state_of(&snapshot, "s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
 
     host.apply_action("p-cancel-mid", "s11", ActionKind::Complete, Vec::new())
@@ -3982,14 +3957,14 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
     assert!(host_all_terminal(&snapshot));
     assert_eq!(
         state_of(&snapshot, "b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_of(&snapshot, "step2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
-        executions_of(&snapshot, "b1"),
+        tasks_of(&snapshot, "b1"),
         vec![0, 1],
         "the redone container redrew its branches exactly once"
     );
@@ -4001,7 +3976,7 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn kernel_path_settles_a_branched_workflow() {
-    use crate::scheduler::core::model::execution_graph::ExecutionState as S;
+    use crate::scheduler::core::model::task_graph::TaskState as S;
 
     let workflow = crate::model::Workflow::new()
         .with_id("wf-branch-parity")
@@ -4037,11 +4012,11 @@ async fn kernel_path_settles_a_branched_workflow() {
         state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
         S::Completed
     );
-    assert!(snapshot.executions.values().all(|e| e.state.is_terminal()));
+    assert!(snapshot.tasks.values().all(|e| e.state.is_terminal()));
 }
 
 fn host_all_terminal(snapshot: &Snapshot) -> bool {
-    snapshot.executions.values().all(|e| e.state.is_terminal())
+    snapshot.tasks.values().all(|e| e.state.is_terminal())
         && snapshot
             .operations
             .values()
@@ -4053,10 +4028,10 @@ fn host_all_terminal(snapshot: &Snapshot) -> bool {
 /// stays live until every generation the rewinds created settled too.
 fn host_all_terminal_generations_0(snapshot: &Snapshot) -> bool {
     snapshot
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.generation == 0 && id.task_id != crate::utils::consts::TASK_ROOT_TID)
-        .all(|(_, execution)| execution.state.is_terminal())
+        .filter(|(id, _)| id.generation == 0 && id.node != crate::utils::consts::TASK_ROOT_TID)
+        .all(|(_, task)| task.state.is_terminal())
 }
 
 /// A client action's intent is durable *as the action*: when the deciding
@@ -4083,16 +4058,15 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
     // The client's intent, committed exactly as the deciding call does it —
     // and then that call never runs (the hop below is all that is left).
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
-    let execution =
-        crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let task = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     let operation = OperationId {
         process_id: PID.into(),
-        task_id: "s1".into(),
+        node: "s1".into(),
         generation: 0,
         sequence: snapshot
             .operations
             .keys()
-            .filter(|id| id.task_id == "s1" && id.generation == 0)
+            .filter(|id| id.node == "s1" && id.generation == 0)
             .map(|id| id.sequence)
             .max()
             .unwrap_or(0)
@@ -4100,7 +4074,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
     };
     let intent = KernelHost::action_intent(
         PID,
-        &execution,
+        &task,
         &operation,
         &ActionKind::Fail {
             code: "E9".into(),
@@ -4112,7 +4086,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
     host.processes.commit_transition(&intent).await.unwrap();
     assert_eq!(
         state_of(&host.snapshot(PID).await.unwrap().unwrap(), "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
+        crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the intent alone decides nothing"
     );
 
@@ -4122,20 +4096,20 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Failed,
+        crate::scheduler::core::model::task_graph::TaskState::Failed,
         "the hop applied the client's failure, not a completion"
     );
     assert_eq!(
         snapshot
             .variables
-            .get(&(execution, "error.code".to_string()))
+            .get(&(task, "error.code".to_string()))
             .map(String::as_str),
         Some("E9"),
         "the failure carries the client's code"
     );
     assert_eq!(
         state_of(&snapshot, "s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped,
+        crate::scheduler::core::model::task_graph::TaskState::Skipped,
         "the downstream is skipped by the error walk"
     );
 
@@ -4153,19 +4127,19 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
     let bare = TransitionPlan {
         process_id: "p-bare-action".into(),
         expected: snapshot.version.clone(),
-        execution_creates: Vec::new(),
+        task_creates: Vec::new(),
         state_changes: Vec::new(),
         variable_writes: Vec::new(),
         source_operation: None,
         operations: vec![OperationIntent {
             id: OperationId {
                 process_id: "p-bare-action".into(),
-                task_id: "s1".into(),
+                node: "s1".into(),
                 generation: 0,
                 sequence: snapshot
                     .operations
                     .keys()
-                    .filter(|id| id.task_id == "s1" && id.generation == 0)
+                    .filter(|id| id.node == "s1" && id.generation == 0)
                     .map(|id| id.sequence)
                     .max()
                     .unwrap_or(0)
@@ -4184,17 +4158,17 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
     let snapshot = bare_host.snapshot("p-bare-action").await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
         "a fact-less operation keeps the bare hop"
     );
     assert!(bare_host.process_completed("p-bare-action").await.unwrap());
 }
 
-fn executions_of(snapshot: &Snapshot, task: &str) -> Vec<u64> {
+fn tasks_of(snapshot: &Snapshot, task: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = snapshot
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == task)
+        .filter(|id| id.node == task)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -4243,10 +4217,10 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Backed
+        crate::scheduler::core::model::task_graph::TaskState::Backed
     );
-    let source = crate::scheduler::core::model::execution_graph::ExecutionId {
-        task_id: "s1".into(),
+    let source = crate::scheduler::core::model::task_graph::TaskId {
+        node: "s1".into(),
         generation: 0,
     };
     assert_eq!(
@@ -4280,13 +4254,13 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
 
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
-        executions_of(&snapshot, "s1"),
+        tasks_of(&snapshot, "s1"),
         vec![0, 1],
         "the rewind created one fresh generation"
     );
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
+        crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the redone step waits on its own act again"
     );
     let rewind = snapshot
@@ -4336,22 +4310,22 @@ async fn abort_on_waiting_step_aborts_the_ancestor_chain() {
     let state = |task: &str| state_of(&snapshot, task);
     assert_eq!(
         state("s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Aborted
+        crate::scheduler::core::model::task_graph::TaskState::Aborted
     );
     // The ancestor walk: the root — terminal since the seed — is
     // rewritten Aborted; the completed sibling is not an ancestor.
     assert_eq!(
         state("$"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Aborted
+        crate::scheduler::core::model::task_graph::TaskState::Aborted
     );
     assert_eq!(
         state("s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     // The untouched downstream joins the death cascade.
     assert_eq!(
         state("s3"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
 }
 
@@ -4392,23 +4366,23 @@ async fn abort_inside_a_branch_aborts_the_container_chain() {
     let state = |task: &str| state_of(&snapshot, task);
     assert_eq!(
         state("s11"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Aborted
+        crate::scheduler::core::model::task_graph::TaskState::Aborted
     );
     assert_eq!(
         state("b1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Aborted
+        crate::scheduler::core::model::task_graph::TaskState::Aborted
     );
     assert_eq!(
         state("step1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Aborted
+        crate::scheduler::core::model::task_graph::TaskState::Aborted
     );
     assert_eq!(
         state("$"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Aborted
+        crate::scheduler::core::model::task_graph::TaskState::Aborted
     );
     assert_eq!(
         state("b2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
 }
 
@@ -4443,31 +4417,28 @@ async fn back_redo_reruns_the_named_step_and_its_downstream() {
     let snapshot = host.snapshot("p-back").await.unwrap().unwrap();
     let state_at = |task: &str, generation: u64| {
         snapshot
-            .executions
-            .get(
-                &crate::scheduler::core::model::execution_graph::ExecutionId::new(task, generation)
-                    .unwrap(),
-            )
-            .map(|execution| execution.state)
+            .tasks
+            .get(&crate::scheduler::core::model::task_graph::TaskId::new(task, generation).unwrap())
+            .map(|task| task.state)
             .unwrap()
     };
     assert_eq!(
         state_at("s2", 0),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Backed,
+        crate::scheduler::core::model::task_graph::TaskState::Backed,
         "the backed generation keeps its decision"
     );
     assert_eq!(
         state_at("s1", 0),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     // The redo: s1 generation 1 already ran; s2 generation 1 waits again.
     assert_eq!(
         state_at("s1", 1),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state_at("s2", 1),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
 
     host.apply_action("p-back", "s2", ActionKind::Complete, Vec::new())
@@ -4510,7 +4481,7 @@ async fn back_without_to_is_refused_without_consuming_state() {
     );
     assert_eq!(
         state_of(&after, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
+        crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the step keeps waiting on its act"
     );
 }
@@ -4552,22 +4523,22 @@ async fn fail_on_waiting_step_skips_downstream_and_decides_ancestors() {
     let state = |task: &str| state_of(&snapshot, task);
     assert_eq!(
         state("s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Failed
+        crate::scheduler::core::model::task_graph::TaskState::Failed
     );
     assert_eq!(
         state("s3"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     // The completed sibling is not an ancestor; the root is.
     assert_eq!(
         state("s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state("$"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Failed
+        crate::scheduler::core::model::task_graph::TaskState::Failed
     );
-    let s2 = crate::scheduler::core::model::execution_graph::ExecutionId::new("s2", 0).unwrap();
+    let s2 = crate::scheduler::core::model::task_graph::TaskId::new("s2", 0).unwrap();
     assert_eq!(
         snapshot
             .variables
@@ -4582,7 +4553,7 @@ async fn fail_on_waiting_step_skips_downstream_and_decides_ancestors() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn kernel_abort_walks_up_and_skips_downstream() {
-    use crate::scheduler::core::model::execution_graph::ExecutionState as S;
+    use crate::scheduler::core::model::task_graph::TaskState as S;
 
     let workflow = || {
         crate::model::Workflow::new()
@@ -4621,7 +4592,7 @@ async fn kernel_abort_walks_up_and_skips_downstream() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn kernel_fail_decides_ancestors_and_skips_downstream() {
-    use crate::scheduler::core::model::execution_graph::ExecutionState as S;
+    use crate::scheduler::core::model::task_graph::TaskState as S;
 
     let workflow = || {
         crate::model::Workflow::new()
@@ -4773,7 +4744,7 @@ async fn kernel_parent_state_stays_running_while_a_fired_branch_runs() {
     let snapshot = loop {
         let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
         if state_of(&snapshot, "s1")
-            == crate::scheduler::core::model::execution_graph::ExecutionState::Running
+            == crate::scheduler::core::model::task_graph::TaskState::Running
         {
             break snapshot;
         }
@@ -4781,21 +4752,21 @@ async fn kernel_parent_state_stays_running_while_a_fired_branch_runs() {
             std::time::Instant::now() < deadline,
             "the kernel step never resumed running: {:?}",
             snapshot
-                .executions
+                .tasks
                 .iter()
-                .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
                 .collect::<Vec<_>>()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     };
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
         "the kernel step runs while its branch runs"
     );
     assert_eq!(
         state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
         "the kernel root runs while its children run"
     );
 
@@ -4814,12 +4785,12 @@ async fn kernel_parent_state_stays_running_while_a_fired_branch_runs() {
     let settled = wait_kernel_settled(&host, PID).await;
     assert_eq!(
         state_of(&settled, crate::utils::consts::TASK_ROOT_TID),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
         "the root completes once the branch settled"
     );
     assert_eq!(
         state_of(&settled, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
     );
     kernel_engine.close().await;
 }
@@ -4908,9 +4879,9 @@ async fn run_timeout_engine(pid: &str, workflow: &crate::model::Workflow) -> cra
             let dump = format!(
                 "executions={:?} operations={:?} owner_vars={:?}",
                 snapshot
-                    .executions
+                    .tasks
                     .iter()
-                    .map(|(id, execution)| format!("{id:?}:{:?}", execution.state))
+                    .map(|(id, task)| format!("{id:?}:{:?}", task.state))
                     .collect::<Vec<_>>(),
                 snapshot
                     .operations
@@ -4923,7 +4894,7 @@ async fn run_timeout_engine(pid: &str, workflow: &crate::model::Workflow) -> cra
                 snapshot
                     .variables
                     .iter()
-                    .filter(|((scope, _), _)| scope.task_id == "s1")
+                    .filter(|((scope, _), _)| scope.node == "s1")
                     .map(|((_, name), value)| format!("{name}={value}"))
                     .collect::<Vec<_>>(),
             );
@@ -5012,7 +4983,7 @@ async fn kernel_timeout_branches_fire_and_settle() {
     for node in ["t1", "t2"] {
         assert_eq!(
             state_of(&snapshot, node),
-            crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+            crate::scheduler::core::model::task_graph::TaskState::Completed,
             "the branch '{node}' must have fired and settled"
         );
     }
@@ -5148,11 +5119,11 @@ async fn uses_steps_write_created_message_records() {
     let state = |task: &str| state_of(&snapshot, task);
     assert_eq!(
         state("s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     assert_eq!(
         state("s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 
     // The records reached the transport with the commits that wrote them: the
@@ -5210,7 +5181,7 @@ async fn effect_params_resolve_scope_variables() {
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
     let snapshot = host.snapshot("p-params").await.unwrap().unwrap();
-    let s1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let s1 = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     assert_eq!(
         snapshot
             .variables
@@ -5364,7 +5335,7 @@ async fn func_package_runs_inside_the_completion_hop() {
     assert!(host.process_completed("p-effect").await.unwrap());
 
     let snapshot = host.snapshot("p-effect").await.unwrap().unwrap();
-    let s1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let s1 = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     assert_eq!(
         snapshot
             .variables
@@ -5383,11 +5354,11 @@ async fn func_package_runs_inside_the_completion_hop() {
     let state = |task: &str| state_of(&snapshot, task);
     assert_eq!(
         state("s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state("s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     engine.close().await;
 }
@@ -5396,7 +5367,7 @@ async fn func_package_runs_inside_the_completion_hop() {
 /// and the error walk takes over (upstream Failed, downstream Skipped).
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
-async fn package_error_fails_the_execution_and_walks_up() {
+async fn package_error_fails_the_task_and_walks_up() {
     let engine = crate::Engine::builder().start().await.unwrap();
     engine.runtime().package().register(
         "test.fail",
@@ -5431,7 +5402,7 @@ async fn package_error_fails_the_execution_and_walks_up() {
 
     assert!(host.process_completed("p-effect-fail").await.unwrap());
     let snapshot = host.snapshot("p-effect-fail").await.unwrap().unwrap();
-    let s1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let s1 = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     assert_eq!(
         snapshot
             .variables
@@ -5447,21 +5418,21 @@ async fn package_error_fails_the_execution_and_walks_up() {
     let state = |task: &str| state_of(&snapshot, task);
     assert_eq!(
         state("s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Failed
+        crate::scheduler::core::model::task_graph::TaskState::Failed
     );
     // The error walk: the ancestor chain ends Failed, the untouched
     // downstream skips.
     assert_eq!(
         state("$"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Failed
+        crate::scheduler::core::model::task_graph::TaskState::Failed
     );
     assert_eq!(
         state("s0"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed
+        crate::scheduler::core::model::task_graph::TaskState::Completed
     );
     assert_eq!(
         state("s2"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
     engine.close().await;
 }
@@ -5477,7 +5448,7 @@ fn scope_vars_carry_the_run_variables_without_the_engine_facts() {
         .with_step(|step| step.with_id("s1"));
     let spec = ProcessSpec::from_workflow("p-vars", &workflow, &|_| None).unwrap();
     let snapshot = spec.seed_snapshot().unwrap();
-    let s1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let s1 = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     let names: Vec<String> = scope_vars(&snapshot, &s1)
         .into_iter()
         .map(|(name, _)| name)
@@ -5555,7 +5526,7 @@ async fn effect_seals_snapshot_params() {
     assert_eq!(report.retried, 0, "the seal must land: {report:?}");
     assert!(host.process_completed("p-seal").await.unwrap());
     let snapshot = host.snapshot("p-seal").await.unwrap().unwrap();
-    let s1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let s1 = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     let kernel = |name: &str| {
         snapshot
             .variables
@@ -5642,10 +5613,10 @@ async fn effect_denies_a_snapshot_scope_the_owner_lacks() {
 
     assert!(host.process_completed("p-denied").await.unwrap());
     let snapshot = host.snapshot("p-denied").await.unwrap().unwrap();
-    let s1 = crate::scheduler::core::model::execution_graph::ExecutionId::new("s1", 0).unwrap();
+    let s1 = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::execution_graph::ExecutionState::Failed
+        crate::scheduler::core::model::task_graph::TaskState::Failed
     );
     let error = snapshot
         .variables

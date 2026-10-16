@@ -2,9 +2,9 @@ use super::*;
 
 #[test]
 fn the_flow_fact_is_one_axis_with_two_values() {
-    let mut snapshot = snapshot(vec![execution("step1", 0, ExecutionState::Running)]);
+    let mut snapshot = snapshot(vec![task("step1", 0, TaskState::Running)]);
     let step1 = id("step1", 0);
-    assert_eq!(execution_flow(&snapshot, &step1), None);
+    assert_eq!(task_flow(&snapshot, &step1), None);
     assert!(!parked_for_children(&snapshot, &step1));
     assert!(!deciding_catches(&snapshot, &step1));
 
@@ -12,10 +12,7 @@ fn the_flow_fact_is_one_axis_with_two_values() {
         (step1.clone(), FLOW_VAR.to_string()),
         FLOW_CHILDREN.to_string(),
     );
-    assert_eq!(
-        execution_flow(&snapshot, &step1),
-        Some(ExecutionFlow::Children)
-    );
+    assert_eq!(task_flow(&snapshot, &step1), Some(TaskFlow::Children));
     assert!(parked_for_children(&snapshot, &step1));
     assert!(!deciding_catches(&snapshot, &step1));
 
@@ -23,10 +20,7 @@ fn the_flow_fact_is_one_axis_with_two_values() {
         (step1.clone(), FLOW_VAR.to_string()),
         FLOW_CATCHES.to_string(),
     );
-    assert_eq!(
-        execution_flow(&snapshot, &step1),
-        Some(ExecutionFlow::Catches)
-    );
+    assert_eq!(task_flow(&snapshot, &step1), Some(TaskFlow::Catches));
     assert!(!parked_for_children(&snapshot, &step1));
     assert!(deciding_catches(&snapshot, &step1));
 
@@ -35,5 +29,5 @@ fn the_flow_fact_is_one_axis_with_two_values() {
     snapshot
         .variables
         .insert((step1.clone(), FLOW_VAR.to_string()), "?".to_string());
-    assert_eq!(execution_flow(&snapshot, &step1), None);
+    assert_eq!(task_flow(&snapshot, &step1), None);
 }

@@ -4,7 +4,7 @@ use std::fmt;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct OperationId {
     pub(crate) process_id: String,
-    pub(crate) task_id: String,
+    pub(crate) node: String,
     pub(crate) generation: u64,
     pub(crate) sequence: u64,
 }
@@ -354,7 +354,7 @@ mod tests {
     fn id() -> OperationId {
         OperationId {
             process_id: "p1".into(),
-            task_id: "t1".into(),
+            node: "t1".into(),
             generation: 3,
             sequence: 9,
         }
@@ -549,7 +549,7 @@ mod tests {
         let operation = OperationRecord {
             id: OperationId {
                 process_id: "p".into(),
-                task_id: "t".into(),
+                node: "t".into(),
                 generation: 0,
                 sequence: 0,
             },

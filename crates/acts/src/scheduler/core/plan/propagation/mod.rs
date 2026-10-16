@@ -1,11 +1,11 @@
 use crate::scheduler::core::{
     commit::process::ProcessSnapshot,
     model::{
-        execution_graph::{ExecutionGraph, ExecutionId, ExecutionState},
         model_graph::NodeId,
         operation::{OperationId, OperationKind},
+        task_graph::{TaskGraph, TaskId, TaskState},
         transition_plan::{
-            ExecutionCreate, OperationCommit, OperationIntent, OutboxIntent, StateChange,
+            OperationCommit, OperationIntent, OutboxIntent, StateChange, TaskCreate,
             TransitionPlan, VariableWrite,
         },
     },
@@ -24,7 +24,7 @@ pub(crate) enum JoinPolicy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PropagateCommand {
     pub(crate) process_id: String,
-    pub(crate) execution: ExecutionId,
+    pub(crate) task: TaskId,
     pub(crate) source_operation: OperationCommit,
     pub(crate) join_policy: JoinPolicy,
     /// The flow the host read from the declaring model, when the settling
@@ -67,10 +67,10 @@ pub(crate) struct FlowTarget {
 pub(crate) const GUARD_SKIP_VAR: &str = "__guard_skip";
 
 /// Whether one execution was skipped by its own guard (see [`GUARD_SKIP_VAR`]).
-pub(crate) fn is_guard_skip(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> bool {
+pub(crate) fn is_guard_skip(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {
     snapshot
         .variables
-        .contains_key(&(execution.clone(), GUARD_SKIP_VAR.to_string()))
+        .contains_key(&(task.clone(), GUARD_SKIP_VAR.to_string()))
 }
 
 pub(crate) struct PropagationPlanner;
@@ -79,8 +79,8 @@ pub(crate) struct PropagationPlanner;
 /// flow may continue". `Skipped` is deliberately absent: a skipped
 /// predecessor means the path is dead (a cancellation cascade flowed through
 /// it), so its successors are skipped too instead of running.
-fn is_success(state: ExecutionState) -> bool {
-    matches!(state, ExecutionState::Completed | ExecutionState::Submitted)
+fn is_success(state: TaskState) -> bool {
+    matches!(state, TaskState::Completed | TaskState::Submitted)
 }
 
 mod cascade;

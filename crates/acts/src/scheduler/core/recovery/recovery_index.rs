@@ -52,7 +52,7 @@ impl RecoveryIndexCodec {
         );
         for entry in &index.entries {
             write_string(&mut output, &entry.operation_id.process_id)?;
-            write_string(&mut output, &entry.operation_id.task_id)?;
+            write_string(&mut output, &entry.operation_id.node)?;
             output.extend_from_slice(&entry.operation_id.generation.to_be_bytes());
             output.extend_from_slice(&entry.operation_id.sequence.to_be_bytes());
             output.extend_from_slice(&entry.revision.to_be_bytes());
@@ -84,7 +84,7 @@ impl RecoveryIndexCodec {
         for _ in 0..count {
             let operation_id = OperationId {
                 process_id: reader.string()?,
-                task_id: reader.string()?,
+                node: reader.string()?,
                 generation: reader.u64()?,
                 sequence: reader.u64()?,
             };
@@ -123,7 +123,7 @@ fn validate(index: &RecoveryIndex) -> Result<(), RecoveryIndexError> {
                 entry.operation_id.clone(),
             ));
         }
-        if entry.operation_id.task_id.trim().is_empty() {
+        if entry.operation_id.node.trim().is_empty() {
             return Err(RecoveryIndexError::EmptyTaskId(entry.operation_id.clone()));
         }
         if let Some(previous) = previous {
@@ -145,7 +145,7 @@ fn validate(index: &RecoveryIndex) -> Result<(), RecoveryIndexError> {
 pub(crate) fn operation_order(left: &OperationId, right: &OperationId) -> std::cmp::Ordering {
     left.process_id
         .cmp(&right.process_id)
-        .then_with(|| left.task_id.cmp(&right.task_id))
+        .then_with(|| left.node.cmp(&right.node))
         .then_with(|| left.generation.cmp(&right.generation))
         .then_with(|| left.sequence.cmp(&right.sequence))
 }
@@ -243,7 +243,7 @@ mod tests {
             entries: vec![RecoveryIndexEntry {
                 operation_id: OperationId {
                     process_id: "p".into(),
-                    task_id: "t".into(),
+                    node: "t".into(),
                     generation: 1,
                     sequence: 2,
                 },
@@ -259,11 +259,11 @@ mod tests {
             Err(RecoveryIndexError::TrailingBytes)
         );
     }
-    fn entry(task_id: &str, sequence: u64) -> RecoveryIndexEntry {
+    fn entry(node: &str, sequence: u64) -> RecoveryIndexEntry {
         RecoveryIndexEntry {
             operation_id: OperationId {
                 process_id: "p".into(),
-                task_id: task_id.into(),
+                node: node.into(),
                 generation: 0,
                 sequence,
             },

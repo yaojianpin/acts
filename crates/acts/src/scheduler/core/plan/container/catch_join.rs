@@ -6,9 +6,9 @@ use super::*;
 pub(crate) struct CatchJoinCommand {
     pub(crate) process_id: String,
     /// The failed step whose CATCH children are settling.
-    pub(crate) parent: ExecutionId,
+    pub(crate) parent: TaskId,
     /// The CATCH child whose settlement triggered this join.
-    pub(crate) source: ExecutionId,
+    pub(crate) source: TaskId,
 }
 
 /// What a settled CATCH child set decided.
@@ -48,7 +48,7 @@ impl ContainerPlanner {
     /// both `catches` and `timeouts` has timeout branches among its children,
     /// and the last one to settle is what completes the gate.
     pub(crate) fn plan_catch_join(
-        graph: &ExecutionGraph,
+        graph: &TaskGraph,
         snapshot: &ProcessSnapshot,
         command: &CatchJoinCommand,
     ) -> Result<Option<CatchJoinOutcome>, ContainerError> {
@@ -68,12 +68,12 @@ impl ContainerPlanner {
             return Ok(None);
         }
         let parent = snapshot
-            .executions
+            .tasks
             .get(&command.parent)
-            .ok_or_else(|| ContainerError::ExecutionNotFound(command.parent.clone()))?;
+            .ok_or_else(|| ContainerError::TaskNotFound(command.parent.clone()))?;
         // The failed step stays `Running` while its CATCH children run (the
         // legacy `Step::on_error`); a decision that landed meanwhile owns it.
-        if parent.state != ExecutionState::Running {
+        if parent.state != TaskState::Running {
             return Ok(None);
         }
         let children = graph.children(&command.parent);
@@ -87,14 +87,14 @@ impl ContainerPlanner {
         let mut handlers = 0usize;
         for child in children {
             let state = snapshot
-                .executions
+                .tasks
                 .get(child)
-                .ok_or_else(|| ContainerError::ExecutionNotFound(child.clone()))?
+                .ok_or_else(|| ContainerError::TaskNotFound(child.clone()))?
                 .state;
             if !state.is_terminal() {
                 return Ok(None);
             }
-            if state == ExecutionState::Aborted {
+            if state == TaskState::Aborted {
                 // The abort walk owns this step's outcome (legacy
                 // `auto_complete` refuses to decide an aborted child set).
                 return Ok(None);
@@ -103,11 +103,11 @@ impl ContainerPlanner {
             // `is_empty_catched` filters by the sign. The step's other children
             // (a `timeouts` branch the tick fired) gate the join above but do
             // not vote.
-            if execution_sign(snapshot, child) != Some(SIGN_CATCH) {
+            if task_sign(snapshot, child) != Some(SIGN_CATCH) {
                 continue;
             }
             handlers += 1;
-            if state != ExecutionState::Skipped {
+            if state != TaskState::Skipped {
                 resumed = false;
             }
         }
@@ -117,26 +117,26 @@ impl ContainerPlanner {
             return Ok(None);
         }
         let sequence =
-            snapshot.next_operation_sequence(&command.parent.task_id, command.parent.generation);
+            snapshot.next_operation_sequence(&command.parent.node, command.parent.generation);
         let operation = OperationIntent {
             id: OperationId {
                 process_id: command.process_id.clone(),
-                task_id: command.parent.task_id.clone(),
+                node: command.parent.node.clone(),
                 generation: command.parent.generation,
                 sequence,
             },
             kind: OperationKind::PropagateTask,
         };
-        let change = |to: ExecutionState| StateChange {
-            execution: command.parent.clone(),
+        let change = |to: TaskState| StateChange {
+            task: command.parent.clone(),
             expected_revision: parent.revision,
-            from: ExecutionState::Running,
+            from: TaskState::Running,
             to,
         };
         Ok(Some(if resumed {
-            CatchJoinOutcome::Resumed(change(ExecutionState::Failed), operation)
+            CatchJoinOutcome::Resumed(change(TaskState::Failed), operation)
         } else {
-            CatchJoinOutcome::Caught(change(ExecutionState::Completed), operation)
+            CatchJoinOutcome::Caught(change(TaskState::Completed), operation)
         }))
     }
 }

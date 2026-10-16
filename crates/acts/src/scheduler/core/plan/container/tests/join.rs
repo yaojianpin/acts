@@ -15,17 +15,14 @@ fn mark_parked(snapshot: &mut ProcessSnapshot, parent: &str) {
 
 #[test]
 fn join_completes_the_parent_when_every_child_is_terminal() {
-    let mut b = crate::scheduler::core::model::execution_graph::ExecutionGraphBuilder::new("p1", 1)
-        .unwrap();
+    let mut b = crate::scheduler::core::model::task_graph::TaskGraphBuilder::new("p1", 1).unwrap();
     for (task, generation) in [("step1", 0u64), ("b1", 0), ("b2", 0)] {
-        b.add_node(
-            crate::scheduler::core::model::execution_graph::ExecutionNode {
-                id: id(task, generation),
-                model_node: node(task),
-                state: ExecutionState::Created,
-                revision: 0,
-            },
-        )
+        b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+            id: id(task, generation),
+            model_node: node(task),
+            state: TaskState::Created,
+            revision: 0,
+        })
         .unwrap();
     }
     b.set_root(id("step1", 0)).unwrap();
@@ -35,31 +32,31 @@ fn join_completes_the_parent_when_every_child_is_terminal() {
     let mut snapshot = snapshot(vec![
         (
             id("step1", 0),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("step1"),
                 parent: None,
                 predecessors: vec![],
-                state: ExecutionState::Running,
+                state: TaskState::Running,
                 revision: 3,
             },
         ),
         (
             id("b1", 0),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("b1"),
                 parent: Some(id("step1", 0)),
                 predecessors: vec![id("step1", 0)],
-                state: ExecutionState::Completed,
+                state: TaskState::Completed,
                 revision: 5,
             },
         ),
         (
             id("b2", 0),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("b2"),
                 parent: Some(id("step1", 0)),
                 predecessors: vec![id("step1", 0)],
-                state: ExecutionState::Skipped,
+                state: TaskState::Skipped,
                 revision: 4,
             },
         ),
@@ -72,11 +69,11 @@ fn join_completes_the_parent_when_every_child_is_terminal() {
     let (change, operation) = ContainerPlanner::plan_join(&graph, &snapshot, &command)
         .unwrap()
         .unwrap();
-    assert_eq!(change.execution, id("step1", 0));
-    assert_eq!(change.from, ExecutionState::Running);
-    assert_eq!(change.to, ExecutionState::Completed);
+    assert_eq!(change.task, id("step1", 0));
+    assert_eq!(change.from, TaskState::Running);
+    assert_eq!(change.to, TaskState::Completed);
     assert_eq!(operation.kind, OperationKind::PropagateTask);
-    assert_eq!(operation.id.task_id, "step1");
+    assert_eq!(operation.id.node, "step1");
     assert_eq!(operation.id.sequence, 1);
 }
 
@@ -84,17 +81,14 @@ fn join_completes_the_parent_when_every_child_is_terminal() {
 fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     let graph = {
         let mut b =
-            crate::scheduler::core::model::execution_graph::ExecutionGraphBuilder::new("p1", 1)
-                .unwrap();
+            crate::scheduler::core::model::task_graph::TaskGraphBuilder::new("p1", 1).unwrap();
         for task in ["step1", "b1", "b2"] {
-            b.add_node(
-                crate::scheduler::core::model::execution_graph::ExecutionNode {
-                    id: id(task, 0),
-                    model_node: node(task),
-                    state: ExecutionState::Created,
-                    revision: 0,
-                },
-            )
+            b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+                id: id(task, 0),
+                model_node: node(task),
+                state: TaskState::Created,
+                revision: 0,
+            })
             .unwrap();
         }
         b.set_root(id("step1", 0)).unwrap();
@@ -108,21 +102,21 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     };
     // The parent is a running container carrying the park mark: that is
     // the state a child's settlement decides.
-    let parked_child = |b1: ExecutionState, b2: ExecutionState| {
+    let parked_child = |b1: TaskState, b2: TaskState| {
         let mut snapshot = snapshot(vec![
             (
                 id("step1", 0),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: node("step1"),
                     parent: None,
                     predecessors: vec![],
-                    state: ExecutionState::Running,
+                    state: TaskState::Running,
                     revision: 3,
                 },
             ),
             (
                 id("b1", 0),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: node("b1"),
                     parent: Some(id("step1", 0)),
                     predecessors: vec![id("step1", 0)],
@@ -132,7 +126,7 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
             ),
             (
                 id("b2", 0),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: node("b2"),
                     parent: Some(id("step1", 0)),
                     predecessors: vec![id("step1", 0)],
@@ -147,7 +141,7 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     assert!(
         ContainerPlanner::plan_join(
             &graph,
-            &parked_child(ExecutionState::Running, ExecutionState::Completed),
+            &parked_child(TaskState::Running, TaskState::Completed),
             &command
         )
         .unwrap()
@@ -157,7 +151,7 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     assert!(
         ContainerPlanner::plan_join(
             &graph,
-            &parked_child(ExecutionState::Completed, ExecutionState::Aborted),
+            &parked_child(TaskState::Completed, TaskState::Aborted),
             &command
         )
         .unwrap()
@@ -167,7 +161,7 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     // an execution waiting for its own act (the legacy `Interrupt`) is
     // `Waiting`, and one whose act is in flight is `Running` — neither is
     // a container until its flow says so.
-    let mut unmarked = parked_child(ExecutionState::Completed, ExecutionState::Skipped);
+    let mut unmarked = parked_child(TaskState::Completed, TaskState::Skipped);
     unmarked.variables.clear();
     assert!(
         ContainerPlanner::plan_join(&graph, &unmarked, &command)
@@ -176,7 +170,7 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     );
     // A parent deciding its catches is never joined by the plain join
     // either — that flow belongs to the catch join.
-    let mut decider = parked_child(ExecutionState::Completed, ExecutionState::Skipped);
+    let mut decider = parked_child(TaskState::Completed, TaskState::Skipped);
     decider.variables.insert(
         (id("step1", 0), FLOW_VAR.to_string()),
         FLOW_CATCHES.to_string(),
@@ -187,14 +181,14 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
             .is_none()
     );
     // A `Waiting` parent is never joined either: its act is unanswered.
-    let mut waiting = parked_child(ExecutionState::Completed, ExecutionState::Skipped);
-    waiting.executions.insert(
+    let mut waiting = parked_child(TaskState::Completed, TaskState::Skipped);
+    waiting.tasks.insert(
         id("step1", 0),
-        ExecutionSnapshot {
+        TaskSnapshot {
             model_node: node("step1"),
             parent: None,
             predecessors: vec![],
-            state: ExecutionState::Waiting,
+            state: TaskState::Waiting,
             revision: 3,
         },
     );

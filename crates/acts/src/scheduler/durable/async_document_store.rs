@@ -599,16 +599,16 @@ impl std::error::Error for AsyncRepositoryError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::core::commit::process::ExecutionSnapshot;
     use crate::scheduler::core::commit::process::ProcessSnapshot;
-    use crate::scheduler::core::model::execution_graph::ExecutionId;
-    use crate::scheduler::core::model::execution_graph::ExecutionState;
+    use crate::scheduler::core::commit::process::TaskSnapshot;
     use crate::scheduler::core::model::model_graph::NodeId;
     use crate::scheduler::core::model::operation::ClaimToken;
     use crate::scheduler::core::model::operation::OperationId;
     use crate::scheduler::core::model::operation::OperationKind;
     use crate::scheduler::core::model::operation::OperationRecord;
     use crate::scheduler::core::model::operation::OperationState;
+    use crate::scheduler::core::model::task_graph::TaskId;
+    use crate::scheduler::core::model::task_graph::TaskState;
     use crate::scheduler::core::model::transition_plan::ProcessVersion;
     use crate::scheduler::core::recovery::recovery_index::{RecoveryIndex, RecoveryIndexCodec};
     use crate::scheduler::durable::document::ProcessDocumentCodec;
@@ -620,10 +620,10 @@ mod tests {
     /// versions of the same aggregate as far as a load's consistency check is
     /// concerned.
     fn snapshot(with_operation: bool) -> ProcessSnapshot {
-        let execution = ExecutionId::new("step", 0).unwrap();
+        let task = TaskId::new("step", 0).unwrap();
         let operation_id = OperationId {
             process_id: "process".into(),
-            task_id: "step".into(),
+            node: "step".into(),
             generation: 0,
             sequence: 0,
         };
@@ -640,13 +640,13 @@ mod tests {
                 process: 2,
                 operations: u64::from(with_operation),
             },
-            executions: HashMap::from([(
-                execution.clone(),
-                ExecutionSnapshot {
+            tasks: HashMap::from([(
+                task.clone(),
+                TaskSnapshot {
                     model_node: NodeId::parse("model-step").unwrap(),
                     parent: None,
                     predecessors: vec![],
-                    state: ExecutionState::Ready,
+                    state: TaskState::Ready,
                     revision: 1,
                 },
             )]),
@@ -770,7 +770,7 @@ mod tests {
         };
         let operation_id = OperationId {
             process_id: "process".into(),
-            task_id: "step".into(),
+            node: "step".into(),
             generation: 0,
             sequence: 0,
         };

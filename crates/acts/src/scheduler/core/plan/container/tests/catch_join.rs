@@ -1,17 +1,14 @@
 use super::*;
 
-fn catch_graph() -> ExecutionGraph {
-    let mut b = crate::scheduler::core::model::execution_graph::ExecutionGraphBuilder::new("p1", 1)
-        .unwrap();
+fn catch_graph() -> TaskGraph {
+    let mut b = crate::scheduler::core::model::task_graph::TaskGraphBuilder::new("p1", 1).unwrap();
     for task in ["step1", "c1", "c2"] {
-        b.add_node(
-            crate::scheduler::core::model::execution_graph::ExecutionNode {
-                id: id(task, 0),
-                model_node: node(task),
-                state: ExecutionState::Created,
-                revision: 0,
-            },
-        )
+        b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+            id: id(task, 0),
+            model_node: node(task),
+            state: TaskState::Created,
+            revision: 0,
+        })
         .unwrap();
     }
     b.set_root(id("step1", 0)).unwrap();
@@ -23,21 +20,21 @@ fn catch_graph() -> ExecutionGraph {
 /// A failed step deciding its caught error: the step carries the ERROR
 /// sign, its CATCH children carry theirs, and the children's states are
 /// the argument.
-fn catch_snapshot(c1: ExecutionState, c2: ExecutionState) -> ProcessSnapshot {
+fn catch_snapshot(c1: TaskState, c2: TaskState) -> ProcessSnapshot {
     let mut snapshot = snapshot(vec![
         (
             id("step1", 0),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("step1"),
                 parent: None,
                 predecessors: vec![],
-                state: ExecutionState::Running,
+                state: TaskState::Running,
                 revision: 3,
             },
         ),
         (
             id("c1", 0),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("c1"),
                 parent: Some(id("step1", 0)),
                 predecessors: vec![id("step1", 0)],
@@ -47,7 +44,7 @@ fn catch_snapshot(c1: ExecutionState, c2: ExecutionState) -> ProcessSnapshot {
         ),
         (
             id("c2", 0),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("c2"),
                 parent: Some(id("step1", 0)),
                 predecessors: vec![id("step1", 0)],
@@ -81,16 +78,16 @@ fn catch_command() -> CatchJoinCommand {
 #[test]
 fn catch_join_resumes_the_error_when_every_catcher_skipped() {
     let graph = catch_graph();
-    let snapshot = catch_snapshot(ExecutionState::Skipped, ExecutionState::Skipped);
+    let snapshot = catch_snapshot(TaskState::Skipped, TaskState::Skipped);
     let outcome = ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command()).unwrap();
     let Some(CatchJoinOutcome::Resumed(change, operation)) = outcome else {
         panic!("every skipped catcher resumes the error");
     };
-    assert_eq!(change.execution, id("step1", 0));
-    assert_eq!(change.from, ExecutionState::Running);
-    assert_eq!(change.to, ExecutionState::Failed);
+    assert_eq!(change.task, id("step1", 0));
+    assert_eq!(change.from, TaskState::Running);
+    assert_eq!(change.to, TaskState::Failed);
     assert_eq!(operation.kind, OperationKind::PropagateTask);
-    assert_eq!(operation.id.task_id, "step1");
+    assert_eq!(operation.id.node, "step1");
     assert_eq!(operation.id.sequence, 0);
 }
 
@@ -98,11 +95,11 @@ fn catch_join_resumes_the_error_when_every_catcher_skipped() {
 fn catch_join_catches_when_a_catcher_did_not_skip() {
     let graph = catch_graph();
     for (c1, c2) in [
-        (ExecutionState::Completed, ExecutionState::Skipped),
-        (ExecutionState::Completed, ExecutionState::Completed),
+        (TaskState::Completed, TaskState::Skipped),
+        (TaskState::Completed, TaskState::Completed),
         // The legacy `is_empty_catched` only counts skips, so a failed
         // handler also leaves the error caught.
-        (ExecutionState::Failed, ExecutionState::Skipped),
+        (TaskState::Failed, TaskState::Skipped),
     ] {
         let snapshot = catch_snapshot(c1, c2);
         let outcome =
@@ -110,8 +107,8 @@ fn catch_join_catches_when_a_catcher_did_not_skip() {
         let Some(CatchJoinOutcome::Caught(change, operation)) = outcome else {
             panic!("a non-skipped catcher catches the error ({c1:?}/{c2:?})");
         };
-        assert_eq!(change.from, ExecutionState::Running);
-        assert_eq!(change.to, ExecutionState::Completed);
+        assert_eq!(change.from, TaskState::Running);
+        assert_eq!(change.to, TaskState::Completed);
         assert_eq!(operation.kind, OperationKind::PropagateTask);
     }
 }
@@ -120,9 +117,9 @@ fn catch_join_catches_when_a_catcher_did_not_skip() {
 fn catch_join_waits_for_an_in_flight_catcher_and_yields_to_the_abort_walk() {
     let graph = catch_graph();
     for (c1, c2) in [
-        (ExecutionState::Running, ExecutionState::Completed),
-        (ExecutionState::Created, ExecutionState::Skipped),
-        (ExecutionState::Completed, ExecutionState::Aborted),
+        (TaskState::Running, TaskState::Completed),
+        (TaskState::Created, TaskState::Skipped),
+        (TaskState::Completed, TaskState::Aborted),
     ] {
         let snapshot = catch_snapshot(c1, c2);
         assert!(
@@ -143,17 +140,14 @@ fn catch_join_waits_for_an_in_flight_catcher_and_yields_to_the_abort_walk() {
 fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     let graph = {
         let mut b =
-            crate::scheduler::core::model::execution_graph::ExecutionGraphBuilder::new("p1", 1)
-                .unwrap();
+            crate::scheduler::core::model::task_graph::TaskGraphBuilder::new("p1", 1).unwrap();
         for task in ["step1", "c1", "t1"] {
-            b.add_node(
-                crate::scheduler::core::model::execution_graph::ExecutionNode {
-                    id: id(task, 0),
-                    model_node: node(task),
-                    state: ExecutionState::Created,
-                    revision: 0,
-                },
-            )
+            b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+                id: id(task, 0),
+                model_node: node(task),
+                state: TaskState::Created,
+                revision: 0,
+            })
             .unwrap();
         }
         b.set_root(id("step1", 0)).unwrap();
@@ -161,21 +155,21 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
         b.add_child(id("step1", 0), id("t1", 0)).unwrap();
         b.build().unwrap()
     };
-    let mixed = |handler: ExecutionState, timeout: ExecutionState| {
+    let mixed = |handler: TaskState, timeout: TaskState| {
         let mut snapshot = snapshot(vec![
             (
                 id("step1", 0),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: node("step1"),
                     parent: None,
                     predecessors: vec![],
-                    state: ExecutionState::Running,
+                    state: TaskState::Running,
                     revision: 3,
                 },
             ),
             (
                 id("c1", 0),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: node("c1"),
                     parent: Some(id("step1", 0)),
                     predecessors: vec![id("step1", 0)],
@@ -185,7 +179,7 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
             ),
             (
                 id("t1", 0),
-                ExecutionSnapshot {
+                TaskSnapshot {
                     model_node: node("t1"),
                     parent: Some(id("step1", 0)),
                     predecessors: vec![id("step1", 0)],
@@ -207,7 +201,7 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     // handler caught the error and the branch has settled.
     let caught = ContainerPlanner::plan_catch_join(
         &graph,
-        &mixed(ExecutionState::Completed, ExecutionState::Completed),
+        &mixed(TaskState::Completed, TaskState::Completed),
         &CatchJoinCommand {
             process_id: "p1".into(),
             parent: id("step1", 0),
@@ -221,7 +215,7 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     // the timeout branch.
     let resumed = ContainerPlanner::plan_catch_join(
         &graph,
-        &mixed(ExecutionState::Skipped, ExecutionState::Completed),
+        &mixed(TaskState::Skipped, TaskState::Completed),
         &CatchJoinCommand {
             process_id: "p1".into(),
             parent: id("step1", 0),
@@ -233,11 +227,11 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     assert!(matches!(resumed, CatchJoinOutcome::Resumed(..)));
     // The timeout branch is still in flight: the gate holds, however the
     // handler settled.
-    for handler in [ExecutionState::Completed, ExecutionState::Skipped] {
+    for handler in [TaskState::Completed, TaskState::Skipped] {
         assert!(
             ContainerPlanner::plan_catch_join(
                 &graph,
-                &mixed(handler, ExecutionState::Waiting),
+                &mixed(handler, TaskState::Waiting),
                 &CatchJoinCommand {
                     process_id: "p1".into(),
                     parent: id("step1", 0),
@@ -253,7 +247,7 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     assert!(
         ContainerPlanner::plan_catch_join(
             &graph,
-            &mixed(ExecutionState::Completed, ExecutionState::Completed),
+            &mixed(TaskState::Completed, TaskState::Completed),
             &CatchJoinCommand {
                 process_id: "p1".into(),
                 parent: id("step1", 0),
@@ -268,7 +262,7 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
 #[test]
 fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
     let graph = catch_graph();
-    let settled = || catch_snapshot(ExecutionState::Skipped, ExecutionState::Skipped);
+    let settled = || catch_snapshot(TaskState::Skipped, TaskState::Skipped);
 
     // A step that never failed (no deciding flow) is not deciding anything.
     let mut snapshot = settled();

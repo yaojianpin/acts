@@ -23,22 +23,22 @@
 //! selection (branch predicates are the host's job, selection semantics are
 //! [`crate::scheduler::core::plan::branch::BranchPlanner`]'s), and the per-child durable facts (`auto`,
 //! declared vars). Admission of each child goes through
-//! [`crate::scheduler::core::plan::execution_admission::GenerationAdmissionPolicy`], so a re-entered container reuses the
+//! [`crate::scheduler::core::plan::task_admission::GenerationAdmissionPolicy`], so a re-entered container reuses the
 //! generations a Cancel rewind already recreated instead of allocating
 //! duplicates.
 
 use crate::scheduler::core::{
     commit::process::ProcessSnapshot,
     model::{
-        execution_graph::{ExecutionGraph, ExecutionId, ExecutionState},
         model_graph::NodeId,
         operation::{OperationId, OperationKind},
+        task_graph::{TaskGraph, TaskId, TaskState},
         transition_plan::{
-            ExecutionCreate, OperationCommit, OperationIntent, OutboxIntent, StateChange,
+            OperationCommit, OperationIntent, OutboxIntent, StateChange, TaskCreate,
             TransitionPlan, VariableWrite,
         },
     },
-    plan::execution_admission::{ExistingGeneration, SlotObservation},
+    plan::task_admission::{ExistingGeneration, SlotObservation},
 };
 
 use std::fmt;

@@ -1,12 +1,12 @@
 use super::*;
-use crate::scheduler::core::commit::process::ExecutionSnapshot;
+use crate::scheduler::core::commit::process::TaskSnapshot;
 use crate::scheduler::core::model::operation::OperationId;
 use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use crate::scheduler::core::model::transition_plan::TransitionPlan;
 use std::collections::{BTreeMap, HashMap};
 
-fn id(task: &str, generation: u64) -> ExecutionId {
-    ExecutionId::new(task, generation).unwrap()
+fn id(task: &str, generation: u64) -> TaskId {
+    TaskId::new(task, generation).unwrap()
 }
 
 fn node(name: &str) -> NodeId {
@@ -17,7 +17,7 @@ fn commit(task: &str, sequence: u64) -> OperationCommit {
     OperationCommit {
         id: OperationId {
             process_id: "p1".into(),
-            task_id: task.into(),
+            node: task.into(),
             generation: 0,
             sequence,
         },
@@ -32,7 +32,7 @@ fn commit(task: &str, sequence: u64) -> OperationCommit {
 
 fn branch(task: &str) -> TimeoutBranch {
     TimeoutBranch {
-        task_id: task.into(),
+        node: task.into(),
         model_node: node(task),
         vars: Vec::new(),
         auto: true,
@@ -41,33 +41,33 @@ fn branch(task: &str) -> TimeoutBranch {
 
 /// A snapshot with `root` (Running) and one owner execution `s1` (Waiting),
 /// plus whatever the test adds.
-fn snapshot(extra: Vec<(ExecutionId, ExecutionSnapshot)>) -> ProcessSnapshot {
+fn snapshot(extra: Vec<(TaskId, TaskSnapshot)>) -> ProcessSnapshot {
     let root = id("$", 0);
     let owner = id("s1", 0);
-    let mut executions = HashMap::from_iter([
+    let mut tasks = HashMap::from_iter([
         (
             root.clone(),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("$"),
                 parent: None,
                 predecessors: Vec::new(),
-                state: crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+                state: crate::scheduler::core::model::task_graph::TaskState::Running,
                 revision: 1,
             },
         ),
         (
             owner.clone(),
-            ExecutionSnapshot {
+            TaskSnapshot {
                 model_node: node("s1"),
                 parent: Some(root),
                 predecessors: Vec::new(),
-                state: crate::scheduler::core::model::execution_graph::ExecutionState::Waiting,
+                state: crate::scheduler::core::model::task_graph::TaskState::Waiting,
                 revision: 1,
             },
         ),
     ]);
-    for (id, execution) in extra {
-        executions.insert(id, execution);
+    for (id, task) in extra {
+        tasks.insert(id, task);
     }
     ProcessSnapshot {
         process_id: "p1".into(),
@@ -76,7 +76,7 @@ fn snapshot(extra: Vec<(ExecutionId, ExecutionSnapshot)>) -> ProcessSnapshot {
             process: 2,
             operations: 2,
         },
-        executions,
+        tasks,
         variables: BTreeMap::new(),
         operations: HashMap::new(),
         outbox: HashMap::new(),
@@ -84,13 +84,13 @@ fn snapshot(extra: Vec<(ExecutionId, ExecutionSnapshot)>) -> ProcessSnapshot {
 }
 
 fn child_of(
-    owner: &ExecutionId,
+    owner: &TaskId,
     task: &str,
-    state: crate::scheduler::core::model::execution_graph::ExecutionState,
-) -> (ExecutionId, ExecutionSnapshot) {
+    state: crate::scheduler::core::model::task_graph::TaskState,
+) -> (TaskId, TaskSnapshot) {
     (
         id(task, 0),
-        ExecutionSnapshot {
+        TaskSnapshot {
             model_node: node(task),
             parent: Some(owner.clone()),
             predecessors: vec![owner.clone()],
@@ -138,7 +138,7 @@ fn an_in_flight_branch_stops_the_round_instead_of_moving_on() {
     let in_flight = snapshot(vec![child_of(
         &owner,
         "t1",
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
     )]);
     assert_eq!(
         candidate(&in_flight, &owner, &branches),
@@ -149,7 +149,7 @@ fn an_in_flight_branch_stops_the_round_instead_of_moving_on() {
     let settled = snapshot(vec![child_of(
         &owner,
         "t1",
-        crate::scheduler::core::model::execution_graph::ExecutionState::Completed,
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
     )]);
     assert_eq!(
         candidate(&settled, &owner, &branches),
@@ -189,14 +189,14 @@ fn only_the_declared_branches_keep_the_owner_from_completing() {
     let live = snapshot(vec![child_of(
         &owner,
         "t1",
-        crate::scheduler::core::model::execution_graph::ExecutionState::Ready,
+        crate::scheduler::core::model::task_graph::TaskState::Ready,
     )]);
     assert!(has_live_children(&live, &owner, &branches));
     // A settled branch does not hold the owner back.
     let settled = snapshot(vec![child_of(
         &owner,
         "t1",
-        crate::scheduler::core::model::execution_graph::ExecutionState::Skipped,
+        crate::scheduler::core::model::task_graph::TaskState::Skipped,
     )]);
     assert!(!has_live_children(&settled, &owner, &branches));
     // A child the model never declared as a timeout branch (a branch of a
@@ -204,7 +204,7 @@ fn only_the_declared_branches_keep_the_owner_from_completing() {
     let other = snapshot(vec![child_of(
         &owner,
         "b1",
-        crate::scheduler::core::model::execution_graph::ExecutionState::Running,
+        crate::scheduler::core::model::task_graph::TaskState::Running,
     )]);
     assert!(!has_live_children(&other, &owner, &branches));
 }
@@ -229,7 +229,7 @@ fn the_dispatch_admits_one_entry_child_and_freezes_the_cost_and_marker() {
     assert_eq!(command.source, owner);
     assert_eq!(command.children.len(), 1);
     let child = &command.children[0];
-    assert_eq!(child.task_id, "t1");
+    assert_eq!(child.node, "t1");
     assert_eq!(child.plan, ContainerChildPlan::Entry);
     assert_eq!(child.predecessors, vec![ContainerPredecessor::Source]);
     assert!(child.auto);
@@ -251,14 +251,14 @@ fn the_dispatch_admits_one_entry_child_and_freezes_the_cost_and_marker() {
     // by a dispatch.
     assert_eq!(
         command.source_park,
-        crate::scheduler::core::model::execution_graph::ExecutionState::Waiting
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     // The plan the container machinery builds from it is legal.
     let plan =
         crate::scheduler::core::plan::container::ContainerPlanner::plan_fanout(&snapshot, command)
             .unwrap();
     plan.validate().unwrap();
-    assert_eq!(plan.execution_creates.len(), 1);
+    assert_eq!(plan.task_creates.len(), 1);
     assert_eq!(
         plan.state_changes,
         Vec::new(),
@@ -297,7 +297,7 @@ fn the_dispatch_reports_the_marker_it_leaves_behind() {
 }
 
 #[test]
-fn the_start_write_stamps_the_executions_own_scope() {
+fn the_start_write_stamps_the_tasks_own_scope() {
     let write = start_write(&id("s1", 0), 42);
     assert_eq!(write.name, "__started");
     assert_eq!(write.value, "42");

@@ -3,23 +3,14 @@ use super::*;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ContainerError {
     WrongProcess,
-    ExecutionNotFound(ExecutionId),
-    SourceNotContainer {
-        source: ExecutionId,
-        state: ExecutionState,
-    },
-    SourceOperationTargetsDifferentExecution,
-    InvalidSourcePark(ExecutionState),
+    TaskNotFound(TaskId),
+    SourceNotContainer { source: TaskId, state: TaskState },
+    SourceOperationTargetsDifferentTask,
+    InvalidSourcePark(TaskState),
     EmptyChildTaskId,
     ForwardSibling(usize),
-    ReadmitNotCreated {
-        execution: ExecutionId,
-        state: ExecutionState,
-    },
-    GraphVersionConflict {
-        graph: u64,
-        snapshot: u64,
-    },
+    ReadmitNotCreated { task: TaskId, state: TaskState },
+    GraphVersionConflict { graph: u64, snapshot: u64 },
     GenerationOverflow,
     SequenceOverflow,
     InvalidPlan(String),

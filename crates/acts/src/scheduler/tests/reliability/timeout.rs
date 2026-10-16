@@ -38,7 +38,7 @@ use serial_test::serial;
 use crate::Step;
 use crate::scheduler::core::commit::process::ProcessSnapshot;
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
-use crate::scheduler::core::model::execution_graph::{ExecutionId, ExecutionState};
+use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
 use crate::utils::test::{USES_IRQ, USES_MSG};
 
 use super::*;
@@ -148,9 +148,9 @@ async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == tid)
+        .filter(|id| id.node == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -163,13 +163,13 @@ async fn generation_state(
     pid: &str,
     tid: &str,
     generation: u64,
-) -> Option<ExecutionState> {
+) -> Option<TaskState> {
     process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .iter()
-        .find(|(id, _)| id.task_id == tid && id.generation == generation)
-        .map(|(_, execution)| execution.state)
+        .find(|(id, _)| id.node == tid && id.generation == generation)
+        .map(|(_, task)| task.state)
 }
 
 /// The branches the one-shot marker (`__timeouts`) holds for the owner node
@@ -177,7 +177,7 @@ async fn generation_state(
 /// round, and holds each branch at most once.
 async fn claimed(engine: &Engine, pid: &str, owner: &str) -> Vec<String> {
     let snapshot = process_snapshot(engine, pid).await;
-    let owner = ExecutionId::new(owner, 0).expect("a node id parses");
+    let owner = TaskId::new(owner, 0).expect("a node id parses");
     snapshot
         .variables
         .get(&(owner, crate::utils::consts::TASK_TIMEOUTS.to_string()))
@@ -199,8 +199,8 @@ async fn outbox_settled(engine: &Engine, pid: &str) -> bool {
 /// The number of executions the run's aggregate holds — the whole graph, not
 /// one node: a settled run's total, so a later tick that admits anything moves
 /// it.
-async fn executions(engine: &Engine, pid: &str) -> usize {
-    process_snapshot(engine, pid).await.executions.len()
+async fn tasks(engine: &Engine, pid: &str) -> usize {
+    process_snapshot(engine, pid).await.tasks.len()
 }
 
 /// The number of outbox records the run's aggregate holds (the kernel keeps the
@@ -316,7 +316,7 @@ async fn a_store_that_refuses_the_branchs_commit_fires_it_exactly_once_inner() {
     wait_completed(&engine, &pid).await;
     assert_eq!(
         generation_state(&engine, &pid, "step1", 0).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "the step must complete once its act and its branches are done"
     );
     sweep_until_gone(&engine, &pid).await;
@@ -376,7 +376,7 @@ async fn a_completion_racing_the_timeout_tick_converges_exactly_once_inner() {
         );
         assert_eq!(
             generation_state(&engine, &pid, "step1", 0).await,
-            Some(ExecutionState::Completed),
+            Some(TaskState::Completed),
             "the step must join the branch and the completed act exactly once"
         );
         sweep_until_gone(&engine, &pid).await;
@@ -399,7 +399,7 @@ async fn a_completion_racing_the_timeout_tick_converges_exactly_once_inner() {
         assert_eq!(fired.load(Ordering::SeqCst), 0);
         assert_eq!(
             generation_state(&engine, &pid, "step1", 0).await,
-            Some(ExecutionState::Completed)
+            Some(TaskState::Completed)
         );
         sweep_until_gone(&engine, &pid).await;
         engine.close().await;
@@ -449,7 +449,7 @@ async fn a_completion_racing_the_timeout_tick_converges_exactly_once_inner() {
         );
         assert_eq!(
             generation_state(&engine, &pid, "step1", 0).await,
-            Some(ExecutionState::Completed),
+            Some(TaskState::Completed),
             "round {round}: the step must hold one settled decision"
         );
         sweep_until_gone(&engine, &pid).await;
@@ -666,7 +666,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
             .unwrap(),
         "the run must be settled"
     );
-    let exec_total = executions(&engine, &pid).await;
+    let exec_total = tasks(&engine, &pid).await;
     let outbox_total = outbox_records(&engine, &pid).await;
     assert!(
         generations(&engine, &pid, "t1").await.is_empty(),
@@ -684,7 +684,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
                     .process_completed(&pid)
                     .await
                     .unwrap()
-                    || executions(&engine, &pid).await != exec_total
+                    || tasks(&engine, &pid).await != exec_total
                     || outbox_records(&engine, &pid).await != outbox_total
                     || fired.load(Ordering::SeqCst) != 0
                     || !generations(&engine, &pid, "t1").await.is_empty()
@@ -707,7 +707,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
                     .process_completed(&pid)
                     .await
                     .unwrap()
-                    || executions(&reloaded, &pid).await != exec_total
+                    || tasks(&reloaded, &pid).await != exec_total
                     || outbox_records(&reloaded, &pid).await != outbox_total
                     || re_fired.load(Ordering::SeqCst) != 0
                     || !generations(&reloaded, &pid, "t1").await.is_empty()

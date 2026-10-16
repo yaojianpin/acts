@@ -48,7 +48,7 @@ use serde_json::json;
 use serial_test::serial;
 
 use crate::scheduler::core::commit::process::ProcessSnapshot;
-use crate::scheduler::core::model::execution_graph::ExecutionState;
+use crate::scheduler::core::model::task_graph::TaskState;
 use crate::{Act, Step};
 
 use super::*;
@@ -180,9 +180,9 @@ async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
 async fn node_generations(engine: &Engine, pid: &str) -> Vec<(String, u64)> {
     let mut nodes: Vec<(String, u64)> = process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .keys()
-        .map(|id| (id.task_id.clone(), id.generation))
+        .map(|id| (id.node.clone(), id.generation))
         .collect();
     nodes.sort();
     nodes
@@ -194,9 +194,9 @@ async fn node_generations(engine: &Engine, pid: &str) -> Vec<(String, u64)> {
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == tid)
+        .filter(|id| id.node == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -204,14 +204,14 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 }
 
 /// The aggregate's state for the newest generation of one model node.
-async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
+async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == tid)
+        .filter(|(id, _)| id.node == tid)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(_, execution)| execution.state)
+        .map(|(_, task)| task.state)
 }
 
 /// How many outbox records of the run fall under `prefix`. A hop's key is
@@ -250,7 +250,7 @@ async fn complete_act_settled(engine: &Engine, pid: &str, act: &str) {
     poll_until_dumped(
         &what,
         || async {
-            decided_state(engine, pid, act).await == Some(ExecutionState::Completed)
+            decided_state(engine, pid, act).await == Some(TaskState::Completed)
                 && records_with_prefix(engine, pid, &propagate).await >= 1
         },
         || dump_state(engine, pid),
@@ -265,10 +265,10 @@ async fn complete_act_settled(engine: &Engine, pid: &str, act: &str) {
 async fn assert_join_once(engine: &Engine, pid: &str, first: &str, second: &str) {
     let unfinished: Vec<String> = process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .iter()
-        .filter(|(_, execution)| !execution.state.is_terminal())
-        .map(|(id, execution)| format!("{}/{}:{:?}", id.task_id, id.generation, execution.state))
+        .filter(|(_, task)| !task.state.is_terminal())
+        .map(|(id, task)| format!("{}/{}:{:?}", id.node, id.generation, task.state))
         .collect();
     assert!(
         unfinished.is_empty(),
@@ -287,7 +287,7 @@ async fn assert_join_once(engine: &Engine, pid: &str, first: &str, second: &str)
     for node in ["step1", first, second] {
         assert_eq!(
             decided_state(engine, pid, node).await,
-            Some(ExecutionState::Completed),
+            Some(TaskState::Completed),
             "node {node} must hold its completion"
         );
     }
@@ -435,7 +435,7 @@ async fn a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_sett
     );
     assert_eq!(
         decided_state(&reloaded, &pid, &first).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "a settled branch keeps its completion across the restart"
     );
     assert!(
@@ -725,9 +725,9 @@ async fn item_generations(engine: &Engine, pid: &str) -> Vec<u64> {
 async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
     let snapshot = process_snapshot(engine, pid).await;
     let mut bindings: Vec<(String, String)> = snapshot
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == "step1#item")
+        .filter(|id| id.node == "step1#item")
         .map(|id| {
             let read = |name: &str| {
                 snapshot
@@ -750,16 +750,15 @@ async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
 async fn item_predecessors(engine: &Engine, pid: &str) -> Vec<(u64, Vec<String>)> {
     let snapshot = process_snapshot(engine, pid).await;
     let mut edges: Vec<(u64, Vec<String>)> = snapshot
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == "step1#item")
-        .map(|(id, execution)| {
+        .filter(|(id, _)| id.node == "step1#item")
+        .map(|(id, task)| {
             (
                 id.generation,
-                execution
-                    .predecessors
+                task.predecessors
                     .iter()
-                    .map(|parent| format!("{}@{}", parent.task_id, parent.generation))
+                    .map(|parent| format!("{}@{}", parent.node, parent.generation))
                     .collect(),
             )
         })
@@ -857,7 +856,7 @@ async fn a_uses_param_fan_out_instantiates_one_template_per_item_inner() {
         );
         assert_eq!(
             decided_state(&engine, &pid, "step1").await,
-            Some(ExecutionState::Completed),
+            Some(TaskState::Completed),
             "({package}) the container completes once its items settled"
         );
 
@@ -908,10 +907,10 @@ async fn a_block_packages_inline_acts_run_as_children_in_both_modes_inner() {
         );
         let unfinished: Vec<String> = process_snapshot(&engine, &pid)
             .await
-            .executions
+            .tasks
             .iter()
-            .filter(|(_, execution)| !execution.state.is_terminal())
-            .map(|(id, execution)| format!("{id:?}:{:?}", execution.state))
+            .filter(|(_, task)| !task.state.is_terminal())
+            .map(|(id, task)| format!("{id:?}:{:?}", task.state))
             .collect();
         assert!(
             unfinished.is_empty(),
@@ -919,7 +918,7 @@ async fn a_block_packages_inline_acts_run_as_children_in_both_modes_inner() {
         );
         assert_eq!(
             decided_state(&engine, &pid, "step1").await,
-            Some(ExecutionState::Completed),
+            Some(TaskState::Completed),
             "({mode}) the container completes once its acts settled"
         );
 

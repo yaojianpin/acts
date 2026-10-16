@@ -38,11 +38,11 @@ use std::sync::Arc;
 
 use serial_test::serial;
 
-use crate::TaskState;
+use crate::LegacyTaskState;
 use crate::scheduler::core::commit::process::ProcessSnapshot;
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
-use crate::scheduler::core::model::execution_graph::ExecutionState;
 use crate::scheduler::core::model::operation::OperationState;
+use crate::scheduler::core::model::task_graph::TaskState;
 use crate::scheduler::core::outbox::records::OutboxState;
 
 use super::*;
@@ -164,9 +164,9 @@ async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == tid)
+        .filter(|id| id.node == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -174,14 +174,14 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 }
 
 /// The aggregate's state for the newest generation of one model node.
-async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
+async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == tid)
+        .filter(|(id, _)| id.node == tid)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(_, execution)| execution.state)
+        .map(|(_, task)| task.state)
 }
 
 /// The non-terminal operations the aggregate holds for one model node, in
@@ -191,7 +191,7 @@ async fn open_shapes(engine: &Engine, pid: &str, tid: &str) -> Vec<&'static str>
         .await
         .operations
         .values()
-        .filter(|operation| operation.id.task_id == tid && !operation.is_terminal())
+        .filter(|operation| operation.id.node == tid && !operation.is_terminal())
         .map(|operation| (operation.id.sequence, shape(&operation.state)))
         .collect();
     open.sort_by_key(|(sequence, _)| *sequence);
@@ -246,7 +246,7 @@ async fn assert_finished_once(engine: &Engine, pid: &str, tid: &str) {
         );
         assert_eq!(
             decided_state(engine, pid, node).await,
-            Some(ExecutionState::Completed),
+            Some(TaskState::Completed),
             "node {node} of {pid} must hold the completion"
         );
     }
@@ -293,10 +293,7 @@ async fn assert_still_finished_once(engine: &Engine, pid: &str, tid: &str) {
 /// see [`sweep_finished_run`]).
 async fn fully_settled(engine: &Engine, pid: &str) -> bool {
     let snapshot = process_snapshot(engine, pid).await;
-    snapshot
-        .executions
-        .values()
-        .all(|execution| execution.state.is_terminal())
+    snapshot.tasks.values().all(|task| task.state.is_terminal())
         && snapshot
             .outbox
             .values()
@@ -322,7 +319,7 @@ async fn outstanding(engine: &Engine, pid: &str) -> String {
         if !operation.is_terminal() {
             out.push(format!(
                 "op {task} seq{sequence} -> {state}",
-                task = id.task_id,
+                task = id.node,
                 sequence = id.sequence,
                 state = shape(&operation.state)
             ));
@@ -341,10 +338,7 @@ async fn outstanding(engine: &Engine, pid: &str) -> String {
 /// caller may run the outbox pass without racing one.
 async fn settled_work(engine: &Engine, pid: &str) -> bool {
     let snapshot = process_snapshot(engine, pid).await;
-    snapshot
-        .executions
-        .values()
-        .all(|execution| execution.state.is_terminal())
+    snapshot.tasks.values().all(|task| task.state.is_terminal())
         && snapshot.operations.values().all(|operation| {
             operation.is_terminal()
                 || matches!(operation.state, OperationState::EffectUnknown { .. })
@@ -502,10 +496,7 @@ async fn sweep_finished_run(engine: &Engine, pid: &str) {
     }
     let snapshot = process_snapshot(engine, pid).await;
     assert!(
-        snapshot
-            .executions
-            .values()
-            .all(|execution| execution.state.is_terminal()),
+        snapshot.tasks.values().all(|task| task.state.is_terminal()),
         "an unreclaimed run must still be settled: {}",
         outstanding(engine, pid).await
     );
@@ -809,7 +800,7 @@ async fn stranded_at_claim(pid: &str) -> (Engine, Arc<DocCutKv>, String) {
         if refused.is_err()
             && kv.refused() == 1
             && shapes == vec!["pending"]
-            && decided == Some(ExecutionState::Waiting)
+            && decided == Some(TaskState::Waiting)
         {
             return (engine, kv, pid);
         }
@@ -1201,9 +1192,9 @@ async fn assert_parked(engine: &Engine, pid: &str) {
     assert!(snapshot.outbox.is_empty(), "a parked run writes no message");
     assert!(
         snapshot
-            .executions
+            .tasks
             .values()
-            .all(|execution| execution.state == ExecutionState::Created),
+            .all(|task| task.state == TaskState::Created),
         "a parked run's root stays `Created`"
     );
     assert!(
@@ -1220,7 +1211,7 @@ async fn assert_parked(engine: &Engine, pid: &str) {
         .expect("a parked run keeps its row");
     assert_eq!(
         row.state(),
-        TaskState::None,
+        LegacyTaskState::None,
         "the parked process state, as the legacy row spells it"
     );
 }

@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use serial_test::serial;
 
 use crate::ActError;
-use crate::scheduler::core::model::execution_graph::ExecutionState;
+use crate::scheduler::core::model::task_graph::TaskState;
 
 use super::*;
 
@@ -118,9 +118,9 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .unwrap()
         .expect("the aggregate exists");
     let mut generations: Vec<u64> = snapshot
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == tid)
+        .filter(|id| id.node == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -133,7 +133,7 @@ async fn generation_state(
     pid: &str,
     tid: &str,
     generation: u64,
-) -> Option<ExecutionState> {
+) -> Option<TaskState> {
     let snapshot = engine
         .runtime()
         .kernel()
@@ -142,10 +142,10 @@ async fn generation_state(
         .unwrap()
         .expect("the aggregate exists");
     snapshot
-        .executions
+        .tasks
         .iter()
-        .find(|(id, _)| id.task_id == tid && id.generation == generation)
-        .map(|(_, execution)| execution.state)
+        .find(|(id, _)| id.node == tid && id.generation == generation)
+        .map(|(_, task)| task.state)
 }
 
 /// Whether the aggregate still holds a non-terminal operation for `tid`: the
@@ -161,7 +161,7 @@ async fn has_pending_operation(engine: &Engine, pid: &str, tid: &str) -> bool {
     snapshot
         .operations
         .values()
-        .any(|operation| operation.id.task_id == tid && !operation.is_terminal())
+        .any(|operation| operation.id.node == tid && !operation.is_terminal())
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +296,7 @@ async fn a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_on
     );
     assert_eq!(
         generation_state(&engine, &pid, &step1, 0).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "the head step is still the finished one the retry cancels"
     );
 
@@ -404,9 +404,9 @@ async fn cancel_racing_next_converges_on_one_terminal_decision_inner() {
         assert_eq!(
             generation_state(&engine, &pid, &step1, 0).await,
             Some(if redone {
-                ExecutionState::Backed
+                TaskState::Backed
             } else {
-                ExecutionState::Completed
+                TaskState::Completed
             }),
             "round {round}: the head must hold exactly one terminal decision"
         );
@@ -491,7 +491,7 @@ async fn a_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inne
     );
     assert_eq!(
         generation_state(&engine, &pid, &step1, 0).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "the head step is still finished, the state the replayed cancel reads"
     );
 
@@ -531,7 +531,7 @@ async fn a_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inne
     );
     assert_eq!(
         generation_state(&reloaded, &pid, &step1, 0).await,
-        Some(ExecutionState::Backed),
+        Some(TaskState::Backed),
         "the replayed cancel must close the finished head step Backed"
     );
     // the replayed rewind re-dispatches the head act, and the intent's

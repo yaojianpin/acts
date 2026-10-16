@@ -1,8 +1,8 @@
 use crate::scheduler::core::{
     commit::process::ProcessSnapshot,
     model::{
-        execution_graph::{ExecutionId, ExecutionState},
         operation::{OperationId, OperationKind},
+        task_graph::{TaskId, TaskState},
         transition_plan::{
             OperationCommit, OperationIntent, OutboxIntent, StateChange, TransitionPlan,
             VariableWrite,
@@ -27,7 +27,7 @@ pub(crate) enum ActionKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ApplyActionCommand {
     pub(crate) process_id: String,
-    pub(crate) execution: ExecutionId,
+    pub(crate) task: TaskId,
     pub(crate) action: ActionKind,
     pub(crate) inputs: Vec<(String, String)>,
     pub(crate) source_operation: OperationCommit,
@@ -57,9 +57,9 @@ impl ActionPlanner {
         Self::validate_command(command)?;
         validate_envelope(snapshot, command)?;
         let current = snapshot
-            .executions
-            .get(&command.execution)
-            .ok_or_else(|| CommandError::ExecutionNotFound(command.execution.clone()))?;
+            .tasks
+            .get(&command.task)
+            .ok_or_else(|| CommandError::TaskNotFound(command.task.clone()))?;
         let target = action_target(current.state, &command.action)?;
         let writes = variable_writes(command)?;
         let next_sequence = command
@@ -76,9 +76,9 @@ impl ActionPlanner {
         let plan = TransitionPlan {
             process_id: command.process_id.clone(),
             expected: snapshot.version.clone(),
-            execution_creates: Vec::new(),
+            task_creates: Vec::new(),
             state_changes: vec![StateChange {
-                execution: command.execution.clone(),
+                task: command.task.clone(),
                 expected_revision: current.revision,
                 from: current.state,
                 to: target,
@@ -88,8 +88,8 @@ impl ActionPlanner {
             operations: vec![OperationIntent {
                 id: OperationId {
                     process_id: command.process_id.clone(),
-                    task_id: command.execution.task_id.clone(),
-                    generation: command.execution.generation,
+                    node: command.task.node.clone(),
+                    generation: command.task.generation,
                     sequence: next_sequence,
                 },
                 kind: operation_kind,
@@ -98,15 +98,12 @@ impl ActionPlanner {
                 key: format!(
                     "action:{}:{}:{}:{}",
                     command.process_id,
-                    command.execution.task_id,
-                    command.execution.generation,
+                    command.task.node,
+                    command.task.generation,
                     command.source_operation.id.sequence
                 ),
                 topic: format!("task.{}", action_name(&command.action)),
-                payload: format!(
-                    "{}:{}",
-                    command.execution.task_id, command.execution.generation
-                ),
+                payload: format!("{}:{}", command.task.node, command.task.generation),
                 receipt: None,
             }],
         };
@@ -130,10 +127,8 @@ fn validate_envelope(
     if source.process_id != command.process_id {
         return Err(CommandError::ForeignSourceOperation(source.clone()));
     }
-    if source.task_id != command.execution.task_id
-        || source.generation != command.execution.generation
-    {
-        return Err(CommandError::SourceOperationTargetsDifferentExecution);
+    if source.node != command.task.node || source.generation != command.task.generation {
+        return Err(CommandError::SourceOperationTargetsDifferentTask);
     }
     Ok(())
 }
@@ -152,19 +147,19 @@ fn variable_writes(command: &ApplyActionCommand) -> Result<Vec<VariableWrite>, C
             return Err(CommandError::DuplicateInput(name.clone()));
         }
         writes.push(VariableWrite {
-            scope: command.execution.clone(),
+            scope: command.task.clone(),
             name: name.clone(),
             value: value.clone(),
         });
     }
     if let ActionKind::Fail { code, message } = &command.action {
         writes.push(VariableWrite {
-            scope: command.execution.clone(),
+            scope: command.task.clone(),
             name: "error.code".into(),
             value: code.clone(),
         });
         writes.push(VariableWrite {
-            scope: command.execution.clone(),
+            scope: command.task.clone(),
             name: "error.message".into(),
             value: message.clone(),
         });
@@ -176,12 +171,9 @@ fn is_reserved_error_input(name: &str) -> bool {
     matches!(name, "error.code" | "error.message")
 }
 
-fn action_target(
-    current: ExecutionState,
-    action: &ActionKind,
-) -> Result<ExecutionState, CommandError> {
+fn action_target(current: TaskState, action: &ActionKind) -> Result<TaskState, CommandError> {
     use ActionKind as A;
-    use ExecutionState as S;
+    use TaskState as S;
     match (current, action) {
         (S::Running | S::Waiting, A::Complete) => Ok(S::Completed),
         (S::Running | S::Waiting, A::Submit) => Ok(S::Submitted),
@@ -209,7 +201,7 @@ fn action_target(
 /// `action_target` applies, exposed so a recovering hop can tell a *live*
 /// durable decision (which it must replay) from a stale one whose target moved
 /// past it while the intent was in flight.
-pub(crate) fn action_allowed(current: ExecutionState, action: &ActionKind) -> bool {
+pub(crate) fn action_allowed(current: TaskState, action: &ActionKind) -> bool {
     action_target(current, action).is_ok()
 }
 
@@ -232,10 +224,10 @@ pub(crate) enum CommandError {
         actual: String,
     },
     ForeignSourceOperation(OperationId),
-    SourceOperationTargetsDifferentExecution,
-    ExecutionNotFound(ExecutionId),
+    SourceOperationTargetsDifferentTask,
+    TaskNotFound(TaskId),
     ActionNotAllowed {
-        state: ExecutionState,
+        state: TaskState,
         action: ActionKind,
     },
     EmptyInputName,
@@ -255,20 +247,20 @@ impl std::error::Error for CommandError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::core::commit::process::ExecutionSnapshot;
+    use crate::scheduler::core::commit::process::TaskSnapshot;
     use crate::scheduler::core::model::model_graph::NodeId;
     use crate::scheduler::core::model::operation::ClaimToken;
     use crate::scheduler::core::model::transition_plan::ProcessVersion;
     use std::collections::{BTreeMap, HashMap};
 
-    fn execution() -> ExecutionId {
-        ExecutionId::new("step", 2).unwrap()
+    fn task() -> TaskId {
+        TaskId::new("step", 2).unwrap()
     }
     fn source() -> OperationCommit {
         OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                task_id: "step".into(),
+                node: "step".into(),
                 generation: 2,
                 sequence: 4,
             },
@@ -280,7 +272,7 @@ mod tests {
             },
         }
     }
-    fn snapshot(state: ExecutionState) -> ProcessSnapshot {
+    fn snapshot(state: TaskState) -> ProcessSnapshot {
         ProcessSnapshot {
             process_id: "p1".into(),
             version: ProcessVersion {
@@ -288,9 +280,9 @@ mod tests {
                 process: 3,
                 operations: 5,
             },
-            executions: HashMap::from([(
-                execution(),
-                ExecutionSnapshot {
+            tasks: HashMap::from([(
+                task(),
+                TaskSnapshot {
                     model_node: NodeId::parse("step").unwrap(),
                     parent: None,
                     predecessors: vec![],
@@ -306,7 +298,7 @@ mod tests {
     fn command(action: ActionKind) -> ApplyActionCommand {
         ApplyActionCommand {
             process_id: "p1".into(),
-            execution: execution(),
+            task: task(),
             action,
             inputs: vec![("answer".into(), "42".into())],
             source_operation: source(),
@@ -316,28 +308,25 @@ mod tests {
     #[test]
     fn complete_generates_one_atomic_plan() {
         let plan = ActionPlanner::plan(
-            &snapshot(ExecutionState::Waiting),
+            &snapshot(TaskState::Waiting),
             &command(ActionKind::Complete),
         )
         .unwrap();
-        assert_eq!(plan.state_changes[0].to, ExecutionState::Completed);
+        assert_eq!(plan.state_changes[0].to, TaskState::Completed);
         assert_eq!(plan.variable_writes.len(), 1);
         assert_eq!(plan.operations[0].kind, OperationKind::PropagateTask);
         assert_eq!(plan.source_operation, Some(source()));
     }
 
     #[test]
-    fn terminal_execution_rejects_action() {
+    fn terminal_task_rejects_action() {
         assert!(matches!(
-            ActionPlanner::plan(
-                &snapshot(ExecutionState::Completed),
-                &command(ActionKind::Abort),
-            ),
+            ActionPlanner::plan(&snapshot(TaskState::Completed), &command(ActionKind::Abort),),
             Err(CommandError::ActionNotAllowed { .. })
         ));
         assert!(matches!(
             ActionPlanner::plan(
-                &snapshot(ExecutionState::Backed),
+                &snapshot(TaskState::Backed),
                 &command(ActionKind::Fail {
                     code: "E".into(),
                     message: String::new(),
@@ -352,18 +341,14 @@ mod tests {
     /// generation `Backed` — the legacy cancelled act's own fact — and refused
     /// while the work is not done (`Ready`/`Running`/`Waiting`).
     #[test]
-    fn cancel_accepts_only_a_finished_execution() {
+    fn cancel_accepts_only_a_finished_task() {
         let plan = ActionPlanner::plan(
-            &snapshot(ExecutionState::Completed),
+            &snapshot(TaskState::Completed),
             &command(ActionKind::Cancel),
         )
         .unwrap();
-        assert_eq!(plan.state_changes[0].to, ExecutionState::Backed);
-        for state in [
-            ExecutionState::Ready,
-            ExecutionState::Running,
-            ExecutionState::Waiting,
-        ] {
+        assert_eq!(plan.state_changes[0].to, TaskState::Backed);
+        for state in [TaskState::Ready, TaskState::Running, TaskState::Waiting] {
             assert!(
                 matches!(
                     ActionPlanner::plan(&snapshot(state), &command(ActionKind::Cancel)),
@@ -376,12 +361,9 @@ mod tests {
 
     #[test]
     fn back_closes_current_generation_without_reopening_it() {
-        let plan = ActionPlanner::plan(
-            &snapshot(ExecutionState::Waiting),
-            &command(ActionKind::Back),
-        )
-        .unwrap();
-        assert_eq!(plan.state_changes[0].to, ExecutionState::Backed);
+        let plan =
+            ActionPlanner::plan(&snapshot(TaskState::Waiting), &command(ActionKind::Back)).unwrap();
+        assert_eq!(plan.state_changes[0].to, TaskState::Backed);
         assert_eq!(plan.operations[0].kind, OperationKind::ApplyAction);
         assert_eq!(plan.operations[0].id.generation, 2);
     }
@@ -391,7 +373,7 @@ mod tests {
         let mut command = command(ActionKind::Complete);
         command.inputs.push(("answer".into(), "43".into()));
         assert_eq!(
-            ActionPlanner::plan(&snapshot(ExecutionState::Waiting), &command),
+            ActionPlanner::plan(&snapshot(TaskState::Waiting), &command),
             Err(CommandError::DuplicateInput("answer".into()))
         );
     }

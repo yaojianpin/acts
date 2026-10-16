@@ -3,12 +3,12 @@ use super::*;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum UpwardError {
     WrongProcess,
-    ExecutionNotFound(ExecutionId),
-    UnsupportedTarget(ExecutionState),
+    TaskNotFound(TaskId),
+    UnsupportedTarget(TaskState),
     SourceNotDecided {
-        source: ExecutionId,
-        state: ExecutionState,
-        to: ExecutionState,
+        source: TaskId,
+        state: TaskState,
+        to: TaskState,
     },
 }
 impl fmt::Display for UpwardError {

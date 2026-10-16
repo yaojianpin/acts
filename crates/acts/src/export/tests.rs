@@ -2,7 +2,7 @@ use crate::{
     ActSchema, ChannelOptions, Engine, Message, Signal, Variant, VariantTypes, Vars, Workflow,
     data::{self, Package},
     event::MessageState,
-    scheduler::TaskState,
+    scheduler::LegacyTaskState,
     store::query::*,
     utils::{self, consts, test::USES_IRQ, test::USES_SET},
 };
@@ -181,7 +181,7 @@ async fn export_executor_start_dup_pid_error() {
         id: pid.clone(),
         name: model.name.clone(),
         mid: model.id.clone(),
-        state: TaskState::None.to_string(),
+        state: LegacyTaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
         timestamp: 0,

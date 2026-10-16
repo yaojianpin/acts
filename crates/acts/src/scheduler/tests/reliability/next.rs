@@ -33,8 +33,8 @@ use serial_test::serial;
 
 use crate::ActError;
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
-use crate::scheduler::core::model::execution_graph::ExecutionState;
 use crate::scheduler::core::model::operation::OperationState;
+use crate::scheduler::core::model::task_graph::TaskState;
 
 use super::*;
 
@@ -182,9 +182,9 @@ async fn process_snapshot(
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == tid)
+        .filter(|id| id.node == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -192,14 +192,14 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 }
 
 /// The aggregate's state for the newest generation of one model node.
-async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<ExecutionState> {
+async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     process_snapshot(engine, pid)
         .await
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == tid)
+        .filter(|(id, _)| id.node == tid)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(_, execution)| execution.state)
+        .map(|(_, task)| task.state)
 }
 
 /// The non-terminal operations the aggregate holds for one model node, in
@@ -209,7 +209,7 @@ async fn open_operations(engine: &Engine, pid: &str, tid: &str) -> Vec<Operation
         .await
         .operations
         .values()
-        .filter(|operation| operation.id.task_id == tid && !operation.is_terminal())
+        .filter(|operation| operation.id.node == tid && !operation.is_terminal())
         .map(|operation| (operation.id.sequence, operation.state.clone()))
         .collect();
     open.sort_by_key(|(sequence, _)| *sequence);
@@ -266,7 +266,7 @@ async fn assert_propagation_once(engine: &Engine, pid: &str, source: &str) {
     );
     assert_eq!(
         decided_state(engine, pid, source).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "the act must hold the completion"
     );
     assert_eq!(
@@ -417,7 +417,7 @@ async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_fin
     let what = format!("the scheduled step of {pid} to wait in the aggregate");
     poll_until_dumped(
         &what,
-        || async { decided_state(&engine, &pid, &step2).await == Some(ExecutionState::Waiting) },
+        || async { decided_state(&engine, &pid, &step2).await == Some(TaskState::Waiting) },
         || dump_state(&engine, &pid),
     )
     .await;
@@ -507,12 +507,12 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
     // scheduled nothing and recorded nothing
     assert_eq!(
         decided_state(&engine, &pid, &step1).await,
-        Some(ExecutionState::Waiting),
+        Some(TaskState::Waiting),
         "an act whose propagation was refused still waits for a decision"
     );
     assert_eq!(
         decided_state(&engine, &pid, "step2").await,
-        Some(ExecutionState::Created),
+        Some(TaskState::Created),
         "a refused propagation may not start the step it schedules"
     );
     let (action, propagate) = next_records(&pid, &step1);
@@ -550,9 +550,7 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
         ("surfaced for reconciliation", &scan.reconciliation_required),
     ] {
         assert!(
-            !operations
-                .iter()
-                .any(|operation| operation.task_id == step1),
+            !operations.iter().any(|operation| operation.node == step1),
             "the refused hop left nothing to replay; it may not be {what}: {scan:?}"
         );
     }
@@ -561,12 +559,12 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
     // the propagation exists
     assert_eq!(
         decided_state(&recovered, &pid, &step1).await,
-        Some(ExecutionState::Waiting),
+        Some(TaskState::Waiting),
         "recovery may not invent the decision the store refused"
     );
     assert_eq!(
         decided_state(&recovered, &pid, "step2").await,
-        Some(ExecutionState::Created),
+        Some(TaskState::Created),
         "recovery may not start a child of a refused propagation"
     );
 
@@ -649,12 +647,12 @@ async fn a_propagation_left_pending_by_a_crash_is_redriven_exactly_once_inner() 
     );
     assert_eq!(
         decided_state(&engine, &pid, &step1).await,
-        Some(ExecutionState::Waiting),
+        Some(TaskState::Waiting),
         "the effect never committed, so the act still waits"
     );
     assert_eq!(
         decided_state(&engine, &pid, "step2").await,
-        Some(ExecutionState::Created),
+        Some(TaskState::Created),
         "the lost effect may not start the step the propagation schedules"
     );
     assert_eq!(
@@ -674,8 +672,8 @@ async fn a_propagation_left_pending_by_a_crash_is_redriven_exactly_once_inner() 
     poll_until_dumped(
         &what,
         || async {
-            decided_state(&recovered, &pid, &step1).await == Some(ExecutionState::Completed)
-                && decided_state(&recovered, &pid, "step2").await == Some(ExecutionState::Waiting)
+            decided_state(&recovered, &pid, &step1).await == Some(TaskState::Completed)
+                && decided_state(&recovered, &pid, "step2").await == Some(TaskState::Waiting)
         },
         || dump_state(&recovered, &pid),
     )
@@ -763,9 +761,7 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
         ("surfaced for reconciliation", &scan.reconciliation_required),
     ] {
         assert!(
-            !operations
-                .iter()
-                .any(|operation| operation.task_id == step1),
+            !operations.iter().any(|operation| operation.node == step1),
             "an applied propagation must leave the scan nothing to replay; it may not be {what}: {scan:?}"
         );
     }
@@ -780,7 +776,7 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
     );
     assert_eq!(
         decided_state(&recovered, &pid, "step2").await,
-        Some(ExecutionState::Waiting),
+        Some(TaskState::Waiting),
         "the recovered run is still where the crash left it"
     );
 
@@ -792,10 +788,7 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
         .await
         .unwrap();
     assert!(
-        !again
-            .woken
-            .iter()
-            .any(|operation| operation.task_id == step1),
+        !again.woken.iter().any(|operation| operation.node == step1),
         "the applied propagation may not be re-woken by a repeated scan: {again:?}"
     );
 
@@ -893,7 +886,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
                 );
                 assert_eq!(
                     decided_state(&engine, &pid, &step1).await,
-                    Some(ExecutionState::Waiting),
+                    Some(TaskState::Waiting),
                     "boundary 1: the act still waits for the decision that never landed"
                 );
             }
@@ -905,7 +898,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
                 );
                 assert_eq!(
                     decided_state(&engine, &pid, &step1).await,
-                    Some(ExecutionState::Waiting),
+                    Some(TaskState::Waiting),
                     "boundary 2: the effect never committed"
                 );
             }
@@ -917,7 +910,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
                 );
                 assert_eq!(
                     decided_state(&engine, &pid, &step1).await,
-                    Some(ExecutionState::Waiting),
+                    Some(TaskState::Waiting),
                     "boundary 3: the engine may not decide across the effect boundary"
                 );
             }
@@ -933,7 +926,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
         // with the close the same commit carries).
         assert_eq!(
             decided_state(&engine, &pid, "step2").await,
-            Some(ExecutionState::Created),
+            Some(TaskState::Created),
             "boundary {boundary}: a hop that lost its effect may not start the step it schedules"
         );
         assert_eq!(
@@ -964,7 +957,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
             INTENT_WRITE => {
                 assert_eq!(
                     decided_state(&recovered, &pid, &step1).await,
-                    Some(ExecutionState::Waiting),
+                    Some(TaskState::Waiting),
                     "boundary 1: nothing durable may have decided the act"
                 );
                 complete_act(&recovered, &pid, &step1).await.unwrap();
@@ -980,12 +973,12 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
                     shifted
                         .reconciliation_required
                         .iter()
-                        .any(|operation| operation.task_id == step1),
+                        .any(|operation| operation.node == step1),
                     "boundary 3: the ambiguous operation must be surfaced for reconciliation: {shifted:?}"
                 );
                 assert_eq!(
                     decided_state(&recovered, &pid, &step1).await,
-                    Some(ExecutionState::Waiting),
+                    Some(TaskState::Waiting),
                     "boundary 3: the engine may not decide across the effect boundary"
                 );
                 complete_act(&recovered, &pid, &step1).await.unwrap();
@@ -997,9 +990,8 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
         poll_until_dumped(
             &what,
             || async {
-                decided_state(&recovered, &pid, &step1).await == Some(ExecutionState::Completed)
-                    && decided_state(&recovered, &pid, "step2").await
-                        == Some(ExecutionState::Waiting)
+                decided_state(&recovered, &pid, &step1).await == Some(TaskState::Completed)
+                    && decided_state(&recovered, &pid, "step2").await == Some(TaskState::Waiting)
             },
             || dump_state(&recovered, &pid),
         )
@@ -1087,7 +1079,7 @@ async fn a_container_completes_only_after_its_last_child_settles_inner() {
         let what = format!("branch act {tid} of {pid} to wait in the aggregate");
         poll_until_dumped(
             &what,
-            || async { decided_state(&engine, &pid, tid).await == Some(ExecutionState::Waiting) },
+            || async { decided_state(&engine, &pid, tid).await == Some(TaskState::Waiting) },
             || dump_state(&engine, &pid),
         )
         .await;
@@ -1115,7 +1107,7 @@ async fn a_container_completes_only_after_its_last_child_settles_inner() {
     complete_act(&engine, &pid, &branch_a).await.unwrap();
     assert_eq!(
         decided_state(&engine, &pid, &branch_a).await,
-        Some(ExecutionState::Completed),
+        Some(TaskState::Completed),
         "the branch the client completed must hold its completion"
     );
     for _ in 0..25 {
@@ -1137,7 +1129,7 @@ async fn a_container_completes_only_after_its_last_child_settles_inner() {
         );
         assert_eq!(
             decided_state(&engine, &pid, &branch_b).await,
-            Some(ExecutionState::Waiting),
+            Some(TaskState::Waiting),
             "the last branch is still the work the join waits for"
         );
         tokio::time::sleep(TICK).await;

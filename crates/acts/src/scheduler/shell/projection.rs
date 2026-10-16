@@ -35,8 +35,8 @@ use crate::{
     scheduler::core::{
         commit::process::ProcessSnapshot,
         model::{
-            execution_graph::{ExecutionId, ExecutionState},
-            task_state::TaskState,
+            legacy_task_state::LegacyTaskState,
+            task_graph::{TaskId, TaskState},
             transition_plan::ProcessVersion,
             view::NodeTree,
         },
@@ -161,12 +161,12 @@ impl RowProjector {
         // The newest generation of every node is the row's task instance: the
         // store keys a task by `pid + tid` and the kernel's tid is the model
         // node id, so one surviving instance may be projected per node.
-        let mut latest: BTreeMap<String, ExecutionId> = BTreeMap::new();
-        for id in snapshot.executions.keys() {
-            match latest.get(&id.task_id) {
+        let mut latest: BTreeMap<String, TaskId> = BTreeMap::new();
+        for id in snapshot.tasks.keys() {
+            match latest.get(&id.node) {
                 Some(current) if current.generation >= id.generation => {}
                 _ => {
-                    latest.insert(id.task_id.clone(), id.clone());
+                    latest.insert(id.node.clone(), id.clone());
                 }
             }
         }
@@ -177,23 +177,23 @@ impl RowProjector {
             self.release(snapshot, "proc");
             return Err(error);
         }
-        for (task_id, execution_id) in &latest {
+        for (node_id, task_id) in &latest {
             if let Some(nodes) = nodes
-                && !nodes.contains(task_id)
+                && !nodes.contains(node_id)
             {
                 continue;
             }
-            if !self.claim(snapshot, task_id) {
+            if !self.claim(snapshot, node_id) {
                 continue;
             }
             if let Err(error) = self
-                .project_task(snapshot, &tree, &latest, task_id, execution_id)
+                .project_task(snapshot, &tree, &latest, node_id, task_id)
                 .await
             {
                 // The claim may not outlive a write that never landed — the
                 // next projection of this version (a retry, a later flush)
                 // must be allowed to write the row.
-                self.release(snapshot, task_id);
+                self.release(snapshot, node_id);
                 return Err(error);
             }
         }
@@ -221,19 +221,19 @@ impl RowProjector {
         model: &crate::model::Workflow,
     ) -> Result<()> {
         let Some(root) = snapshot
-            .executions
+            .tasks
             .keys()
-            .filter(|id| id.task_id == consts::TASK_ROOT_TID)
+            .filter(|id| id.node == consts::TASK_ROOT_TID)
             .min_by_key(|id| id.generation)
             .cloned()
         else {
             return Ok(());
         };
         let state = snapshot
-            .executions
+            .tasks
             .get(&root)
-            .map(|execution| execution.state)
-            .unwrap_or(ExecutionState::Created);
+            .map(|task| task.state)
+            .unwrap_or(TaskState::Created);
 
         let collection = self.store().procs();
         let existing = collection.find_opt(&snapshot.process_id).await?;
@@ -243,7 +243,7 @@ impl RowProjector {
             state: proc_state(state).into(),
             mid: model.id.clone(),
             name: model.name.clone(),
-            start_time: if state == ExecutionState::Created {
+            start_time: if state == TaskState::Created {
                 0
             } else {
                 stamp(existing.as_ref().map(|row| row.start_time), now)
@@ -284,7 +284,7 @@ impl RowProjector {
     /// The process env, as the legacy proc row carries it: the caller
     /// authority, the run's directory, and whatever a package wrote through
     /// `Context::set_env` (the durable `__env` map).
-    fn proc_env(&self, snapshot: &ProcessSnapshot, root: &ExecutionId) -> Result<String> {
+    fn proc_env(&self, snapshot: &ProcessSnapshot, root: &TaskId) -> Result<String> {
         let mut env = Vars::new();
         if let Some(owner) = snapshot
             .variables
@@ -309,21 +309,21 @@ impl RowProjector {
         &self,
         snapshot: &ProcessSnapshot,
         tree: &NodeTree,
-        latest: &BTreeMap<String, ExecutionId>,
-        task_id: &str,
-        execution_id: &ExecutionId,
+        latest: &BTreeMap<String, TaskId>,
+        node_id: &str,
+        task_id: &TaskId,
     ) -> Result<()> {
-        let execution = snapshot
-            .executions
-            .get(execution_id)
+        let task = snapshot
+            .tasks
+            .get(task_id)
             .expect("projected execution must exist");
         // The root task's tid is `$` while its node is the workflow node the
         // tree is rooted at (the legacy root row has the same split: `tid =
         // "$"`, `node_data.id = <model id>`).
-        let node = if task_id == consts::TASK_ROOT_TID {
+        let node = if node_id == consts::TASK_ROOT_TID {
             tree.root()
         } else {
-            tree.node(task_id)
+            tree.node(node_id)
         };
         let Some(node) = node else {
             // An execution whose model node is gone can only come from a
@@ -332,38 +332,38 @@ impl RowProjector {
             // hop.
             tracing::warn!(
                 pid = %snapshot.process_id,
-                node = task_id,
+                node = node_id,
                 "row projection: model has no node; task row skipped"
             );
             return Ok(());
         };
 
-        let row_id = crate::utils::Id::new(&snapshot.process_id, task_id).id();
+        let row_id = crate::utils::Id::new(&snapshot.process_id, node_id).id();
         let collection = self.store().tasks();
         let existing = collection.find_opt(&row_id).await?;
         let now = crate::utils::time::time_millis();
         let row = data::Task {
             id: row_id.clone(),
             pid: snapshot.process_id.clone(),
-            tid: task_id.to_string(),
+            tid: node_id.to_string(),
             node_data: node.to_string()?,
             kind: node.kind().to_string(),
-            prev: execution
+            prev: task
                 .predecessors
                 .iter()
                 .max_by_key(|id| id.generation)
-                .map(|id| id.task_id.clone()),
-            next: successors(snapshot, latest, execution_id),
-            parent: execution.parent.as_ref().map(|id| id.task_id.clone()),
+                .map(|id| id.node.clone()),
+            next: successors(snapshot, latest, task_id),
+            parent: task.parent.as_ref().map(|id| id.node.clone()),
             name: node.name(),
-            state: task_state(execution.state).into(),
-            err: error_of(snapshot, execution_id),
-            start_time: if execution.state == ExecutionState::Created {
+            state: legacy_task_state(task.state).into(),
+            err: error_of(snapshot, task_id),
+            start_time: if task.state == TaskState::Created {
                 0
             } else {
                 stamp(existing.as_ref().map(|row| row.start_time), now)
             },
-            end_time: if execution.state.is_terminal() {
+            end_time: if task.state.is_terminal() {
                 stamp(existing.as_ref().map(|row| row.end_time), now)
             } else {
                 0
@@ -379,15 +379,15 @@ impl RowProjector {
         // keep the whole run (and its directory) out of the sweeper's reach.
         let was_terminal = existing
             .as_ref()
-            .map(|row| TaskState::from(row.state.as_str()).is_completed())
+            .map(|row| LegacyTaskState::from(row.state.as_str()).is_completed())
             .unwrap_or(false);
-        if execution.state.is_terminal() && !was_terminal {
+        if task.state.is_terminal() && !was_terminal {
             self.store()
-                .close_deliveries(&snapshot.process_id, task_id)
+                .close_deliveries(&snapshot.process_id, node_id)
                 .await?;
         }
 
-        let data = scope_data(snapshot, execution_id);
+        let data = scope_data(snapshot, task_id);
         if data.is_empty() {
             return Ok(());
         }
@@ -396,7 +396,7 @@ impl RowProjector {
         let row = data::TaskVars {
             id: row_id.clone(),
             pid: snapshot.process_id.clone(),
-            tid: task_id.to_string(),
+            tid: node_id.to_string(),
             data: serde_json::Value::Object(data).to_string(),
             // The aggregate carries no sealed scope: a snapshot seal is a
             // per-effect resolution, not durable run state (see `effects`).
@@ -426,11 +426,8 @@ pub(crate) fn env_map(snapshot: &ProcessSnapshot) -> Result<Vec<(String, serde_j
 /// (`DeliveryUnknown`, `Quarantined`) keeps the rows alive for reconciliation,
 /// exactly like an open legacy delivery row.
 pub(crate) fn settled(snapshot: &ProcessSnapshot) -> bool {
-    !snapshot.executions.is_empty()
-        && snapshot
-            .executions
-            .values()
-            .all(|execution| execution.state.is_terminal())
+    !snapshot.tasks.is_empty()
+        && snapshot.tasks.values().all(|task| task.state.is_terminal())
         && snapshot.outbox.values().all(|record| {
             matches!(
                 record.state,
@@ -443,19 +440,19 @@ pub(crate) fn settled(snapshot: &ProcessSnapshot) -> bool {
 /// that names it a predecessor. Deterministic (sorted).
 fn successors(
     snapshot: &ProcessSnapshot,
-    latest: &BTreeMap<String, ExecutionId>,
-    execution_id: &ExecutionId,
+    latest: &BTreeMap<String, TaskId>,
+    task_id: &TaskId,
 ) -> Vec<String> {
     let mut next: Vec<String> = latest
         .values()
         .filter(|id| {
             snapshot
-                .executions
+                .tasks
                 .get(*id)
-                .map(|execution| execution.predecessors.contains(execution_id))
+                .map(|task| task.predecessors.contains(task_id))
                 .unwrap_or(false)
         })
-        .map(|id| id.task_id.clone())
+        .map(|id| id.node.clone())
         .collect();
     next.sort();
     next
@@ -466,11 +463,11 @@ fn successors(
 /// legacy row holds.
 fn scope_data(
     snapshot: &ProcessSnapshot,
-    execution: &ExecutionId,
+    task: &TaskId,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut data = serde_json::Map::new();
     for ((scope, name), raw) in &snapshot.variables {
-        if scope != execution || consts::is_private_key(name) || name == AUTO_VAR {
+        if scope != task || consts::is_private_key(name) || name == AUTO_VAR {
             continue;
         }
         data.insert(
@@ -483,15 +480,15 @@ fn scope_data(
 
 /// The failed execution's error, in the legacy `Error` shape
 /// (`{"ecode":...,"message":...}`).
-fn error_of(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> Option<String> {
-    let execution_state = snapshot.executions.get(execution)?.state;
-    if execution_state != ExecutionState::Failed {
+fn error_of(snapshot: &ProcessSnapshot, task: &TaskId) -> Option<String> {
+    let task_state = snapshot.tasks.get(task)?.state;
+    if task_state != TaskState::Failed {
         return None;
     }
     let read = |name: &str| {
         snapshot
             .variables
-            .get(&(execution.clone(), name.to_string()))
+            .get(&(task.clone(), name.to_string()))
             .map(|raw| serde_json::from_str::<String>(raw).unwrap_or_else(|_| raw.clone()))
             .unwrap_or_default()
     };
@@ -500,35 +497,33 @@ fn error_of(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> Option<Strin
 }
 
 /// One execution state as the legacy task state the read model speaks.
-pub(crate) fn task_state(state: ExecutionState) -> TaskState {
+pub(crate) fn legacy_task_state(state: TaskState) -> LegacyTaskState {
     match state {
         // A pre-created chain node is the legacy `Pending` task: created, not
         // yet woken by its predecessor.
-        ExecutionState::Created => TaskState::Pending,
-        ExecutionState::Ready => TaskState::Ready,
-        ExecutionState::Running => TaskState::Running,
-        ExecutionState::Waiting => TaskState::Interrupt,
-        ExecutionState::Completed => TaskState::Completed,
-        ExecutionState::Submitted => TaskState::Submitted,
-        ExecutionState::Backed => TaskState::Backed,
-        ExecutionState::Cancelled => TaskState::Cancelled,
-        ExecutionState::Failed => TaskState::Error,
-        ExecutionState::Aborted => TaskState::Aborted,
-        ExecutionState::Skipped => TaskState::Skipped,
-        ExecutionState::Removed => TaskState::Removed,
+        TaskState::Created => LegacyTaskState::Pending,
+        TaskState::Ready => LegacyTaskState::Ready,
+        TaskState::Running => LegacyTaskState::Running,
+        TaskState::Waiting => LegacyTaskState::Interrupt,
+        TaskState::Completed => LegacyTaskState::Completed,
+        TaskState::Submitted => LegacyTaskState::Submitted,
+        TaskState::Backed => LegacyTaskState::Backed,
+        TaskState::Cancelled => LegacyTaskState::Cancelled,
+        TaskState::Failed => LegacyTaskState::Error,
+        TaskState::Aborted => LegacyTaskState::Aborted,
+        TaskState::Skipped => LegacyTaskState::Skipped,
+        TaskState::Removed => LegacyTaskState::Removed,
     }
 }
 
 /// The process state of a run whose root is in `state`. The legacy process is
 /// `None` until its root task is created, `Running` while the root lives, and
 /// the root's own terminal state afterwards.
-pub(crate) fn proc_state(state: ExecutionState) -> TaskState {
+pub(crate) fn proc_state(state: TaskState) -> LegacyTaskState {
     match state {
-        ExecutionState::Created => TaskState::None,
-        ExecutionState::Ready | ExecutionState::Running | ExecutionState::Waiting => {
-            TaskState::Running
-        }
-        other => task_state(other),
+        TaskState::Created => LegacyTaskState::None,
+        TaskState::Ready | TaskState::Running | TaskState::Waiting => LegacyTaskState::Running,
+        other => legacy_task_state(other),
     }
 }
 
@@ -581,23 +576,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn execution_states_map_onto_the_legacy_task_vocabulary() {
+    fn task_states_map_onto_the_legacy_task_vocabulary() {
         // The parity folding the migration notes pin: Waiting is the legacy
         // Interrupt, Failed is Error.
-        assert_eq!(task_state(ExecutionState::Waiting), TaskState::Interrupt);
-        assert_eq!(task_state(ExecutionState::Failed), TaskState::Error);
-        assert_eq!(task_state(ExecutionState::Created), TaskState::Pending);
-        assert_eq!(task_state(ExecutionState::Completed), TaskState::Completed);
-        assert_eq!(task_state(ExecutionState::Aborted), TaskState::Aborted);
+        assert_eq!(
+            legacy_task_state(TaskState::Waiting),
+            LegacyTaskState::Interrupt
+        );
+        assert_eq!(legacy_task_state(TaskState::Failed), LegacyTaskState::Error);
+        assert_eq!(
+            legacy_task_state(TaskState::Created),
+            LegacyTaskState::Pending
+        );
+        assert_eq!(
+            legacy_task_state(TaskState::Completed),
+            LegacyTaskState::Completed
+        );
+        assert_eq!(
+            legacy_task_state(TaskState::Aborted),
+            LegacyTaskState::Aborted
+        );
     }
 
     #[test]
     fn proc_state_tracks_the_root_and_predates_creation() {
-        assert_eq!(proc_state(ExecutionState::Created), TaskState::None);
-        assert_eq!(proc_state(ExecutionState::Running), TaskState::Running);
-        assert_eq!(proc_state(ExecutionState::Waiting), TaskState::Running);
-        assert_eq!(proc_state(ExecutionState::Completed), TaskState::Completed);
-        assert_eq!(proc_state(ExecutionState::Failed), TaskState::Error);
-        assert_eq!(proc_state(ExecutionState::Skipped), TaskState::Skipped);
+        assert_eq!(proc_state(TaskState::Created), LegacyTaskState::None);
+        assert_eq!(proc_state(TaskState::Running), LegacyTaskState::Running);
+        assert_eq!(proc_state(TaskState::Waiting), LegacyTaskState::Running);
+        assert_eq!(proc_state(TaskState::Completed), LegacyTaskState::Completed);
+        assert_eq!(proc_state(TaskState::Failed), LegacyTaskState::Error);
+        assert_eq!(proc_state(TaskState::Skipped), LegacyTaskState::Skipped);
     }
 }

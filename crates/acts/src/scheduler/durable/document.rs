@@ -58,23 +58,23 @@ impl std::error::Error for ProcessDocumentError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::core::commit::process::ExecutionSnapshot;
-    use crate::scheduler::core::model::execution_graph::ExecutionId;
-    use crate::scheduler::core::model::execution_graph::ExecutionState;
+    use crate::scheduler::core::commit::process::TaskSnapshot;
     use crate::scheduler::core::model::model_graph::NodeId;
     use crate::scheduler::core::model::operation::ClaimToken;
     use crate::scheduler::core::model::operation::OperationId;
     use crate::scheduler::core::model::operation::OperationKind;
     use crate::scheduler::core::model::operation::OperationRecord;
     use crate::scheduler::core::model::operation::OperationState;
+    use crate::scheduler::core::model::task_graph::TaskId;
+    use crate::scheduler::core::model::task_graph::TaskState;
     use crate::scheduler::core::model::transition_plan::ProcessVersion;
     use std::collections::{BTreeMap, HashMap};
 
     fn snapshot() -> ProcessSnapshot {
-        let execution = ExecutionId::new("step", 2).unwrap();
+        let task = TaskId::new("step", 2).unwrap();
         let operation_id = OperationId {
             process_id: "process".into(),
-            task_id: "step".into(),
+            node: "step".into(),
             generation: 2,
             sequence: 7,
         };
@@ -91,17 +91,17 @@ mod tests {
                 process: 4,
                 operations: 8,
             },
-            executions: HashMap::from([(
-                execution.clone(),
-                ExecutionSnapshot {
+            tasks: HashMap::from([(
+                task.clone(),
+                TaskSnapshot {
                     model_node: NodeId::parse("model-step").unwrap(),
                     parent: None,
                     predecessors: vec![],
-                    state: ExecutionState::Running,
+                    state: TaskState::Running,
                     revision: 3,
                 },
             )]),
-            variables: BTreeMap::from([((execution, "payload".into()), "value".into())]),
+            variables: BTreeMap::from([((task, "payload".into()), "value".into())]),
             operations: HashMap::from([(
                 operation_id.clone(),
                 OperationRecord {

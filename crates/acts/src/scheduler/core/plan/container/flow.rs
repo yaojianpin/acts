@@ -47,7 +47,7 @@ pub(crate) const FLOW_CATCHES: &str = "catches";
 
 /// Which decision flow one execution is in, beyond its own act's.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ExecutionFlow {
+pub(crate) enum TaskFlow {
     /// Waiting for the children it admitted: the plain join decides it.
     Children,
     /// Deciding its `catches`: the catch join decides it.
@@ -57,39 +57,33 @@ pub(crate) enum ExecutionFlow {
 /// The flow fact ([`FLOW_VAR`]) of one execution, if any. `None` means the
 /// execution is in its own act's flow — `Running` with it in flight, `Waiting`
 /// for a client, or not started yet.
-pub(crate) fn execution_flow(
-    snapshot: &ProcessSnapshot,
-    execution: &ExecutionId,
-) -> Option<ExecutionFlow> {
+pub(crate) fn task_flow(snapshot: &ProcessSnapshot, task: &TaskId) -> Option<TaskFlow> {
     match snapshot
         .variables
-        .get(&(execution.clone(), FLOW_VAR.to_string()))
+        .get(&(task.clone(), FLOW_VAR.to_string()))
         .map(String::as_str)
     {
-        Some(FLOW_CHILDREN) => Some(ExecutionFlow::Children),
-        Some(FLOW_CATCHES) => Some(ExecutionFlow::Catches),
+        Some(FLOW_CHILDREN) => Some(TaskFlow::Children),
+        Some(FLOW_CATCHES) => Some(TaskFlow::Catches),
         _ => None,
     }
 }
 
 /// Whether one execution is parked in `Running` for the children it admitted.
-pub(crate) fn parked_for_children(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> bool {
-    execution_flow(snapshot, execution) == Some(ExecutionFlow::Children)
+pub(crate) fn parked_for_children(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {
+    task_flow(snapshot, task) == Some(TaskFlow::Children)
 }
 
 /// Whether one execution is deciding its `catches` (the legacy `Sign::ERROR`
 /// on the failed step).
-pub(crate) fn deciding_catches(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> bool {
-    execution_flow(snapshot, execution) == Some(ExecutionFlow::Catches)
+pub(crate) fn deciding_catches(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {
+    task_flow(snapshot, task) == Some(TaskFlow::Catches)
 }
 
 /// The sign fact ([`SIGN_VAR`]) of one execution, if any.
-pub(crate) fn execution_sign<'a>(
-    snapshot: &'a ProcessSnapshot,
-    execution: &ExecutionId,
-) -> Option<&'a str> {
+pub(crate) fn task_sign<'a>(snapshot: &'a ProcessSnapshot, task: &TaskId) -> Option<&'a str> {
     snapshot
         .variables
-        .get(&(execution.clone(), SIGN_VAR.to_string()))
+        .get(&(task.clone(), SIGN_VAR.to_string()))
         .map(String::as_str)
 }

@@ -3,7 +3,7 @@ use super::*;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ContainerFanoutCommand {
     pub(crate) process_id: String,
-    pub(crate) source: ExecutionId,
+    pub(crate) source: TaskId,
     pub(crate) source_operation: OperationCommit,
     pub(crate) children: Vec<ContainerChild>,
     /// Client inputs of the completion that fans out (an auto completion has
@@ -20,7 +20,7 @@ pub(crate) struct ContainerFanoutCommand {
     ///
     /// `Waiting` stays a valid park value only for the timeout dispatch, which
     /// admits a branch under an execution that keeps waiting on its own act.
-    pub(crate) source_park: ExecutionState,
+    pub(crate) source_park: TaskState,
 }
 
 impl ContainerPlanner {
@@ -38,20 +38,14 @@ impl ContainerPlanner {
         if snapshot.process_id != command.process_id {
             return Err(ContainerError::WrongProcess);
         }
-        if !matches!(
-            command.source_park,
-            ExecutionState::Running | ExecutionState::Waiting
-        ) {
+        if !matches!(command.source_park, TaskState::Running | TaskState::Waiting) {
             return Err(ContainerError::InvalidSourcePark(command.source_park));
         }
         let source = snapshot
-            .executions
+            .tasks
             .get(&command.source)
-            .ok_or_else(|| ContainerError::ExecutionNotFound(command.source.clone()))?;
-        if !matches!(
-            source.state,
-            ExecutionState::Running | ExecutionState::Waiting
-        ) {
+            .ok_or_else(|| ContainerError::TaskNotFound(command.source.clone()))?;
+        if !matches!(source.state, TaskState::Running | TaskState::Waiting) {
             return Err(ContainerError::SourceNotContainer {
                 source: command.source.clone(),
                 state: source.state,
@@ -59,10 +53,10 @@ impl ContainerPlanner {
         }
         let operation = &command.source_operation.id;
         if operation.process_id != command.process_id
-            || operation.task_id != command.source.task_id
+            || operation.node != command.source.node
             || operation.generation != command.source.generation
         {
-            return Err(ContainerError::SourceOperationTargetsDifferentExecution);
+            return Err(ContainerError::SourceOperationTargetsDifferentTask);
         }
         if command.children.is_empty() {
             // A container without children is a normal completion: the join
@@ -77,7 +71,7 @@ impl ContainerPlanner {
         let mut state_changes = Vec::new();
         if source.state != command.source_park {
             state_changes.push(StateChange {
-                execution: command.source.clone(),
+                task: command.source.clone(),
                 expected_revision: source.revision,
                 from: source.state,
                 to: command.source_park,
@@ -95,7 +89,7 @@ impl ContainerPlanner {
         let mut operations = Vec::new();
         // Resolved execution of each already-processed child, for sibling
         // predecessor references.
-        let mut resolved: Vec<ExecutionId> = Vec::with_capacity(command.children.len());
+        let mut resolved: Vec<TaskId> = Vec::with_capacity(command.children.len());
         // The children this source already holds, per model node, oldest
         // generation first. A child slot belongs to its *parent*: the same model
         // node may be live under several parents at once (a `uses`-param
@@ -103,7 +97,7 @@ impl ContainerPlanner {
         // only the executions this fan-out admitted are its own to reuse. A
         // command that names one node N times (the param fan-out) maps its i-th
         // occurrence to the i-th child it already holds, and allocates the rest.
-        let mut held: std::collections::HashMap<String, Vec<ExecutionId>> =
+        let mut held: std::collections::HashMap<String, Vec<TaskId>> =
             std::collections::HashMap::with_capacity(command.children.len());
         let mut occurrence: std::collections::HashMap<String, usize> =
             std::collections::HashMap::with_capacity(command.children.len());
@@ -114,27 +108,27 @@ impl ContainerPlanner {
         let mut allocated: std::collections::HashMap<String, u64> =
             std::collections::HashMap::with_capacity(command.children.len());
         for (index, child) in command.children.iter().enumerate() {
-            if child.task_id.trim().is_empty() {
+            if child.node.trim().is_empty() {
                 return Err(ContainerError::EmptyChildTaskId);
             }
             let nth = {
-                let count = occurrence.entry(child.task_id.clone()).or_insert(0);
+                let count = occurrence.entry(child.node.clone()).or_insert(0);
                 let nth = *count;
                 *count += 1;
                 nth
             };
             let siblings = held
-                .entry(child.task_id.clone())
-                .or_insert_with(|| existing_children(snapshot, &command.source, &child.task_id));
+                .entry(child.node.clone())
+                .or_insert_with(|| existing_children(snapshot, &command.source, &child.node));
             let existing = siblings.get(nth).cloned();
             let observation =
                 SlotObservation::vacant(false, false).with_existing(match &existing {
-                    Some(execution) => generation_state(snapshot, execution),
+                    Some(task) => generation_state(snapshot, task),
                     None => ExistingGeneration::Absent,
                 });
-            let base = next_generation(snapshot, &child.task_id)
-                .ok_or(ContainerError::GenerationOverflow)?;
-            let generation = match allocated.get(&child.task_id) {
+            let base =
+                next_generation(snapshot, &child.node).ok_or(ContainerError::GenerationOverflow)?;
+            let generation = match allocated.get(&child.node) {
                 Some(previous) => base.max(
                     previous
                         .checked_add(1)
@@ -142,23 +136,23 @@ impl ContainerPlanner {
                 ),
                 None => base,
             };
-            let execution = match crate::scheduler::core::plan::execution_admission::GenerationAdmissionPolicy::decide(
-                crate::scheduler::core::plan::execution_admission::ExecutionSlotKind::Once,
-                crate::scheduler::core::plan::execution_admission::AdmissionIntent::Forward,
+            let task = match crate::scheduler::core::plan::task_admission::GenerationAdmissionPolicy::decide(
+                crate::scheduler::core::plan::task_admission::TaskSlotKind::Once,
+                crate::scheduler::core::plan::task_admission::AdmissionIntent::Forward,
                 observation,
             ) {
-                crate::scheduler::core::plan::execution_admission::AdmissionDecision::Ignore => {
+                crate::scheduler::core::plan::task_admission::AdmissionDecision::Ignore => {
                     resolved.push(
-                        existing.ok_or(ContainerError::ExecutionNotFound(command.source.clone()))?,
+                        existing.ok_or(ContainerError::TaskNotFound(command.source.clone()))?,
                     );
                     continue;
                 }
-                crate::scheduler::core::plan::execution_admission::AdmissionDecision::AllocateGeneration => {
-                    let execution = ExecutionId::new(child.task_id.clone(), generation)
+                crate::scheduler::core::plan::task_admission::AdmissionDecision::AllocateGeneration => {
+                    let task = TaskId::new(child.node.clone(), generation)
                         .map_err(|_| ContainerError::EmptyChildTaskId)?;
-                    allocated.insert(child.task_id.clone(), generation);
-                    creates.push(ExecutionCreate {
-                        execution: execution.clone(),
+                    allocated.insert(child.node.clone(), generation);
+                    creates.push(TaskCreate {
+                        task: task.clone(),
                         model_node: child.model_node.clone(),
                         parent: Some(command.source.clone()),
                         predecessors: resolve_predecessors(
@@ -168,21 +162,21 @@ impl ContainerPlanner {
                             index,
                         )?,
                         initial_state: match child.plan {
-                            ContainerChildPlan::Queued => ExecutionState::Created,
+                            ContainerChildPlan::Queued => TaskState::Created,
                             ContainerChildPlan::Entry | ContainerChildPlan::Skip => {
-                                ExecutionState::Ready
+                                TaskState::Ready
                             }
                         },
                     });
-                    if let Some(intent) = child_operation(command, &execution, child.plan)? {
+                    if let Some(intent) = child_operation(command, &task, child.plan)? {
                         operations.push(intent);
                     }
-                    child_variables(&mut variable_writes, &execution, child);
-                    execution
+                    child_variables(&mut variable_writes, &task, child);
+                    task
                 }
-                crate::scheduler::core::plan::execution_admission::AdmissionDecision::ReadmitExisting => {
-                    let execution =
-                        existing.ok_or(ContainerError::ExecutionNotFound(command.source.clone()))?;
+                crate::scheduler::core::plan::task_admission::AdmissionDecision::ReadmitExisting => {
+                    let task =
+                        existing.ok_or(ContainerError::TaskNotFound(command.source.clone()))?;
                     // A queued chain successor is admitted by propagation, never
                     // by the fan-out: an execution the seed (the root's own
                     // chain) or a rewind already created stays `Created` until
@@ -190,29 +184,29 @@ impl ContainerPlanner {
                     // `Ready` with no operation to run — and take the admission
                     // the propagation is about to perform.
                     if child.plan == ContainerChildPlan::Queued {
-                        resolved.push(execution);
+                        resolved.push(task);
                         continue;
                     }
                     // The latest generation exists but never ran (a Cancel
                     // rewind recreated it): admit it in place instead of
                     // allocating a second live generation.
-                    if let Some(change) = readmit_change(snapshot, &execution)? {
+                    if let Some(change) = readmit_change(snapshot, &task)? {
                         state_changes.push(change);
                     }
-                    if let Some(intent) = child_operation(command, &execution, child.plan)? {
+                    if let Some(intent) = child_operation(command, &task, child.plan)? {
                         operations.push(intent);
                     }
-                    child_variables(&mut variable_writes, &execution, child);
-                    execution
+                    child_variables(&mut variable_writes, &task, child);
+                    task
                 }
             };
-            resolved.push(execution);
+            resolved.push(task);
         }
 
         let plan = TransitionPlan {
             process_id: command.process_id.clone(),
             expected: snapshot.version.clone(),
-            execution_creates: creates,
+            task_creates: creates,
             state_changes,
             variable_writes,
             source_operation: Some(command.source_operation.clone()),
@@ -227,7 +221,7 @@ impl ContainerPlanner {
     fn empty_container_plan(
         snapshot: &ProcessSnapshot,
         command: &ContainerFanoutCommand,
-        state: ExecutionState,
+        state: TaskState,
         revision: u64,
     ) -> Result<TransitionPlan, ContainerError> {
         let sequence = command
@@ -239,7 +233,7 @@ impl ContainerPlanner {
         let mut operations = Vec::new();
         let propagate_id = OperationId {
             process_id: command.process_id.clone(),
-            task_id: command.source.task_id.clone(),
+            node: command.source.node.clone(),
             generation: command.source.generation,
             sequence,
         };
@@ -252,12 +246,12 @@ impl ContainerPlanner {
         let plan = TransitionPlan {
             process_id: command.process_id.clone(),
             expected: snapshot.version.clone(),
-            execution_creates: Vec::new(),
+            task_creates: Vec::new(),
             state_changes: vec![StateChange {
-                execution: command.source.clone(),
+                task: command.source.clone(),
                 expected_revision: revision,
                 from: state,
-                to: ExecutionState::Completed,
+                to: TaskState::Completed,
             }],
             variable_writes: Vec::new(),
             source_operation: Some(command.source_operation.clone()),
@@ -273,17 +267,11 @@ impl ContainerPlanner {
 /// The executions one task already has under one parent, oldest generation
 /// first: the children a re-run of this fan-out reuses (the seed's chain, a
 /// Cancel rewind's recreation) instead of duplicating.
-fn existing_children(
-    snapshot: &ProcessSnapshot,
-    parent: &ExecutionId,
-    task_id: &str,
-) -> Vec<ExecutionId> {
-    let mut children: Vec<ExecutionId> = snapshot
-        .executions
+fn existing_children(snapshot: &ProcessSnapshot, parent: &TaskId, node: &str) -> Vec<TaskId> {
+    let mut children: Vec<TaskId> = snapshot
+        .tasks
         .iter()
-        .filter(|(id, execution)| {
-            id.task_id == task_id && execution.parent.as_ref() == Some(parent)
-        })
+        .filter(|(id, task)| id.node == node && task.parent.as_ref() == Some(parent))
         .map(|(id, _)| id.clone())
         .collect();
     children.sort_by_key(|id| id.generation);
@@ -293,21 +281,21 @@ fn existing_children(
 /// The admission observation for one already-existing execution: `Created`
 /// never ran (`Unstarted`), so a rewound-and-recreated child is readmitted
 /// rather than duplicated.
-fn generation_state(snapshot: &ProcessSnapshot, execution: &ExecutionId) -> ExistingGeneration {
-    match snapshot.executions.get(execution).map(|held| held.state) {
-        Some(ExecutionState::Created) => ExistingGeneration::Unstarted,
-        Some(ExecutionState::Ready | ExecutionState::Running | ExecutionState::Waiting) => {
+fn generation_state(snapshot: &ProcessSnapshot, task: &TaskId) -> ExistingGeneration {
+    match snapshot.tasks.get(task).map(|held| held.state) {
+        Some(TaskState::Created) => ExistingGeneration::Unstarted,
+        Some(TaskState::Ready | TaskState::Running | TaskState::Waiting) => {
             ExistingGeneration::Active
         }
         _ => ExistingGeneration::Completed,
     }
 }
 
-fn next_generation(snapshot: &ProcessSnapshot, task_id: &str) -> Option<u64> {
+fn next_generation(snapshot: &ProcessSnapshot, node: &str) -> Option<u64> {
     snapshot
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == task_id)
+        .filter(|id| id.node == node)
         .map(|id| id.generation)
         .max()
         .map_or(Some(0), |value| value.checked_add(1))
@@ -318,10 +306,10 @@ fn next_generation(snapshot: &ProcessSnapshot, task_id: &str) -> Option<u64> {
 /// id, created or readmitted).
 fn resolve_predecessors(
     references: &[ContainerPredecessor],
-    source: &ExecutionId,
-    resolved: &[ExecutionId],
+    source: &TaskId,
+    resolved: &[TaskId],
     current: usize,
-) -> Result<Vec<ExecutionId>, ContainerError> {
+) -> Result<Vec<TaskId>, ContainerError> {
     references
         .iter()
         .map(|reference| match *reference {
@@ -342,7 +330,7 @@ fn resolve_predecessors(
 /// The admission operation of one child, when its plan needs one.
 fn child_operation(
     command: &ContainerFanoutCommand,
-    execution: &ExecutionId,
+    task: &TaskId,
     plan: ContainerChildPlan,
 ) -> Result<Option<OperationIntent>, ContainerError> {
     let kind = match plan {
@@ -353,27 +341,23 @@ fn child_operation(
     Ok(Some(OperationIntent {
         id: OperationId {
             process_id: command.process_id.clone(),
-            task_id: execution.task_id.clone(),
-            generation: execution.generation,
+            node: task.node.clone(),
+            generation: task.generation,
             sequence: 0,
         },
         kind,
     }))
 }
 
-fn child_variables(
-    writes: &mut Vec<VariableWrite>,
-    execution: &ExecutionId,
-    child: &ContainerChild,
-) {
+fn child_variables(writes: &mut Vec<VariableWrite>, task: &TaskId, child: &ContainerChild) {
     writes.push(VariableWrite {
-        scope: execution.clone(),
+        scope: task.clone(),
         name: "auto".to_string(),
         value: if child.auto { "1" } else { "0" }.to_string(),
     });
     for (name, value) in &child.vars {
         writes.push(VariableWrite {
-            scope: execution.clone(),
+            scope: task.clone(),
             name: name.clone(),
             value: value.clone(),
         });
@@ -384,23 +368,23 @@ fn child_variables(
 /// unexpected state is refused rather than forced.
 fn readmit_change(
     snapshot: &ProcessSnapshot,
-    execution: &ExecutionId,
+    task: &TaskId,
 ) -> Result<Option<StateChange>, ContainerError> {
     let existing = snapshot
-        .executions
-        .get(execution)
-        .ok_or_else(|| ContainerError::ExecutionNotFound(execution.clone()))?;
-    if existing.state != ExecutionState::Created {
+        .tasks
+        .get(task)
+        .ok_or_else(|| ContainerError::TaskNotFound(task.clone()))?;
+    if existing.state != TaskState::Created {
         return Err(ContainerError::ReadmitNotCreated {
-            execution: execution.clone(),
+            task: task.clone(),
             state: existing.state,
         });
     }
     Ok(Some(StateChange {
-        execution: execution.clone(),
+        task: task.clone(),
         expected_revision: existing.revision,
-        from: ExecutionState::Created,
-        to: ExecutionState::Ready,
+        from: TaskState::Created,
+        to: TaskState::Ready,
     }))
 }
 
@@ -409,12 +393,12 @@ fn fanout_outbox(command: &ContainerFanoutCommand, outcome: &str) -> OutboxInten
         key: format!(
             "fanout:{}:{}:{}:{}",
             command.process_id,
-            command.source.task_id,
+            command.source.node,
             command.source.generation,
             command.source_operation.id.sequence,
         ),
         topic: format!("fanout.{outcome}"),
-        payload: format!("{}:{}", command.source.task_id, command.source.generation),
+        payload: format!("{}:{}", command.source.node, command.source.generation),
         receipt: None,
     }
 }

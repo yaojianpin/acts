@@ -7,12 +7,12 @@ pub(crate) enum PropagationError {
         graph: u64,
         snapshot: u64,
     },
-    SourceOperationTargetsDifferentExecution,
-    ExecutionNotInGraph(ExecutionId),
-    ExecutionNotFound(ExecutionId),
+    SourceOperationTargetsDifferentTask,
+    TaskNotInGraph(TaskId),
+    TaskNotFound(TaskId),
     SourceNotTerminal {
-        execution: ExecutionId,
-        state: ExecutionState,
+        task: TaskId,
+        state: TaskState,
     },
     /// A step's `next` names a node the run never instantiated (the model and
     /// the seeded graph disagree). Scheduling nothing would end the flow

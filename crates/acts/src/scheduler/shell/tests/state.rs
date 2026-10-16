@@ -1,153 +1,153 @@
-use crate::TaskState;
+use crate::LegacyTaskState;
 
 use serial_test::serial;
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_state_is_finished() {
-    let state = TaskState::Ready;
+    let state = LegacyTaskState::Ready;
     assert!(!state.is_completed());
 
-    let state = TaskState::Running;
+    let state = LegacyTaskState::Running;
     assert!(!state.is_completed());
 
-    let state = TaskState::None;
+    let state = LegacyTaskState::None;
     assert!(!state.is_completed());
 
-    let state = TaskState::Completed;
+    let state = LegacyTaskState::Completed;
     assert!(state.is_completed());
 
-    let state = TaskState::Cancelled;
+    let state = LegacyTaskState::Cancelled;
     assert!(state.is_completed());
 
-    let state = TaskState::Backed;
+    let state = LegacyTaskState::Backed;
     assert!(state.is_completed());
 
-    let state = TaskState::Submitted;
+    let state = LegacyTaskState::Submitted;
     assert!(state.is_completed());
 
-    let state = TaskState::Skipped;
+    let state = LegacyTaskState::Skipped;
     assert!(state.is_completed());
 
-    let state = TaskState::Removed;
+    let state = LegacyTaskState::Removed;
     assert!(state.is_completed());
 
-    let state = TaskState::Error;
+    let state = LegacyTaskState::Error;
     assert!(state.is_completed());
 
-    let state = TaskState::Aborted;
+    let state = LegacyTaskState::Aborted;
     assert!(state.is_completed());
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_state_is_error() {
-    let state = TaskState::Ready;
+    let state = LegacyTaskState::Ready;
     assert!(!state.is_error());
 
-    let state = TaskState::Running;
+    let state = LegacyTaskState::Running;
     assert!(!state.is_error());
 
-    let state = TaskState::None;
+    let state = LegacyTaskState::None;
     assert!(!state.is_error());
 
-    let state = TaskState::Completed;
+    let state = LegacyTaskState::Completed;
     assert!(!state.is_error());
 
-    let state = TaskState::Submitted;
+    let state = LegacyTaskState::Submitted;
     assert!(!state.is_error());
 
-    let state = TaskState::Cancelled;
+    let state = LegacyTaskState::Cancelled;
     assert!(!state.is_error());
 
-    let state = TaskState::Backed;
+    let state = LegacyTaskState::Backed;
     assert!(!state.is_error());
 
-    let state = TaskState::Skipped;
+    let state = LegacyTaskState::Skipped;
     assert!(!state.is_error());
 
-    let state = TaskState::Error;
+    let state = LegacyTaskState::Error;
     assert!(state.is_error());
 
-    let state = TaskState::Aborted;
+    let state = LegacyTaskState::Aborted;
     assert!(!state.is_error());
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_state_to_string() {
-    let state = TaskState::None;
+    let state = LegacyTaskState::None;
     assert_eq!(state.to_string(), "none");
 
-    let state = TaskState::Ready;
+    let state = LegacyTaskState::Ready;
     assert_eq!(state.to_string(), "ready");
 
-    let state = TaskState::Running;
+    let state = LegacyTaskState::Running;
     assert_eq!(state.to_string(), "running");
 
-    let state = TaskState::Error;
+    let state = LegacyTaskState::Error;
     assert_eq!(state.to_string(), "error");
 
-    let state = TaskState::Interrupt;
+    let state = LegacyTaskState::Interrupt;
     assert_eq!(state.to_string(), "interrupted");
 
-    let state = TaskState::Submitted;
+    let state = LegacyTaskState::Submitted;
     assert_eq!(state.to_string(), "submitted");
 
-    let state = TaskState::Cancelled;
+    let state = LegacyTaskState::Cancelled;
     assert_eq!(state.to_string(), "cancelled");
 
-    let state = TaskState::Backed;
+    let state = LegacyTaskState::Backed;
     assert_eq!(state.to_string(), "backed");
 
-    let state = TaskState::Pending;
+    let state = LegacyTaskState::Pending;
     assert_eq!(state.to_string(), "pending");
 
-    let state = TaskState::Aborted;
+    let state = LegacyTaskState::Aborted;
     assert_eq!(state.to_string(), "aborted");
 
-    let state = TaskState::Removed;
+    let state = LegacyTaskState::Removed;
     assert_eq!(state.to_string(), "removed");
 
-    let state = TaskState::Skipped;
+    let state = LegacyTaskState::Skipped;
     assert_eq!(state.to_string(), "skipped");
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_state_from_string() {
-    let state: TaskState = "none".into();
-    assert_eq!(state, TaskState::None);
+    let state: LegacyTaskState = "none".into();
+    assert_eq!(state, LegacyTaskState::None);
 
-    let state: TaskState = "ready".into();
-    assert_eq!(state, TaskState::Ready);
+    let state: LegacyTaskState = "ready".into();
+    assert_eq!(state, LegacyTaskState::Ready);
 
-    let state: TaskState = "running".into();
-    assert_eq!(state, TaskState::Running);
+    let state: LegacyTaskState = "running".into();
+    assert_eq!(state, LegacyTaskState::Running);
 
-    let state: TaskState = "error".into();
-    assert_eq!(state, TaskState::Error);
+    let state: LegacyTaskState = "error".into();
+    assert_eq!(state, LegacyTaskState::Error);
 
-    let state: TaskState = "aborted".into();
-    assert_eq!(state, TaskState::Aborted);
+    let state: LegacyTaskState = "aborted".into();
+    assert_eq!(state, LegacyTaskState::Aborted);
 
-    let state: TaskState = "submitted".into();
-    assert_eq!(state, TaskState::Submitted);
+    let state: LegacyTaskState = "submitted".into();
+    assert_eq!(state, LegacyTaskState::Submitted);
 
-    let state: TaskState = "cancelled".into();
-    assert_eq!(state, TaskState::Cancelled);
+    let state: LegacyTaskState = "cancelled".into();
+    assert_eq!(state, LegacyTaskState::Cancelled);
 
-    let state: TaskState = "backed".into();
-    assert_eq!(state, TaskState::Backed);
+    let state: LegacyTaskState = "backed".into();
+    assert_eq!(state, LegacyTaskState::Backed);
 
-    let state: TaskState = "interrupted".into();
-    assert_eq!(state, TaskState::Interrupt);
+    let state: LegacyTaskState = "interrupted".into();
+    assert_eq!(state, LegacyTaskState::Interrupt);
 
-    let state: TaskState = "pending".into();
-    assert_eq!(state, TaskState::Pending);
+    let state: LegacyTaskState = "pending".into();
+    assert_eq!(state, LegacyTaskState::Pending);
 
-    let state: TaskState = "skipped".into();
-    assert_eq!(state, TaskState::Skipped);
+    let state: LegacyTaskState = "skipped".into();
+    assert_eq!(state, LegacyTaskState::Skipped);
 
-    let state: TaskState = "removed".into();
-    assert_eq!(state, TaskState::Removed);
+    let state: LegacyTaskState = "removed".into();
+    assert_eq!(state, LegacyTaskState::Removed);
 }

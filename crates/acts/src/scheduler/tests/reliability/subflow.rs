@@ -48,10 +48,10 @@ use parking_lot::Mutex;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::scheduler::core::model::execution_graph::ExecutionState;
+use crate::scheduler::core::model::task_graph::TaskState;
 use crate::store::ScanOperation;
 use crate::utils::consts;
-use crate::{Step, TaskState};
+use crate::{LegacyTaskState, Step};
 
 use super::*;
 
@@ -144,14 +144,14 @@ async fn deploy(engine: &Engine, workflow: &Workflow) {
 /// The aggregate's state for one model node of one run, if the aggregate is
 /// still there — the durable truth, immune to the read model's lag and to the
 /// sweeper.
-async fn node_state(engine: &Engine, pid: &str, node: &str) -> Option<ExecutionState> {
+async fn legacy_task_state(engine: &Engine, pid: &str, node: &str) -> Option<TaskState> {
     let snapshot = engine.runtime().kernel().snapshot(pid).await.ok()??;
     snapshot
-        .executions
+        .tasks
         .iter()
-        .filter(|(id, _)| id.task_id == node)
+        .filter(|(id, _)| id.node == node)
         .max_by_key(|(id, _)| id.generation)
-        .map(|(_, execution)| execution.state)
+        .map(|(_, task)| task.state)
 }
 
 /// How many live runs of the child model the store holds. A process is one row
@@ -516,8 +516,8 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
         "the child start must have been attempted exactly once, never replayed"
     );
     assert_eq!(
-        node_state(&engine, &pid, PARENT_NODE).await,
-        Some(ExecutionState::Failed),
+        legacy_task_state(&engine, &pid, PARENT_NODE).await,
+        Some(TaskState::Failed),
         "the subflow step must degrade to a defined terminal error"
     );
     // no half-created child: the refused start wrote nothing at all
@@ -558,8 +558,8 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
     assert_eq!(tid, CHILD_NODE, "the child's act is its step's own node");
     wait_completed(&engine, &pid2).await;
     assert_eq!(
-        node_state(&engine, &pid2, PARENT_NODE).await,
-        Some(ExecutionState::Completed),
+        legacy_task_state(&engine, &pid2, PARENT_NODE).await,
+        Some(TaskState::Completed),
         "the healed parent's subflow act completes with the child's start"
     );
     assert!(
@@ -646,7 +646,7 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
     let child = wait_waiting_task(&engine, &child_pid, CHILD_NODE).await;
     assert_eq!(
         child.state(),
-        TaskState::Interrupt,
+        LegacyTaskState::Interrupt,
         "the child's act must recover as the waiting act it was"
     );
     assert!(
@@ -668,8 +668,8 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
         "the parent must recover as the completed run it was"
     );
     assert_eq!(
-        node_state(&engine, &pid, PARENT_NODE).await,
-        Some(ExecutionState::Completed),
+        legacy_task_state(&engine, &pid, PARENT_NODE).await,
+        Some(TaskState::Completed),
         "the recovered parent's subflow act stays the completed handoff"
     );
     let extra = capture_created(&engine, ACT_KEY);

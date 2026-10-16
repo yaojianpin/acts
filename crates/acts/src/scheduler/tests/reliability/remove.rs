@@ -84,7 +84,7 @@ struct Durable {
     /// The aggregate version: a refusal that landed a commit would move it.
     version: String,
     /// The sorted `(node, generation, state)` set: what the run has decided.
-    executions: String,
+    tasks: String,
     /// The operation and outbox ids, with their states: what the run has
     /// scheduled and what it has left to deliver.
     scheduled: String,
@@ -100,12 +100,12 @@ async fn durable_shape(engine: &Engine, pid: &str) -> Durable {
         .await
         .unwrap()
         .expect("the aggregate of a live run exists");
-    let mut executions: Vec<String> = snapshot
-        .executions
+    let mut tasks: Vec<String> = snapshot
+        .tasks
         .iter()
-        .map(|(id, execution)| format!("{}#{}={:?}", id.task_id, id.generation, execution.state))
+        .map(|(id, task)| format!("{}#{}={:?}", id.node, id.generation, task.state))
         .collect();
-    executions.sort();
+    tasks.sort();
     let mut scheduled: Vec<String> = snapshot
         .operations
         .keys()
@@ -120,7 +120,7 @@ async fn durable_shape(engine: &Engine, pid: &str) -> Durable {
     scheduled.sort();
     Durable {
         version: format!("{:?}", snapshot.version),
-        executions: executions.join(","),
+        tasks: tasks.join(","),
         scheduled: scheduled.join(","),
     }
 }
@@ -138,9 +138,7 @@ async fn settled_shape(engine: &Engine, pid: &str) -> Durable {
     loop {
         tokio::time::sleep(TICK).await;
         let now = durable_shape(engine, pid).await;
-        if now.version == last.version
-            && now.executions == last.executions
-            && now.scheduled == last.scheduled
+        if now.version == last.version && now.tasks == last.tasks && now.scheduled == last.scheduled
         {
             stable += 1;
             if stable >= 3 {
@@ -154,7 +152,7 @@ async fn settled_shape(engine: &Engine, pid: &str) -> Durable {
             Instant::now() < deadline,
             "the run {pid}'s durable shape never settled: {} {} {}",
             last.version,
-            last.executions,
+            last.tasks,
             last.scheduled
         );
     }
@@ -174,9 +172,9 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .unwrap()
         .expect("the aggregate of a live run exists");
     let mut generations: Vec<u64> = snapshot
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == tid)
+        .filter(|id| id.node == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -276,9 +274,9 @@ async fn a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload_inner()
         "a refused `Remove` must not land a commit"
     );
     assert_eq!(
-        after.executions, before.executions,
+        after.tasks, before.tasks,
         "a refused `Remove` must not decide anything, got {}",
-        after.executions
+        after.tasks
     );
     assert_eq!(
         after.scheduled, before.scheduled,
@@ -297,9 +295,9 @@ async fn a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload_inner()
     );
     let replayed = settled_shape(&reloaded, &pid).await;
     assert_eq!(
-        replayed.executions, before.executions,
+        replayed.tasks, before.tasks,
         "the reloaded run must hold the decisions the refusal left, got {}",
-        replayed.executions
+        replayed.tasks
     );
 
     // still fully drivable to the normal settlement, once
@@ -392,9 +390,9 @@ async fn a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_on
         "an outage must not move the run's version"
     );
     assert_eq!(
-        after.executions, before.executions,
+        after.tasks, before.tasks,
         "an outage must not decide anything, got {}",
-        after.executions
+        after.tasks
     );
     assert_eq!(
         after.scheduled, before.scheduled,
@@ -457,9 +455,9 @@ async fn a_duplicate_remove_delivery_is_refused_without_effect_inner() {
         "the first refusal must consume nothing"
     );
     assert_eq!(
-        after_first.executions, before.executions,
+        after_first.tasks, before.tasks,
         "the first refusal must not decide anything, got {}",
-        after_first.executions
+        after_first.tasks
     );
     assert_eq!(
         after_first.scheduled, before.scheduled,
@@ -477,16 +475,16 @@ async fn a_duplicate_remove_delivery_is_refused_without_effect_inner() {
     let after_second = settled_shape(&engine, &pid).await;
     println!(
         "the decision point both refusals left: {} | {}",
-        after_second.version, after_second.executions
+        after_second.version, after_second.tasks
     );
     assert_eq!(
         after_second.version, after_first.version,
         "the duplicate must not move the version the first refusal left"
     );
     assert_eq!(
-        after_second.executions, after_first.executions,
+        after_second.tasks, after_first.tasks,
         "the duplicate must not move the executions, got {}",
-        after_second.executions
+        after_second.tasks
     );
     assert_eq!(
         after_second.scheduled, after_first.scheduled,

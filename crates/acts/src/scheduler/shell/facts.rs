@@ -15,13 +15,13 @@ pub(super) fn model_of(
 
 /// The root execution of an aggregate: the `$` node's earliest generation —
 /// the generation a re-entry never removes.
-pub(super) fn root_execution(
+pub(super) fn root_task(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-) -> Option<crate::scheduler::core::model::execution_graph::ExecutionId> {
+) -> Option<crate::scheduler::core::model::task_graph::TaskId> {
     snapshot
-        .executions
+        .tasks
         .keys()
-        .filter(|id| id.task_id == crate::utils::consts::TASK_ROOT_TID)
+        .filter(|id| id.node == crate::utils::consts::TASK_ROOT_TID)
         .min_by_key(|id| id.generation)
         .cloned()
 }
@@ -32,7 +32,7 @@ pub(super) fn root_variable(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
     name: &str,
 ) -> Result<Option<String>> {
-    Ok(root_execution(snapshot)
+    Ok(root_task(snapshot)
         .and_then(|root| snapshot.variables.get(&(root, name.to_string())).cloned()))
 }
 
@@ -42,15 +42,10 @@ pub(super) fn root_variable(
 /// being admitted for free.
 pub(super) fn root_state(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-) -> crate::scheduler::core::model::execution_graph::ExecutionState {
-    root_execution(snapshot)
-        .and_then(|root| {
-            snapshot
-                .executions
-                .get(&root)
-                .map(|execution| execution.state)
-        })
-        .unwrap_or(crate::scheduler::core::model::execution_graph::ExecutionState::Running)
+) -> crate::scheduler::core::model::task_graph::TaskState {
+    root_task(snapshot)
+        .and_then(|root| snapshot.tasks.get(&root).map(|task| task.state))
+        .unwrap_or(crate::scheduler::core::model::task_graph::TaskState::Running)
 }
 
 /// Whether every execution of the run reached a terminal state: the run is no
@@ -62,11 +57,7 @@ pub(super) fn root_state(
 pub(super) fn run_settled(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
 ) -> bool {
-    !snapshot.executions.is_empty()
-        && snapshot
-            .executions
-            .values()
-            .all(|execution| execution.state.is_terminal())
+    !snapshot.tasks.is_empty() && snapshot.tasks.values().all(|task| task.state.is_terminal())
 }
 
 /// The run's `__created` stamp (milliseconds): the FIFO key of the parked
@@ -119,18 +110,18 @@ pub(super) fn auto_decision(
 /// params answer the same cost the legacy branch task did.
 pub(crate) fn scope_vars(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    scope: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    scope: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> Vec<(String, String)> {
     let mut chain = vec![scope.clone()];
     let mut cursor = snapshot
-        .executions
+        .tasks
         .get(scope)
-        .and_then(|execution| execution.parent.clone());
+        .and_then(|task| task.parent.clone());
     while let Some(parent) = cursor {
         cursor = snapshot
-            .executions
+            .tasks
             .get(&parent)
-            .and_then(|execution| execution.parent.clone());
+            .and_then(|task| task.parent.clone());
         chain.push(parent);
     }
     let mut merged: Vec<(String, String)> = Vec::new();
@@ -191,7 +182,7 @@ pub(super) fn is_error_fact(name: &str) -> bool {
 /// ([`is_engine_fact`]) are never part of a run's data.
 pub(super) fn root_variables(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    root: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    root: &crate::scheduler::core::model::task_graph::TaskId,
     keep: impl Fn(&str) -> bool,
 ) -> crate::Vars {
     let mut vars = crate::Vars::new();
@@ -218,7 +209,7 @@ pub(super) fn root_variables(
 /// `null` rather than failing the run.
 pub(super) fn exposed_variables(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    root: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    root: &crate::scheduler::core::model::task_graph::TaskId,
     exposes: &[crate::Variant],
 ) -> crate::Vars {
     let scope = scope_vars(snapshot, root);
@@ -265,7 +256,7 @@ fn evaluate_expression(expr: &str, scope: &[(String, String)]) -> Option<serde_j
 /// space only when it declares none ([`root_variables`]).
 pub(super) fn process_message(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    root: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    root: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> crate::Message {
     let model = model_of(snapshot).ok().flatten();
     let inputs = root_variables(snapshot, root, |_| true);
@@ -281,9 +272,9 @@ pub(super) fn process_message(
     };
     let mid = model.map(|model| model.id).unwrap_or_default();
     let state = snapshot
-        .executions
+        .tasks
         .get(root)
-        .map(|execution| lifecycle_state(execution.state))
+        .map(|task| lifecycle_state(task.state))
         .unwrap_or(crate::MessageState::None);
     crate::Message {
         id: crate::utils::longid(),
@@ -302,10 +293,10 @@ pub(super) fn process_message(
 
 /// A kernel execution state in the engine's message vocabulary.
 pub(super) fn lifecycle_state(
-    state: crate::scheduler::core::model::execution_graph::ExecutionState,
+    state: crate::scheduler::core::model::task_graph::TaskState,
 ) -> crate::MessageState {
     use crate::MessageState as M;
-    use crate::scheduler::core::model::execution_graph::ExecutionState as S;
+    use crate::scheduler::core::model::task_graph::TaskState as S;
     match state {
         S::Completed => M::Completed,
         S::Submitted => M::Submitted,
@@ -322,7 +313,7 @@ pub(super) fn lifecycle_state(
 /// The failed root's error variables (`error.code` / `error.message`).
 pub(super) fn root_error(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    root: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    root: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> (String, String) {
     // The value is read the way every other scope reader reads it
     // ([`json_text`]): the failure vocabulary reaches the root both as an
@@ -390,14 +381,14 @@ pub(super) fn json_var(value: &str) -> String {
 }
 
 /// One variable of one execution scope, raw (the aggregate's own text).
-pub(super) fn execution_variable<'a>(
+pub(super) fn task_variable<'a>(
     snapshot: &'a crate::scheduler::core::commit::process::ProcessSnapshot,
-    execution: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
     name: &str,
 ) -> Option<&'a str> {
     snapshot
         .variables
-        .get(&(execution.clone(), name.to_string()))
+        .get(&(task.clone(), name.to_string()))
         .map(String::as_str)
 }
 
@@ -413,12 +404,12 @@ pub(super) struct ActFacts {
 /// them at start.
 pub(super) fn act_facts(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    execution: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> Option<ActFacts> {
     let read = |name: &str| {
         snapshot
             .variables
-            .get(&(execution.clone(), name.to_string()))
+            .get(&(task.clone(), name.to_string()))
             .map(|raw| {
                 serde_json::from_str::<serde_json::Value>(raw).unwrap_or(serde_json::Value::Null)
             })
@@ -438,9 +429,9 @@ pub(super) fn json_text(raw: &str) -> String {
 /// The outbox topic that announces one decided execution state — the act
 /// message the legacy engine emitted for that transition.
 pub(super) fn message_topic(
-    state: crate::scheduler::core::model::execution_graph::ExecutionState,
+    state: crate::scheduler::core::model::task_graph::TaskState,
 ) -> Option<&'static str> {
-    use crate::scheduler::core::model::execution_graph::ExecutionState as S;
+    use crate::scheduler::core::model::task_graph::TaskState as S;
     match state {
         S::Completed => Some("task.completed"),
         S::Submitted => Some("task.submitted"),
@@ -459,10 +450,10 @@ pub(super) fn message_topic(
 /// the legacy `Task::inputs` merges the node's vars last, so they win.
 pub(super) fn input_vars(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    execution: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut inputs = serde_json::Map::new();
-    let mut merge = |scope: &crate::scheduler::core::model::execution_graph::ExecutionId| {
+    let mut merge = |scope: &crate::scheduler::core::model::task_graph::TaskId| {
         for ((key_scope, name), raw) in &snapshot.variables {
             if key_scope != scope || is_engine_fact(name) {
                 continue;
@@ -473,12 +464,12 @@ pub(super) fn input_vars(
             );
         }
     };
-    if let Some(execution) = snapshot.executions.get(execution) {
-        for predecessor in &execution.predecessors {
+    if let Some(task) = snapshot.tasks.get(task) {
+        for predecessor in &task.predecessors {
             merge(predecessor);
         }
     }
-    merge(execution);
+    merge(task);
     inputs
 }
 
@@ -508,7 +499,7 @@ pub(super) fn exposes_error(
 /// engine fails the task on the same conditions).
 pub(super) fn evaluate_predicate(
     snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
-    scope: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    scope: &crate::scheduler::core::model::task_graph::TaskId,
     expr: &str,
     overlay: &[(String, String)],
 ) -> PredicateValue {
@@ -568,12 +559,12 @@ pub(super) fn evaluate_predicate(
 /// children a fan-out admitted), which are not this message's outputs.
 pub(super) fn message_outputs(
     outputs: &[VariableWrite],
-    execution: &crate::scheduler::core::model::execution_graph::ExecutionId,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> serde_json::Value {
     let vars: serde_json::Map<String, serde_json::Value> = outputs
         .iter()
         .filter(|write| {
-            write.scope == *execution
+            write.scope == *task
                 && !crate::utils::consts::is_private_key(&write.name)
                 && !write.name.starts_with("error.")
         })

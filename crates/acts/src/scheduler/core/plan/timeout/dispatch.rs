@@ -25,7 +25,7 @@ pub(crate) struct TimeoutDispatch {
 /// branch task's `init` error).
 pub(crate) fn dispatch(
     snapshot: &ProcessSnapshot,
-    owner: &ExecutionId,
+    owner: &TaskId,
     source_operation: OperationCommit,
     branch: &TimeoutBranch,
     extra_vars: Vec<(String, String)>,
@@ -40,7 +40,7 @@ pub(crate) fn dispatch(
             source: owner.clone(),
             source_operation,
             children: vec![ContainerChild {
-                task_id: branch.task_id.clone(),
+                node: branch.node.clone(),
                 model_node: branch.model_node.clone(),
                 plan: ContainerChildPlan::Entry,
                 predecessors: vec![ContainerPredecessor::Source],
@@ -59,10 +59,10 @@ pub(crate) fn dispatch(
             // it. A state change here would need a matching reverse
             // transition, and none is meant.
             source_park: snapshot
-                .executions
+                .tasks
                 .get(owner)
-                .map(|execution| execution.state)
-                .unwrap_or(crate::scheduler::core::model::execution_graph::ExecutionState::Running),
+                .map(|task| task.state)
+                .unwrap_or(crate::scheduler::core::model::task_graph::TaskState::Running),
         },
         claimed_after: claimed_after.to_vec(),
     }
@@ -70,7 +70,7 @@ pub(crate) fn dispatch(
 
 /// The variable write that stamps an execution's cost start (see
 /// [`STARTED_VAR`]).
-pub(crate) fn start_write(owner: &ExecutionId, now_ms: i64) -> VariableWrite {
+pub(crate) fn start_write(owner: &TaskId, now_ms: i64) -> VariableWrite {
     VariableWrite {
         scope: owner.clone(),
         name: STARTED_VAR.to_string(),

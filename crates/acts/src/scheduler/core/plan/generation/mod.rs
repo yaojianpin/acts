@@ -1,10 +1,10 @@
 use crate::scheduler::core::{
-    commit::process::{ExecutionSnapshot, ProcessSnapshot},
+    commit::process::{ProcessSnapshot, TaskSnapshot},
     model::{
-        execution_graph::{ExecutionGraph, ExecutionId, ExecutionState},
         operation::{OperationId, OperationKind},
+        task_graph::{TaskGraph, TaskId, TaskState},
         transition_plan::{
-            ExecutionCreate, OperationCommit, OperationIntent, OutboxIntent, TransitionPlan,
+            OperationCommit, OperationIntent, OutboxIntent, TaskCreate, TransitionPlan,
             VariableWrite,
         },
     },
@@ -17,7 +17,7 @@ use std::fmt;
 pub(crate) struct ReenterCommand {
     pub(crate) process_id: String,
     /// The terminal execution requesting re-entry, normally a Backed task.
-    pub(crate) source: ExecutionId,
+    pub(crate) source: TaskId,
     /// Stable logical task identity to instantiate again.
     pub(crate) target_task_id: String,
     pub(crate) source_operation: OperationCommit,
@@ -37,7 +37,7 @@ impl GenerationPlanner {
     /// into the recreated chain. `graph` is the snapshot's execution graph
     /// (rebuilt by the caller).
     pub(crate) fn plan_reentry(
-        graph: &ExecutionGraph,
+        graph: &TaskGraph,
         snapshot: &ProcessSnapshot,
         command: &ReenterCommand,
     ) -> Result<TransitionPlan, GenerationError> {
@@ -45,13 +45,10 @@ impl GenerationPlanner {
             return Err(GenerationError::WrongProcess);
         }
         let source = snapshot
-            .executions
+            .tasks
             .get(&command.source)
-            .ok_or_else(|| GenerationError::ExecutionNotFound(command.source.clone()))?;
-        if !matches!(
-            source.state,
-            ExecutionState::Backed | ExecutionState::Cancelled
-        ) {
+            .ok_or_else(|| GenerationError::TaskNotFound(command.source.clone()))?;
+        if !matches!(source.state, TaskState::Backed | TaskState::Cancelled) {
             return Err(GenerationError::SourceNotReenterable {
                 source: command.source.clone(),
                 state: source.state,
@@ -59,10 +56,10 @@ impl GenerationPlanner {
         }
         let operation = &command.source_operation.id;
         if operation.process_id != command.process_id
-            || operation.task_id != command.source.task_id
+            || operation.node != command.source.node
             || operation.generation != command.source.generation
         {
-            return Err(GenerationError::SourceOperationTargetsDifferentExecution);
+            return Err(GenerationError::SourceOperationTargetsDifferentTask);
         }
         if command.target_task_id.trim().is_empty() {
             return Err(GenerationError::EmptyTargetTaskId);
@@ -73,13 +70,13 @@ impl GenerationPlanner {
         // and the backed source must lie inside the closure it spawns (the
         // redo re-runs everything downstream of the target, the source
         // included).
-        let root = if command.target_task_id == command.source.task_id {
+        let root = if command.target_task_id == command.source.node {
             command.source.clone()
         } else {
             snapshot
-                .executions
+                .tasks
                 .keys()
-                .filter(|id| id.task_id == command.target_task_id)
+                .filter(|id| id.node == command.target_task_id)
                 .max_by_key(|id| id.generation)
                 .cloned()
                 .ok_or_else(|| {
@@ -90,8 +87,8 @@ impl GenerationPlanner {
         // (edges always point forward, so BFS is a topological order): the
         // source and every execution downstream of it are dead on this
         // path and must be recreated as fresh generations.
-        let mut order: Vec<ExecutionId> = Vec::new();
-        let mut seen: HashMap<ExecutionId, ()> = HashMap::new();
+        let mut order: Vec<TaskId> = Vec::new();
+        let mut seen: HashMap<TaskId, ()> = HashMap::new();
         let mut queue = VecDeque::new();
         seen.insert(root.clone(), ());
         order.push(root.clone());
@@ -116,21 +113,20 @@ impl GenerationPlanner {
         // predecessor edge onto the new generations (edges from outside the
         // closure - typically the completed root - keep pointing at
         // themselves through the identity map below).
-        let mut remap: HashMap<ExecutionId, ExecutionId> = HashMap::new();
-        let mut closure: Vec<(ExecutionId, &ExecutionSnapshot, ExecutionId)> =
-            Vec::with_capacity(order.len());
+        let mut remap: HashMap<TaskId, TaskId> = HashMap::new();
+        let mut closure: Vec<(TaskId, &TaskSnapshot, TaskId)> = Vec::with_capacity(order.len());
         for old_id in &order {
-            let old = &snapshot.executions[old_id];
+            let old = &snapshot.tasks[old_id];
             let generation = snapshot
-                .executions
+                .tasks
                 .keys()
-                .filter(|id| id.task_id == old_id.task_id)
+                .filter(|id| id.node == old_id.node)
                 .map(|id| id.generation)
                 .max()
                 .unwrap_or(0)
                 .checked_add(1)
                 .ok_or(GenerationError::GenerationOverflow)?;
-            let new_id = ExecutionId::new(old_id.task_id.clone(), generation)
+            let new_id = TaskId::new(old_id.node.clone(), generation)
                 .map_err(|_| GenerationError::EmptyTargetTaskId)?;
             remap.insert(old_id.clone(), new_id.clone());
             closure.push((old_id.clone(), old, new_id));
@@ -142,11 +138,11 @@ impl GenerationPlanner {
         let next = remap
             .get(&root)
             .cloned()
-            .ok_or_else(|| GenerationError::TargetNeverInstantiated(root.task_id.clone()))?;
-        let execution_creates: Vec<ExecutionCreate> = closure
+            .ok_or_else(|| GenerationError::TargetNeverInstantiated(root.node.clone()))?;
+        let task_creates: Vec<TaskCreate> = closure
             .iter()
-            .map(|(old_id, old, new_id)| ExecutionCreate {
-                execution: new_id.clone(),
+            .map(|(old_id, old, new_id)| TaskCreate {
+                task: new_id.clone(),
                 model_node: old.model_node.clone(),
                 // A nested closure's children belong to the re-entered
                 // generation, not the dead one: the parent edge remaps like
@@ -156,7 +152,7 @@ impl GenerationPlanner {
                     .parent
                     .as_ref()
                     .map(|parent| remap.get(parent).cloned().unwrap_or_else(|| parent.clone())),
-                predecessors: snapshot.executions[old_id]
+                predecessors: snapshot.tasks[old_id]
                     .predecessors
                     .iter()
                     .map(|predecessor| {
@@ -167,9 +163,9 @@ impl GenerationPlanner {
                     })
                     .collect(),
                 initial_state: if *new_id == next {
-                    ExecutionState::Ready
+                    TaskState::Ready
                 } else {
-                    ExecutionState::Created
+                    TaskState::Created
                 },
             })
             .collect();
@@ -194,14 +190,14 @@ impl GenerationPlanner {
         // recreated downstream waits for its propagation.
         let next_operation = OperationId {
             process_id: command.process_id.clone(),
-            task_id: next.task_id.clone(),
+            node: next.node.clone(),
             generation: next.generation,
             sequence: 0,
         };
         let plan = TransitionPlan {
             process_id: command.process_id.clone(),
             expected: snapshot.version.clone(),
-            execution_creates,
+            task_creates,
             state_changes: Vec::new(),
             variable_writes,
             source_operation: Some(command.source_operation.clone()),
@@ -213,12 +209,12 @@ impl GenerationPlanner {
                 key: format!(
                     "reenter:{}:{}:{}:{}",
                     command.process_id,
-                    next.task_id,
+                    next.node,
                     next.generation,
                     command.source_operation.id.sequence,
                 ),
                 topic: "task.reentered".into(),
-                payload: format!("{}:{}", next.task_id, next.generation),
+                payload: format!("{}:{}", next.node, next.generation),
                 receipt: None,
             }],
         };
