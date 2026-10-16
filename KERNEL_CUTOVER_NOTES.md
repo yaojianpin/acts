@@ -2271,6 +2271,39 @@ trait + GAT 读取视图(`Reading`/`Command` 都带生命周期),且**连「求�
 - 三处跨切片改动由主 agent 整合完成后一次性验收:编译警告 0、clippy EXIT 0。
 
 
+### H3 完成(2026-10-16):`hop` 一词从代码里退场 —— 模块 / 类型 / 函数 / 注释统一为 operation
+
+**用户指令**:「将 Hop 改成 Operation,其他相关名称也同步修改,或者 Op 简写」(同一轮里还问了 operation 与 hop 的关系、为什么叫 hop)。
+
+**关系(答案,登记在案)**:`Operation*` 是**持久面** —— 聚合里的一条工作记录(`OperationId` 的文档原话是 "Stable identity of one durable unit of work";
+`OperationKind`/`OperationRecord`/`OperationState`/`OperationEvent`,恢复索引也是从它们建的)。而 `hop` 是**运行面**的老词,指「把一个 operation 从 claim 带到下一次提交」的那一趟
+(一次 claim + 一次 work + 一次 plan + 一次把该 operation 就地关闭的 commit);同一个 operation 可能被带多趟(丢 CAS 重带、恢复扫描重推、租约过期释放后重带),一趟必然只对一个 operation。
+该词是内核迁移时作为运行面的昵称进来的(`hop driver`、「一次 hop 的 store 流量」§9.2、「hop 吞吐」),`KERNEL_REFACTOR_DESIGN.md` §1.1 把它写成等式:「`Operation` = 一次持久化 hop」。
+H3 起不再用它:**记录**叫 operation,那一趟在需要区分时叫 **drive**。
+
+**改名(纯改名,零行为变更)**:
+
+| 旧 | 新 |
+|---|---|
+| 模块 `shell/hop/`(9 文件) | **`shell/operation/`**(`git mv`) |
+| 上下文结构 `Hop<'_>`(阶段 2/3 看到的那个 operation) | **`Operation<'_>`** |
+| `Claimed::hop()` | `Claimed::operation()` |
+| `prepare_hop` / `dispatch_hop` | `prepare_operation` / `dispatch_operation` |
+| `hop_message_payload` / `task_hop_plan` / `attach_hop_message` | `operation_message_payload` / `task_operation_plan` / `attach_operation_message` |
+| 探针 `shell::hop_trace`(计数常量 `HOPS`) | `shell::operation_trace`(`OPERATIONS`) |
+| 3 个测试名(`..._in_the_same_hop`、`func_package_runs_inside_the_completion_hop`、`a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery`) | 同义改 operation |
+| `.rs` 注释/文档里的 `hop`(全库 286 处,含可靠性矩阵 12 个文件的注释) | `operation`(会被读成"记录"处改用 `drive`) |
+
+括号里的三个驱动类型(`PropagateTask`/`ReenterTask` 等在 H2 已与计划类型解耦)不受影响;`core/plan/**` 的 `ActPlan`、driver trait 的 `ActOperation` 保持 H2 的名字。
+
+**文档**:`KERNEL_REFACTOR_DESIGN.md` §3.8 的路径与函数名同步到新词,并加了「H3 词汇变更」说明;
+`KERNEL_MIGRATION_NOTES.md` 与本文件写于 H3 之前的记录(H1/H2 等)**保持原文**,不追改历史。
+
+**验收**:`cargo fmt --all --check` 干净;`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**;
+`cargo test -p acts --lib --tests` = **869 passed / 1 failed / 1 ignored** —— 唯一失败是基线已证的既有抖动
+`export::actions::tests::a_run_cannot_seal_another_subjects_scope`(与 H1/H2 同一条,见「H1 完成」的抖动归因);探针照跑(`cargo test --release -p acts --lib perf_probe -- --ignored`,改名后用例名 `perf_probe_engine_operation_stages`,94 个 operation、11 个阶段齐全)。
+
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2317,6 +2350,7 @@ trait + GAT 读取视图(`Reading`/`Command` 都带生命周期),且**连「求�
 |---|---|---|---|
 | **H1** | host 的 hop 分相:`shell/hop/` 四阶段(准备 / 执行并返回结果 / 生成 next plan / 分发 next 操作)+ 按 kind 的 driver 模块;`execute_one` 与 `apply_action_once` 走同一条流水线 | — | **已做(§10「H1 完成」,设计见 `KERNEL_REFACTOR_DESIGN.md` §3.8)** |
 | **H2** | `core/plan/**` 的 plan 抽象层:每个计划/判定 = 一个类型,实现 `ActPlan`(用户 2026-10-16 指令;形态:trait + GAT 读取视图,连求值/策略一并收进) | H1 | **已做(§10「H2 完成」,设计见 `KERNEL_REFACTOR_DESIGN.md` §3.9)** |
+| **H3** | 词汇:`Hop` → `Operation`(模块 `shell/hop/` → `shell/operation/`,相关函数/类型/注释同步;Trait 名由 H2 定为 `ActPlan`/`ActOperation`) | H1/H2 | **已做(§10「H3 完成」)** |
 
 ### B. 第二波:性能与遗留(可与彼此交错)
 

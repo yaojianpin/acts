@@ -2,7 +2,7 @@
 //! restart, a duplicate delivery, and an abort racing a completion.
 //!
 //! The kernel decides a client action by committing it against the aggregate
-//! — one guarded batch per hop — and projects the rows from the committed
+//! — one guarded batch per operation — and projects the rows from the committed
 //! snapshot afterwards. `Abort` itself is a plain decision
 //! (`(Running | Waiting) -> Aborted`, `runtime/core/commit/command.rs`) whose
 //! plan walks the act's ancestor chain `Aborted` and skips the untouched
@@ -20,7 +20,7 @@
 //! Two kernel contracts shape the cells the legacy engine built around
 //! `Context::cancellation_token`, and they are stated where they land:
 //!
-//! - the kernel runs a `run_as = Func` package *inline inside the driver hop*
+//! - the kernel runs a `run_as = Func` package *inline inside the driver operation*
 //!   (`effect_plan` awaits `runner.run(request)` in `runtime/shell/mod.rs`)
 //!   and attaches no cancellation to it: neither an `Abort` nor a shutdown
 //!   ever reaches an in-flight effect, and a package that blocks forever
@@ -150,7 +150,7 @@ async fn act_error_variables(engine: &Engine, pid: &str, tid: &str) -> Vec<Strin
 /// hand that row back for the assertions that read it.
 ///
 /// `wait_completed` observes the *aggregate* (every execution terminal), while a
-/// hop's rows are written by the task that committed it: the projection is
+/// operation's rows are written by the task that committed it: the projection is
 /// explicitly eventual (`runtime/shell/projection.rs`, re-derived on the run's
 /// next commit and reclaimed whole by the sweeper once the run is delivered), so
 /// a row can trail the decision by a few milliseconds — a downstream row still
@@ -276,10 +276,10 @@ async fn a_restart_never_reapplies_a_decided_abort_inner() {
 ///
 /// The legacy cell asserted that an abort *reaches a running act* through
 /// `Context::cancellation_token`. The kernel runs Func effects inline on the
-/// driver hop and attaches no cancellation to them, so no action can reach an
+/// driver operation and attaches no cancellation to them, so no action can reach an
 /// in-flight effect — the nearest property the kernel does hold is that the
 /// stop request decides the act and the run, and that decision is what later
-/// hops may not undo.
+/// operations may not undo.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_abort_on_a_waiting_act_decides_the_act_and_the_run() {
@@ -342,7 +342,7 @@ async fn an_abort_on_a_waiting_act_decides_the_act_and_the_run_inner() {
 // ---------------------------------------------------------------------------
 
 /// A shutdown never reaches an in-flight effect either (the kernel's effects run
-/// inline on the driver hop, with no cancellation attached), so the property a
+/// inline on the driver operation, with no cancellation attached), so the property a
 /// closing engine must hold is the one this cell pins: shutting down while an
 /// act waits decides nothing — the durable aggregate still holds that act
 /// waiting — and loses nothing, because a fresh engine over the same store
@@ -420,7 +420,7 @@ impl FailingProbe {
         self.finished.load(Ordering::SeqCst)
     }
 
-    /// A bounded wait: the effect runs inline on the driver hop, so a cell that
+    /// A bounded wait: the effect runs inline on the driver operation, so a cell that
     /// never releases the package must let the engine go instead of wedging it
     /// (the cell's own poll fails the test long before this).
     async fn wait_released(&self) {
@@ -492,14 +492,14 @@ fn failing_probe_workflow() -> Workflow {
 
 /// An act's own effect, failing after the act was already decided `Aborted`,
 /// cannot undo that decision: the kernel's guard admits an action only against
-/// a non-terminal execution, and the failure hop's plan is formed against the
+/// a non-terminal execution, and the failure operation's plan is formed against the
 /// pre-abort revision, so its commit is refused and recovery re-derives the
-/// hop as the bare remainder — the act stays `Aborted`, with no error variables
+/// operation as the bare remainder — the act stays `Aborted`, with no error variables
 /// and no second generation.
 ///
 /// The legacy cell relied on `Context::cancellation_token` firing to make the
 /// act fail *because* it was overridden. The kernel never cancels an in-flight
-/// effect (it runs inline on the driver hop; a blocked one wedges the engine),
+/// effect (it runs inline on the driver operation; a blocked one wedges the engine),
 /// so the probe package is released by the cell instead: the effect returns its
 /// error while the aggregate already holds the abort, which is the same
 /// question — can the act's own failure overwrite the decision? — asked on the
@@ -523,7 +523,7 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
         .unwrap();
     let pid = start_run(&engine, &failing_probe_workflow()).await;
 
-    // the act's effect is in flight: the driver hop is inside the package
+    // the act's effect is in flight: the driver operation is inside the package
     poll_until("the failing package to enter its effect", || async {
         FAILING_PROBE.started()
     })
@@ -539,7 +539,7 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
         "the abort must decide the act even though its effect is in flight"
     );
 
-    // the effect now returns its error; the hop that carries it is refused
+    // the effect now returns its error; the operation that carries it is refused
     FAILING_PROBE.release();
     poll_until("the released effect to report its failure", || async {
         FAILING_PROBE.finished()
@@ -547,7 +547,7 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
     .await;
 
     // the decision stands, across a settle window and in the durable truth
-    let what = "the aborted act to keep its decision while the failed hop is refused";
+    let what = "the aborted act to keep its decision while the failed operation is refused";
     let held = poll_settle(
         || async {
             act_state(&engine, &pid, "step1").await == Some(TaskState::Aborted)
@@ -623,7 +623,7 @@ async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(
     let (pid, tid) = waiting_first_step(&engine).await;
 
     // the one-shot fault is aimed at the run's aggregate document: the abort's
-    // commit (and the hop that carries it) is the next write of it
+    // commit (and the operation that carries it) is the next write of it
     let key = process_key(&pid);
     kv.arm_key(&key);
     let refused = abort_act(&engine, &pid, &tid).await;
@@ -753,7 +753,7 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
 /// The abort's ancestor walk used to race the pending scheduling, leaving an
 /// unreachable `Interrupt` act downstream whose message was never emitted. The
 /// kernel's abort cascade is planned against the aggregate in the same commit
-/// that decides the act (the untouched downstream joins it `Skipped`), so no hop
+/// that decides the act (the untouched downstream joins it `Skipped`), so no operation
 /// can grow the run afterwards. The round loop is the regression: a live
 /// downstream act — or a second generation of it — fails it.
 #[serial]

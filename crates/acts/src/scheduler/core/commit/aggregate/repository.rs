@@ -180,7 +180,7 @@ impl OperationRepository for MemoryProcessRepository {
 ///
 /// The durable repository owns the loaded snapshot, never reuses it after a
 /// failed commit (it drops the aggregate and reports the failure, and recovery
-/// re-derives the hop), so it can hand the snapshot over instead of paying for
+/// re-derives the operation), so it can hand the snapshot over instead of paying for
 /// a clone of the whole aggregate per commit. Every check runs before the
 /// first mutation.
 #[cfg(test)]

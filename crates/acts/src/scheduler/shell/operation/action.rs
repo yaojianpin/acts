@@ -1,10 +1,10 @@
-//! The `ApplyAction` hop: replaying a durable decision, and running the act's
+//! The `ApplyAction` operation: replaying a durable decision, and running the act's
 //! effect.
 //!
 //! Phase 2 is the work: a client decision is read back from the `__action`
 //! fact the deciding call committed before its claim (so a decision whose
 //! deciding call never applied it — a crash, an expired lease — is re-planned
-//! exactly like that call would have), and an auto-completion hop runs the
+//! exactly like that call would have), and an auto-completion operation runs the
 //! step's package (the attached effect runner; a host without one
 //! auto-completes). Phase 3 folds that outcome into the durable transition —
 //! the completion, the container fan-out, the parked execution, the failing
@@ -18,18 +18,18 @@ impl KernelHost {
     /// A plain execution completes and propagates; a container (a branched
     /// step, or a branch over its own steps) fans its children out instead and
     /// parks in `Waiting` until the join completes it. `action` is `None` for
-    /// the auto-completion hop. Only a completion fans out — every other
+    /// the auto-completion operation. Only a completion fans out — every other
     /// client decision (Submit / Skip / Cancel / Abort / Fail) is terminal for
     /// the container and its unborn children, exactly like the legacy engine,
     /// where a step that is no longer running never schedules its branches.
     ///
-    /// `effect` is what phase 2 already ran: the auto-completion hop's package
+    /// `effect` is what phase 2 already ran: the auto-completion operation's package
     /// outcome (the legacy `ActRunAs::Func` run, whose outputs commit as scope
     /// variables with the same atomic completion), and `None` for a client
     /// decision, which runs nothing. A step that is already deciding a caught
     /// error never reaches here — phase 2 answers that with no work at all,
     /// which keeps the operation's own commit as its bare remainder.
-    // Like `task_hop_plan`, the planner mirrors the aggregate's own facts
+    // Like `task_operation_plan`, the planner mirrors the aggregate's own facts
     // (operation, execution, claim) as separate parameters; bundling them
     // into a struct would only rename the same eight fields.
     #[allow(clippy::too_many_arguments)]
@@ -86,7 +86,7 @@ impl KernelHost {
                     }
                     return Ok(plan);
                 }
-                let mut plan = self.task_hop_plan(
+                let mut plan = self.task_operation_plan(
                     snapshot,
                     id,
                     task_id,
@@ -99,7 +99,7 @@ impl KernelHost {
                     self.fold_effect_outcome(snapshot, task_id, outcome, &mut plan);
                 }
                 // The act's Completed message rides the completion record.
-                if let Some(payload) = self.hop_message_payload(
+                if let Some(payload) = self.operation_message_payload(
                     snapshot,
                     task_id,
                     &id.node,
@@ -226,7 +226,7 @@ impl KernelHost {
                 }
                 // A client action that decides a `uses` execution announces it
                 // on the act's own message, exactly like the legacy act.
-                self.attach_hop_message(snapshot, task_id, &mut plan)?;
+                self.attach_operation_message(snapshot, task_id, &mut plan)?;
                 Ok(plan)
             }
         }
@@ -265,7 +265,7 @@ impl KernelHost {
         command: &crate::scheduler::core::plan::container::ContainerFanoutCommand,
     ) -> Result<TransitionPlan> {
         let mut plan = Fanout::plan(snapshot, command).map_err(runtime)?;
-        // A container without children completes in this very hop: it never
+        // A container without children completes in this very operation: it never
         // parks, so it carries no mark.
         if !command.children.is_empty() {
             mark_parked_for_children(&mut plan, &command.source);
@@ -284,7 +284,7 @@ impl KernelHost {
             None => false,
         };
         if source_has_package
-            && let Some(payload) = self.hop_message_payload(
+            && let Some(payload) = self.operation_message_payload(
                 snapshot,
                 &command.source,
                 &command.source.node,
@@ -320,7 +320,7 @@ impl KernelHost {
         claim: &OperationCommit,
         inputs: &[(String, String)],
     ) -> Result<TransitionPlan> {
-        let mut plan = self.task_hop_plan(
+        let mut plan = self.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -353,7 +353,7 @@ impl KernelHost {
         // leaf completion's. A package-less execution announces nothing here —
         // it is still running, and only its terminal decision is a message.
         if self.step_uses(snapshot, &task.model_node)?.is_some()
-            && let Some(payload) = self.hop_message_payload(
+            && let Some(payload) = self.operation_message_payload(
                 snapshot,
                 task_id,
                 &id.node,
@@ -368,7 +368,7 @@ impl KernelHost {
         Ok(plan)
     }
 
-    /// Fold one package outcome into the hop's plan: the returned outputs and
+    /// Fold one package outcome into the operation's plan: the returned outputs and
     /// the headless task's own data become the acting scope's writes, and the
     /// process env the package set merges into the run's durable env map on
     /// the root scope. All of it commits with the completion, so a crash
@@ -419,7 +419,7 @@ impl KernelHost {
     /// the error variables, its message on its own record, and the propagation
     /// that carries the error walk upward (the legacy `emit_error` path). An
     /// execution that already left the running states keeps its state — the
-    /// bare hop remainder completes the operation. A step declaring `catches`
+    /// bare operation remainder completes the operation. A step declaring `catches`
     /// never reaches the `Failed` decision: [`Self::catch_fanout`] keeps it
     /// running and dispatches its handlers instead.
     #[allow(clippy::too_many_arguments)]
@@ -444,7 +444,7 @@ impl KernelHost {
             generation: id.generation,
             sequence: id.sequence + 1,
         };
-        let mut plan = self.task_hop_plan(
+        let mut plan = self.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -478,7 +478,7 @@ impl KernelHost {
                 kind: OperationKind::PropagateTask,
             });
         }
-        if let Some(payload) = self.hop_message_payload(
+        if let Some(payload) = self.operation_message_payload(
             snapshot,
             task_id,
             &id.node,
@@ -660,7 +660,7 @@ impl KernelHost {
         // the step recovered, so the client sees the failure the handler is
         // answering. Sequence-qualified, so the step's own later decision (a
         // resumed error) carries a record of its own.
-        if let Some(payload) = self.hop_message_payload(
+        if let Some(payload) = self.operation_message_payload(
             snapshot,
             task_id,
             &task_id.node,
@@ -689,8 +689,8 @@ impl KernelHost {
     /// act's for a `uses` step, the task's for a package-less one — so a client
     /// action that decides it (complete/submit/skip/cancel/abort/fail) must
     /// speak the same message. The record's topic already names the state; its
-    /// opaque lifecycle payload becomes the hop's payload.
-    fn attach_hop_message(
+    /// opaque lifecycle payload becomes the operation's payload.
+    fn attach_operation_message(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -710,7 +710,7 @@ impl KernelHost {
             return Ok(());
         };
         // A `uses` step announces its act; a package-less execution announces
-        // the task itself (`hop_message_payload` picks the shape).
+        // the task itself (`operation_message_payload` picks the shape).
         // The action's own writes carry the error variables a `Fail` action
         // supplies; later writes win, like the commit's own order.
         let read = |name: &str| {
@@ -727,7 +727,7 @@ impl KernelHost {
             .as_ref()
             .map(|(code, message)| (code.as_str(), message.as_str()));
         let facts = act_facts(snapshot, task_id);
-        if let Some(payload) = self.hop_message_payload(
+        if let Some(payload) = self.operation_message_payload(
             snapshot,
             task_id,
             &task_id.node,
@@ -786,7 +786,7 @@ impl KernelHost {
             model::SEQUENCE_PACKAGE => false,
             _ => return Ok(None),
         };
-        // The `in` array: the params the start hop resolved and pinned — the
+        // The `in` array: the params the start operation resolved and pinned — the
         // same facts every later message of the act carries — falling back to
         // a literal declaration, which is all a host without an effect runner
         // ever has (its expression form is unresolvable there, and the
@@ -936,7 +936,7 @@ impl KernelHost {
                 }
                 // A predicate that cannot be evaluated fails its branch — the
                 // legacy branch task errors in its `init` — instead of wedging
-                // the hop. Such a branch is never selected and never decides
+                // the operation. Such a branch is never selected and never decides
                 // anything for its siblings; in particular an `else` sibling
                 // is blocked: the legacy else runs only when every `if`
                 // sibling *skipped*, and an errored one did not.
@@ -996,7 +996,7 @@ impl KernelHost {
                             .map(|var| (var.name.clone(), var.value.to_string()))
                             .collect();
                         // The failing branch is admitted like a selected one:
-                        // its first hop reads the pinned failure and decides
+                        // its first operation reads the pinned failure and decides
                         // this execution `Failed`, so the parity floor keeps
                         // its terminal execution (the legacy branch task).
                         if let Some(message) = branch_error(&branch.id) {
@@ -1074,7 +1074,7 @@ impl KernelHost {
 pub(in crate::scheduler::shell) enum Effect {
     /// Nothing to commit: the execution is already deciding a caught error, the
     /// state moved past the decision while its intent was in flight, or the
-    /// decision landed on an execution that can no longer take it. The hop's
+    /// decision landed on an execution that can no longer take it. The operation's
     /// bare remainder completes the operation.
     Nothing,
     /// A durable client decision to replay.
@@ -1082,14 +1082,14 @@ pub(in crate::scheduler::shell) enum Effect {
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
     },
-    /// The auto-completion hop: the act's own package ran, or its node carries
+    /// The auto-completion operation: the act's own package ran, or its node carries
     /// no package at all.
     Completed(Option<effects::EffectOutcome>),
     /// The act's package failed: the error walk takes over.
     Failed(ActError),
 }
 
-/// The completion hop: the decision a client made, or the act's own work.
+/// The completion operation: the decision a client made, or the act's own work.
 pub(super) struct ApplyAction;
 
 #[async_trait::async_trait]
@@ -1099,13 +1099,13 @@ impl ActOperation for ApplyAction {
         Ok(Precheck::Proceed)
     }
 
-    async fn run(&self, host: &KernelHost, hop: &Hop<'_>) -> Result<Outcome> {
-        let snapshot = hop.snapshot;
-        let task_id = &hop.task_id;
-        let task = hop
+    async fn run(&self, host: &KernelHost, operation: &Operation<'_>) -> Result<Outcome> {
+        let snapshot = operation.snapshot;
+        let task_id = &operation.task_id;
+        let task = operation
             .task
             .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
-        // A durable client decision is what this hop replays: the `__action`
+        // A durable client decision is what this operation replays: the `__action`
         // fact is committed *before* the claim and the effect, so a decision
         // whose deciding call never applied it (a crash, an expired lease) is
         // re-planned exactly like that call would have. The execution's own
@@ -1115,16 +1115,16 @@ impl ActOperation for ApplyAction {
         // about.
         let fact = snapshot
             .variables
-            .get(&(task_id.clone(), action_fact_var(hop.id.sequence)))
+            .get(&(task_id.clone(), action_fact_var(operation.id.sequence)))
             .cloned();
         let effect = match fact {
             Some(fact) => {
                 let (action, inputs) = decode_action_fact(&fact)?;
                 // The step is already deciding a caught error (the sign its
-                // failure hop pinned): no later hop may complete, fail or fan
+                // failure operation pinned): no later operation may complete, fail or fan
                 // it out — the catch join decides it. The client path refuses
                 // such an action at the preflight; what reaches here is the
-                // stale auto hop a failure raced, which keeps the operation's
+                // stale auto operation a failure raced, which keeps the operation's
                 // own commit as its bare remainder.
                 if is_catch_decider(snapshot, task_id)
                     || !crate::scheduler::core::commit::command::action_allowed(task.state, &action)
@@ -1144,7 +1144,7 @@ impl ActOperation for ApplyAction {
                     | crate::scheduler::core::model::task_graph::TaskState::Waiting
             ) =>
             {
-                // A decision landed while this hop was in flight (the cascade
+                // A decision landed while this operation was in flight (the cascade
                 // skipped the execution, a cancel closed it): the durable
                 // remainder is the empty plan, not an error.
                 Effect::Nothing
@@ -1173,23 +1173,25 @@ impl ActOperation for ApplyAction {
     async fn next(
         &self,
         host: &KernelHost,
-        hop: &Hop<'_>,
+        operation: &Operation<'_>,
         outcome: Outcome,
     ) -> Result<TransitionPlan> {
         let Outcome::Effect(effect) = outcome else {
-            return Err(runtime("the completion hop planned a foreign outcome"));
+            return Err(runtime(
+                "the completion operation planned a foreign outcome",
+            ));
         };
-        let snapshot = hop.snapshot;
-        let id = hop.id;
-        let task_id = hop.task_id.clone();
-        let claim = hop.claim;
-        let task = hop
+        let snapshot = operation.snapshot;
+        let id = operation.id;
+        let task_id = operation.task_id.clone();
+        let claim = operation.claim;
+        let task = operation
             .task
             .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
         match effect {
             // The bare remainder of an operation with nothing to do: its own
             // commit, which completes the operation, is the whole effect.
-            Effect::Nothing => host.task_hop_plan(
+            Effect::Nothing => host.task_operation_plan(
                 snapshot,
                 id,
                 &task_id,
@@ -1211,7 +1213,7 @@ impl ActOperation for ApplyAction {
                 )
                 .await
             }
-            // The auto-completion hop has no action: the act's own outcome is
+            // The auto-completion operation has no action: the act's own outcome is
             // what the plan folds in.
             Effect::Completed(effect) => {
                 host.completion_plan(

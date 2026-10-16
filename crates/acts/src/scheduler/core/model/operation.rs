@@ -14,11 +14,11 @@ pub(crate) enum OperationKind {
     ExecuteTask,
     PropagateTask,
     ApplyAction,
-    /// Cascade a cancellation/failure past a created execution: the hop
+    /// Cascade a cancellation/failure past a created execution: the operation
     /// commits `Ready → Skipped` and hands propagation to a `PropagateTask`
     /// operation, whose readiness then treats the skipped source as dead.
     SkipTask,
-    /// The abort cascade's hop for a `Running` successor of an aborted
+    /// The abort cascade's operation for a `Running` successor of an aborted
     /// execution: the legacy ancestor walk marks running children `Aborted`
     /// (pending ones skip). Like `SkipTask` it is one atomic
     /// `Running → Aborted` commit plus a `PropagateTask` hand-off.
@@ -35,9 +35,9 @@ pub(crate) enum OperationKind {
     /// The durable rewind a `Cancel`/`Back` decision leaves behind: the
     /// deciding commit closes the source generation (`Backed`) and creates
     /// this operation in the *same* atomic batch, so the re-entry cannot be
-    /// lost to a crash or a lost compare-and-swap — its hop plans the fresh
+    /// lost to a crash or a lost compare-and-swap — its operation plans the fresh
     /// generations ([`crate::scheduler::core::plan::generation::Reenter`]) and the
-    /// recovery scan re-drives it if that hop fails. The target task id is
+    /// recovery scan re-drives it if that operation fails. The target task id is
     /// the durable fact `__reenter_target` the deciding commit writes (`Back`
     /// names an earlier step, `Cancel` the closed execution itself).
     ReenterTask,
@@ -92,7 +92,7 @@ pub(crate) struct CommitToken {
 /// transitions of the operation lifecycle `RecoveryPlanner` classifies and
 /// `snapshot_codec` persists (the states they produce are part of the durable
 /// V2 format, tags 5–7), but no in-tree caller emits them today: the kernel's
-/// hop and recovery paths use `Claim`/`PrepareCommit`/`Commit`/`Complete`/
+/// operation and recovery paths use `Claim`/`PrepareCommit`/`Commit`/`Complete`/
 /// `ScheduleRetry`/`ReleaseExpiredClaim` only. Kept as the lifecycle's stated
 /// vocabulary rather than deleted, because deleting the events would delete
 /// the states they produce and change the persisted format.
@@ -102,7 +102,7 @@ pub(crate) enum OperationEvent {
     Claim(ClaimToken),
     /// Take ownership and mark the commit prepared in one durable step.
     /// Nothing observable happens between the two for the single owner that
-    /// drives a hop, so the pair is a needless second round trip.
+    /// drives one, so the pair is a needless second round trip.
     ClaimAndPrepare(ClaimToken),
     RenewClaim {
         current: ClaimToken,
@@ -184,12 +184,12 @@ impl OperationRecord {
                 S::Claimed(claim)
             }
 
-            // Ownership and the prepared commit are one transition: the hop
+            // Ownership and the prepared commit are one transition: the operation
             // that owns an operation does both with nothing in between that
             // another owner could observe, so one durable step says exactly
             // what two did. A crash after it is the `CommitPrepared` case the
             // recovery scan already handles (its lease expires, the owner is
-            // reclaimed and the hop re-runs).
+            // reclaimed and the operation re-runs).
             (S::Pending, E::ClaimAndPrepare(claim)) if valid_initial_claim(&claim) => {
                 S::CommitPrepared(claim)
             }

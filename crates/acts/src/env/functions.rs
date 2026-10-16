@@ -114,7 +114,7 @@ fn builtin(name: &str) -> Option<Value> {
             let value = json_arg("$set_process_var", args, 1)?;
             let vars = Vars::new().with(name.as_str(), value);
             // The write lands in the headless scope's own data; what an
-            // effect scope writes is folded into the hop's commit (see
+            // effect scope writes is folded into the operation's commit (see
             // `scheduler::shell::effects`), and nothing else is persisted —
             // the aggregate is the record.
             Context::with(|ctx| ctx.proc.set_data(&vars));

@@ -30,7 +30,7 @@ pub(super) fn action_target(
 }
 
 /// Whether `action` is admissible on an execution in `state` — the guard
-/// `action_target` applies, exposed so a recovering hop can tell a *live*
+/// `action_target` applies, exposed so a recovering operation can tell a *live*
 /// durable decision (which it must replay) from a stale one whose target moved
 /// past it while the intent was in flight.
 pub(crate) fn action_allowed(current: TaskState, action: &ActionKind) -> bool {

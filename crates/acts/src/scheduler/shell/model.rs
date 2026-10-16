@@ -4,7 +4,7 @@
 //! optional explicit join edges. The nested import (P2) keeps the same
 //! vocabulary — `crate::scheduler::core::model::model_graph::ModelGraph`/`crate::scheduler::core::model::task_graph::TaskGraph` — for the
 //! seeded top chain, and carries the nested structure (branch subtrees) as
-//! durable aggregate variables (`__model`, `__auto`): the fan-out hop reads
+//! durable aggregate variables (`__model`, `__auto`): the fan-out operation reads
 //! them from the snapshot, so recovery replays never need the declaring
 //! spec. Branch executions and their inner chains come alive through
 //! `crate::scheduler::core::plan::container::Fanout` fan-outs, never at seed time.
@@ -77,7 +77,7 @@ pub(crate) struct ProcessSpec {
 /// and an unnamed workflow a long one (the `mid` every message carries). The
 /// kernel derives every node id from the model, so this runs before the import;
 /// the result is what lands in the aggregate as the durable model, which is how
-/// a hop addresses a node the model never named.
+/// an operation addresses a node the model never named.
 fn assign_ids(workflow: &mut crate::model::Workflow) {
     if workflow.id.is_empty() {
         workflow.id = crate::utils::longid();
@@ -294,7 +294,7 @@ pub(crate) fn step_branches(step: &crate::model::Step) -> Option<&[crate::model:
 enum StepPlace {
     /// A seeded chain step of the workflow root: its auto decision joins the
     /// seed set. Its own `if`/`while` is its guard, evaluated by the start
-    /// hop's entry check.
+    /// operation's entry check.
     TopLevel,
     /// A `catches` handler of a step. Its `if` is the handler's own
     /// selection — the legacy `Step::init` guard, evaluated when the failed
@@ -306,7 +306,7 @@ enum StepPlace {
     /// dispatcher; a `while` would loop the branch, which neither the tick nor
     /// the kernel has a driver for.
     Timeout,
-    /// A step inside a branch: its guard is its own start hop's, like a
+    /// A step inside a branch: its guard is its own start operation's, like a
     /// top-level step's, and a guard that fails falls through to the next step
     /// declared in the same branch (`GUARD_SKIP_VAR` keeps the join from
     /// reading that skip as a dead path).
@@ -341,8 +341,8 @@ fn import_step(
         auto.insert(step.id.clone());
     }
     // A seeded chain step's declared vars land on its own scope as a durable
-    // fact. A nested node's scope does not exist until the hop that admits it,
-    // and that hop seeds them from the model (`child_variables`), so seeding
+    // fact. A nested node's scope does not exist until the operation that admits it,
+    // and that operation seeds them from the model (`child_variables`), so seeding
     // them here would only create a variable on an execution the aggregate
     // refuses to know (the seed validates every scope it writes).
     if place == StepPlace::TopLevel {
@@ -478,7 +478,7 @@ impl ProcessSpec {
     /// workflow's top-level steps seed one chain; a step's branches (legacy
     /// rule: only when the step declares no `next`) and their inner steps do
     /// NOT seed executions — they come alive when the branched step's effect
-    /// hop fans out, selected by their `if` predicates. The nested structure,
+    /// operation fans out, selected by their `if` predicates. The nested structure,
     /// the workflow vars and the per-node auto decision all become durable
     /// root-scope variables, so the aggregate replays without the spec.
     ///
@@ -497,7 +497,7 @@ impl ProcessSpec {
         // The caller's model stays untouched: the ids the legacy tree assigns
         // (`prepare_workflow_ids` before it builds nodes) are assigned on a
         // copy, and that copy is what the aggregate carries as its durable
-        // model — so an unnamed nested node is addressable by the hops that
+        // model — so an unnamed nested node is addressable by the operations that
         // must reach it, exactly as it is in the legacy run.
         let mut assigned = workflow.clone();
         assign_ids(&mut assigned);
@@ -510,7 +510,7 @@ impl ProcessSpec {
         for var in &workflow.vars {
             seed_variables.push((None, var.name.clone(), var.value.to_string()));
         }
-        // The model itself is part of the aggregate: the fan-out hop reads
+        // The model itself is part of the aggregate: the fan-out operation reads
         // the nested structure from the snapshot.
         seed_variables.push((
             None,
@@ -777,7 +777,7 @@ mod tests {
     /// unnamed branches and unnamed inner steps. The legacy tree assigns ids
     /// before it builds nodes (`prepare_step_ids`), and the import does the same
     /// on a copy — the ids land in the durable model, which is the only way a
-    /// hop can address a node the model never named. The caller's model stays
+    /// operation can address a node the model never named. The caller's model stays
     /// untouched.
     #[test]
     fn unnamed_nested_nodes_get_ids_like_the_legacy_tree() {
@@ -939,7 +939,7 @@ mod tests {
     fn catch_and_timeout_declarations_import_and_loops_or_blank_ids_are_refused() {
         // A catch step is a nested step: its auto decision and declared vars
         // become durable facts like a branch's, but it seeds no execution —
-        // it comes alive when the failed step fans it out, and that hop seeds
+        // it comes alive when the failed step fans it out, and that operation seeds
         // the vars from the model.
         let with_catch = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1")
@@ -980,13 +980,13 @@ mod tests {
                 .variables
                 .keys()
                 .any(|(scope, _)| scope.node == "c1"),
-            "a nested node's vars are seeded when its hop admits it"
+            "a nested node's vars are seeded when its operation admits it"
         );
 
         // A step's `timeouts` import like its catches: the branch is dispatched
         // by the tick, which evaluates its guard, so both the branch and its
         // guard are durable model facts. Nothing seeds an execution for it —
-        // the dispatch hop admits it.
+        // the dispatch operation admits it.
         let with_timeout = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1")
                 .with_uses("acts.transform.set", crate::Vars::new())
@@ -1000,7 +1000,7 @@ mod tests {
                 .tasks
                 .values()
                 .all(|task| task.model_node.as_str() != "t1"),
-            "the timer's hop admits the branch, not the seed"
+            "the timer's operation admits the branch, not the seed"
         );
         // The branch's auto decision is a durable fact like a catch's.
         let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
@@ -1100,7 +1100,7 @@ mod tests {
         assert!(format!("{error}").contains("'while' guard"));
     }
 
-    /// A guard inside a branch is imported: its start hop evaluates it, and a
+    /// A guard inside a branch is imported: its start operation evaluates it, and a
     /// guard that fails falls through to the next step declared in the same
     /// branch (the skip carries `GUARD_SKIP_VAR`, so the join reads it as a
     /// fall-through rather than as the deadness cascade).
@@ -1168,7 +1168,7 @@ mod tests {
     }
 
     /// The durable model of a run, decoded from the root scope's
-    /// [`MODEL_VAR`] — what a hop reads the nested structure from.
+    /// [`MODEL_VAR`] — what an operation reads the nested structure from.
     fn durable_model(snapshot: &ProcessSnapshot) -> crate::model::Workflow {
         let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
         serde_json::from_str(

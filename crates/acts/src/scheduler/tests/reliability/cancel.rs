@@ -78,7 +78,7 @@ async fn waiting_chain(engine: &Engine) -> (String, String) {
 async fn finish_by_hand(engine: &Engine, pid: &str) {
     // The drive-by-hand bound is deliberately longer than the harness `WAIT`:
     // the full suite runs this cell alongside ~850 others, so the driver's
-    // ticks and the completion's hops can be starved well past the stand-alone
+    // ticks and the completion's operations can be starved well past the stand-alone
     // cadence. The assertion is the same either way (the run must settle); the
     // dump is what a genuine stall ships home.
     let deadline = Instant::now() + WAIT * 3;
@@ -435,7 +435,7 @@ async fn cancel_racing_next_converges_on_one_terminal_decision_inner() {
 
 /// A `Cancel` whose durable intent landed but whose effect never committed (a
 /// crash between the two, here a write cut) must be replayed by recovery
-/// exactly once: the intent is the durable decision, and the hop that follows
+/// exactly once: the intent is the durable decision, and the operation that follows
 /// it re-plans the action the client made — the head step `Backed` plus the
 /// `ReenterTask` rewind — so the rewind survives the crash instead of being
 /// silently dropped.
@@ -507,7 +507,7 @@ async fn a_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inne
         || async { generations(&reloaded, &pid, &step1).await == vec![0, 1] },
         || async {
             // the replayed intent's fate, not just the row: a cancel dropped by
-            // the recovered hop shows up here as a pending intent that ran to
+            // the recovered operation shows up here as a pending intent that ran to
             // completion while the head step never moved
             format!(
                 "{} | head gens={:?} state0={:?} intent-pending={}",

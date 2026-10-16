@@ -1,6 +1,6 @@
-//! The `PropagateTask` hop: carrying a settled execution into its successors.
+//! The `PropagateTask` operation: carrying a settled execution into its successors.
 //!
-//! The hop runs nothing (phase 2 is the snapshot itself); phase 3 re-plans
+//! The operation runs nothing (phase 2 is the snapshot itself); phase 3 re-plans
 //! propagation from the authoritative snapshot — the successors'
 //! `Created → Ready` plus their `ExecuteTask` operations, the upward half of a
 //! failed or aborted decision, and the container join a settled child may
@@ -35,7 +35,7 @@ impl KernelHost {
         };
         // Only a settled *success* flows on (a step its own guard skipped
         // included — that skip is the legacy fall-through). A failure, an
-        // abort or a cascade skip owns the hop: its own walk decides the run,
+        // abort or a cascade skip owns the operation: its own walk decides the run,
         // and a flow from it would resurrect what the walk is ending.
         let state = snapshot.tasks.get(task_id).map(|task| task.state);
         if !matches!(
@@ -145,7 +145,7 @@ impl KernelHost {
     }
 }
 
-/// The propagation hop: a settled execution carried into its successors.
+/// The propagation operation: a settled execution carried into its successors.
 pub(super) struct PropagateTask;
 
 #[async_trait::async_trait]
@@ -156,22 +156,22 @@ impl ActOperation for PropagateTask {
         Ok(Precheck::Proceed)
     }
 
-    /// Nothing runs: the plan is the whole hop.
-    async fn run(&self, _host: &KernelHost, _hop: &Hop<'_>) -> Result<Outcome> {
+    /// Nothing runs: the plan is the whole operation.
+    async fn run(&self, _host: &KernelHost, _operation: &Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 
     async fn next(
         &self,
         host: &KernelHost,
-        hop: &Hop<'_>,
+        operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
-        let snapshot = hop.snapshot;
-        let id = hop.id;
-        let task_id = hop.task_id.clone();
-        let claim = hop.claim;
-        let task = hop.task.cloned();
+        let snapshot = operation.snapshot;
+        let id = operation.id;
+        let task_id = operation.task_id.clone();
+        let claim = operation.claim;
+        let task = operation.task.cloned();
         let plan = {
             // predecessor lists), never the declaring spec.
             let graph = task_graph(snapshot)?;
@@ -188,7 +188,7 @@ impl ActOperation for PropagateTask {
             // what a step's package wrote is what the step (and, up the
             // chain, the run) answers, which is what a workflow-level
             // `exposes` judges and what `proc:get`'s data shows. Engine
-            // facts and anything this hop already writes for that scope
+            // facts and anything this operation already writes for that scope
             // are left out (the failure path owns its own error
             // variables).
             if task.as_ref().map(|e| e.state)
@@ -219,7 +219,7 @@ impl ActOperation for PropagateTask {
             // The decision walks' upward half: an aborted execution ends
             // its whole ancestor chain `Aborted` (legacy `abort_task`),
             // a failed one ends it `Failed` (legacy `emit_error` →
-            // `parent.set_err`); each newly decided ancestor's own hop
+            // `parent.set_err`); each newly decided ancestor's own operation
             // carries the death into its remaining subtrees.
             let upward_to = match task.as_ref().map(|e| e.state) {
                 Some(crate::scheduler::core::model::task_graph::TaskState::Aborted) => {
@@ -240,13 +240,13 @@ impl ActOperation for PropagateTask {
             // twice is not a plan.
             if upward_to.is_none()
                 && let Some(parent) = task.as_ref().and_then(|e| e.parent.clone())
-                // A hop that re-enters one of this parent's nodes (a
+                // An operation that re-enters one of this parent's nodes (a
                 // backward `next`, a `while` turn) is *not* the end of the
                 // parent's chain: the join reads the snapshot, where the
                 // re-entered child does not exist yet, so completing the
                 // parent here would finish it under the node the flow just
                 // created. Every other parent's join runs as usual (the
-                // completed child's own branch/step settles with this hop).
+                // completed child's own branch/step settles with this operation).
                 && !plan
                     .task_creates
                     .iter()
@@ -288,7 +288,7 @@ impl ActOperation for PropagateTask {
                         let text = task_variable(snapshot, &parent, "error.message")
                             .map(json_text)
                             .unwrap_or_default();
-                        if let Some(payload) = host.hop_message_payload(
+                        if let Some(payload) = host.operation_message_payload(
                             snapshot,
                             &parent,
                             &parent.node,

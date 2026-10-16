@@ -126,10 +126,10 @@ async fn durable_shape(engine: &Engine, pid: &str) -> Durable {
 }
 
 /// [`durable_shape`] once the run stops moving: the same shape on three
-/// consecutive ticks. The driver's own trailing hop — the delivery
+/// consecutive ticks. The driver's own trailing operation — the delivery
 /// confirmation of the act's `Created` — lands just after the client has seen
 /// that message, so a decision point has to be read from a settled aggregate;
-/// a shape taken mid-hop would measure the driver's own writes instead of the
+/// a shape taken mid-operation would measure the driver's own writes instead of the
 /// delivery under test.
 async fn settled_shape(engine: &Engine, pid: &str) -> Durable {
     let deadline = Instant::now() + WAIT;

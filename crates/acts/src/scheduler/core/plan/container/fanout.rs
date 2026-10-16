@@ -69,7 +69,7 @@ impl ActPlan for Fanout {
         }
         if command.children.is_empty() {
             // A container without children is a normal completion: the join
-            // of zero children fires in the same hop.
+            // of zero children fires in the same operation.
             return Self::empty_container_plan(snapshot, command, source.state, source.revision);
         }
 

@@ -1,4 +1,4 @@
-//! The `ExecuteTask` hop: starting one execution's act.
+//! The `ExecuteTask` operation: starting one execution's act.
 //!
 //! Phase 2 is the step's entry check — the branch predicate pinned at
 //! admission, the step's own `if`/`while` guard and its run bound, then the
@@ -37,11 +37,11 @@ pub(in crate::scheduler::shell) enum Start {
     Failed(Failure),
     /// The act may start.
     Started {
-        /// The act's facts: this hop's own resolution, or the ones a previous
+        /// The act's facts: this operation's own resolution, or the ones a previous
         /// attempt pinned (a durable `Created` record is what tells them
         /// apart).
         facts: Option<ActFacts>,
-        /// Whether *this* hop resolved them.
+        /// Whether *this* operation resolved them.
         fresh: bool,
         /// Whether the acting node carries a `uses` package at all.
         package: bool,
@@ -49,12 +49,12 @@ pub(in crate::scheduler::shell) enum Start {
         announced: bool,
     },
     /// The act's params did not resolve: the execution is marked started and
-    /// the decision is handed to its effect hop, which resolves again and
-    /// fails it — the legacy act's `run()` gate, one hop later.
+    /// the decision is handed to its effect operation, which resolves again and
+    /// fails it — the legacy act's `run()` gate, one operation later.
     Unresolved,
 }
 
-/// The start hop: `Ready → Running` (auto) or `Ready → Waiting` (a waiting
+/// The start operation: `Ready → Running` (auto) or `Ready → Waiting` (a waiting
 /// package), plus the act's `Created` message record and, for an auto step,
 /// the `ApplyAction` operation that performs its work.
 pub(super) struct ExecuteTask;
@@ -66,12 +66,12 @@ impl ActOperation for ExecuteTask {
         Ok(Precheck::Proceed)
     }
 
-    async fn run(&self, host: &KernelHost, hop: &Hop<'_>) -> Result<Outcome> {
-        let snapshot = hop.snapshot;
-        let task_id = &hop.task_id;
-        let task = hop.task;
+    async fn run(&self, host: &KernelHost, operation: &Operation<'_>) -> Result<Outcome> {
+        let snapshot = operation.snapshot;
+        let task_id = &operation.task_id;
+        let task = operation.task;
         // A branch whose predicate could not be evaluated fails on its first
-        // hop: the fan-out admitted it with the failure pinned (see
+        // operation: the fan-out admitted it with the failure pinned (see
         // `fanout_command`), which is the legacy branch task erroring in its
         // `init` — the container's error walk takes over from here.
         if task.is_some()
@@ -93,11 +93,11 @@ impl ActOperation for ExecuteTask {
         }
         // The act's package facts and its own gate: every `uses` step resolves
         // its package at start, and the pinned facts ride every later message
-        // record — so no later hop re-runs the headless scope, whose snapshot
+        // record — so no later operation re-runs the headless scope, whose snapshot
         // seal must fail the act at start, never a completion.
         let created_key = format!(
             "message.created:{}:{}:{}",
-            hop.id.process_id, hop.id.node, hop.id.generation
+            operation.id.process_id, operation.id.node, operation.id.generation
         );
         let announced = snapshot
             .outbox
@@ -129,14 +129,14 @@ impl ActOperation for ExecuteTask {
                     // The act cannot start with these params (the legacy act's
                     // `run()` fails it before it waits or executes). The state
                     // table, like the legacy sequence, only decides a failure
-                    // from a started act: this hop marks it started and hands
-                    // the decision to the effect hop, which resolves again and
-                    // fails it — the same error walk, one hop later.
+                    // from a started act: this operation marks it started and hands
+                    // the decision to the effect operation, which resolves again and
+                    // fails it — the same error walk, one operation later.
                     tracing::debug!(
                         pid = %snapshot.process_id,
                         node = %task_id.node,
                         error = %error,
-                        "act resolution failed at start; failing it on its effect hop"
+                        "act resolution failed at start; failing it on its effect operation"
                     );
                     Start::Unresolved
                 }
@@ -155,18 +155,18 @@ impl ActOperation for ExecuteTask {
     async fn next(
         &self,
         host: &KernelHost,
-        hop: &Hop<'_>,
+        operation: &Operation<'_>,
         outcome: Outcome,
     ) -> Result<TransitionPlan> {
         let Outcome::Start(start) = outcome else {
-            return Err(runtime("the start hop planned a foreign outcome"));
+            return Err(runtime("the start operation planned a foreign outcome"));
         };
-        let snapshot = hop.snapshot;
-        let id = hop.id;
-        let task_id = hop.task_id.clone();
-        let claim = hop.claim;
-        let task = hop.task;
-        let now_ms = hop.now_ms;
+        let snapshot = operation.snapshot;
+        let id = operation.id;
+        let task_id = operation.task_id.clone();
+        let claim = operation.claim;
+        let task = operation.task;
+        let now_ms = operation.now_ms;
         // The action this start seeds (an auto task's own completion) and
         // whether it is already durable.
         let action_id = OperationId {
@@ -183,7 +183,7 @@ impl ActOperation for ExecuteTask {
             .get(&(task_id.clone(), "auto".into()))
             .map(String::as_str)
             != Some("0");
-        let mut plan = host.task_hop_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             &task_id,
@@ -255,7 +255,7 @@ impl ActOperation for ExecuteTask {
                 // for a package-less execution — the legacy engine's `on_task`
                 // fired for every task, not only the acts.
                 if !created_exists
-                    && let Some(payload) = host.hop_message_payload(
+                    && let Some(payload) = host.operation_message_payload(
                         snapshot,
                         &task_id,
                         &id.node,
@@ -299,7 +299,7 @@ impl ActOperation for ExecuteTask {
                     // A node that declares `timeouts` starts its cost clock
                     // here and arms the timer that fires them (see
                     // `crate::scheduler::core::plan::timeout` and the timeout
-                    // hop): the timer is durable, so a tick after a crash still
+                    // operation): the timer is durable, so a tick after a crash still
                     // fires a branch whose window opened while the host was
                     // down. Only timeout owners carry the stamp — it is a
                     // kernel fact, never a variable a model reads.
@@ -330,7 +330,7 @@ impl ActOperation for ExecuteTask {
 }
 
 impl KernelHost {
-    /// The step's own guard and run bound, decided at the start hop — the
+    /// The step's own guard and run bound, decided at the start operation — the
     /// legacy `Step::init`, which decides whether a step runs at all before any
     /// act exists.
     ///
@@ -422,7 +422,7 @@ impl KernelHost {
             generation: id.generation,
             sequence: id.sequence + 1,
         };
-        let mut plan = self.task_hop_plan(
+        let mut plan = self.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -438,8 +438,8 @@ impl KernelHost {
             name: crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR.to_string(),
             value: serde_json::json!(true).to_string(),
         });
-        // The act's own Skipped message, like the cascade's hop emits.
-        if let Some(payload) = self.hop_message_payload(
+        // The act's own Skipped message, like the cascade's operation emits.
+        if let Some(payload) = self.operation_message_payload(
             snapshot,
             task_id,
             &id.node,

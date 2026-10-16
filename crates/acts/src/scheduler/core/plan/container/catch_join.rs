@@ -40,7 +40,7 @@ impl ActPlan for CatchJoin {
     /// failed step.
     ///
     /// The legacy rule is `is_empty_catched`: the step's `Sign::ERROR` was
-    /// pinned by its failure hop, `auto_complete` waits for *every* child that
+    /// pinned by its failure operation, `auto_complete` waits for *every* child that
     /// exists (a `timeouts` branch the tick fired included), and then
     ///
     /// - every CATCH child skipped ⇒ no handler matched, so the error is
@@ -70,7 +70,7 @@ impl ActPlan for CatchJoin {
                 snapshot: snapshot.version.graph,
             });
         }
-        // Only an execution whose failure hop pinned the deciding flow decides
+        // Only an execution whose failure operation pinned the deciding flow decides
         // a caught error, and only one of its own children settling may trigger
         // the decision.
         if !deciding_catches(snapshot, &command.parent) {

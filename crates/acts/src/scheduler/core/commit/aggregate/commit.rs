@@ -93,10 +93,10 @@ pub(crate) fn advance_transition(
         let mut record =
             OutboxRecord::pending(id.clone(), item.topic.clone(), item.payload.clone(), 0)
                 .map_err(CommitError::InvalidOutbox)?;
-        // A record the hop's own transport already delivered commits as
+        // A record the operation's own transport already delivered commits as
         // delivered (see `OutboxIntent::receipt`): the message is out, and the
         // record exists to say so — the driver's pass never sees it, so one
-        // hop stays one delivery without a claim and a confirm of its own.
+        // operation stays one delivery without a claim and a confirm of its own.
         if let Some(receipt) = &item.receipt {
             // The record's own counters must describe the delivery it records:
             // one attempt, its fence, and a revision that covers it — exactly
@@ -147,7 +147,7 @@ pub(crate) fn advance_transition(
             .operations
             .get(&source.id)
             .ok_or_else(|| CommitError::OperationNotFound(source.id.clone()))?;
-        // The hop's own operation closes inside the *same* commit as its
+        // The operation closes inside the *same* commit as its
         // business effect. The two used to be two whole-aggregate compare-and-
         // swaps (`OperationEvent::Commit`, then a second plan that carried only
         // `OperationEvent::Complete`), and nothing observed the state between
@@ -160,7 +160,7 @@ pub(crate) fn advance_transition(
         //
         // `Committed` stays a persisted state: the V2 tags decode it and
         // `RecoveryPlanner::FinalizeCommit` still finishes the aggregates a
-        // writer from before this fold left there. No hop produces it any more.
+        // writer from before this fold left there. No operation produces it any more.
         let committed = operation
             .evolve(OperationEvent::Commit {
                 claim: source.claim.clone(),

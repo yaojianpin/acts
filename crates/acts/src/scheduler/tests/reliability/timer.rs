@@ -7,7 +7,7 @@
 //!
 //! Both loops belong to the kernel: their rows are the kernel's projection
 //! (`deliveries`/`events`) and the two loops run outside the driver, because
-//! they are not part of the hop protocol and must not delay it. A cell
+//! they are not part of the operation protocol and must not delay it. A cell
 //! therefore reads the loops' effects off the row collections and the engine's
 //! own channels — a re-send is an `emit_delivery` to the owning channel, a
 //! trigger fire is the `events` due query plus `fire_schedule` — and never
@@ -415,7 +415,7 @@ async fn message_retry_resumes_after_restart_and_errored_stays_dead_inner() {
 }
 
 /// Poll the first delivery row of `pid` into existence: the act message's
-/// dispatch stores it on the process's own shard, so it appears a hop after the
+/// dispatch stores it on the process's own shard, so it appears an operation after the
 /// run starts.
 async fn poll_first_delivery(engine: &Engine, store: &Store, pid: &str) -> crate::data::Delivery {
     let what = format!("the first delivery row of {pid}");

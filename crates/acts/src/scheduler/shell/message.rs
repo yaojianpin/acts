@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// Map one delivered record onto its engine message, or `None` when the
-/// record carries no payload (lifecycle notes such as `task.started` on a hop
+/// record carries no payload (lifecycle notes such as `task.started` on an operation
 /// that announced nothing).
 ///
 /// Two payload shapes arrive here, both faithful to the legacy
@@ -58,7 +58,7 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         .unwrap_or_default()
         .to_string();
 
-    // The message's inputs: the scope inputs the hop recorded, plus the
+    // The message's inputs: the scope inputs the operation recorded, plus the
     // resolved params/options the message carries (the legacy
     // `Task::create_message`).
     let mut inputs = Vars::new();

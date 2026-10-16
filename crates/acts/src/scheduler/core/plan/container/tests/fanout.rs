@@ -112,7 +112,7 @@ fn fanout_queues_chain_successors_behind_the_entry() {
 }
 
 #[test]
-fn empty_container_completes_and_propagates_in_the_same_hop() {
+fn empty_container_completes_and_propagates_in_the_same_operation() {
     let (snapshot, command) = fanout_command("b1", TaskState::Running, vec![]);
     let plan = Fanout::plan(&snapshot, &command).unwrap();
     assert!(plan.task_creates.is_empty());

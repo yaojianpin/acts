@@ -16,7 +16,7 @@ pub(crate) enum PropagationError {
     },
     /// A step's `next` names a node the run never instantiated (the model and
     /// the seeded graph disagree). Scheduling nothing would end the flow
-    /// silently, so the hop refuses instead.
+    /// silently, so the operation refuses instead.
     FlowTargetNotInstantiated(String),
     EmptyFlowTarget,
     GenerationOverflow,

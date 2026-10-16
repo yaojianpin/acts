@@ -1,11 +1,11 @@
 use super::*;
 
-/// Whether an `ExecuteTask` hop may start this execution: a `Ready` one is the
+/// Whether an `ExecuteTask` operation may start this execution: a `Ready` one is the
 /// ordinary scheduled start, and a `Created` one is a root the slot cap parked,
-/// whose admission hop *is* its start hop (see
+/// whose admission operation *is* its start operation (see
 /// [`Admissions`](super::Admissions) and
 /// `crate::scheduler::core::plan::concurrency`). A successor is `Created` only
-/// until the propagation hop that schedules it commits its `Created → Ready`
+/// until the propagation operation that schedules it commits its `Created → Ready`
 /// move in the same plan as its `ExecuteTask` operation.
 pub(super) fn startable(state: crate::scheduler::core::model::task_graph::TaskState) -> bool {
     matches!(
@@ -15,15 +15,15 @@ pub(super) fn startable(state: crate::scheduler::core::model::task_graph::TaskSt
     )
 }
 
-/// What one timeout dispatch round decided (see the `DispatchTimeout` hop's
+/// What one timeout dispatch round decided (see the `DispatchTimeout` operation's
 /// phase 2).
 pub(super) enum TimeoutRound {
-    /// The due branch and its decided guard: the hop dispatches it.
+    /// The due branch and its decided guard: the operation dispatches it.
     Dispatch {
         branch: crate::scheduler::core::plan::timeout::TimeoutBranch,
         guard: TimeoutGuard,
         cost_ms: i64,
-        /// How many branches the node declares: the hop re-arms the timer while
+        /// How many branches the node declares: the operation re-arms the timer while
         /// the one-shot marker is shorter than that.
         declared: usize,
     },
@@ -41,14 +41,14 @@ pub(super) enum TimeoutGuard {
     /// The guard holds (or the branch declares none): dispatch the branch.
     Fire,
     /// The guard could not be evaluated (a non-boolean value or a compile/eval
-    /// error): the branch is admitted and fails on its first hop, exactly like
+    /// error): the branch is admitted and fails on its first operation, exactly like
     /// the legacy branch task whose `init` errored. The message is the pinned
     /// failure.
     Fail(String),
 }
 
 /// The next free operation sequence on one execution, counting both the
-/// snapshot's records and the intents this plan already claims: a hop that adds
+/// snapshot's records and the intents this plan already claims: an operation that adds
 /// its own timer next to the act's completion op must not collide with it.
 pub(super) fn next_plan_sequence(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -67,7 +67,7 @@ pub(super) fn next_plan_sequence(
     from_snapshot.max(from_plan)
 }
 
-/// Record one execution's decision flow in the hop's plan (`children` for a
+/// Record one execution's decision flow in the operation's plan (`children` for a
 /// container parking for the children it admitted, `catches` for a failed
 /// execution that dispatched its handlers). The planner's own fact wins over a
 /// client input of the same private name.
@@ -98,9 +98,9 @@ pub(super) fn mark_parked_for_children(
     );
 }
 
-/// Whether this execution is deciding a caught error: its failure hop pinned
+/// Whether this execution is deciding a caught error: its failure operation pinned
 /// the deciding flow ([`crate::scheduler::core::plan::container::FLOW_CATCHES`], the legacy
-/// `Step::sign() == Sign::ERROR`), which the catch join answers and no later hop
+/// `Step::sign() == Sign::ERROR`), which the catch join answers and no later operation
 /// may override.
 pub(super) fn is_catch_decider(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -166,7 +166,7 @@ pub(super) fn walk_step<'a>(
         // legacy tree builds them as `NodeOutputKind::Catch` children, which
         // `Node::children()` (Normal kind) does not return, so a successful
         // completion never runs into them — only `Step::on_error` dispatches
-        // them, on the failure path (the completion hop's catch fan-out).
+        // them, on the failure path (the completion operation's catch fan-out).
         return model::step_branches(step).map(ContainerShape::Branches);
     }
     for branch in model::step_branches(step).unwrap_or_default() {

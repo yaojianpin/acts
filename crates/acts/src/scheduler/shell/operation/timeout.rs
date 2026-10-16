@@ -64,7 +64,7 @@ impl KernelHost {
     /// `Step::on_timeout` + `dispatch_next_timeout_branch` + the branch's own
     /// `Step::init` guard, decided against the aggregate.
     ///
-    /// The cost is what passed since the execution's own start hop (the legacy
+    /// The cost is what passed since the execution's own start operation (the legacy
     /// task's creation stamp); it is frozen into the branch's evaluation as the
     /// `__cost` task datum `$cost()`/`$cost_in(...)` read.
     async fn timeout_round(
@@ -145,7 +145,7 @@ impl KernelHost {
                             }
                             // A guard that cannot be evaluated is the legacy
                             // branch's `init` error: the branch is admitted and
-                            // fails on its first hop.
+                            // fails on its first operation.
                             crate::scheduler::core::plan::branch::PredicateValue::Null => {
                                 TimeoutGuard::Fail(format!(
                                     "timeout step '{}' guard evaluated to null",
@@ -248,7 +248,7 @@ impl KernelHost {
     }
 }
 
-/// The timer hop: one execution's declared `timeouts`, evaluated once per tick
+/// The timer operation: one execution's declared `timeouts`, evaluated once per tick
 /// while the execution is live.
 pub(super) struct DispatchTimeout;
 
@@ -256,7 +256,7 @@ pub(super) struct DispatchTimeout;
 impl ActOperation for DispatchTimeout {
     /// The round, asked *before* the claim: a timer that wakes on the tick
     /// with nothing due must not consume its own operation, so the pre-claim
-    /// verdict is the same round the hop would decide — an [`Precheck::Ignore`]
+    /// verdict is the same round the operation would decide — an [`Precheck::Ignore`]
     /// leaves the operation `Pending` for the next tick.
     async fn precheck(&self, host: &KernelHost, pending: &Pending<'_>) -> Result<Precheck> {
         let id = pending.id;
@@ -279,11 +279,16 @@ impl ActOperation for DispatchTimeout {
 
     /// The round, decided again against the authoritative post-claim snapshot:
     /// a decision that landed between the preflight and the claim leaves the
-    /// timer with nothing to do, and the hop then has nothing to commit.
-    async fn run(&self, host: &KernelHost, hop: &Hop<'_>) -> Result<Outcome> {
+    /// timer with nothing to do, and the operation then has nothing to commit.
+    async fn run(&self, host: &KernelHost, operation: &Operation<'_>) -> Result<Outcome> {
         Ok(
             match host
-                .timeout_round(hop.snapshot, &hop.task_id, hop.task, hop.now_ms)
+                .timeout_round(
+                    operation.snapshot,
+                    &operation.task_id,
+                    operation.task,
+                    operation.now_ms,
+                )
                 .await?
             {
                 TimeoutRound::Idle => Outcome::Nothing,
@@ -295,19 +300,19 @@ impl ActOperation for DispatchTimeout {
     async fn next(
         &self,
         host: &KernelHost,
-        hop: &Hop<'_>,
+        operation: &Operation<'_>,
         outcome: Outcome,
     ) -> Result<TransitionPlan> {
         let Outcome::Timeout(round) = outcome else {
-            return Err(runtime("the timer hop planned a foreign outcome"));
+            return Err(runtime("the timer operation planned a foreign outcome"));
         };
-        let snapshot = hop.snapshot;
-        let id = hop.id;
-        let task_id = &hop.task_id;
-        let task = hop.task;
-        let claim = hop.claim;
+        let snapshot = operation.snapshot;
+        let id = operation.id;
+        let task_id = &operation.task_id;
+        let task = operation.task;
+        let claim = operation.claim;
         Ok(match round {
-            // The timer of a timed-out execution: this hop dispatches the due
+            // The timer of a timed-out execution: this operation dispatches the due
             // branch.
             TimeoutRound::Dispatch {
                 branch,
@@ -324,7 +329,7 @@ impl ActOperation for DispatchTimeout {
             // The idle round is [`Outcome::Nothing`], which never reaches a
             // plan.
             TimeoutRound::Idle => {
-                return Err(runtime("the timer hop replanned an idle round"));
+                return Err(runtime("the timer operation replanned an idle round"));
             }
         })
     }

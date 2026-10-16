@@ -154,7 +154,7 @@ pub struct Op {
     /// unambiguous now that a record can name its target.
     pub source_tid: String,
     pub tid: String,
-    /// The target of a propagation hop. `None` for `Exec` and client `Action`
+    /// The target of a propagation operation. `None` for `Exec` and client `Action`
     /// records, which are scoped to `tid` rather than an edge.
     #[serde(default)]
     pub target_tid: Option<String>,
@@ -163,7 +163,7 @@ pub struct Op {
     #[serde(default)]
     pub source_version: i64,
     /// The durable operation that caused this one, when this record was
-    /// created as the next hop of a propagation chain.
+    /// created as the next operation of a propagation chain.
     #[serde(default)]
     pub causal_op_id: Option<String>,
     /// The operation lifecycle phase. Kept beside the scheduler-facing

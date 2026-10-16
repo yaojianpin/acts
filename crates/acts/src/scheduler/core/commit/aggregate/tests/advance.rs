@@ -54,7 +54,7 @@ fn operation_event_advances_the_snapshot_it_is_given() {
 #[test]
 fn rejected_operation_event_leaves_its_snapshot_untouched() {
     // The reachable rejection runs before the first mutation, which is
-    // what lets the durable repository hand its own snapshot over: a hop
+    // what lets the durable repository hand its own snapshot over: an operation
     // that loses the revision race must leave the aggregate as it was.
     let (current, operation_id, claim) = pending_operation_snapshot();
     let mut next = current.clone();

@@ -64,12 +64,12 @@ pub(crate) struct OutboxIntent {
     pub(crate) key: String,
     pub(crate) topic: String,
     pub(crate) payload: String,
-    /// The receipt the hop's own transport returned for this record, when it
+    /// The receipt the operation's own transport returned for this record, when it
     /// delivered it *before* committing (the effect seam's ordering: the work
     /// runs, then one commit records it). The commit creates the record
     /// already `Delivered` — no claim, no confirm pass, no second commit — and
     /// `None` leaves it `Pending` for the driver's retry pass (a transport that
-    /// refused, or a plan no hop has offered the transport yet).
+    /// refused, or a plan no operation has offered the transport yet).
     pub(crate) receipt: Option<String>,
 }
 
@@ -176,7 +176,7 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
             // A run parked by the driver's slot cap is seeded with its root
             // `Created` (the read model's `None` process state, the legacy
             // parked row) and admitted by driving the very operation that
-            // parked it: its admission hop *is* its start hop, so a parked
+            // parked it: its admission operation *is* its start operation, so a parked
             // root takes its act straight to `Running`/`Waiting` — the legacy
             // parked process went from `None` to its root task running with no
             // scheduling step in between.

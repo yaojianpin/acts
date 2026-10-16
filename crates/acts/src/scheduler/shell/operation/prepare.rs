@@ -1,4 +1,4 @@
-//! Phase 1 of a hop: preparing an operation to run.
+//! Phase 1 of an operation: preparing an operation to run.
 //!
 //! The parked fast path, the slot policy, the kind's pre-claim policy and the
 //! claim — everything that must happen before the operation's own work starts,
@@ -10,15 +10,15 @@ use super::*;
 use crate::scheduler::shell::*;
 
 impl KernelHost {
-    /// Phase 1: whether this hop may be driven, and the claimed operation it
+    /// Phase 1: whether this operation may be driven, and the claimed operation it
     /// drives. `Ok(None)` is the "nothing to do" answer — a run parked by the
     /// slot cap, an operation that already moved past the claimable states, or
     /// a kind whose pre-claim check says there is nothing to do.
     ///
     /// `slot` says whether the run's slot policy applies ([`Slot::Policy`], the
-    /// driver's own hops) or the operation is claimed directly
+    /// driver's own operations) or the operation is claimed directly
     /// ([`Slot::Direct`], the client action path — see [`Slot`]).
-    pub(in crate::scheduler::shell) async fn prepare_hop(
+    pub(in crate::scheduler::shell) async fn prepare_operation(
         &self,
         id: &OperationId,
         slot: Slot,
@@ -38,7 +38,7 @@ impl KernelHost {
         // The slot policy for this run, before it is driven: a parked run
         // waits, a run this driver never admitted (one already in flight when
         // it booted) takes a slot or parks, and a run that settled already —
-        // its last hop committed, a client action closed it, or a crash left
+        // its last operation committed, a client action closed it, or a crash left
         // its timer open — frees its slot for the parked run that has waited
         // longest. The recovery scan re-wakes every pending operation each
         // tick, so this is also the hot path of a parked run.
@@ -79,7 +79,7 @@ impl KernelHost {
         // The claim's fence must advance past the operation's own attempt: the
         // state machine refuses a claim that does not (`RetryScheduled{attempt}`
         // and `EffectUnknown{attempt}` require `fence > attempt`), and the
-        // driver used to claim with a fixed fence of 1 — so a hop whose claim
+        // driver used to claim with a fixed fence of 1 — so an operation whose claim
         // recovery had released for a retry (`RetryScheduled{attempt: 1}`, the
         // state both a lease expiry and a lost commit produce) could never be
         // claimed again, and its run was stranded for good.

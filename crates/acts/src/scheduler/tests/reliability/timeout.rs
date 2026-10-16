@@ -4,10 +4,10 @@
 //! and the driver's passes over an already-settled run.
 //!
 //! The kernel keeps the legacy tick's three facts in the run's aggregate: the
-//! cost start (`__started`, stamped by the owner's own start hop), the frozen
+//! cost start (`__started`, stamped by the owner's own start operation), the frozen
 //! cost (written into the branch's scope as `__cost`, what `$cost()` reads) and
 //! the one-shot marker (`__timeouts`, the branch ids that already fired). The
-//! timer is a durable `DispatchTimeout` operation armed by that start hop and
+//! timer is a durable `DispatchTimeout` operation armed by that start operation and
 //! re-woken by the recovery scan on every tick (800 ms under `cfg(test)`), so a
 //! branch fires on the tick whose round admits it: one branch per round, in
 //! declaration order, skipping the claimed ones and stopping at the first
@@ -187,7 +187,7 @@ async fn claimed(engine: &Engine, pid: &str, owner: &str) -> Vec<String> {
 
 /// Whether every outbox record of the run has settled (delivered or
 /// quarantined): the outbox dispatch pass has no aggregate write left to make,
-/// so the next write to the run's aggregate is a hop's own commit.
+/// so the next write to the run's aggregate is an operation's own commit.
 async fn outbox_settled(engine: &Engine, pid: &str) -> bool {
     process_snapshot(engine, pid)
         .await

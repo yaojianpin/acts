@@ -25,7 +25,7 @@ pub(crate) struct ProcessSnapshot {
 
 impl ProcessSnapshot {
     /// The next free operation sequence for one execution: operation ids are
-    /// unique per (task, generation), and an execution that already ran hops
+    /// unique per (task, generation), and an execution that already ran operations
     /// (a fan-out child, a rewound generation) owns earlier sequences, so
     /// every newly seeded operation takes the one after the highest known.
     pub(crate) fn next_operation_sequence(&self, node: &str, generation: u64) -> u64 {

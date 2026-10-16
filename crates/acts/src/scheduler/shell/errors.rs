@@ -7,12 +7,12 @@ use std::task::{Context as TaskContext, Poll};
 
 /// Catches a panic raised while polling one future.
 ///
-/// The engine runs user code (a package's `execute`) and its own hop code on
+/// The engine runs user code (a package's `execute`) and its own operation code on
 /// the single driver task: a panic that escaped would kill that task and
 /// leave the whole engine wedged with no owner for any operation. A package
 /// panic is contained where the package runs and reported as the ordinary
 /// package failure (the execution `Failed`, its error walk carries it); a
-/// panic anywhere else in a hop is contained around `KernelHost::execute_one`
+/// panic anywhere else while driving is contained around `KernelHost::execute_one`
 /// so the driver survives and the operation stays open for recovery.
 pub(super) struct CatchPanic<F> {
     future: Option<F>,
@@ -96,7 +96,7 @@ pub(super) fn is_conflict(error: &ActError) -> bool {
 /// a lost compare-and-swap, so a caller can re-plan against the fresh
 /// snapshot. A plan that would create an operation already standing is that
 /// same race, seen from the other side: operation ids are derived from the
-/// snapshot (`max(sequence) + 1`, and a hop's own successor), so two writers
+/// snapshot (`max(sequence) + 1`, and an operation's own successor), so two writers
 /// that loaded the same state mint the same ids, and the second one must
 /// re-plan rather than fail (a hard error there leaves a client action refused
 /// for a race it never lost). A store-side failure keeps its own typed error (a

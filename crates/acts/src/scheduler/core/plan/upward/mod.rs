@@ -11,7 +11,7 @@
 //! The downward half of either death is the ordinary dead-source cascade
 //! ([`crate::scheduler::core::plan::propagation::Propagate`]); this planner produces the upward half:
 //! one atomic batch of ancestor state changes plus the `PropagateTask`
-//! operations whose hops spread the death into the remaining subtrees.
+//! operations whose operations spread the death into the remaining subtrees.
 
 use crate::scheduler::core::{
     commit::aggregate::ProcessSnapshot,

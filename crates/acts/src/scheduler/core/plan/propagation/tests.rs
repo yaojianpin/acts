@@ -159,7 +159,7 @@ fn dead_predecessor_puts_success_join_into_the_skip_cascade() {
 
 #[test]
 fn dead_source_sends_admitted_unfinished_successors_into_the_cascade() {
-    // `join` is already `Ready` (admitted, start hop pending) when its
+    // `join` is already `Ready` (admitted, start operation pending) when its
     // predecessor is cancelled: it must skip, not run behind a dead path.
     let mut snap = snapshot(TaskState::Cancelled, TaskState::Completed);
     if let Some(target) = snap.tasks.get_mut(&id("join")) {
@@ -197,13 +197,16 @@ fn a_running_successor_of_a_dead_source_is_skipped_in_place() {
     }
     let plan =
         Propagate::plan((&graph, &snapshot), &command("a", JoinPolicy::AllSucceeded)).unwrap();
-    // The plan only schedules the skip; the hop owns the state change
+    // The plan only schedules the skip; the operation owns the state change
     // against the authoritative state.
     assert!(plan.state_changes.is_empty());
     assert_eq!(plan.operations.len(), 1);
     assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
     assert_eq!(plan.operations[0].id.node, "b");
-    assert_eq!(plan.operations[0].id.sequence, 0, "no prior hops on b");
+    assert_eq!(
+        plan.operations[0].id.sequence, 0,
+        "no prior operations on b"
+    );
 }
 
 #[test]

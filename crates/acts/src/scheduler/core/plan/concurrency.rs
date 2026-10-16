@@ -28,13 +28,13 @@ pub(crate) const CREATED_VAR: &str = "__created";
 /// What the driver does with a run that does not hold a slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Admission {
-    /// Let the run hop: it holds a slot, or needs none.
+    /// Let the run operation: it holds a slot, or needs none.
     Admit,
     /// Hold the run back until a slot frees.
     Park,
 }
 
-/// The plan of one run's slot decision: whether the driver lets it hop now or
+/// The plan of one run's slot decision: whether the driver lets it operation now or
 /// holds it back until a slot frees.
 pub(crate) struct Admit;
 

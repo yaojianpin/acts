@@ -1,15 +1,15 @@
-//! The `ReenterTask` hop: the durable rewind a `Cancel`/`Back` decision leaves
+//! The `ReenterTask` operation: the durable rewind a `Cancel`/`Back` decision leaves
 //! behind.
 //!
 //! The deciding commit closed the source generation and created this operation
 //! in the *same* atomic batch, so the re-entry can be lost neither to a crash
-//! nor to a lost compare-and-swap: its hop plans the fresh generations and the
+//! nor to a lost compare-and-swap: its operation plans the fresh generations and the
 //! recovery scan re-drives it until that plan commits.
 
 use super::*;
 use crate::scheduler::shell::*;
 
-/// The rewind hop: `Back` to an earlier step, or `Cancel` of the closed
+/// The rewind operation: `Back` to an earlier step, or `Cancel` of the closed
 /// execution itself.
 pub(super) struct ReenterTask;
 
@@ -20,26 +20,26 @@ impl ActOperation for ReenterTask {
         Ok(Precheck::Proceed)
     }
 
-    /// Nothing runs: the plan is the whole hop.
-    async fn run(&self, _host: &KernelHost, _hop: &Hop<'_>) -> Result<Outcome> {
+    /// Nothing runs: the plan is the whole operation.
+    async fn run(&self, _host: &KernelHost, _operation: &Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 
     async fn next(
         &self,
         _host: &KernelHost,
-        hop: &Hop<'_>,
+        operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
-        let snapshot = hop.snapshot;
-        let id = hop.id;
-        let task_id = hop.task_id.clone();
-        let claim = hop.claim;
+        let snapshot = operation.snapshot;
+        let id = operation.id;
+        let task_id = operation.task_id.clone();
+        let claim = operation.claim;
         let plan = {
             // generation and wrote the target it names (`Back` an earlier
             // step, `Cancel` the closed execution itself). Planning here —
             // not in the deciding call — is what makes the rewind survive
-            // a lost compare-and-swap or a crash: this hop is re-driven by
+            // a lost compare-and-swap or a crash: this operation is re-driven by
             // the recovery scan until its commit lands.
             let target = snapshot
                 .variables

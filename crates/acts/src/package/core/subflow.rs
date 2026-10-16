@@ -77,7 +77,7 @@ impl ActPackage for SubflowPackage {
         // auto-completing (`task.set_auto_complete(false)`) so the subflow act
         // waited for its child run and the child's `return_to_act` completed
         // it. The kernel drives every `Func` act to completion through its own
-        // effect hop and has no parent/child run linkage yet, so the child is
+        // effect operation and has no parent/child run linkage yet, so the child is
         // started with the parent's authority and the act completes with it —
         // registered as a kernel gap in KERNEL_CUTOVER_NOTES.md §10.
         // A subflow is not a caller: it is a live run spawning work of its

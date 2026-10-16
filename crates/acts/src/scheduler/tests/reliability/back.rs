@@ -8,7 +8,7 @@
 //! projects the rows from the committed snapshot afterwards. Its `Back` is the
 //! legacy redo: it needs a *waiting* execution and the `to` step to re-enter,
 //! and its deciding commit closes the source generation `Backed`, pins the
-//! redo target and creates the durable `ReenterTask` operation whose hop
+//! redo target and creates the durable `ReenterTask` operation whose operation
 //! rebuilds the named step and its forward closure as fresh generations. So
 //! the cells pin, on the surfaces the kernel has:
 //!
@@ -17,10 +17,10 @@
 //!   count (the read model keeps one row per model node, so a count cannot see
 //!   a rewind at all);
 //! - a durable intent a crash left behind is replayed by recovery exactly
-//!   once (an aggregate a writer from before the hop's close was folded into
+//!   once (an aggregate a writer from before the operation's close was folded into
 //!   its effect commit left `Committed` is finalized rather than re-applied —
 //!   that state is pinned by `async_document_store.rs`'s finalize cell, since
-//!   no hop produces it any more);
+//!   no operation produces it any more);
 //! - a store fault the rewind's own durable commit runs into is surfaced to
 //!   the client and consumes nothing, so the retry rewinds exactly once;
 //! - a duplicate `Back` is refused by the decision guard — after the rewind
@@ -89,7 +89,7 @@ async fn waiting_chain(engine: &Engine) -> (String, String) {
 async fn finish_by_hand(engine: &Engine, pid: &str) {
     // The drive-by-hand bound is deliberately longer than the harness `WAIT`:
     // the full suite runs this cell alongside ~850 others, so the driver's
-    // ticks and the completion's hops can be starved well past the stand-alone
+    // ticks and the completion's operations can be starved well past the stand-alone
     // cadence. The assertion is the same either way (the run must settle); the
     // dump is what a genuine stall ships home.
     let deadline = Instant::now() + WAIT * 3;
@@ -197,7 +197,7 @@ async fn rewind_operations(engine: &Engine, pid: &str, tid: &str) -> usize {
 
 /// The crash and the boot, in the order that makes the crash real: close
 /// `engine` while the cut still refuses every write, so no live driver can
-/// apply the hop the crash left behind, then heal the store (an engine boot
+/// apply the operation the crash left behind, then heal the store (an engine boot
 /// writes, so the store must be whole before `start`) and boot a fresh engine
 /// over the same durable state. This is the harness's [`restart`] with the
 /// healing sequenced between the close and the boot.
@@ -214,7 +214,7 @@ async fn crash_and_reboot(engine: &Engine, store: Arc<dyn KvStore>, kv: &CutKv) 
 /// A `Back` whose durable intent landed but whose effect never committed (a
 /// crash between the two, here a write cut) must be replayed by recovery
 /// exactly once: the intent is the durable decision — the action the client
-/// made — and the hop that follows it re-plans it, closing the waiting act's
+/// made — and the operation that follows it re-plans it, closing the waiting act's
 /// generation `Backed` and creating the `ReenterTask` rewind, so the rewind
 /// survives the crash instead of being silently dropped.
 ///
@@ -274,7 +274,7 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
 
     // the crash and the replay: the fresh engine's recovery pass is what
     // re-drives the intent, exactly once. The redo's own `Created` is
-    // registered first: the re-enter commits on the fresh engine's hop, and
+    // registered first: the re-enter commits on the fresh engine's operation, and
     // the act's message rides the outbox pass after it, so the announcement is
     // observed rather than missed.
     let reloaded = crash_and_reboot(&engine, store.clone(), &kv).await;
@@ -371,7 +371,7 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
     let (pid, step1) = waiting_chain(&engine).await;
 
     // the one-shot fault is aimed at the run's aggregate document: the back's
-    // commit (and the hop that carries it) is the next write of it
+    // commit (and the operation that carries it) is the next write of it
     let process = process_key(&pid);
     kv.arm_key(&process);
     let refused = back_act(&engine, &pid, "step2", &step1).await;

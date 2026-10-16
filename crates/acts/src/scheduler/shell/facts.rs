@@ -331,21 +331,21 @@ pub(super) fn root_error(
     (read("error.code"), read("error.message"))
 }
 
-/// The private execution variables the start hop pins on a `uses` step: its
+/// The private execution variables the start operation pins on a `uses` step: its
 /// resolved params and its declared options. Every later message record
-/// (completion, failure, skip) carries the facts the *start* hop resolved
+/// (completion, failure, skip) carries the facts the *start* operation resolved
 /// instead of re-running the headless scope, whose snapshot seal may fail
-/// (and must fail the act at start, never a later hop).
+/// (and must fail the act at start, never a later operation).
 pub(super) const PARAMS_VAR: &str = "__params";
 pub(super) const OPTIONS_VAR: &str = "__options";
 
 /// The private execution variable a fan-out pins on a branch whose predicate
 /// could not be evaluated (`{"code":..,"message":..}`): the branch is admitted
-/// and fails on its first hop, exactly like the legacy branch task erroring in
+/// and fails on its first operation, exactly like the legacy branch task erroring in
 /// its `init`.
 pub(super) const BRANCH_ERROR_VAR: &str = "__branch_error";
 
-/// One decided execution failure: the error variables a failure hop commits,
+/// One decided execution failure: the error variables a failure operation commits,
 /// plus the legacy task-data name a catch predicate reads.
 pub(super) struct Failure {
     /// The kernel's error code (`error.code`).
@@ -400,7 +400,7 @@ pub(super) struct ActFacts {
     pub(super) options: serde_json::Value,
 }
 
-/// The act facts the start hop pinned on `execution`, when a runner resolved
+/// The act facts the start operation pinned on `execution`, when a runner resolved
 /// them at start.
 pub(super) fn act_facts(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -555,7 +555,7 @@ pub(super) fn evaluate_predicate(
 
 /// The message payload's `outputs` bag: the acting execution's own scope writes
 /// minus the private engine facts and the error variables (the legacy
-/// `Task::outputs`). A hop's plan may carry writes for other scopes too (the
+/// `Task::outputs`). An operation's plan may carry writes for other scopes too (the
 /// children a fan-out admitted), which are not this message's outputs.
 pub(super) fn message_outputs(
     outputs: &[VariableWrite],

@@ -1,8 +1,8 @@
-//! Phase 4 of a hop: dispatching the plan phase 3 built.
+//! Phase 4 of a claimed operation: dispatching the plan phase 3 built.
 //!
-//! One commit is the hop's whole durable effect: the plan's outbox records are
+//! One commit is the operation's whole durable effect: the plan's outbox records are
 //! delivered first (the at-least-once window the effect seam documents), the
-//! transition is committed with the hop's own claim as its source operation —
+//! transition is committed with the operation's own claim as its source operation —
 //! which closes the operation *inside* the same atomic batch — and only then
 //! do the operations the commit created get woken, the run's lifecycle
 //! reported, the read model re-materialized and the slot bookkeeping settled.
@@ -12,21 +12,21 @@ use crate::scheduler::shell::*;
 
 /// Which rows the read model re-materializes from the committed snapshot.
 pub(in crate::scheduler::shell) enum Projection {
-    /// Only the executions the hop's own plan named (plus the proc row): the
+    /// Only the executions the operation's own plan named (plus the proc row): the
     /// rows of a run's other executions cannot have changed.
     Touched,
     /// The run's rows whole. The client action path takes this one: an action
-    /// is decided against the aggregate as a whole rather than as one hop's
+    /// is decided against the aggregate as a whole rather than as one operation's
     /// effect, so its commit is the point where every row of the run may need
     /// re-reading.
     Whole,
 }
 
 impl KernelHost {
-    /// Phase 4: deliver, commit, wake and settle. An error means the hop's
+    /// Phase 4: deliver, commit, wake and settle. An error means the operation's
     /// effect is *not* durable: a lost compare-and-swap releases the claim and
     /// leaves the operation for recovery, every other failure leaves it open.
-    pub(in crate::scheduler::shell) async fn dispatch_hop(
+    pub(in crate::scheduler::shell) async fn dispatch_operation(
         &self,
         claimed: &Claimed,
         plan: TransitionPlan,
@@ -45,18 +45,18 @@ impl KernelHost {
             | crate::scheduler::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { receipt, snapshot } => (receipt, snapshot),
             crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
                 // Another writer advanced the aggregate; the wake stays open
-                // and recovery re-derives the hop against the new state. A
+                // and recovery re-derives the operation against the new state. A
                 // conflict applies nothing, so the plan definitely did not
                 // commit: the claim is released back here rather than left
                 // `CommitPrepared` until its lease expires — that route ends in
                 // `EffectUnknown`, whose only disposition is manual
-                // reconciliation, so a hop that merely lost a compare-and-swap
+                // reconciliation, so a claimed operation that merely lost a compare-and-swap
                 // would be stranded for good (and the run with it).
                 if let Err(error) = self.release_claim(claimed, claimed.claim.claim.fence as u32).await {
                     tracing::warn!(
                         id = ?id,
                         error = %error,
-                        "releasing a conflicted hop's claim failed; recovery's lease expiry decides it"
+                        "releasing a conflicted operation's claim failed; recovery's lease expiry decides it"
                     );
                 }
                 // The conflict is the retryable race it is: a caller that
@@ -65,13 +65,13 @@ impl KernelHost {
                 return Err(conflict(format!("commit conflict on operation {id:?}")));
             }
         };
-        // The commit closed the hop's own operation inside its batch (see
+        // The commit closed the operation inside its batch (see
         // `advance_transition`): there is no second, close-only commit to run.
         let wake = QueueWake {
             tx: self.wake_tx.clone(),
         };
         for operation in &receipt.new_operations {
-            // A timer armed by an execution's *start* hop waits for the tick:
+            // A timer armed by an execution's *start* operation waits for the tick:
             // the legacy engine had no round before its first process tick, so
             // waking it here would let an already-open window fire up to one
             // tick early. Waking it is the recovery scan's job (it re-wakes
@@ -95,8 +95,8 @@ impl KernelHost {
         self.report_lifecycle(&loaded);
         // The read model follows the same commit — the snapshot that commit
         // returned, never a fresh load: a load is a second read that can
-        // already be older than a concurrent hop's commit, and projecting it
-        // would write that hop's rows away with an older state (the
+        // already be older than a concurrent operation's commit, and projecting it
+        // would write that operation's rows away with an older state (the
         // projection's write order must be the commit order).
         match projection {
             Projection::Whole => self.project(&loaded).await,
@@ -119,9 +119,9 @@ impl KernelHost {
                 self.project_touched(&loaded, &touched).await;
             }
         }
-        // This hop may have settled the run: its slot goes back to the parked
+        // This operation may have settled the run: its slot goes back to the parked
         // queue right here, so the run that has waited longest starts now
-        // instead of on the driver's next tick. The run is the one this hop
+        // instead of on the driver's next tick. The run is the one this operation
         // just drove, so it either holds its slot or needs none — never parked.
         self.place_run(&loaded);
         Ok(())

@@ -24,7 +24,7 @@
 //! `end_time`, since the surviving instance is running again.
 //!
 //! Nothing here is authoritative: a projection failure is reported by the
-//! caller and never fails the hop (the rows are re-derived from the aggregate
+//! caller and never fails the operation (the rows are re-derived from the aggregate
 //! on the next commit), and `removable` — set only once every execution is
 //! terminal *and* every outbox record delivered — is what hands the rows (and
 //! the run's directory) to the legacy sweeper.
@@ -59,7 +59,7 @@ pub(crate) const ENV_MAP_VAR: &str = "__env";
 /// task data.
 const AUTO_VAR: &str = "auto";
 
-/// The kernel's error variables (the naming the failure hops commit).
+/// The kernel's error variables (the naming the failure operations commit).
 const ERROR_CODE_VAR: &str = "error.code";
 const ERROR_MESSAGE_VAR: &str = "error.message";
 
@@ -78,7 +78,7 @@ pub(crate) struct RowProjector {
     /// The newest aggregate version each (run, row) was projected from.
     ///
     /// A projection is *derived* state and its writers are not serialized: the
-    /// driver projects the hops it runs while a client thread projects the
+    /// driver projects the operations it runs while a client thread projects the
     /// action it just committed, and the write-behind queue applies them in
     /// arrival order — which is not the commit order. An older commit's
     /// projection must therefore never write over a newer one's rows, so each
@@ -106,7 +106,7 @@ impl RowProjector {
 
     /// Claim one row's projection version, or refuse it because a newer
     /// commit's projection of that row already ran (see [`Self::projected`]).
-    /// Claimed per row — the proc row under its own key — because a hop's
+    /// Claimed per row — the proc row under its own key — because an operation's
     /// projection may cover a handful of rows while another commit's covers
     /// the process row alone: one claim for both would let the narrower
     /// projection lock the wider one out of a version they share.
@@ -143,7 +143,7 @@ impl RowProjector {
     }
 
     /// Project the proc row plus the named nodes' rows; `None` projects every
-    /// node. A hop only changes a handful of executions, so the driver passes
+    /// node. An operation only changes a handful of executions, so the driver passes
     /// the ones the commit touched instead of rewriting every row of the run.
     pub(crate) async fn project_nodes(
         &self,
@@ -329,7 +329,7 @@ impl RowProjector {
             // An execution whose model node is gone can only come from a
             // corrupt aggregate; the rows are re-derived on the next commit,
             // so the projection reports and skips it rather than failing the
-            // hop.
+            // operation.
             tracing::warn!(
                 pid = %snapshot.process_id,
                 node = node_id,
@@ -538,11 +538,11 @@ fn stamp(existing: Option<i64>, now: i64) -> i64 {
 /// Upsert one projected row: replace an existing document, create a missing
 /// one — and skip the write when the stored document is already identical.
 ///
-/// A hop re-projects the rows it touched even when their content did not move
+/// An operation re-projects the rows it touched even when their content did not move
 /// (the root's proc row changes only when the run starts and when it settles,
 /// while a task row repeats a state it already carries), and every write also
 /// writes the row's index keys. The projected row is compared against the one
-/// just read, so an unchanged hop costs reads instead of writes.
+/// just read, so an unchanged operation costs reads instead of writes.
 async fn write<T>(
     collection: &Arc<dyn DbCollection<Item = T>>,
     existing: Option<&T>,

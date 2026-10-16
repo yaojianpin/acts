@@ -1,18 +1,19 @@
-//! The hop pipeline: the four phases one durable operation goes through.
+//! The operation pipeline: one operation, from claim to its next commit.
 //!
-//! A *hop* is one [`OperationId`] driven to its next commit — the driver's
-//! woken operation, the recovery scan's re-drive and a client action's own
-//! operation are all the same thing. Every hop runs the same four phases, and
-//! only the middle two depend on the operation's kind:
+//! An operation ([`OperationId`]) is the aggregate's durable unit of work;
+//! taking a claimed one to its next commit is what this module does, and the
+//! driver's woken operation, the recovery scan's re-drive and a client action's
+//! own operation all take the same four phases. Only the middle two depend on
+//! the operation's kind:
 //!
 //! 1. **Prepare** ([`prepare`]): the parked fast path, the slot policy
 //!    ([`KernelHost::place_run`]), the kind's own pre-claim policy
 //!    ([`ActOperation::precheck`]) and the claim, as one atomic
 //!    `ClaimAndPrepare` event. The snapshot that commit hands back is the
-//!    authoritative state the rest of the hop is formed from.
+//!    authoritative state the rest of the operation is formed from.
 //! 2. **Perform** ([`ActOperation::run`]): the operation's own work —
 //!    evaluating a step's guard and resolving its act, running a package's
-//!    effect, deciding a timer's round, or nothing at all for a hop whose whole
+//!    effect, deciding a timer's round, or nothing at all for a claimed operation whose
 //!    job is its plan.
 //! 3. **ActPlan** ([`ActOperation::next`]): that outcome folded into the
 //!    durable next plan — the state changes, the successor operations and the
@@ -47,7 +48,7 @@ use super::*;
 /// Phase 1's verdict on whether this operation has anything to do at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Precheck {
-    /// Drive the hop: claim the operation and run its work.
+    /// Drive the operation: claim the operation and run its work.
     Proceed,
     /// Nothing to do *before the claim*: leave the operation exactly as it is —
     /// its state, its claim — and let the next tick re-derive it.
@@ -57,18 +58,18 @@ pub(super) enum Precheck {
 /// Whether phase 1 applies the run's slot policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Slot {
-    /// The driver's own hops: the parked fast path and the slot policy
-    /// ([`KernelHost::place_run`]) decide whether this run may hop at all.
+    /// The driver's own operations: the parked fast path and the slot policy
+    /// ([`KernelHost::place_run`]) decide whether this run may operation at all.
     Policy,
     /// The client action path: the decision is already durable — the intent was
-    /// committed before the hop — so the operation is claimed directly. The
+    /// committed before the operation — so the operation is claimed directly. The
     /// parked queue books the runs the *driver* drives; it is not a gate on a
     /// decision a client has already been told about.
     Direct,
 }
 
 /// Phase 1's pre-claim view of one operation: the identity, the state it was
-/// read from and the clock the hop runs on. A kind's pre-claim policy may look
+/// read from and the clock the operation runs on. A kind's pre-claim policy may look
 /// at the aggregate, but it must not write anything — the claim has not been
 /// taken yet.
 pub(super) struct Pending<'a> {
@@ -85,7 +86,7 @@ pub(super) struct Claimed {
     /// The claim, as the plan's `source_operation`: committing the plan closes
     /// the operation inside the same atomic batch.
     pub(super) claim: OperationCommit,
-    /// The prepared record's revision: what a hop that cannot commit its plan
+    /// The prepared record's revision: what a claimed operation that cannot commit its plan
     /// releases its claim against ([`prepare::release_claim`]).
     pub(super) revision: u64,
     pub(super) snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -96,13 +97,13 @@ impl Claimed {
     /// The claimed operation as phases 2 and 3 read it: the identity, the
     /// claim, the authoritative snapshot, and the execution the operation
     /// names (absent for an operation whose execution a decision removed).
-    pub(super) fn hop(&self) -> Hop<'_> {
+    pub(super) fn operation(&self) -> Operation<'_> {
         let task_id = crate::scheduler::core::model::task_graph::TaskId {
             node: self.id.node.clone(),
             generation: self.id.generation,
         };
         let task = self.snapshot.tasks.get(&task_id);
-        Hop {
+        Operation {
             id: &self.id,
             claim: &self.claim,
             task_id,
@@ -113,9 +114,9 @@ impl Claimed {
     }
 }
 
-/// Phases 2 and 3's view of one claimed hop: everything a kind's work and its
+/// Phases 2 and 3's view of one claimed operation: everything a kind's work and its
 /// plan need, borrowed from the aggregate the claim handed back.
-pub(super) struct Hop<'a> {
+pub(super) struct Operation<'a> {
     pub(super) id: &'a OperationId,
     pub(super) claim: &'a OperationCommit,
     pub(super) task_id: crate::scheduler::core::model::task_graph::TaskId,
@@ -139,17 +140,17 @@ pub(super) enum Outcome {
     /// `PropagateTask`, `ReenterTask`): nothing ran, the snapshot is the input.
     Planned,
     /// Nothing to commit after all (a timer round that turned idle between the
-    /// preflight and the claim): the hop's claim goes back and the operation
+    /// preflight and the claim): the operation's claim goes back and the operation
     /// waits for the next tick.
     Nothing,
 }
 
-/// One operation kind's execution: the kind-specific half of a hop.
+/// One operation kind's execution: the kind-specific half of driving one.
 ///
 /// The host runs the four phases above; only the pre-claim policy and the
 /// middle two phases depend on the kind, and each kind answers them in its own
 /// module under this one. The host is passed in rather than held: the drivers
-/// are stateless, and every fact they work with is in the [`Hop`].
+/// are stateless, and every fact they work with is in the [`Operation`].
 #[async_trait::async_trait]
 pub(super) trait ActOperation: Send + Sync {
     /// Phase 1's kind-specific half, decided before the claim consumes
@@ -157,15 +158,15 @@ pub(super) trait ActOperation: Send + Sync {
     async fn precheck(&self, host: &KernelHost, pending: &Pending<'_>) -> Result<Precheck>;
 
     /// Phase 2: the operation's own work, reported as the outcome phase 3
-    /// folds into the hop's plan.
-    async fn run(&self, host: &KernelHost, hop: &Hop<'_>) -> Result<Outcome>;
+    /// folds into the operation's plan.
+    async fn run(&self, host: &KernelHost, operation: &Operation<'_>) -> Result<Outcome>;
 
     /// Phase 3: the durable next plan of one outcome. [`Outcome::Nothing`]
-    /// never reaches here — that hop has no plan at all.
+    /// never reaches here — that operation has no plan at all.
     async fn next(
         &self,
         host: &KernelHost,
-        hop: &Hop<'_>,
+        operation: &Operation<'_>,
         outcome: Outcome,
     ) -> Result<TransitionPlan>;
 }
@@ -189,13 +190,13 @@ pub(super) fn driver(kind: OperationKind) -> Option<&'static dyn ActOperation> {
 }
 
 impl KernelHost {
-    /// One durable hop, in the four phases above. Returns `Ok(false)` when the
+    /// One durable operation, in the four phases above. Returns `Ok(false)` when the
     /// operation needed nothing — a wake redelivered for an already-terminal
     /// operation, a run parked by the slot cap, or a timer with nothing due.
     pub(in crate::scheduler::shell) async fn execute_one(&self, id: &OperationId) -> Result<bool> {
         // Phase 1 — prepare: the slot policy, the kind's pre-claim check, the
         // claim. `None` is "nothing to drive", never an error.
-        let Some(claimed) = self.prepare_hop(id, Slot::Policy).await? else {
+        let Some(claimed) = self.prepare_operation(id, Slot::Policy).await? else {
             return Ok(false);
         };
         let driver = driver(claimed.kind).ok_or_else(|| {
@@ -204,10 +205,10 @@ impl KernelHost {
                 claimed.kind
             ))
         })?;
-        let hop = claimed.hop();
+        let operation = claimed.operation();
         // Phases 2 and 3 — perform and plan: the kind's own work and the
         // transition that work implies.
-        let outcome = driver.run(self, &hop).await?;
+        let outcome = driver.run(self, &operation).await?;
         if matches!(outcome, Outcome::Nothing) {
             // The work turned out to be nothing after all: the claim goes back
             // so the next recovery tick re-derives the operation. The release
@@ -217,14 +218,14 @@ impl KernelHost {
                 tracing::debug!(
                     id = ?claimed.id,
                     error = %error,
-                    "releasing an idle hop's claim failed; recovery's lease expiry decides it"
+                    "releasing an idle operation's claim failed; recovery's lease expiry decides it"
                 );
             }
             return Ok(false);
         }
-        let plan = driver.next(self, &hop, outcome).await?;
+        let plan = driver.next(self, &operation, outcome).await?;
         // Phase 4 — dispatch: deliver, commit, wake, settle.
-        self.dispatch_hop(&claimed, plan, Projection::Touched)
+        self.dispatch_operation(&claimed, plan, Projection::Touched)
             .await?;
         Ok(true)
     }

@@ -6,7 +6,7 @@
 //! is one `Func` act: its effect resolves the child model, starts it
 //! (`start_as_owner`, carrying the parent's authority and its
 //! `$parent_pid`/`$parent_tid` inputs) and then completes, so the act and the
-//! child's start are one hop. The child is a process of its own, with its own
+//! child's start are one operation. The child is a process of its own, with its own
 //! aggregate, driven by its own operations.
 //!
 //! The kernel has **no parent↔child hand-back**: `return_to_act` was deleted
@@ -317,7 +317,7 @@ async fn assert_no_created(sig: &Signal<(String, String)>) {
 /// This is the kernel's nearest write to the legacy fault cell's: the legacy
 /// store failed the *second* `procs-id-` row batch (the child's process row),
 /// but a row is a projection here — a failed row write is logged and dropped,
-/// never propagated into the hop — so the start's durable unit, the aggregate
+/// never propagated into the operation — so the start's durable unit, the aggregate
 /// transaction, is what a fault has to break to reach the subflow effect.
 struct SubflowKv {
     inner: MemoryStore,

@@ -4,7 +4,7 @@ use super::*;
 /// commit for the `ReenterTask` operation its batch creates: `Back` names an
 /// earlier step (the client's `to`), `Cancel` the closed execution itself.
 /// A private fact (the `__` prefix keeps it out of the expression space and
-/// the read model), like every other engine fact the hops address each other
+/// the read model), like every other engine fact the operations address each other
 /// with.
 pub(super) const REENTER_TARGET_VAR: &str = "__reenter_target";
 
@@ -33,7 +33,7 @@ pub(super) fn action_fact_var(sequence: u64) -> String {
     format!("__action@{sequence}")
 }
 
-/// The action a durable intent carries, as the JSON text its hop replays.
+/// The action a durable intent carries, as the JSON text its operation replays.
 pub(super) fn action_fact(
     action: &crate::scheduler::core::commit::command::ActionKind,
     inputs: &[(String, String)],

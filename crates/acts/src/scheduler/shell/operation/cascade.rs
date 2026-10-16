@@ -1,45 +1,45 @@
-//! The cascade hops: carrying a cancellation, an abort or a failure past an
+//! The cascade operations: carrying a cancellation, an abort or a failure past an
 //! execution that never ran its act.
 //!
-//! Both hops run nothing (phase 2 is the snapshot itself, `Outcome::Planned`);
+//! Both operations run nothing (phase 2 is the snapshot itself, `Outcome::Planned`);
 //! phase 3 commits the execution's terminal state and hands the cascade on to
 //! a `PropagateTask`, whose readiness treats the settled source as dead.
 
 use super::*;
 use crate::scheduler::shell::*;
 
-/// The `SkipTask` hop: the cascade a dead predecessor carries past an
+/// The `SkipTask` operation: the cascade a dead predecessor carries past an
 /// execution that was admitted but must not run.
 pub(super) struct SkipTask;
 
 #[async_trait::async_trait]
 impl ActOperation for SkipTask {
-    /// Nothing to check before the claim: a cascade hop always has its work.
+    /// Nothing to check before the claim: a cascade operation always has its work.
     async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
     }
 
-    /// Nothing runs: the plan is the whole hop.
-    async fn run(&self, _host: &KernelHost, _hop: &Hop<'_>) -> Result<Outcome> {
+    /// Nothing runs: the plan is the whole operation.
+    async fn run(&self, _host: &KernelHost, _operation: &Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 
     async fn next(
         &self,
         host: &KernelHost,
-        hop: &Hop<'_>,
+        operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
-        let snapshot = hop.snapshot;
-        let id = hop.id;
-        let task_id = hop.task_id.clone();
-        let claim = hop.claim;
-        let task = hop.task.cloned();
+        let snapshot = operation.snapshot;
+        let id = operation.id;
+        let task_id = operation.task_id.clone();
+        let claim = operation.claim;
+        let task = operation.task.cloned();
         let plan = {
-            // `Created → Ready`; this hop marks the execution `Skipped`
+            // `Created → Ready`; this operation marks the execution `Skipped`
             // and hands propagation to a `PropagateTask`, whose readiness
             // treats the skipped source as dead and continues the
-            // cascade. Like every hop it is one atomic commit sourced by
+            // cascade. Like every operation it is one atomic commit sourced by
             // this operation.
             let task =
                 task.ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
@@ -60,7 +60,7 @@ impl ActOperation for SkipTask {
                 generation: id.generation,
                 sequence: id.sequence + 1,
             };
-            let mut plan = host.task_hop_plan(
+            let mut plan = host.task_operation_plan(
                 snapshot,
                 id,
                 &task_id,
@@ -71,7 +71,7 @@ impl ActOperation for SkipTask {
             )?;
             // A skipped act emits its Skipped message (the legacy act
             // row's own message).
-            if let Some(payload) = host.hop_message_payload(
+            if let Some(payload) = host.operation_message_payload(
                 snapshot,
                 &task_id,
                 &id.node,
@@ -99,43 +99,43 @@ impl ActOperation for SkipTask {
     }
 }
 
-/// The `AbortTask` hop: the abort cascade's running-successor half — the
+/// The `AbortTask` operation: the abort cascade's running-successor half — the
 /// legacy ancestor walk decides running children `Aborted` where a cancellation
 /// decides them `Skipped`.
 pub(super) struct AbortTask;
 
 #[async_trait::async_trait]
 impl ActOperation for AbortTask {
-    /// Nothing to check before the claim: an abort hop always has its work.
+    /// Nothing to check before the claim: an abort operation always has its work.
     async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
     }
 
-    /// Nothing runs: the plan is the whole hop.
-    async fn run(&self, _host: &KernelHost, _hop: &Hop<'_>) -> Result<Outcome> {
+    /// Nothing runs: the plan is the whole operation.
+    async fn run(&self, _host: &KernelHost, _operation: &Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 
     async fn next(
         &self,
         host: &KernelHost,
-        hop: &Hop<'_>,
+        operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
-        let snapshot = hop.snapshot;
-        let id = hop.id;
-        let task_id = hop.task_id.clone();
-        let claim = hop.claim;
-        let task = hop.task.cloned();
+        let snapshot = operation.snapshot;
+        let id = operation.id;
+        let task_id = operation.task_id.clone();
+        let claim = operation.claim;
+        let task = operation.task.cloned();
         let plan = {
             // ancestor walk decides running children `Aborted` (pending
             // ones skip). Same shape as `SkipTask`, terminal `Aborted`.
             let task =
                 task.ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
             if task.state != crate::scheduler::core::model::task_graph::TaskState::Running {
-                // A decision landed while the hop was queued: the empty
+                // A decision landed while the operation was queued: the empty
                 // remainder completes the operation either way.
-                host.task_hop_plan(
+                host.task_operation_plan(
                     snapshot,
                     id,
                     &task_id,
@@ -151,7 +151,7 @@ impl ActOperation for AbortTask {
                     generation: id.generation,
                     sequence: id.sequence + 1,
                 };
-                let mut plan = host.task_hop_plan(
+                let mut plan = host.task_operation_plan(
                     snapshot,
                     id,
                     &task_id,
@@ -168,7 +168,7 @@ impl ActOperation for AbortTask {
                 });
                 // The aborted execution announces itself (the legacy
                 // `on_task` emitted its Aborted message like any other).
-                if let Some(payload) = host.hop_message_payload(
+                if let Some(payload) = host.operation_message_payload(
                     snapshot,
                     &task_id,
                     &id.node,

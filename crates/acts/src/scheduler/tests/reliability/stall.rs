@@ -3,7 +3,7 @@
 //! left in at a cut.
 //!
 //! The kernel decides a client action in three commits against the aggregate —
-//! the durable *intent* (the operation plus the private action fact its hop
+//! the durable *intent* (the operation plus the private action fact its operation
 //! replays), the claim that prepares it, and the effect commit, which closes
 //! the operation in the same batch — and projects the rows from those commits
 //! afterwards. A crash is therefore a *cut*: the writer stops landing writes at
@@ -20,11 +20,11 @@
 //!
 //! Two kernel facts shape the cells, and each one says where it matters:
 //!
-//! - the kernel keeps its outbox records *inside* the aggregate, so a hop
+//! - the kernel keeps its outbox records *inside* the aggregate, so an operation
 //!   either commits its record with its source operation or leaves nothing —
 //!   there is no open `next` row a writer could lose and re-materialize. What
 //!   legacy's abandoned record is here is a durable *operation* left
-//!   non-terminal: a hop that ended without closing it, which the recovery
+//!   non-terminal: an operation that ended without closing it, which the recovery
 //!   scan is what re-drives;
 //! - the read model is eventual and nothing repairs a *settled* run's rows, so
 //!   a cell reads "exactly once" and "no stranded work" off the aggregate
@@ -47,7 +47,7 @@ use crate::scheduler::core::outbox::records::OutboxState;
 
 use super::*;
 
-/// The commits of one client action's hop, in order: the durable intent (the
+/// The commits of one client action's operation, in order: the durable intent (the
 /// operation plus its action fact), the claim that prepares it, and the effect.
 /// `CLAIM_WRITE` is the commit the strand cells let the intent precede and then
 /// refuse — the intent is the commit before it. The effect commit is also the
@@ -64,7 +64,7 @@ const CLAIM_WRITE: usize = 2;
 /// The `Created` message is deliberately not awaited: the act's *state* is
 /// wake-driven, and a cell that reads the tid off the row (the `uses` step's
 /// own node) needs no message. The wait is polled read-only — a test thread
-/// that writes the aggregate while a hop is in flight can lose that hop's
+/// that writes the aggregate while an operation is in flight can lose that operation's
 /// commit to a revision conflict — and the run is only quiesced (its outbox
 /// delivered) once it is quiet.
 async fn waiting_run(engine: &Engine) -> (String, String) {
@@ -160,7 +160,7 @@ async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
 }
 
 /// The ascending generations the aggregate holds for one model node: how many
-/// times the node was instantiated. A hop applied twice adds one.
+/// times the node was instantiated. An operation applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
@@ -213,8 +213,8 @@ fn shape(state: &OperationState) -> &'static str {
     }
 }
 
-/// How many outbox records of the run fall under `prefix`. A hop's key is
-/// deterministic per `(pid, tid, generation, sequence)`, so a hop that applied
+/// How many outbox records of the run fall under `prefix`. An operation's key is
+/// deterministic per `(pid, tid, generation, sequence)`, so an operation that applied
 /// twice cannot hide behind the count.
 async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize {
     process_snapshot(engine, pid)
@@ -225,8 +225,8 @@ async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize 
         .count()
 }
 
-/// The completion hop's key family for one act: one `action` record for the
-/// decision and one `propagate` record for the hop it set off.
+/// The completion operation's key family for one act: one `action` record for the
+/// decision and one `propagate` record for the operation it set off.
 fn completion_records(pid: &str, tid: &str) -> (String, String) {
     (
         format!("action:{pid}:{tid}:"),
@@ -235,7 +235,7 @@ fn completion_records(pid: &str, tid: &str) -> (String, String) {
 }
 
 /// The finished run landed exactly once: one generation of the act and of the
-/// root, both `Completed`, and exactly one record per hop of the decision.
+/// root, both `Completed`, and exactly one record per operation of the decision.
 async fn assert_finished_once(engine: &Engine, pid: &str, tid: &str) {
     assert!(completed(engine, pid).await, "run {pid} must settle");
     for node in [utils::consts::TASK_ROOT_TID, tid] {
@@ -254,7 +254,7 @@ async fn assert_finished_once(engine: &Engine, pid: &str, tid: &str) {
     assert_eq!(
         records_with_prefix(engine, pid, &action).await,
         1,
-        "one record for the completion hop"
+        "one record for the completion operation"
     );
     assert_eq!(
         records_with_prefix(engine, pid, &propagate).await,
@@ -265,7 +265,7 @@ async fn assert_finished_once(engine: &Engine, pid: &str, tid: &str) {
 
 /// The finished run, re-checked after a later recovery round: the decision did
 /// not move — the run stays settled, one generation per node, one record per
-/// hop. A retry of a stranded operation that re-applied a decision would show
+/// operation. A retry of a stranded operation that re-applied a decision would show
 /// up here as a second generation or a second record.
 async fn assert_still_finished_once(engine: &Engine, pid: &str, tid: &str) {
     let (action, propagate) = completion_records(pid, tid);
@@ -288,7 +288,7 @@ async fn assert_still_finished_once(engine: &Engine, pid: &str, tid: &str) {
 /// operation closed or *surfaced for reconciliation* (`effect-unknown`), and no
 /// outbox record still awaiting its first delivery (`Pending`). A record a
 /// delivery pass already claimed, or one surfaced for reconciliation, is that
-/// delivery's own unresolved business — never the hop work this drives — so it
+/// delivery's own unresolved business — never the operation work this drives — so it
 /// does not keep the run from being converged (it does keep its *rows* alive;
 /// see [`sweep_finished_run`]).
 async fn fully_settled(engine: &Engine, pid: &str) -> bool {
@@ -332,9 +332,9 @@ async fn outstanding(engine: &Engine, pid: &str) -> String {
     }
 }
 
-/// The run's own hop work is done: every execution terminal, every operation
+/// The run's own operation work is done: every execution terminal, every operation
 /// closed or surfaced for reconciliation. Outbox records may still be
-/// undelivered — that is a delivery's business — but no hop is in flight, so a
+/// undelivered — that is a delivery's business — but no operation is in flight, so a
 /// caller may run the outbox pass without racing one.
 async fn settled_work(engine: &Engine, pid: &str) -> bool {
     let snapshot = process_snapshot(engine, pid).await;
@@ -346,8 +346,8 @@ async fn settled_work(engine: &Engine, pid: &str) -> bool {
 }
 
 /// Whether the run has nothing left undone (see [`fully_settled`]), first
-/// running the outbox pass *if the run's own hop work is already done*: never
-/// while a hop is in flight, since a pass's write would race the hop's guarded
+/// running the outbox pass *if the run's own operation work is already done*: never
+/// while an operation is in flight, since a pass's write would race the operation's guarded
 /// commit and a delivery claim that loses that race is never reclaimed. A
 /// finished run's deliveries therefore land promptly instead of waiting for a
 /// tick that may claim one mid-cascade.
@@ -372,10 +372,10 @@ async fn wait_fully_settled(engine: &Engine, pid: &str) {
 
 /// Whether the engine still has work it will drive by itself: an operation
 /// `Pending`/`RetryScheduled` (the next wake or tick re-drives it) or
-/// `Committed` (recovery finalizes it; no hop produces that state any more — it
+/// `Committed` (recovery finalizes it; no operation produces that state any more — it
 /// survives in a store a writer from before the close was folded into the
 /// effect commit left behind). Read-only, so a cell can ask it while the
-/// driver's hops are in flight — a `Claimed`/`CommitPrepared` operation
+/// driver's operations are in flight — a `Claimed`/`CommitPrepared` operation
 /// whose owner died is deliberately *not* drivable: only the claim's lease
 /// releases it.
 async fn engine_drivable(engine: &Engine, pid: &str) -> bool {
@@ -398,7 +398,7 @@ async fn engine_drivable(engine: &Engine, pid: &str) -> bool {
 /// *refused* — an act still waiting for the client — is decided by hand as its
 /// retry would.
 ///
-/// The engine's own hops are left alone while it has drivable work (a hop in
+/// The engine's own operations are left alone while it has drivable work (an operation in
 /// flight must not have a test thread write the aggregate under it). When it
 /// stops with a claim a crash left behind — an operation `Claimed` or
 /// `CommitPrepared` whose owner is gone — the scan is repeated "a minute
@@ -450,17 +450,17 @@ async fn drive_to_end(engine: &Engine, pid: &str, tid: &str) {
 /// Close `engine` and let its driver task observe the shutdown.
 ///
 /// `Runtime::close` cancels the token and closes the writer but does not join
-/// the spawned driver, so a hop the driver is inside finishes *after* `close`
+/// the spawned driver, so an operation the driver is inside finishes *after* `close`
 /// returns — possibly writing the aggregate. A cell that reuses the store must
-/// not have that write land in the middle of the next engine's hops (it loses
-/// the hop's guarded commit and strands it for its claim lease), so a cell
+/// not have that write land in the middle of the next engine's operations (it loses
+/// the operation's guarded commit and strands it for its claim lease), so a cell
 /// waits the driver out.
 async fn stop(engine: &Engine) {
     engine.close().await;
-    // Long enough for a hop the driver was inside to finish *before* the store
+    // Long enough for an operation the driver was inside to finish *before* the store
     // is healed and handed to the next engine: a driver that outlives the
     // close would otherwise commit into the new engine's store and lose one of
-    // its hops' guarded commits at random.
+    // its operations' guarded commits at random.
     tokio::time::sleep(Duration::from_millis(300)).await;
 }
 
@@ -536,7 +536,7 @@ async fn sweep_finished_run(engine: &Engine, pid: &str) {
 
 /// The crash and the boot, in the order that makes the crash real: stop the
 /// engine while the cut still refuses every write (no live driver can apply the
-/// hop the crash left behind, and none may leak a write into the new engine),
+/// operation the crash left behind, and none may leak a write into the new engine),
 /// then heal the store — a fresh boot writes — and open a fresh engine over the
 /// same durable state.
 async fn crash_and_reboot(engine: &Engine, store: Arc<dyn KvStore>, kv: &DocCutKv) -> Engine {
@@ -549,13 +549,13 @@ async fn crash_and_reboot(engine: &Engine, store: Arc<dyn KvStore>, kv: &DocCutK
 // A cut at a *commit* boundary
 // ---------------------------------------------------------------------------
 
-/// A KV backend that stops honouring *hop commits* of one run from the
+/// A KV backend that stops honouring *operation commits* of one run from the
 /// `budget`-th one after it is armed.
 ///
 /// The harness's [`CutKv`] counts *every* write, so a row projection or a
-/// delivery landing between two of a hop's commits shifts the boundary a cut
+/// delivery landing between two of an operation's commits shifts the boundary a cut
 /// lands on: the cells would cut the intent instead of the claim on some runs
-/// and pass or fail by timing. A hop's commits are the ones that change the
+/// and pass or fail by timing. An operation's commits are the ones that change the
 /// run's *recovery index* (the derived document listing its non-terminal
 /// operations) — an outbox delivery rewrites the same bytes — so this backend
 /// spends its budget only on those and is immune to that interleave. Reads keep
@@ -564,7 +564,7 @@ struct DocCutKv {
     inner: MemoryStore,
     /// The authoritative document the budget's commits carry.
     key: String,
-    /// The derived index that only a hop commit changes.
+    /// The derived index that only an operation commit changes.
     recovery_key: String,
     budget: AtomicUsize,
     armed: AtomicBool,
@@ -590,7 +590,7 @@ impl DocCutKv {
         self.clone()
     }
 
-    /// Let `budget` more hop commits land, then refuse every one from the next
+    /// Let `budget` more operation commits land, then refuse every one from the next
     /// on. `arm(1)` is "the intent lands, the claim is refused".
     fn arm(&self, budget: usize) {
         self.budget.store(budget, Ordering::SeqCst);
@@ -602,7 +602,7 @@ impl DocCutKv {
         self.armed.store(false, Ordering::SeqCst);
     }
 
-    /// Hop commits attempted so far.
+    /// Operation commits attempted so far.
     fn commits(&self) -> usize {
         self.commits.load(Ordering::SeqCst)
     }
@@ -612,7 +612,7 @@ impl DocCutKv {
         self.refused.load(Ordering::SeqCst)
     }
 
-    /// Whether this write set is a hop commit of the run, and whether the
+    /// Whether this write set is an operation commit of the run, and whether the
     /// budget refuses it.
     async fn blocks(&self, ops: &[StoreBatchOp]) -> bool {
         let touches_document = ops.iter().any(|op| match op {
@@ -635,7 +635,7 @@ impl DocCutKv {
         }
     }
 
-    /// Whether this write set changes the run's recovery index — what a hop
+    /// Whether this write set changes the run's recovery index — what an operation
     /// commit does and an outbox delivery does not.
     async fn changes_recovery_index(&self, ops: &[StoreBatchOp]) -> bool {
         let stored = self.inner.one(&self.recovery_key).await.ok().flatten();
@@ -694,13 +694,13 @@ impl KvStore for DocCutKv {
 /// Whatever the cut leaves durable — the intent `Pending`, the claim
 /// `prepared`, the propagation seeded but undriven — the reloaded engine must
 /// carry the run to its end, and the end must be exactly once: one generation
-/// per node, one record per hop, and the finished run settled (its rows
+/// per node, one record per operation, and the finished run settled (its rows
 /// reclaimed through the sweeper).
 ///
 /// The sweep is over the *completion's own commits* (the legacy cheaper
 /// variant): the intent, the claim, the effect (the operation's close included),
-/// and — one past the hop — the claim of the propagation it seeds. Those are the
-/// boundaries the completion owns; a hop's *row projection* is a derived write
+/// and — one past the operation — the claim of the propagation it seeds. Those are the
+/// boundaries the completion owns; an operation's *row projection* is a derived write
 /// whose failure is absorbed, and is pinned by the row-fault cells in `action.rs`
 /// and `next.rs`, while the propagation's own effect boundary is the kernel's
 /// fail-safe (surfaced for reconciliation), pinned by `next.rs`'s propagation
@@ -723,7 +723,7 @@ async fn a_cut_swept_across_a_completion_converges_at_every_write_boundary() {
     .await;
 }
 
-/// The completion hop's own commits: the intent, the claim, and the effect
+/// The completion operation's own commits: the intent, the claim, and the effect
 /// (which closes the operation with it). Cutting the commit *after* them is the
 /// propagation's claim.
 const COMPLETION_COMMITS: usize = 3;
@@ -781,7 +781,7 @@ async fn cut_sweep_inner() {
 /// the run until [`DocCutKv::heal`].
 ///
 /// The cut is re-armed on a fresh run until it lands on that boundary. The arm
-/// counts *hop commits*, so the only way an attempt can miss is a hop the
+/// counts *operation commits*, so the only way an attempt can miss is an operation the
 /// engine ran between the arm and the action (the store is otherwise quiet);
 /// re-arming keeps the cell's fault the one it means to cut instead of letting
 /// the assertion below fail on a shifted boundary. The strand it finally cuts
@@ -805,7 +805,7 @@ async fn stranded_at_claim(pid: &str) -> (Engine, Arc<DocCutKv>, String) {
             return (engine, kv, pid);
         }
         eprintln!(
-            "the claim cut missed (refused={}, hop commits={}, shapes={shapes:?}, decided={decided:?}); re-arming",
+            "the claim cut missed (refused={}, operation commits={}, shapes={shapes:?}, decided={decided:?}); re-arming",
             kv.refused(),
             kv.commits()
         );
@@ -814,11 +814,11 @@ async fn stranded_at_claim(pid: &str) -> (Engine, Arc<DocCutKv>, String) {
     panic!("the completion's claim could not be cut after eight attempts");
 }
 
-/// A fresh engine over the healed store whose *recovery* is cut as well: a hop
+/// A fresh engine over the healed store whose *recovery* is cut as well: an operation
 /// commit of the run is refused, so the stranded intent is not carried forward
 /// and survives the restart.
 ///
-/// The cut is re-armed until it lands on the recovery hop itself — its claim
+/// The cut is re-armed until it lands on the recovery operation itself — its claim
 /// refused (the intent stays `Pending`) or, when a commit the booted engine made
 /// first took the refusal, its effect refused (the intent's claim `prepared`).
 /// Both leave the work unresolved, which is the strand the cell means; a
@@ -843,13 +843,13 @@ async fn boot_with_recovery_cut(store: Arc<dyn KvStore>, kv: &Arc<DocCutKv>, pid
         eprintln!("the recovery cut missed (fired={fired}, shapes={shapes:?}); re-arming");
         stop(&engine).await;
     }
-    panic!("the recovery of {pid} could not be cut at its own hop after eight attempts");
+    panic!("the recovery of {pid} could not be cut at its own operation after eight attempts");
 }
 
 /// A durable intent a crash left `Pending` — the completion's own claim write
 /// refused, so the decision is recorded but nothing owns it — is re-driven by
 /// the engine's own recovery, with **no restart and no client action**: the
-/// healed store lets the scan wake the intent, the hop decides the act exactly
+/// healed store lets the scan wake the intent, the operation decides the act exactly
 /// once, the chain propagates into the root, the run settles and its rows are
 /// reclaimed (see [`sweep_finished_run`] for the one delivery-lifecycle hole
 /// that can keep them).
@@ -892,7 +892,7 @@ async fn stalled_redriven_inner() {
         "the pass must re-derive the stranded intent: {scan:?}"
     );
     // The driver carries the wakes from there; the cell only reads — except for
-    // the retry a *transient* needs (see `drive_to_end`): a re-driven hop whose
+    // the retry a *transient* needs (see `drive_to_end`): a re-driven operation whose
     // own commit lost a race is reclaimed and delivered back to the client,
     // whose decision the kernel's guard admits exactly once.
     drive_to_end(&engine, &pid, &tid).await;
@@ -915,7 +915,7 @@ async fn stalled_redriven_inner() {
 /// The same stranded intent, healed and left to the engine's own timer: the
 /// tick's recovery scan re-drives it, so an abandoned operation is not a
 /// restart-shaped hole in the runtime's contract. The cell waits read-only for
-/// the tick to converge the run; only if a re-driven hop's own commit lost a
+/// the tick to converge the run; only if a re-driven operation's own commit lost a
 /// race and the run is still stalled does it fall back to the retry
 /// [`drive_to_end`] applies — printing a NOTE, since that path is not the
 /// timer's.
@@ -988,8 +988,8 @@ async fn second_restart_inner() {
     // intent durable and undecided, and the engine dies without recovering it.
     stop(&engine_a).await;
 
-    // The second engine: its own recovery is cut too — the very next hop commit
-    // of the run (the recovery hop's claim) is refused — so the strand survives
+    // The second engine: its own recovery is cut too — the very next operation commit
+    // of the run (the recovery operation's claim) is refused — so the strand survives
     // this restart.
     let engine_b = boot_with_recovery_cut(store.clone(), &kv, &pid).await;
     stop(&engine_b).await;
@@ -1026,11 +1026,11 @@ async fn second_restart_inner() {
 ///
 /// With one slot, a run that reached its act and three runs parked behind it
 /// are all in the store at boot. The scan admits exactly one of the parked
-/// runs — the others take no hop at all, their aggregate staying exactly the
+/// runs — the others take no operation at all, their aggregate staying exactly the
 /// seed the crash left — and as each admitted run is decided by the client and
 /// settles, the slot it frees admits the run that has waited longest
 /// (`__created` ascending): the second and third seatings are asserted in that
-/// order. The run waiting on the client takes no hop and no slot, and
+/// order. The run waiting on the client takes no operation and no slot, and
 /// converges when its own act is decided.
 ///
 /// The kernel admits the *first* `cap` runs at boot in the order the scan
@@ -1038,7 +1038,7 @@ async fn second_restart_inner() {
 /// boot index), so this cell asserts the admission it observes and the FIFO
 /// only where the kernel promises it — at a freed slot. Legacy deferred the
 /// replayed record of a process the resident set did not hold; the kernel holds
-/// no resident object, so what it defers is the *hop*.
+/// no resident object, so what it defers is the *operation*.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_parked_at_boot_waits_for_a_slot_and_converges() {
@@ -1076,7 +1076,7 @@ async fn boot_slot_inner() {
         assert_parked(&engine, pid).await;
         assert!(
             !completed(&engine, pid).await,
-            "a parked run has not hopped, let alone settled"
+            "a parked run has not been driven, let alone settled"
         );
     }
     stop(&engine).await;
@@ -1086,7 +1086,7 @@ async fn boot_slot_inner() {
     // contests the three parked runs' seeded root operations alone.
     let engine2 = engine_with(store.clone(), &config).await;
 
-    // Exactly one parked run is admitted into its act; the others do not hop at
+    // Exactly one parked run is admitted into its act; the others do not operation at
     // all — their aggregate is still the seed the crash left.
     let before = snapshot_map(&engine2, &parked).await;
     let first = wait_admitted(&engine2, &parked, &before).await;
@@ -1111,7 +1111,7 @@ async fn boot_slot_inner() {
     wait_completed(&engine2, &second).await;
 
     // The last parked run is admitted, and the head run is decided by its own
-    // client; every run keeps one generation per node and one record per hop.
+    // client; every run keeps one generation per node and one record per operation.
     let before = snapshot_map(&engine2, &waiting).await;
     let third = wait_admitted(&engine2, &waiting, &before).await;
     assert_eq!(third, waiting[0], "the last parked run takes the last seat");
@@ -1138,7 +1138,7 @@ async fn snapshot_map(engine: &Engine, pids: &[String]) -> BTreeMap<String, Proc
 
 /// Poll until one of `pids` has been admitted into its act, and answer which.
 /// Every other run must still hold exactly its pre-admission aggregate: a run
-/// the single slot did not admit takes no hop at all.
+/// the single slot did not admit takes no operation at all.
 async fn wait_admitted(
     engine: &Engine,
     pids: &[String],
@@ -1177,14 +1177,14 @@ async fn wait_admitted(
         assert_eq!(
             &process_snapshot(engine, pid).await,
             before.get(pid).expect("a snapshot per run"),
-            "a run the slot did not admit may not hop"
+            "a run the slot did not admit may not operation"
         );
     }
     admitted
 }
 
 /// The parked shape of one run, on the aggregate and on the row: the root stays
-/// `Created`, its single seeded operation is still `Pending` (no hop), no
+/// `Created`, its single seeded operation is still `Pending` (no operation), no
 /// message was written, and the read model spells the process state `None` —
 /// the legacy parked row.
 async fn assert_parked(engine: &Engine, pid: &str) {

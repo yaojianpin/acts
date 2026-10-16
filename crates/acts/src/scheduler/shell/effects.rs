@@ -1,5 +1,5 @@
 //! The effect seam: running a Func package's work inside the host's
-//! `ApplyAction` hop.
+//! `ApplyAction` operation.
 //!
 //! A host driving without an attached runner auto-completes (the bare
 //! contract the kernel's own tests use); the serving host has
@@ -15,7 +15,7 @@
 //! acting node. Packages read the context they always read — the params
 //! resolve through the same `fill_params` path — and nothing the headless
 //! scope touches is durably written: outputs come back as values and land
-//! in the aggregate through the hop's own plan.
+//! in the aggregate through the operation's own plan.
 
 use crate::{
     ActRunAs, Result, Vars,
@@ -38,8 +38,8 @@ pub(crate) struct EffectRequest {
 
 /// The act facts one `uses` step resolves to before it runs — the legacy
 /// act's `run()` up to (not including) the package's own execution. The
-/// message hop needs them for every `run_as` (the legacy act's Created
-/// message carries the resolved params and its options); the effect hop needs
+/// message operation needs them for every `run_as` (the legacy act's Created
+/// message carries the resolved params and its options); the effect operation needs
 /// them for the package it executes (Func).
 pub(crate) struct ResolvedEffect {
     /// The step's resolved params (`task.params(ctx)`), the message's
@@ -77,7 +77,7 @@ pub(crate) trait EffectRunner: Send + Sync {
     async fn resolve(&self, request: &EffectRequest) -> Result<ResolvedEffect>;
 
     /// The package's work: a Func package executes (an Irq/Msg package has
-    /// none). The outcome carries the values to fold into the hop's commit.
+    /// none). The outcome carries the values to fold into the operation's commit.
     async fn run(&self, request: EffectRequest) -> Result<EffectOutcome>;
 }
 
@@ -128,7 +128,7 @@ impl EffectRunner for PackageEffectRunner {
         // `run()`: seed its vars and seal the snapshot data its target
         // declares, under the run's authority. A resolution failure (a denied
         // scope, a missing required param under `on_missing = error`) fails
-        // the act *here*, which is the hop the start hop deferred it to; the
+        // the act *here*, which is the operation the start operation deferred it to; the
         // legacy engine prepared before it dispatched on `run_as` too, so an
         // Irq act whose seal is refused failed instead of waiting forever.
         let (process, task, ctx) = self.headless(&request)?;
@@ -165,7 +165,7 @@ impl EffectRunner for PackageEffectRunner {
 
         // The write-back: what the package left in the headless scope beyond
         // what the seam seeded — its own task data and the process env — and
-        // the outputs it returned. All of it folds into the hop's atomic
+        // the outputs it returned. All of it folds into the operation's atomic
         // commit, so a crash before the commit re-runs the package with the
         // same pre-state (the legacy `exec` → persist ordering).
         let env = non_private(process.env());

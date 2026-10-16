@@ -11,7 +11,7 @@ use crate::scheduler::core::plan::ActPlan;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TimeoutDispatch {
     pub(crate) command: ContainerFanoutCommand,
-    /// The one-shot marker after this dispatch. The hop re-arms its timer
+    /// The one-shot marker after this dispatch. The operation re-arms its timer
     /// while it is shorter than the declared branch list.
     pub(crate) claimed_after: Vec<String>,
 }
@@ -21,7 +21,7 @@ pub(crate) struct TimeoutDispatch {
 pub(crate) struct DispatchCommand<'a> {
     /// The execution whose timer fired.
     pub(crate) owner: &'a TaskId,
-    /// The operation the timeout hop claimed the timer with.
+    /// The operation the timeout operation claimed the timer with.
     pub(crate) source_operation: OperationCommit,
     /// The branch that is due.
     pub(crate) branch: &'a TimeoutBranch,

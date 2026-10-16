@@ -1,6 +1,6 @@
 //! Pure planners: every state decision the kernel makes, given a snapshot.
 //!
-//! Every one of them is *a type* implementing [`ActPlan`]: a hop reads the
+//! Every one of them is *a type* implementing [`ActPlan`]: an operation reads the
 //! authoritative snapshot (and, where the decision's shape lives in the edges,
 //! the graph rebuilt from it), hands the plan that reading plus the command it
 //! read off it, and gets its output back. Nothing above this layer names a
@@ -30,9 +30,9 @@ pub(crate) mod upward;
 /// - [`Command`](ActPlan::Command) is what the caller read off that reading, in
 ///   the plan's own vocabulary (mostly the `*Command` DTO beside it).
 /// - [`Output`](ActPlan::Output) is the plan: a whole durable transition, a
-///   verdict, or the fragment its caller folds into the hop's plan.
+///   verdict, or the fragment its caller folds into the operation's plan.
 /// - [`Error`](ActPlan::Error) is the plan's own refusal — never an engine error:
-///   the caller maps it where it calls (see the hop drivers above this layer).
+///   the caller maps it where it calls (see the operation drivers above this layer).
 ///
 /// A plan that cannot refuse still returns a `Result` (see [`infallible`]): one
 /// contract for the whole layer, not one for what fails and one for what

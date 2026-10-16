@@ -2,13 +2,13 @@ use super::*;
 
 use crate::scheduler::core::plan::ActPlan;
 
-/// The cost start of one execution, written by its own start hop (`Ready →
+/// The cost start of one execution, written by its own start operation (`Ready →
 /// Running`/`Waiting`). Not part of the expression variable space: it is a
 /// kernel fact, so it stays `__`-private and never reaches a headless scope.
 ///
 /// The legacy `Task` stamped its *creation* time and measured `cost()` from it.
 /// The kernel pre-creates a run's chain executions at seed time, so creation
-/// time would measure the whole run's age; the start hop is the closest durable
+/// time would measure the whole run's age; the start operation is the closest durable
 /// analogue — it is the moment the execution began its own work, which is what
 /// the legacy stamp meant for a step its predecessor scheduled.
 pub(crate) const STARTED_VAR: &str = "__started";
@@ -64,7 +64,7 @@ pub(crate) fn claim(claimed: &[String], branch: &str) -> Vec<String> {
 }
 
 /// The cost of one execution in milliseconds: what has passed since its start
-/// hop, or zero when that stamp is missing (an aggregate seeded before the
+/// operation, or zero when that stamp is missing (an aggregate seeded before the
 /// timeout slice) or in the future (a clock that stepped backwards).
 pub(crate) fn cost_ms(now_ms: i64, started: Option<&str>) -> i64 {
     let started = started

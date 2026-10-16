@@ -1,22 +1,22 @@
 //! ACTION reliability cells: the `Next` client action — the wire name of a
 //! completion — under a store fault, a duplicate delivery, N racing deliveries,
-//! and a crash at each write boundary of its durable hop.
+//! and a crash at each write boundary of its durable operation.
 //!
 //! The kernel decides a client action in three writes against the aggregate:
-//! the durable *intent* (the operation plus the private `__action` fact its hop
+//! the durable *intent* (the operation plus the private `__action` fact its operation
 //! replays), the claim that prepares it, and the effect commit, which closes
 //! the operation inside the same batch. The read model is only projected from
 //! those commits afterwards, so a cell reads
 //! "exactly once" off the surfaces that hold it — the aggregate's executions
-//! and its outbox records (a hop's record key is deterministic per
-//! `(pid, tid, generation, sequence)`, so a hop that applied twice shows up as
+//! and its outbox records (an operation's record key is deterministic per
+//! `(pid, tid, generation, sequence)`, so an operation that applied twice shows up as
 //! a second record or a second generation) — and "the read model follows" off
 //! the projected rows.
 //!
 //! Three legacy cells pinned the resident scheduler's own bookkeeping: the
 //! writer's `PropagationPhase`, the replay of an open `next` record, and the
 //! one-shot child-visit marker (`Sign::IN_CHILDREN`). None of it survives the
-//! cutover: a decision *is* a committed operation, a hop's effect is committed
+//! cutover: a decision *is* a committed operation, an operation's effect is committed
 //! with its source operation in one guarded batch, and an applied effect leaves
 //! no open record behind — so those cells are restated here as the nearest
 //! property the kernel holds, and each one says so.
@@ -141,7 +141,7 @@ async fn process_snapshot(
 }
 
 /// The ascending generations the aggregate holds for one model node: how many
-/// times the node was instantiated. A hop applied twice adds one.
+/// times the node was instantiated. An operation applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
@@ -197,8 +197,8 @@ fn open_shapes(states: &[OperationState]) -> Vec<&'static str> {
         .collect()
 }
 
-/// How many outbox records of the run fall under `prefix`. A hop's key is
-/// deterministic per `(pid, tid, generation, sequence)`, so a hop that applied
+/// How many outbox records of the run fall under `prefix`. An operation's key is
+/// deterministic per `(pid, tid, generation, sequence)`, so an operation that applied
 /// twice cannot hide behind the count.
 async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize {
     process_snapshot(engine, pid)
@@ -209,8 +209,8 @@ async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize 
         .count()
 }
 
-/// The completion hop's key family for one act: one `action` record for the
-/// decision and one `propagate` record for the hop it set off.
+/// The completion operation's key family for one act: one `action` record for the
+/// decision and one `propagate` record for the operation it set off.
 fn completion_records(pid: &str, tid: &str) -> (String, String) {
     (
         format!("action:{pid}:{tid}:"),
@@ -219,7 +219,7 @@ fn completion_records(pid: &str, tid: &str) -> (String, String) {
 }
 
 /// The completion landed exactly once: one execution for the act, and exactly
-/// one record per hop of the decision.
+/// one record per operation of the decision.
 async fn assert_completion_once(engine: &Engine, pid: &str, tid: &str) {
     let (action_prefix, propagate_prefix) = completion_records(pid, tid);
     assert_eq!(
@@ -235,7 +235,7 @@ async fn assert_completion_once(engine: &Engine, pid: &str, tid: &str) {
     assert_eq!(
         records_with_prefix(engine, pid, &action_prefix).await,
         1,
-        "one record for the completion hop"
+        "one record for the completion operation"
     );
     assert_eq!(
         records_with_prefix(engine, pid, &propagate_prefix).await,
@@ -292,10 +292,10 @@ fn is_decision_negative(error: &ActError) -> bool {
 
 /// A store fault under the projection of the completed act's own row must
 /// neither fail the client's action nor undo it: the row is derived, so the
-/// fault is logged and dropped inside the hop (a projection failure never fails
+/// fault is logged and dropped inside the operation (a projection failure never fails
 /// a commit) and the decision stays the aggregate's.
 ///
-/// The act is completed exactly once — one execution and one record per hop —
+/// The act is completed exactly once — one execution and one record per operation —
 /// and the read model either converges to the decision (a later full projection
 /// of the run re-derives the row it lost: both the action path and the outbox
 /// settle pass project every node) or the sweeper carries the stale row away
@@ -333,7 +333,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
         "the fault must land on the completed act's own row"
     );
 
-    // the decision is durable: one execution for every node, one record per hop
+    // the decision is durable: one execution for every node, one record per operation
     wait_completed(&engine, &pid).await;
     flush(&engine).await;
     assert_completion_once(&engine, &pid, &tid).await;
@@ -394,7 +394,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
 /// N racing `Next` deliveries on the same in-flight act must converge on one
 /// decision and one effect: every racer gets a decision-level verdict, at least
 /// one reports the decision it applied, the act ends `Completed` exactly once,
-/// the run keeps one execution, one row and one record per hop, and a late
+/// the run keeps one execution, one row and one record per operation, and a late
 /// delivery is refused.
 ///
 /// The kernel does not hold the legacy writer's "exactly one racer succeeds":
@@ -404,7 +404,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
 /// success, and several racers can legitimately answer `Ok`. They all carry one
 /// action here, so every `Ok` is a report of the run's single decision, and
 /// what must be exactly once is the durable effect: one execution, one row and
-/// one record per hop, checked on the aggregate. A losing racer's negative is
+/// one record per operation, checked on the aggregate. A losing racer's negative is
 /// never an engine failure — only a refusal or a durable step that moved under
 /// it — and the run always reaches the decision it raced for.
 #[serial]
@@ -573,7 +573,7 @@ async fn a_duplicate_complete_is_refused_without_effect_inner() {
 // ACTION × restart — each write boundary of the completion
 // ---------------------------------------------------------------------------
 
-/// The completion hop writes the aggregate three times: the durable *intent*
+/// The completion operation writes the aggregate three times: the durable *intent*
 /// (the operation plus the private action fact), the claim that prepares it,
 /// and the effect commit (which closes the operation). Cutting the writer at
 /// each of the first three and then booting a fresh engine over the same store
@@ -584,7 +584,7 @@ async fn a_duplicate_complete_is_refused_without_effect_inner() {
 ///   to replay (`scanned == 0`) and the act still waits for the client, which
 ///   its own refusal already told;
 /// - the claim write lost: the intent is durable and `Pending`, and recovery
-///   re-drives it exactly once — the decision lands, one record per hop, the
+///   re-drives it exactly once — the decision lands, one record per operation, the
 ///   chain propagates into one child;
 /// - the effect write lost: the operation sits at the effect boundary, and the
 ///   kernel will not guess across it (a refused commit and a lost outcome are
@@ -620,8 +620,8 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
         let (pid, step1) = waiting_head(&engine).await;
 
         // The cut is armed *before* the action, so the boundary the engine is
-        // cut at is the hop's own write and not whichever write the driver made
-        // first; nothing else is in flight, so the hop's writes are exactly the
+        // cut at is the operation's own write and not whichever write the driver made
+        // first; nothing else is in flight, so the operation's writes are exactly the
         // writes below the boundary.
         let base = kv.writes();
         kv.cut_at(base + boundary);
@@ -633,7 +633,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
         assert_eq!(
             kv.refused(),
             1,
-            "boundary {boundary}: exactly one write — the hop's own — must have been cut"
+            "boundary {boundary}: exactly one write — the operation's own — must have been cut"
         );
 
         // what the crash left durable, per boundary
@@ -680,7 +680,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                     records_with_prefix(&recovered, &pid, &completion_records(&pid, &step1).0)
                         .await,
                     0,
-                    "nothing of the refused hop may be durable"
+                    "nothing of the refused operation may be durable"
                 );
             }
             CLAIM => {
@@ -779,7 +779,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
 /// The legacy engine kept the parent's `next` record `Pending` for as long as
 /// its children were in flight and replayed it through recovery, relying on a
 /// one-shot in-memory child-visit marker to keep the replay from scheduling a
-/// second child. The kernel has neither: a hop's effect is committed with its
+/// second child. The kernel has neither: an operation's effect is committed with its
 /// source operation, so an applied propagation is a *closed* operation in the
 /// aggregate — nothing is left `Pending` for the scan to replay, the child's
 /// execution is already there, and the recovery scan is asserted to have
@@ -799,7 +799,7 @@ async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node() {
 }
 
 async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner() {
-    // The completion hop's first two writes: the intent and the claim. Cutting
+    // The completion operation's first two writes: the intent and the claim. Cutting
     // at the claim leaves the intent — the durable remainder — landed.
     const INTENT_LANDS_AT_CLAIM: usize = 2;
 

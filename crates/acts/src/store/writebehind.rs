@@ -1,6 +1,6 @@
 //! The read model's write-behind path.
 //!
-//! Two writes must not happen inline in the engine's hop loop: a delivery row
+//! Two writes must not happen inline in the engine's operation loop: a delivery row
 //! (created on the channel path, which must stay reactive) and a process
 //! removal (the sweeper). Both are ordered per pid — a removal must apply
 //! after every write still queued for that process — so they go through one

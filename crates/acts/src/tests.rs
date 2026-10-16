@@ -762,11 +762,11 @@ fn engine_builder_set_store_duplicate() {
 /// A run whose authority does not own the scope its act wants to seal fails
 /// instead of waiting forever.
 ///
-/// The start hop resolves the act's scope first; a seal refusal there is
-/// handed to the act's own hop (the state table, like the legacy sequence,
+/// The start operation resolves the act's scope first; a seal refusal there is
+/// handed to the act's own operation (the state table, like the legacy sequence,
 /// only decides a failure from a started act). `acts.core.irq` waits for a
-/// client and never executes a package, so that hop must prepare the scope
-/// anyway — otherwise the refusal has no hop left to land on and the run
+/// client and never executes a package, so that operation must prepare the scope
+/// anyway — otherwise the refusal has no operation left to land on and the run
 /// stays `Running` with no failure and no message (the wedge this pins).
 #[serial]
 #[tokio::test(flavor = "multi_thread")]

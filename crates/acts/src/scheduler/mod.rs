@@ -15,7 +15,7 @@
 //!   enforces it).
 //! - `durable/` — byte-level persistence, the only layer that may name
 //!   `crate::store` (and only in its declared adapter).
-//! - `shell/` — the async shell: the hop driver plus its parts (`effects`,
+//! - `shell/` — the async shell: the operation driver plus its parts (`effects`,
 //!   `facts`, `message`, `planning`, `predicate`, `projection`, `scope`,
 //!   `action`, `errors`, `model`, `context`, `health`, `validation`, `process`,
 //!   `task_tree`, `tests`). Unconstrained by design: it is the only place

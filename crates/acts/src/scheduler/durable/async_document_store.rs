@@ -237,7 +237,7 @@ impl AsyncProcessRepository {
         })?;
         // The advance runs on the loaded aggregate itself: this repository owns
         // it and drops it on failure (the caller reports and recovery
-        // re-derives the hop), so the whole-aggregate clone is not needed.
+        // re-derives the operation), so the whole-aggregate clone is not needed.
         let entries = recovery_entries(&loaded.snapshot);
         let operation = advance_operation_event(&mut loaded.snapshot, id, expected_revision, event)
             .map_err(AsyncRepositoryError::Domain)?;
@@ -527,7 +527,7 @@ pub(crate) enum OperationCommitOutcome {
     Committed {
         operation: crate::scheduler::core::model::operation::OperationRecord,
         /// The snapshot this commit installed. Handed back so the driver does
-        /// not have to decode the whole aggregate again to form the hop's plan.
+        /// not have to decode the whole aggregate again to form the operation's plan.
         snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     },
     AlreadyCommitted {
@@ -745,13 +745,13 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), LOAD_ATTEMPTS);
     }
 
-    /// An operation a writer from *before* the hop's close was folded into its
+    /// An operation a writer from *before* the operation's close was folded into its
     /// effect commit left `Committed` — the effect durable, the completion
     /// lost, which used to be a commit of its own — must still be finalized by
     /// recovery: the policy routes that state to `FinalizeCommit`, and the
     /// `Complete` event it carries applies to the durable record
     /// (`Committed` → `Completed`), so a store an older engine left behind
-    /// converges instead of being stranded. No hop produces the state any more,
+    /// converges instead of being stranded. No operation produces the state any more,
     /// but the V2 documents keep it.
     #[tokio::test]
     async fn a_committed_operation_left_by_an_older_writer_is_finalized() {
@@ -774,7 +774,7 @@ mod tests {
             generation: 0,
             sequence: 0,
         };
-        // The pair the pre-fold hop committed in two rounds: claim-and-prepare,
+        // The pair the pre-fold operation committed in two rounds: claim-and-prepare,
         // then the effect commit.
         let committed = OperationRecord::pending(operation_id.clone(), OperationKind::ExecuteTask)
             .evolve(OperationEvent::ClaimAndPrepare(claim.clone()))

@@ -2,7 +2,7 @@
 //!
 //! [`Runtime`] wires the store (and its write-behind queue), the emitter, the
 //! package registry, the schema cache, the snapshot registry and the shell —
-//! the hop driver — together, and hosts the store-facing timers (schedule
+//! the operation driver — together, and hosts the store-facing timers (schedule
 //! triggers, delivery retries, snapshot TTL). It is the entry point every
 //! serving path holds; the names a consumer outside the runtime may use are
 //! re-exported from `mod.rs`.
@@ -34,7 +34,8 @@ pub struct Runtime {
     /// The durable store every read API and the kernel driver go through.
     store: Arc<Store>,
     /// The read model's write-behind queue: delivery rows and process
-    /// removals are ordered per pid and must not run inline in a hop.
+    /// removals are ordered per pid and must not run inline while an operation
+    /// is in flight.
     writer: writebehind::StoreWriter,
     /// The pid → lane mapping shared with the emitter's handler gate. Held
     /// here so a sweeper removal can release the pid's assignment.
@@ -49,7 +50,7 @@ pub struct Runtime {
     /// Failure state of the message-retry timer (see [`SchedulerHealth`]).
     retry_health: Arc<LoopGuard>,
     /// The deterministic kernel host: it *is* the engine — it owns every
-    /// started process (start, actions, effects, messages) and drives the hops
+    /// started process (start, actions, effects, messages) and drives the operations
     /// over the aggregate documents.
     kernel: Arc<crate::scheduler::shell::KernelHost>,
 }
@@ -493,7 +494,7 @@ impl Runtime {
         let schema_cache = Arc::new(SchemaCache::new());
         let snapshots = Arc::new(SnapshotRegistry::new());
         // The deterministic kernel host — the engine. It owns its own driver
-        // task over the same key-value store, woken per hop, ticked for
+        // task over the same key-value store, woken per operation, ticked for
         // recovery and outbox delivery, and it serves (starts, actions,
         // effects, messages).
         let (kernel, wake_rx) = crate::scheduler::shell::KernelHost::new(
@@ -589,7 +590,7 @@ impl Runtime {
     /// Both jobs are the kernel's: the delivery rows are written through the
     /// channel path (which the kernel's outbox transport feeds) and the rows
     /// themselves are the kernel's projection, so the two store-facing loops
-    /// run here rather than inside the driver — they are not part of the hop
+    /// run here rather than inside the driver — they are not part of the operation
     /// protocol and must not delay it.
     pub fn init_retry_timer(self: &Arc<Self>) -> crate::Result<()> {
         let max_message_retry_times = self.config().max_message_retry_times();

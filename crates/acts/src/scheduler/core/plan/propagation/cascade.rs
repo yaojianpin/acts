@@ -59,7 +59,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                     // or even still parked for its children (the flow's own
                     // jump back into an ancestor while it waits). Only the node
                     // itself is created here — its own
-                    // hops bring its forward closure alive (a container fans
+                    // operations bring its forward closure alive (a container fans
                     // its children out as fresh generations), exactly like the
                     // seeded chain — with the parent and predecessors the dead
                     // generation had, so the join keeps waiting where it did.
@@ -72,7 +72,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                         .map_err(|_| PropagationError::EmptyFlowTarget)?;
                     // The re-entered generation inherits the dead one's edges,
                     // and it is admitted like any other execution: `Ready` with
-                    // its start hop when every predecessor it inherited has
+                    // its start operation when every predecessor it inherited has
                     // settled, otherwise `Created` — the predecessor still in
                     // flight admits it through its own propagation (its
                     // successors include this execution the moment the create
@@ -141,7 +141,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                                 || crate::utils::consts::is_private_key(name)
                                 || name == "auto"
                                 // The failure vocabulary travels up the
-                                // ancestor walk of its own hop (`plan_upward`'s
+                                // ancestor walk of its own operation (`plan_upward`'s
                                 // carry), which writes it to every ancestor it
                                 // decides: carrying it here too would fight
                                 // that walk over the same scope.
@@ -181,7 +181,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                 // source operation may still be completing after recovery, so
                 // this is idempotent rather than an error — except when the
                 // source is dead: an admitted-but-unfinished successor
-                // (`Ready` queued for its start hop, `Running`/`Waiting` mid
+                // (`Ready` queued for its start operation, `Running`/`Waiting` mid
                 // execution, e.g. a branch child of a cancelled container)
                 // joins the skip cascade in place instead of running on
                 // behind a dead path.
@@ -191,7 +191,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                         TaskState::Ready | TaskState::Running | TaskState::Waiting
                     )
                 {
-                    // The hop owns the state change (it re-reads the
+                    // The operation owns the state change (it re-reads the
                     // authoritative state); the plan only schedules it. An
                     // aborted source's `Running` successor is `Aborted` (the
                     // legacy ancestor walk aborts running children); every
@@ -245,7 +245,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                 JoinReadiness::Waiting => {}
                 // A dead predecessor (cancelled/failed/aborted) never blocks
                 // the run: the successor is admitted and immediately handed a
-                // skip cascade, which flows the deadness past it one hop per
+                // skip cascade, which flows the deadness past it one operation per
                 // operation.
                 JoinReadiness::SkipCascade { predecessor, state } => {
                     state_changes.push(StateChange {

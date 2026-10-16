@@ -4,7 +4,7 @@
 //! What is under test is the kernel engine, so a cell observes the kernel's own
 //! surfaces. A run's durable truth is its aggregate document; the
 //! `procs`/`tasks`/`vars` rows are that document's projection, and the driver
-//! advances the run's hops on its own task. A cell therefore reads the run
+//! advances the run's operations on its own task. A cell therefore reads the run
 //! through [`read_proc`] (the read model, rebuilt from the rows), the row
 //! collections, the engine's own messages, and the run's env — never through a
 //! resident process object that keeps itself current.
@@ -32,12 +32,12 @@
 //! fault has to know them:
 //!
 //! - a row write is a *projection*: its failure is logged and dropped, never
-//!   propagated into the hop, and the row is re-derived from the aggregate by
+//!   propagated into the operation, and the row is re-derived from the aggregate by
 //!   the next commit of that run. Nothing else repairs a row — recovery scans
 //!   operations, not rows — so a cell that breaks the *last* row write of a run
 //!   is testing whether that run still converges on its own;
 //! - an aggregate or index write is the durable truth: its failure reaches the
-//!   caller (the client action returns `Err`, the hop is retried or parked by
+//!   caller (the client action returns `Err`, the operation is retried or parked by
 //!   recovery), and the run must converge exactly once anyway.
 //!
 //! `#![allow(dead_code)]`: the harness is shared by every feature file, and a
@@ -322,7 +322,7 @@ pub(crate) fn task_snapshot(proc: &Arc<Process>) -> Vec<(String, String)> {
 
 /// Wait until the run's projected task set stops moving: the same snapshot on
 /// three consecutive ticks. A decision is committed by the acting task while
-/// the driver's own hops keep landing, so a comparison taken immediately would
+/// the driver's own operations keep landing, so a comparison taken immediately would
 /// race them.
 pub(crate) async fn settle_tasks(engine: &Engine, pid: &str) {
     let deadline = Instant::now() + WAIT;
@@ -682,7 +682,7 @@ impl FaultArm {
 }
 
 /// A store whose next matching write fails once while armed, then works
-/// normally: the transient store fault a hop, an action or a row projection
+/// normally: the transient store fault an operation, an action or a row projection
 /// can hit. The fault is one-shot by construction, and [`Self::fired`] /
 /// [`Self::failed_key`] let a cell prove it landed on the write it meant to
 /// break instead of passing vacuously.
@@ -812,7 +812,7 @@ impl KvStore for FaultKv {
     }
 }
 
-/// A store that refuses every read and write while down: the outage a hop, a
+/// A store that refuses every read and write while down: the outage an operation, a
 /// timer pass or a sweep has to survive. Reads and writes are counted, so a
 /// cell can prove the degraded path really attempted the store (and that the
 /// engine came back to it once healed) instead of passing vacuously.

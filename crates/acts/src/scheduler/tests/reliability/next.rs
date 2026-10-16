@@ -1,32 +1,32 @@
-//! NEXT reliability cells: the `Next` client action's *propagation* — the hop
+//! NEXT reliability cells: the `Next` client action's *propagation* — the operation
 //! that decides a step `Completed` and fans the flow out into the step after it
-//! — under a store fault on the step it schedules, a durable fault on the hop's
-//! own commit, a crash that leaves the hop undecided, an already-applied hop a
-//! recovery scan sees, a crash at each write boundary of the hop, and a
+//! — under a store fault on the step it schedules, a durable fault on the operation's
+//! own commit, a crash that leaves the operation undecided, an already-applied operation a
+//! recovery scan sees, a crash at each write boundary of the operation, and a
 //! container that may not finish before its children.
 //!
 //! The kernel decides a client action in three writes against the aggregate —
-//! the durable *intent* (the operation plus the private action fact its hop
+//! the durable *intent* (the operation plus the private action fact its operation
 //! replays), the claim that prepares it, and the effect commit, which closes the
 //! operation with it — and projects the rows from those commits afterwards. The
-//! effect commit decides the act and records the hop as its `action:` outbox
+//! effect commit decides the act and records the operation as its `action:` outbox
 //! record, and in the same batch it seeds the `PropagateTask` operation that
-//! *is* the propagation: that hop, with a claim and an effect commit of its own,
+//! *is* the propagation: that operation, with a claim and an effect commit of its own,
 //! writes the `propagate:` record and moves the step the flow schedules into
 //! `Ready` with an `ExecuteTask` operation of its own. So a cell reads
 //! "exactly once" off
 //! the surfaces that hold it: the aggregate's executions (one per model node and
 //! generation) and its outbox records, whose keys are deterministic per
-//! `(pid, tid, generation, sequence)` — a hop that applied twice shows up as a
+//! `(pid, tid, generation, sequence)` — an operation that applied twice shows up as a
 //! second record or a second generation — and "the read model follows" off the
 //! projected rows.
 //!
 //! Legacy's `next` bookkeeping is gone, and the cells that pinned it say so
 //! where they stand: there is no writer `PropagationPhase` (the kernel's
-//! equivalent is the operation's own state machine, and an applied hop leaves a
+//! equivalent is the operation's own state machine, and an applied operation leaves a
 //! *closed* operation rather than an open record), and there is no `next` outbox
 //! record the writer could lose and re-materialize (the kernel keeps the record
-//! inside the aggregate, so one batch either carries the whole hop or none of
+//! inside the aggregate, so one batch either carries the whole operation or none of
 //! it).
 
 use serial_test::serial;
@@ -38,7 +38,7 @@ use crate::scheduler::core::model::task_graph::TaskState;
 
 use super::*;
 
-/// The three writes of one client action's hop, in order: the durable intent,
+/// The three writes of one client action's operation, in order: the durable intent,
 /// the claim that prepares it, and the effect commit (which decides the act,
 /// seeds the propagation the flow runs next, and closes the operation). They
 /// are the boundaries a crash cell cuts the writer at. There is no fourth: the
@@ -178,7 +178,7 @@ async fn process_snapshot(
 }
 
 /// The ascending generations the aggregate holds for one model node: how many
-/// times the node was instantiated. A hop applied twice adds one.
+/// times the node was instantiated. An operation applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = process_snapshot(engine, pid)
         .await
@@ -234,8 +234,8 @@ fn open_shapes(states: &[OperationState]) -> Vec<&'static str> {
         .collect()
 }
 
-/// How many outbox records of the run fall under `prefix`. A hop's key is
-/// deterministic per `(pid, tid, generation, sequence)`, so a hop that applied
+/// How many outbox records of the run fall under `prefix`. An operation's key is
+/// deterministic per `(pid, tid, generation, sequence)`, so an operation that applied
 /// twice cannot hide behind the count.
 async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize {
     process_snapshot(engine, pid)
@@ -246,8 +246,8 @@ async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize 
         .count()
 }
 
-/// The propagation hop's key family for one act: one `action` record for the
-/// decision and one `propagate` record for the hop it set off.
+/// The propagation operation's key family for one act: one `action` record for the
+/// decision and one `propagate` record for the operation it set off.
 fn next_records(pid: &str, tid: &str) -> (String, String) {
     (
         format!("action:{pid}:{tid}:"),
@@ -256,7 +256,7 @@ fn next_records(pid: &str, tid: &str) -> (String, String) {
 }
 
 /// The propagation of `source` landed exactly once: one execution for the act,
-/// the completion it holds, and exactly one record per hop of the decision.
+/// the completion it holds, and exactly one record per operation of the decision.
 async fn assert_propagation_once(engine: &Engine, pid: &str, source: &str) {
     let (action, propagate) = next_records(pid, source);
     assert_eq!(
@@ -272,7 +272,7 @@ async fn assert_propagation_once(engine: &Engine, pid: &str, source: &str) {
     assert_eq!(
         records_with_prefix(engine, pid, &action).await,
         1,
-        "one record for the completion hop"
+        "one record for the completion operation"
     );
     assert_eq!(
         records_with_prefix(engine, pid, &propagate).await,
@@ -345,7 +345,7 @@ async fn wait_rows_settled(engine: &Engine, pid: &str) {
 
 /// A store fault under the *row* of the step a propagation schedules must not
 /// refuse, undo or duplicate the work: the row is a projection, so the fault is
-/// logged and dropped by the hop that writes it, the client's completion is
+/// logged and dropped by the operation that writes it, the client's completion is
 /// accepted, and the flow continues into the scheduled step.
 ///
 /// "Exactly once" is the aggregate's: one execution per node (the scheduled
@@ -373,7 +373,7 @@ async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_fin
     let (pid, step1) = waiting_head(&engine).await;
 
     // The fault lands on the row of the step the propagation schedules: the
-    // first write of `step2`'s row after arming is the projection of the hop that
+    // first write of `step2`'s row after arming is the projection of the operation that
     // starts the scheduled step. A row is a projection, so refusing it may not
     // refuse the work it describes.
     let row_key = task_data_key("tasks", &pid, "step2");
@@ -413,7 +413,7 @@ async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_fin
     );
 
     // the decision is the aggregate's: the scheduled step waits there, the
-    // propagation is whole — one child, one record per hop
+    // propagation is whole — one child, one record per operation
     let what = format!("the scheduled step of {pid} to wait in the aggregate");
     poll_until_dumped(
         &what,
@@ -458,15 +458,15 @@ async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_fin
 // ---------------------------------------------------------------------------
 
 /// A store that refuses the run's own durable commit — the only place the kernel
-/// records a hop — must reach the client instead of being swallowed: the
+/// records an operation — must reach the client instead of being swallowed: the
 /// decision was not recorded, so a client told "ok" would believe a propagation
 /// nobody holds. The refusal consumes nothing — the act still waits, the step the
-/// hop would schedule is still the `Created` execution the model imported, and no
+/// operation would schedule is still the `Created` execution the model imported, and no
 /// `propagate:` record was written — and the crash that follows has nothing of the
-/// hop to replay: recovery drives *durable* intents, and this hop left none.
+/// operation to replay: recovery drives *durable* intents, and this operation left none.
 ///
 /// The propagation is therefore not lost, it is the client's: its retry lands the
-/// hop exactly once — one child execution and one record per hop — and no node
+/// operation exactly once — one child execution and one record per operation — and no node
 /// gains a second generation. Legacy's `next` record family (`ops-id-…`) is the
 /// aggregate family now: the kernel keeps the outbox inside the aggregate, so one
 /// commit carries the record, and a lost record cannot be re-materialized out of
@@ -487,7 +487,7 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
     let engine = engine_on(store.clone()).await;
     let (pid, step1) = waiting_head(&engine).await;
 
-    // the run's durable truth breaks exactly once: the first commit of the hop
+    // the run's durable truth breaks exactly once: the first commit of the operation
     // the client's completion runs into
     let durable = process_key(&pid);
     kv.arm_key(&durable);
@@ -520,16 +520,16 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
         assert_eq!(
             records_with_prefix(&engine, &pid, prefix).await,
             0,
-            "no record of the refused hop may be durable: {prefix}"
+            "no record of the refused operation may be durable: {prefix}"
         );
     }
     assert!(
         open_operations(&engine, &pid, &step1).await.is_empty(),
-        "the refused hop may not leave a durable intent behind"
+        "the refused operation may not leave a durable intent behind"
     );
 
     // the crash: close before healing, then boot a fresh engine over the same
-    // store. Its recovery pass is the only thing that could replay the hop.
+    // store. Its recovery pass is the only thing that could replay the operation.
     // (The fault was one-shot: the backend is whole again already.)
     assert!(
         !kv.is_armed(),
@@ -551,7 +551,7 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
     ] {
         assert!(
             !operations.iter().any(|operation| operation.node == step1),
-            "the refused hop left nothing to replay; it may not be {what}: {scan:?}"
+            "the refused operation left nothing to replay; it may not be {what}: {scan:?}"
         );
     }
 
@@ -601,8 +601,8 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
 /// crash cuts the write right after the intent) is left `Pending` — the state a
 /// crash between the two leaves — and the fresh engine's boot recovery is what
 /// finishes it: the recovered run reaches its child *without any client action*,
-/// the act closes `Completed`, and the hop leaves one child execution and one
-/// record per hop, never a second of either.
+/// the act closes `Completed`, and the operation leaves one child execution and one
+/// record per operation, never a second of either.
 ///
 /// Legacy's `Pending` `next` outbox record re-dispatched by
 /// `recover_actions` is the kernel's pending `ApplyAction` operation: both are
@@ -706,15 +706,15 @@ async fn a_propagation_left_pending_by_a_crash_is_redriven_exactly_once_inner() 
 // ---------------------------------------------------------------------------
 
 /// An already-applied propagation is never re-run when recovery scans. The
-/// kernel commits a hop's effect with its source operation, so an applied
+/// kernel commits an operation's effect with its source operation, so an applied
 /// propagation is a *closed* operation: the recovery index pages non-terminal
 /// operations only, and a fresh boot over the same durable state has nothing of
-/// the hop to wake, await, finalize or surface — a repeated scan no more than the
+/// the operation to wake, await, finalize or surface — a repeated scan no more than the
 /// first.
 ///
 /// The invariant that legacy's `PropagationPhase` marker protected is therefore
 /// structural here: the run keeps one execution per node (the scheduled child
-/// included) and one record per hop, and the child is still the very act the
+/// included) and one record per operation, and the child is still the very act the
 /// crash left waiting — never a second child scheduled over it.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
@@ -733,7 +733,7 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
     let (pid, step1) = waiting_chain(&engine).await;
 
     // the applied propagation is closed: no open operation of the source, one
-    // child execution and one record for the hop
+    // child execution and one record for the operation
     assert!(
         open_operations(&engine, &pid, &step1).await.is_empty(),
         "an applied propagation is a closed operation, not an open record"
@@ -815,7 +815,7 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
 // NEXT × restart — each write boundary of the propagation
 // ---------------------------------------------------------------------------
 
-/// Cutting the writer at each of the hop's three writes and booting a fresh engine
+/// Cutting the writer at each of the operation's three writes and booting a fresh engine
 /// over the same store must leave the propagation exactly-once or not-at-all, and
 /// every boundary must converge on the same single child:
 ///
@@ -833,13 +833,13 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
 ///
 /// The state the legacy writer's "applied but unclosed" cut used to leave — the
 /// effect durable and the propagation it seeds still `Pending` — is not a
-/// boundary of this hop any more: the effect commit closes the operation, so a
+/// boundary of this operation any more: the effect commit closes the operation, so a
 /// cut past it lands on the propagation's own commit. `stall.rs`'s sweep runs
-/// that case (`COMPLETION_COMMITS`, the commit one past the hop) and asserts the
+/// that case (`COMPLETION_COMMITS`, the commit one past the operation) and asserts the
 /// recovered engine drives the seeded propagation.
 ///
 /// In every case the recovered run ends with one execution per node — the source
-/// and the child included — and exactly one record per hop, so no boundary can be
+/// and the child included — and exactly one record per operation, so no boundary can be
 /// observed as a second child or a second `propagate:` record.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
@@ -859,8 +859,8 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
         let (pid, step1) = waiting_head(&engine).await;
 
         // the cut is armed before the action, so the boundary the engine is cut
-        // at is the hop's own write and not whichever write the driver made
-        // first; nothing else is in flight, so the hop's writes are exactly the
+        // at is the operation's own write and not whichever write the driver made
+        // first; nothing else is in flight, so the operation's writes are exactly the
         // writes below the boundary
         let base = kv.writes();
         kv.cut_at(base + boundary);
@@ -872,7 +872,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
         assert_eq!(
             kv.refused(),
             1,
-            "boundary {boundary}: exactly one write — the hop's own — must have been cut"
+            "boundary {boundary}: exactly one write — the operation's own — must have been cut"
         );
 
         // what the crash left durable, per boundary: the propagation never
@@ -921,28 +921,28 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
             "boundary {boundary}: the crash left exactly one execution of the source"
         );
         // The model's executions exist from import; what the propagation owns is
-        // *starting* the child, so a hop that lost its effect leaves it
+        // *starting* the child, so an operation that lost its effect leaves it
         // un-started. Every boundary here loses that effect (the third loses it
         // with the close the same commit carries).
         assert_eq!(
             decided_state(&engine, &pid, "step2").await,
             Some(TaskState::Created),
-            "boundary {boundary}: a hop that lost its effect may not start the step it schedules"
+            "boundary {boundary}: an operation that lost its effect may not start the step it schedules"
         );
         assert_eq!(
             generations(&engine, &pid, "step2").await,
             vec![0],
             "boundary {boundary}: the crash left exactly one execution of the child"
         );
-        // The `propagate:` record belongs to the propagation hop the effect
+        // The `propagate:` record belongs to the propagation operation the effect
         // commit seeds (it is what moves the successor into `Ready`), so no
-        // boundary of this hop can have written it: every one of them refuses
+        // boundary of this operation can have written it: every one of them refuses
         // the effect — the third refuses it with the close the same commit
-        // carries — so the seeded hop never even exists.
+        // carries — so the seeded operation never even exists.
         assert_eq!(
             records_with_prefix(&engine, &pid, &next_records(&pid, &step1).1).await,
             0,
-            "boundary {boundary}: the propagation hop cannot have committed here"
+            "boundary {boundary}: the propagation operation cannot have committed here"
         );
 
         // heal and boot: the crash state above is the durable remainder

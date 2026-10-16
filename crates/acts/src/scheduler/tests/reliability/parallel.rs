@@ -28,17 +28,17 @@
 //! "Exactly once" is the aggregate's. The branch acts are executions (one per
 //! model node, generation 0) and each client decision leaves one `action:` and
 //! one `propagate:` record, while the container's own completion is the join's
-//! single `completed:` record; a hop or a join applied twice would add a second
+//! single `completed:` record; an operation or a join applied twice would add a second
 //! generation or a second record. The rows lag those commits and nothing repairs
 //! a *settled* run's rows, so each cell reads the decision off the aggregate and
 //! only the *sweep* off the read model.
 //!
 //! One kernel defect surfaced while porting the legacy row — the dropped param
 //! fan-out above — and it is named where it bites rather than softened. A second
-//! one, a hop whose effect commit lost a compare-and-swap to a concurrent client
+//! one, an operation whose effect commit lost a compare-and-swap to a concurrent client
 //! commit being turned into `EffectUnknown` (manual reconciliation) instead of
 //! being retried, was found by the concurrent-sibling cell and fixed during the
-//! port: the losing hop now releases its claim, so the next recovery tick
+//! port: the losing operation now releases its claim, so the next recovery tick
 //! re-drives it. That cell pins the convergence.
 
 use std::time::Duration;
@@ -214,8 +214,8 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskStat
         .map(|(_, task)| task.state)
 }
 
-/// How many outbox records of the run fall under `prefix`. A hop's key is
-/// deterministic per `(pid, tid, generation, sequence)`, so a hop that applied
+/// How many outbox records of the run fall under `prefix`. An operation's key is
+/// deterministic per `(pid, tid, generation, sequence)`, so an operation that applied
 /// twice cannot hide behind the count.
 async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize {
     process_snapshot(engine, pid)
@@ -227,26 +227,26 @@ async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize 
 }
 
 /// The two record families one client decision writes: the `action` record for
-/// the decision itself and the `propagate` record for the hop it set off.
-fn hop_records(pid: &str, tid: &str) -> (String, String) {
+/// the decision itself and the `propagate` record for the operation it set off.
+fn operation_records(pid: &str, tid: &str) -> (String, String) {
     (
         format!("action:{pid}:{tid}:"),
         format!("propagate:{pid}:{tid}:"),
     )
 }
 
-/// Complete one branch act and wait until its decision *and* the hop it set off
+/// Complete one branch act and wait until its decision *and* the operation it set off
 /// are durable before returning — the settled state a duplicate delivery or a
 /// crash cell aims at.
 ///
 /// The kernel decides a client completion and propagates it through two
 /// separate operations, so `complete_act` returning means only the decision is
 /// durable; a cell that compares against, or crashes on, the post-completion
-/// state first wants the hop to have landed.
+/// state first wants the operation to have landed.
 async fn complete_act_settled(engine: &Engine, pid: &str, act: &str) {
     complete_act(engine, pid, act).await.unwrap();
-    let (_, propagate) = hop_records(pid, act);
-    let what = format!("the completion of {act} of {pid} to settle with its hop");
+    let (_, propagate) = operation_records(pid, act);
+    let what = format!("the completion of {act} of {pid} to settle with its operation");
     poll_until_dumped(
         &what,
         || async {
@@ -320,7 +320,7 @@ async fn no_created_for(seen: &Arc<Mutex<Vec<(String, String)>>>, tid: &str) {
 // ---------------------------------------------------------------------------
 
 /// A store fault under a branch row's projection must not refuse, undo or
-/// duplicate the branch's work: the row is derived, so the hop that writes it
+/// duplicate the branch's work: the row is derived, so the operation that writes it
 /// logs and drops the failure, the client's completion stands, both branches
 /// complete, the container joins exactly once, and the finished run sweeps
 /// cleanly.
@@ -414,7 +414,7 @@ async fn a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_sett
     let pid = start_run(&engine, &parallel_workflow()).await;
     let (first, second) = wait_branches(&engine, &pid, &seen).await;
 
-    // one branch completes durably (decision and hop included); the other stays
+    // one branch completes durably (decision and operation included); the other stays
     // in flight, so the container is parked and the run is not settled
     complete_act_settled(&engine, &pid, &first).await;
     flush(&engine).await;
@@ -465,7 +465,7 @@ async fn a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_sett
 /// still completes, so the container joins exactly once.
 ///
 /// A failure would mean a duplicate could re-decide a settled act: a second
-/// generation for its node, a second hop record, or a join that ran twice.
+/// generation for its node, a second operation record, or a join that ran twice.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_duplicate_branch_completion_is_refused_without_a_second_generation() {
@@ -482,11 +482,11 @@ async fn a_duplicate_branch_completion_is_refused_without_a_second_generation_in
     let pid = start_run(&engine, &parallel_workflow()).await;
     let (first, second) = wait_branches(&engine, &pid, &seen).await;
 
-    // the first delivery decides the branch; let both its hops settle durably
+    // the first delivery decides the branch; let both its operations settle durably
     // before the duplicate arrives, so the duplicate is a retry and not a race
     // with the decision or with the propagation it set off
     complete_act_settled(&engine, &pid, &first).await;
-    let (action, propagate) = hop_records(&pid, &first);
+    let (action, propagate) = operation_records(&pid, &first);
     flush(&engine).await;
 
     let before = (
@@ -497,7 +497,7 @@ async fn a_duplicate_branch_completion_is_refused_without_a_second_generation_in
     assert_eq!(before.1, 1, "the completion leaves one action record");
     assert_eq!(
         before.2, 1,
-        "the completion's hop leaves one propagate record"
+        "the completion's operation leaves one propagate record"
     );
 
     let duplicate = complete_act(&engine, &pid, &first).await;
@@ -545,12 +545,12 @@ async fn a_duplicate_branch_completion_is_refused_without_a_second_generation_in
 /// waiting act, and neither is the other's guard), the join sees both children
 /// terminal and completes the container once, and the run settles and sweeps.
 ///
-/// The two racers are the client completion and the driver's own hop for the
-/// *other* branch: whichever hop commits second loses the aggregate's
+/// The two racers are the client completion and the driver's own operation for the
+/// *other* branch: whichever operation commits second loses the aggregate's
 /// compare-and-swap. That is not a decision — a conflict applies nothing — so
-/// the losing hop releases its claim and is re-driven from the fresh snapshot on
+/// the losing operation releases its claim and is re-driven from the fresh snapshot on
 /// the next recovery tick, and the join still fires exactly once. (While porting
-/// this row the losing hop stayed `CommitPrepared` until its lease expired and
+/// this row the losing operation stayed `CommitPrepared` until its lease expired and
 /// was then parked `EffectUnknown` — manual reconciliation — stranding the run
 /// in 4 of 6 runs; the fix is what this cell pins.)
 ///
@@ -846,7 +846,7 @@ async fn a_uses_param_fan_out_instantiates_one_template_per_item_inner() {
             .filter(|act| act.key == "act1")
             .map(|act| format!("{}={}", act.index, act.value))
             .collect();
-        // The two items' hops are independent, so their deliveries may arrive
+        // The two items' operations are independent, so their deliveries may arrive
         // in either order: the cell asserts the set, not the arrival order.
         items.sort();
         assert_eq!(

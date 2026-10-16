@@ -89,7 +89,7 @@ fn source_operation_is_committed_and_closed_in_same_atomic_batch() {
     let receipt = repo.compare_and_commit(&p).unwrap();
     let snapshot = repo.load("p1").unwrap().unwrap();
     // The operation's own commit and its close are one transition of the
-    // batch: the hop leaves `Completed`, never an intermediate `Committed`
+    // batch: the operation leaves `Completed`, never an intermediate `Committed`
     // (nothing would observe it, and a second commit for it bought a second
     // whole-aggregate round trip).
     assert_eq!(

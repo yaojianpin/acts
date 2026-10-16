@@ -7,7 +7,8 @@
 //! The shell owns no state of its own — every fact lives in the aggregate
 //! documents over the engine's [`KvStore`]. Wakes are a channel and strictly an
 //! optimization: losing one is safe because `recover` re-derives the same
-//! work from the recovery index. It drives one operation kind per durable hop:
+//! work from the recovery index. It takes each durable operation from claim to
+//! commit, one operation kind per drive:
 //!
 //! - `ExecuteTask` commits `Ready → Running` (the task started) and seeds the
 //!   `ApplyAction` operation whose effect performs the task's work: the
@@ -21,16 +22,16 @@
 //!   commits the successors' `Created → Ready` plus their `ExecuteTask`
 //!   operations; join readiness omits waiting successors idempotently.
 //!
-//! Every hop is one `commit_transition` with the hop's own operation as the
-//! `source_operation`, so the operation is committed *and closed* inside the
+//! Every drive is one `commit_transition` with the operation it drives as the
+//! plan's `source_operation`, so the operation is committed *and closed* inside the
 //! same atomic batch as its business effect (the `Committed` → `Completed`
-//! pair is applied in order there). When a hop's durable remainder already
-//! exists (a wake redelivered after the commit), the hop commits an empty
-//! plan sourced by its own operation, which completes the operation without
-//! touching business state.
+//! pair is applied in order there). When an operation's durable remainder
+//! already exists (a wake redelivered after the commit), the drive commits an
+//! empty plan sourced by its own operation, which completes the operation
+//! without touching business state.
 //!
-//! The hop *pipeline* — the four phases a hop runs, and the one module per
-//! operation kind that implements the kind-specific two of them — is [`hop`];
+//! The drive *pipeline* — the four phases one operation goes through, and the one
+//! module per kind that implements the kind-specific two of them — is [`operation`];
 //! this module is the host around it: the store and delivery seams, the
 //! driver's slot bookkeeping, recovery, the outbox pass, the read model and
 //! the plan vocabulary every kind plans with.
@@ -85,9 +86,9 @@ mod effects;
 mod errors;
 mod facts;
 pub(crate) mod health;
-mod hop;
 mod message;
 mod model;
+mod operation;
 mod planning;
 mod predicate;
 mod process;
@@ -109,7 +110,7 @@ pub(crate) use projection::RowProjector;
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;
 /// How many times a client action re-plans after losing a compare-and-swap:
-/// the serving loop commits hops of the same aggregate concurrently, so a
+/// the serving loop commits operations of the same aggregate concurrently, so a
 /// client's plan can go stale before its commit. A retry re-reads the
 /// snapshot; the action then either applies or is legitimately refused.
 const ACTION_ATTEMPTS: usize = 8;
@@ -149,7 +150,7 @@ pub(crate) struct KernelHost {
     recovery: Arc<AsyncRecoveryRepository>,
     wake_tx: Sender<OperationId>,
     /// The effect seam: when attached, a Func package's work runs inside the
-    /// ApplyAction hop and its outputs commit with the completion. Without
+    /// ApplyAction operation and its outputs commit with the completion. Without
     /// one the host auto-completes (the shadow contract).
     effect: Arc<parking_lot::RwLock<Option<Arc<dyn effects::EffectRunner>>>>,
     /// The outbox delivery seam: the shadow logs; the driver's transport
@@ -193,7 +194,7 @@ pub(crate) struct KernelHost {
     /// The slot policy (`crate::scheduler::core::plan::concurrency`): the runs
     /// in flight at once, and the parked ones waiting for a slot. `start_process`
     /// reserves here and the driver settles here, so one lock owns the answer
-    /// to "may this run hop".
+    /// to "may this run operation".
     admissions: Arc<parking_lot::Mutex<Admissions>>,
 }
 
@@ -228,14 +229,14 @@ struct ReportedRuns {
 /// `Created` — the read model's `None` process state, exactly the legacy parked
 /// row — and leaves that root's operation undriven, while a run that was
 /// already in flight keeps the row it had (the legacy boot-resume overflow's
-/// shape). Either way the run takes no hop, and the oldest parked run
+/// shape). Either way the run takes no operation, and the oldest parked run
 /// (`__created` ascending, the legacy row's `timestamp` order) is what a freed
 /// slot admits.
 ///
 /// The legacy resident set answered the same question through `Cache`; here
 /// the only two writers are [`KernelHost::start_process`] (which reserves) and
-/// the driver's hops (which settle), so this set is the single answer to "may
-/// this run hop". Like that set it is in-memory: a restart starts it empty,
+/// the driver's operations (which settle), so this set is the single answer to "may
+/// this run operation". Like that set it is in-memory: a restart starts it empty,
 /// and the runs still in flight take their slots again through
 /// [`KernelHost::place_run`] when the recovery scan hands them their first
 /// wake. The first `cap` of them are admitted in the order the scan returns
@@ -249,7 +250,7 @@ struct Admissions {
     /// Runs holding a slot: admitted here and not yet settled.
     active: std::collections::HashSet<String>,
     /// Parked runs, oldest first, with the operation that admits each: the
-    /// seeded root `ExecuteTask` whose hop starts the parked root. The key is
+    /// seeded root `ExecuteTask` whose operation starts the parked root. The key is
     /// the run's `__created` stamp; two runs seeded in the same millisecond
     /// are ordered by pid, so no run can hide behind an equal key.
     parked: std::collections::BTreeMap<(i64, String), OperationId>,
@@ -339,8 +340,8 @@ impl Admissions {
 
 /// The operation that admits a run the driver did not seed itself — one
 /// already in flight when it booted: the seed's root `ExecuteTask` (sequence 0
-/// of the root execution), which is the hop that starts a `Created` root. A run
-/// whose root hop already ran has no such operation left, so waking it is a
+/// of the root execution), which is the operation that starts a `Created` root. A run
+/// whose root operation already ran has no such operation left, so waking it is a
 /// no-op and the recovery scan re-wakes the run's real work on the next tick.
 fn resume_operation(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -432,15 +433,15 @@ impl KernelHost {
     }
 
     /// Attach the effect runner: from then on a Func package's work runs
-    /// inside the ApplyAction hop (see [`effects`]). Idempotent — the last
-    /// attach wins; attach before driving hops.
+    /// inside the ApplyAction operation (see [`effects`]). Idempotent — the last
+    /// attach wins; attach before driving operations.
     pub(crate) fn attach_effect_runner(&self, runner: Arc<dyn effects::EffectRunner>) {
         *self.effect.write() = Some(runner);
     }
 
     /// Replace the outbox transport: the shadow's logs records; the driver's
     /// transport maps them onto engine messages (see [`message`]). Attach
-    /// before driving hops.
+    /// before driving operations.
     pub(crate) fn attach_outbox_transport(
         &self,
         transport: Box<dyn crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport>,
@@ -450,14 +451,14 @@ impl KernelHost {
 
     /// Attach the process-lifecycle sink: from then on a run reports one
     /// start when it is alive and one terminal event when every execution
-    /// settled — the driver's `on_proc`. Attach before driving hops.
+    /// settled — the driver's `on_proc`. Attach before driving operations.
     pub(crate) fn attach_lifecycle_sink(&self, sink: LifecycleSink) {
         *self.lifecycle.write() = Some(sink);
     }
 
     /// Attach the read-model projector: from then on every commit
     /// re-materializes the legacy rows from the committed snapshot (see
-    /// [`projection`]). Attach before driving hops.
+    /// [`projection`]). Attach before driving operations.
     pub(crate) fn attach_row_projector(&self, projector: Arc<projection::RowProjector>) {
         *self.projection.write() = Some(projector);
     }
@@ -465,7 +466,7 @@ impl KernelHost {
     /// Attach the predicate runner: from then on a branch `if` is decided on
     /// the engine's own environment on a headless task (see [`predicate`]);
     /// without one the built-in subset evaluator decides. Attach before
-    /// driving hops.
+    /// driving operations.
     pub(crate) fn attach_predicate_runner(&self, runner: Arc<dyn predicate::PredicateRunner>) {
         *self.predicate.write() = Some(runner);
     }
@@ -496,7 +497,7 @@ impl KernelHost {
             Ok(value) => Ok(value),
             // A predicate the engine's environment cannot decide — an unset
             // variable, a non-boolean, a compile error — is the legacy branch
-            // task's `init` error: the branch fails, the hop does not.
+            // task's `init` error: the branch fails, the operation does not.
             Err(error) => Ok(PredicateValue::Invalid {
                 message: format!("{error}"),
             }),
@@ -505,7 +506,7 @@ impl KernelHost {
 
     /// Project one committed snapshot into the legacy rows, when a projector
     /// is attached. The rows are a derived read model: a store failure is
-    /// reported and dropped, never propagated into the hop — the next commit
+    /// reported and dropped, never propagated into the operation — the next commit
     /// re-derives them from the aggregate.
     async fn project(&self, snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot) {
         let projector = self.projection.read().clone();
@@ -542,7 +543,7 @@ impl KernelHost {
     }
 
     /// Re-project one process from its durable aggregate (the action path, and
-    /// the outbox settling pass: a run whose last hop committed before its
+    /// the outbox settling pass: a run whose last operation committed before its
     /// records were delivered only becomes `removable` once they are).
     pub(crate) async fn refresh_projection(&self, process_id: &str) {
         if self.projection.read().is_none() {
@@ -638,7 +639,7 @@ impl KernelHost {
         }
     }
 
-    /// The background driver: executes woken hops as they arrive, runs one
+    /// The background driver: executes woken operations as they arrive, runs one
     /// outbox delivery pass the moment a commit writes records, and on every
     /// tick re-derives recovery work (the durable net) and runs another
     /// delivery pass (the retry net). Exits when `shutdown` fires.
@@ -686,9 +687,9 @@ impl KernelHost {
                 }
                 id = wake_rx.recv() => {
                     let Some(id) = id else { break };
-                    // A panic anywhere in a hop must not take the driver down
+                    // A panic anywhere while driving must not take the driver down
                     // with it: the engine would be left running with no owner
-                    // for any operation. The hop's own user-code boundary (a
+                    // for any operation. The operation's own user-code boundary (a
                     // package's `execute`) has already turned a package panic
                     // into an ordinary failure, so what reaches here is an
                     // engine panic — reported, and the operation is left open
@@ -697,7 +698,7 @@ impl KernelHost {
                         Ok(run) => run,
                         Err(payload) => {
                             let message = panic_message(&payload);
-                            tracing::error!(operation = ?id, panic = %message, "kernel hop panicked; left open for recovery");
+                            tracing::error!(operation = ?id, panic = %message, "kernel operation panicked; left open for recovery");
                             continue;
                         }
                     };
@@ -705,8 +706,8 @@ impl KernelHost {
                         // The operation stays open; the next recovery tick
                         // re-derives it.
                         #[cfg(test)]
-                        eprintln!("hop {id:?} failed: {error}");
-                        tracing::debug!(operation = ?id, error = %error, "kernel hop failed; left open for recovery");
+                        eprintln!("operation {id:?} failed: {error}");
+                        tracing::debug!(operation = ?id, error = %error, "kernel operation failed; left open for recovery");
                     }
                 }
             }
@@ -747,7 +748,7 @@ impl KernelHost {
             return Err(error);
         }
         // The read model from the first durable fact: the proc row and the
-        // seeded task rows exist before the root hop runs, so an immediately
+        // seeded task rows exist before the root operation runs, so an immediately
         // following read sees the run. A parked run's proc row reads `None`,
         // exactly like the legacy parked row's.
         self.project(&snapshot).await;
@@ -794,13 +795,13 @@ impl KernelHost {
     /// Deliver a plan's own records *before* it commits — the effect seam's
     /// ordering, applied to the outbox: the work runs, then one commit records
     /// it. A record the transport confirms commits as `Delivered`, so the
-    /// driver's pass never touches it and the hop pays no claim, no confirm and
-    /// no extra store pass for its message — one hop, one commit, one
+    /// driver's pass never touches it and the operation pays no claim, no confirm and
+    /// no extra store pass for its message — one operation, one commit, one
     /// delivery. A record the transport could not confirm is left `Pending`
     /// (the commit writes it so) and the driver's pass is woken to retry it.
     ///
     /// The at-least-once window is the same one the effect seam documents: a
-    /// crash between the delivery and the commit re-runs the hop, and the
+    /// crash between the delivery and the commit re-runs the operation, and the
     /// message goes out again (the channel is at-least-once by construction).
     ///
     /// Called immediately before the commit that records the plan: the commit
@@ -842,7 +843,7 @@ impl KernelHost {
                 other => {
                     // A retryable (or unconfirmed) outcome: the record commits
                     // `Pending` and the driver's pass owns it from here.
-                    tracing::debug!(key = %intent.key, outcome = ?other, "outbox record not confirmed in the hop");
+                    tracing::debug!(key = %intent.key, outcome = ?other, "outbox record not confirmed in the operation");
                     unconfirmed = true;
                 }
             }
@@ -854,7 +855,7 @@ impl KernelHost {
     }
 
     /// The slot bookkeeping for one run, from a fresh snapshot of it. Returns
-    /// whether the hop that asked may run.
+    /// whether the operation that asked may run.
     ///
     /// - a run this driver admitted and whose executions all settled frees its
     ///   slot, and the parked run that takes it is woken here;
@@ -866,7 +867,7 @@ impl KernelHost {
     ///   slot taken. This is the boot pass: the recovery scan hands every
     ///   unfinished run its first wake, and this is where the cap meets it.
     ///   A parked pid waking that way is admitted by its seed's root
-    ///   operation; a run whose root hop has already run may be woken by a
+    ///   operation; a run whose root operation has already run may be woken by a
     ///   no-op, and the next recovery tick re-wakes its real work.
     fn place_run(
         &self,
@@ -889,7 +890,7 @@ impl KernelHost {
             )) {
                 Admission::Admit => {
                     // A settled run is admitted *because* it needs no slot:
-                    // taking one here would hold it for a run that never hops
+                    // taking one here would hold it for a run that never operations
                     // again.
                     if !state.is_terminal() {
                         admissions.activate(&snapshot.process_id);
@@ -913,8 +914,8 @@ impl KernelHost {
         drive
     }
 
-    /// Drive woken operations until the queue drains or `max_steps` hops ran.
-    /// Test-side twin of [`Self::serve`]: same hop execution, deterministic
+    /// Drive woken operations until the queue drains or `max_steps` operations ran.
+    /// Test-side twin of [`Self::serve`]: same operation execution, deterministic
     /// drain instead of a select loop.
     #[cfg(test)]
     pub(crate) async fn run_until_quiescent(
@@ -934,15 +935,15 @@ impl KernelHost {
                 Ok(Err(error)) => {
                     report.retried += 1;
                     #[cfg(test)]
-                    eprintln!("hop {id:?} failed: {error}");
-                    tracing::debug!(operation = ?id, error = %error, "hop failed; operation stays open for recovery");
+                    eprintln!("operation {id:?} failed: {error}");
+                    tracing::debug!(operation = ?id, error = %error, "operation failed; operation stays open for recovery");
                 }
                 Err(payload) => {
                     report.retried += 1;
                     let message = panic_message(&payload);
                     #[cfg(test)]
-                    eprintln!("hop {id:?} panicked: {message}");
-                    tracing::error!(operation = ?id, panic = %message, "hop panicked; operation stays open for recovery");
+                    eprintln!("operation {id:?} panicked: {message}");
+                    tracing::error!(operation = ?id, panic = %message, "operation panicked; operation stays open for recovery");
                 }
             }
         }
@@ -959,7 +960,7 @@ impl KernelHost {
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
     ) -> Result<()> {
-        // The serving loop commits hops of the same aggregate concurrently, so
+        // The serving loop commits operations of the same aggregate concurrently, so
         // a client's plan can go stale before its commit. A retry re-plans
         // against the fresh snapshot: the action either applies or is
         // legitimately refused — and a refusal is never retried. The retry
@@ -1188,9 +1189,9 @@ impl KernelHost {
     }
 
     /// The durable intent of one client action: the `ApplyAction` operation
-    /// that carries it, plus the action itself as the private fact its hop
+    /// that carries it, plus the action itself as the private fact its operation
     /// replays. Without that fact a recovery driving the operation (a crash,
-    /// an expired lease) would plan the bare hop's auto completion instead of
+    /// an expired lease) would plan the bare operation's auto completion instead of
     /// the decision the client made.
     fn action_intent(
         process_id: &str,
@@ -1278,7 +1279,7 @@ impl KernelHost {
     }
 
     /// One action application: the preflight, the durable intent, and then the
-    /// standard hop over the operation that intent names (see
+    /// standard operation over the operation that intent names (see
     /// [`Self::apply_action`] for the retry around it). `pinned` carries the
     /// identity the first attempt fixed.
     async fn apply_action_once(
@@ -1305,7 +1306,7 @@ impl KernelHost {
         // The preflight envelope: `ActionPlanner` validates the whole command —
         // identity and sequence included — before the durable intent exists, so
         // a caller-correctable refusal consumes nothing. The claim on this
-        // envelope is the envelope's own; the hop takes its claim in phase 1,
+        // envelope is the envelope's own; the operation takes its claim in phase 1,
         // fenced by the operation's own attempt, which is what the state
         // machine checks.
         let command = crate::scheduler::core::commit::command::ApplyActionCommand {
@@ -1355,7 +1356,7 @@ impl KernelHost {
         // A step declaring `catches` is not a client target once it is deciding
         // its caught error: the legacy act it folds is already terminal, and the
         // legacy `do_action` refuses every action on it. The durable flow fact
-        // is exactly that state — the same hop that dispatched the handlers
+        // is exactly that state — the same operation that dispatched the handlers
         // pinned it — so no child-proxy is needed (a timeout branch the tick
         // fired is a child too, and the step's own act stays actionable while
         // one runs). The refusal is part of the preflight, so it consumes no
@@ -1376,7 +1377,7 @@ impl KernelHost {
         }
 
         // Durable intent: the operation that carries the action *and* the
-        // action itself, as a private fact its hop replays (see
+        // action itself, as a private fact its operation replays (see
         // `action_intent`). Written once per decision, not once per attempt: a
         // retry whose intent already landed goes straight to the claim, and an
         // operation already standing at the id (a racer's, or our own from a
@@ -1406,29 +1407,32 @@ impl KernelHost {
             }
         }
 
-        // Ownership, work, plan, dispatch — the standard hop, so the action
+        // Ownership, work, plan, dispatch — the standard operation, so the action
         // path carries no claim, commit, wake, projection or slot code of its
-        // own (see [`hop`]). The slot policy does not apply here: the decision
+        // own (see [`operation`]). The slot policy does not apply here: the decision
         // is already durable, the intent was committed above.
-        let Some(claimed) = self.prepare_hop(&operation_id, hop::Slot::Direct).await? else {
+        let Some(claimed) = self
+            .prepare_operation(&operation_id, operation::Slot::Direct)
+            .await?
+        else {
             return Err(conflict(format!(
                 "action intent {operation_id:?} is not claimable"
             )));
         };
-        let driver = hop::driver(OperationKind::ApplyAction)
+        let driver = operation::driver(OperationKind::ApplyAction)
             .expect("ApplyAction is a driven operation kind");
-        let claimed_hop = claimed.hop();
-        let plan = match driver.run(self, &claimed_hop).await {
-            Ok(outcome) => driver.next(self, &claimed_hop, outcome).await,
+        let claimed_operation = claimed.operation();
+        let plan = match driver.run(self, &claimed_operation).await {
+            Ok(outcome) => driver.next(self, &claimed_operation, outcome).await,
             Err(error) => Err(error),
         };
         match plan {
             // The action's own commit, never a fresh load: the read model and
             // the slot follow the snapshot that commit returned, exactly like
-            // every other hop's. The run's rows whole — an action is decided
-            // against the aggregate as a whole, not as one hop's effect.
+            // every other operation's. The run's rows whole — an action is decided
+            // against the aggregate as a whole, not as one operation's effect.
             Ok(plan) => {
-                self.dispatch_hop(&claimed, plan, hop::Projection::Whole)
+                self.dispatch_operation(&claimed, plan, operation::Projection::Whole)
                     .await
             }
             Err(error) => {
@@ -1440,10 +1444,10 @@ impl KernelHost {
         }
     }
 
-    /// The bare hop plan: the operation's own commit plus its outbox note.
+    /// The bare operation plan: the operation's own commit plus its outbox note.
     /// State changes and successor operations are layered on by the callers.
     #[allow(clippy::too_many_arguments)]
-    fn task_hop_plan(
+    fn task_operation_plan(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
@@ -1501,11 +1505,11 @@ impl KernelHost {
     /// The act message payload of one `uses` step: the fact set the driver's
     /// transport maps onto the engine's `Message`, faithful to the legacy
     /// `Task::create_message` — the resolved params and options, the step and
-    /// model inputs, the scope inputs the message carries, then the hop's own
-    /// outputs or its error. `facts` are the start hop's pinned resolution
+    /// model inputs, the scope inputs the message carries, then the operation's own
+    /// outputs or its error. `facts` are the start operation's pinned resolution
     /// (absent for a host without a runner or an aggregate seeded before it);
-    /// `outputs` are the hop's own scope writes (`__`-private facts and the
-    /// error variables excluded); `error` is the failure the hop decided.
+    /// `outputs` are the operation's own scope writes (`__`-private facts and the
+    /// error variables excluded); `error` is the failure the operation decided.
     #[allow(clippy::too_many_arguments)]
     fn act_message_payload(
         &self,
@@ -1521,7 +1525,7 @@ impl KernelHost {
         let Some((uses, raw_params, name, mid)) = self.step_uses(snapshot, &node)? else {
             return Ok(None);
         };
-        // The resolved facts when the start hop pinned them, the raw
+        // The resolved facts when the start operation pinned them, the raw
         // declaration otherwise (`params` before a runner ever saw the step).
         let params = facts
             .map(|facts| facts.params.clone())
@@ -1618,10 +1622,10 @@ impl KernelHost {
         Ok(Some(payload))
     }
 
-    /// The message payload of one hop's record: the act payload for a `uses`
+    /// The message payload of one operation's record: the act payload for a `uses`
     /// step, the task payload otherwise. Both are the same legacy emission
     /// (`Task::create_message`); only the fact set differs.
-    fn hop_message_payload(
+    fn operation_message_payload(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
