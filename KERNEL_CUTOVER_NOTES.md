@@ -2127,6 +2127,45 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 (那次重置只旁置了两个 shell 文件,漏了它;它从未进过索引,`git fsck --unreachable` 里也没有它的 blob ⇒ **不可恢复**)。
 教训:要硬重置就先旁置**工作区里每一处**改动;`git reset --hard` 不是"回退我自己的改动",是回退**全树**。
 
+### C1b 完成(2026-10-16):`core/commit/{aggregate,command}` 目录化,模块名回到 `aggregate`
+
+**用户指令**:补 C1 里被我推迟的那半 —— 把 `core/commit/process.rs` 落成 `aggregate/` 目录并按主题拆开;"同理"把 `command.rs` 也按主题拆开;
+外加:`command/plan.rs` 与 `core/plan` 撞词,改名。
+
+**目录树**(纯搬移 + 一处命名纠正):
+
+| 前 | 后 |
+|---|---|
+| `commit/process.rs` 1509 | `commit/aggregate/{mod,snapshot,repository,commit,canonical,errors}.rs` 30+125+226+283+177+59 · `commit/aggregate/tests/{mod,commit,repository,canonical,advance}.rs` 72+324+120+65+65 |
+| `commit/command.rs` 391 | `commit/command/{mod,action,planner,target,errors,tests}.rs` 30+26+149+36+28+142 |
+
+**命名与路径**:
+
+- 目录叫 `aggregate`(用户指定)⇒ 模块路径回到 **`core::commit::aggregate`**(C2 曾把它随类型族改成 `commit::process`);
+  **类型名仍是 `Process*`/`Task*`**(D1/C2/C3 不动)—— "aggregate" 是那层文档/仓库的名字,`ProcessSnapshot` 是它的内容。路径改写触及 **34 文件 / 118 行**。
+- `command/` 的模块路径**不变**(`core::commit::command`)⇒ 它的调用点一行未动。
+- `command/plan.rs` → `command/planner.rs`:文件主角是 `ActionPlanner`;叫 `plan` 会和 `core/plan/**`(纯 planner 目录)撞词,读起来含混。
+- 为什么 `operation_order`/`deterministic_digest`/`action_target`/`action_name` 放宽到 `pub(super)`:它们原先在单文件里是私有,用户搬到了兄弟模块 ⇒
+  `pub(super)` 正好等于它原来在单文件里的可见范围(C1 同口径)。
+
+**证据**:按行范围搬运 + 平铺断言(每行恰好落进一个目标文件);`fn` 清单 `commit/process.rs` **62→62**、`commit/command.rs` **19→19**(逐行相同);
+`#[test]` **21→21**、**6→6**。门禁:`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**、
+`cargo fmt --all --check` 干净、`cargo test -p acts --lib --tests` **869 passed / 1 failed** —— 挂的正是基线已证的那条既有抖动
+(`export::actions::tests::a_run_cannot_seal_another_subjects_scope`,C2 worktree 上同样挂、单跑过;另有一次整跑因机器被占跑到 1406 s、挂两条 racing 用例,同属负载抖动)。
+
+**顺带核实(用户追问:policy 侧的 `NodeKind` 是否设计上少了 `Step`/`Branch`)**:
+
+- **不是设计如此,是 cutover 时掉的**:最初 `01a95b9`(`kernel/model_graph.rs`)的 `NodeKind` 就是 4 值 **`Workflow/Step/Branch/Act`**;
+  `2f20791` 仍是 4 值;**`7e8c791`(cutover to kernel runtime)缩成 2 值** `Workflow/Act`,此后没再动。没有任何提交/文档说明这次收窄的理由。
+- **而且今天没人读它**:`NodeDefinition.kind`(连同 `name`)只在 `ModelGraphBuilder::add_node` 里存进 builder 的 `nodes` map,
+  `build()` 只用那张 map 做**存在性**校验(`contains_key`),产出的 `ModelGraph` 只留 `declaration_next`/`explicit_next` ⇒ `kind` 是**写进去就丢**的死字段。
+- **比"缺变体"更糟:它现在给的是错答案** —— `shell/model.rs:554-568` 把**每个**子节点(step/branch/act)一律标成 `Act`。
+- 4 值的真值来源是 `view::NodeKind`(`crate::NodeKind` 就是它;`Node::kind()`/`is_kind()` 用它;行/消息的 kind 由 `node_kind_and_name` 从声明模型算,C6 再加 `act`)。
+- ⇒ **C8b③ 的"两份合一"应改成:删掉 policy 侧这个 enum(顺带 `NodeDefinition.name`),只留 `view::NodeKind`**;哪天真需要 policy 图区分节点种类,得喂 4 值的 kind,而不是常量 `Act`。
+
+**过程登记(探针 WIP)**:同 C2/C3 —— 旁置 `shell/mod.rs`/`shell/tests/mod.rs`,提交后按同一管线回填(这次只需把模块路径 `commit::process` → `commit::aggregate`);
+`examples/simple/main.rs` 那笔已在 C3 被误重置丢失(见 §10「C3 完成」),本轮它停在 HEAD 版本、未被触碰。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2151,7 +2190,7 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 
 | 编号 | 任务 | 阻塞/前置 | 状态 |
 |---|---|---|---|
-| **C1** | 拆 `core/plan/**` 成同名目录 + `pub(crate) use` 保路径 + tests 归位(纯搬移,调用方一行不改) | — | **已做(§10「C1 完成」)** |
+| **C1** | 拆 `core/plan/**` 成同名目录 + `pub(crate) use` 保路径 + tests 归位(纯搬移,调用方一行不改) | — | **已做(§10「C1 完成」)**;**补笔 C1b**:`core/commit/{aggregate,command}` 也目录化(§10「C1b 完成」) |
 | **C2** | `Aggregate*` 全族 → `Process*`(纯改名) | C1;**D1 已拍**(`{Process, Task, Operation}`) | **已做(§10「C2 完成」)** |
 | **C3** | `Execution*` → `Task*` + `task_state::TaskState` 改名让位(纯改名) | C2 | **已做(§10「C3 完成」)** |
 | **C4** | `TaskId` 显式化 + `OperationId.task` 换类型(`wire()` 派生,输出仍是 node id ⇒ golden 全绿) | C3 | 未做(**承载原 §7a**) |
@@ -2159,7 +2198,7 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 | **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | 未做 |
 | **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | 未做 |
 | **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | 未做 |
-| **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_kind_and_name` 替投影、`NodeKind` 合一) | C8a | 未做 |
+| **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_kind_and_name` 替投影、`NodeKind` 合一) | C8a | 未做。**注**(§10「C1b 完成」已证):policy 侧 `model_graph::NodeKind` 是**死字段**(`build()` 丢掉 `NodeDefinition`)且把每个子节点一律标成 `Act` ⇒ 应**删**而非合一 |
 | **C8c** | `view` 挪位(§3.7 c)+ §3.7(d) 的登记项 —— **先验证 effect seam 是否丢弃 `Context::build_acts` 的结果**(若成立即"每 hop 跑了但不生效"的白付开销) | C8b;**D4 需先拍** | 未做(登记待验证) |
 
 **与第二波的关系**:C1/C8a/C8b 是纯搬移/删死件,与性能项零冲突;从 C4 起动的是 `core/model` + `commit/aggregate` + `shell/mod.rs`,
@@ -2212,9 +2251,10 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 - `wire()` 先立成身份的**唯一派生入口**(`TaskId::wire()`),**输出仍是 node id** ⇒ golden 不动;切 hex 是 C5(D2 待拍)。
 - **编解码字节不变**:`snapshot_codec` 仍写同一个 node 字符串 + 同一个 gen;恢复条目键仍是 `hex(pid).hex(node).gen.seq`(§1.6);行表不动。
 
-**前置/边界**:动的面 = `core/model/{task_graph,operation}.rs`、`commit/process.rs`、`durable/{snapshot_codec,recovery_entry,document_store}.rs`、
-`core/recovery/**`、`shell/**`、`core/plan/**` 的 identity 用法。**D2/D3 不是本笔前置**(它们是 C5 的):本笔不碰 `wire()` 的字符集、
-不碰行表 `prev/next/parent` 的取值、不动 codec 版本。先读 §4 的 C4 行 + §5 的风险表("键长/存储字节""旧库兼容"两行)。
+**前置/边界**:动的面 = `core/model/{task_graph,operation}.rs`、`commit/aggregate/{snapshot,repository,commit,canonical}.rs`(C1b 之后这里已是目录)、
+`durable/{snapshot_codec,recovery_entry,document_store}.rs`、`core/recovery/**`、`shell/**`、`core/plan/**` 的 identity 用法。
+**D2/D3 不是本笔前置**(它们是 C5 的):本笔不碰 `wire()` 的字符集、不碰行表 `prev/next/parent` 的取值、不动 codec 版本。
+先读 §4 的 C4 行 + §5 的风险表("键长/存储字节""旧库兼容"两行)。
 
 **现状(已实测,C3 之后)**:`Execution`/`Aggregate`/`execution_id` 在 `crates/acts/src` 内均为 0 命中;
 `TaskId { node: String, generation }` 与 `OperationId { process_id, node, generation, sequence }` 已是 C3 的形状;
