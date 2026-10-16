@@ -47,7 +47,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::scheduler::core::commit::process::ProcessSnapshot;
+use crate::scheduler::core::commit::aggregate::ProcessSnapshot;
 use crate::scheduler::core::model::task_graph::TaskState;
 use crate::{Act, Step};
 

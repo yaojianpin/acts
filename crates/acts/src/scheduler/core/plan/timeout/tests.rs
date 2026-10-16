@@ -1,5 +1,5 @@
 use super::*;
-use crate::scheduler::core::commit::process::TaskSnapshot;
+use crate::scheduler::core::commit::aggregate::TaskSnapshot;
 use crate::scheduler::core::model::operation::OperationId;
 use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use crate::scheduler::core::model::transition_plan::TransitionPlan;

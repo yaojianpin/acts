@@ -1,4 +1,4 @@
-use crate::scheduler::core::commit::process::sha256_hex;
+use crate::scheduler::core::commit::aggregate::sha256_hex;
 use std::fmt;
 
 const MAGIC: &[u8; 8] = b"ACTSAGR\0";

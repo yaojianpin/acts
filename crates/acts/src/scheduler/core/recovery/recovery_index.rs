@@ -1,4 +1,4 @@
-use crate::scheduler::core::{commit::process::ProcessSnapshot, model::operation::OperationId};
+use crate::scheduler::core::{commit::aggregate::ProcessSnapshot, model::operation::OperationId};
 
 use std::collections::HashSet;
 use std::fmt;

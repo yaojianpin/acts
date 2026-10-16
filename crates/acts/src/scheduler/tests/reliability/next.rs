@@ -167,7 +167,7 @@ fn branched_workflow() -> Workflow {
 async fn process_snapshot(
     engine: &Engine,
     pid: &str,
-) -> crate::scheduler::core::commit::process::ProcessSnapshot {
+) -> crate::scheduler::core::commit::aggregate::ProcessSnapshot {
     engine
         .runtime()
         .kernel()

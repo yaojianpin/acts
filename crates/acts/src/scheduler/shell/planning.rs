@@ -51,7 +51,7 @@ pub(super) enum TimeoutGuard {
 /// snapshot's records and the intents this plan already claims: a hop that adds
 /// its own timer next to the act's completion op must not collide with it.
 pub(super) fn next_plan_sequence(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     plan: &TransitionPlan,
     node: &str,
     generation: u64,
@@ -103,7 +103,7 @@ pub(super) fn mark_parked_for_children(
 /// `Step::sign() == Sign::ERROR`), which the catch join answers and no later hop
 /// may override.
 pub(super) fn is_catch_decider(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> bool {
     crate::scheduler::core::plan::container::deciding_catches(snapshot, task)
@@ -127,7 +127,7 @@ pub(super) fn package_failure(error: &crate::ActError) -> Failure {
 
 /// The branch predicate failure a fan-out pinned on `execution`, if any.
 pub(super) fn branch_error(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> Option<Failure> {
     let raw = snapshot

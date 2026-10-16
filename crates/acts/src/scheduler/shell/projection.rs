@@ -33,7 +33,7 @@ use super::{model_of, root_variable};
 use crate::{
     ActError, Result, Vars,
     scheduler::core::{
-        commit::process::ProcessSnapshot,
+        commit::aggregate::ProcessSnapshot,
         model::{
             legacy_task_state::LegacyTaskState,
             task_graph::{TaskId, TaskState},

@@ -3388,7 +3388,7 @@ async fn cancelled_head_cascades_skip_through_the_chain() {
 
 // ---- nested model import: the legacy branch-if suite, mirrored ----
 
-type Snapshot = crate::scheduler::core::commit::process::ProcessSnapshot;
+type Snapshot = crate::scheduler::core::commit::aggregate::ProcessSnapshot;
 
 fn state_of(
     snapshot: &Snapshot,

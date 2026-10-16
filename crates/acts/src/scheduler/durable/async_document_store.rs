@@ -9,7 +9,7 @@ use crate::{
     ActError,
     scheduler::{
         core::{
-            commit::process::{
+            commit::aggregate::{
                 CommitError, CommitReceipt, RecoveryCursor, RecoveryPage, advance_operation_event,
                 advance_transition,
             },
@@ -126,7 +126,7 @@ impl AsyncProcessRepository {
 
     pub(crate) async fn create(
         &self,
-        snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     ) -> Result<LoadedProcess, AsyncRepositoryError> {
         let (transaction, document, recovery_index, outbox_index) =
             build_create_transaction(snapshot)?;
@@ -327,7 +327,7 @@ impl AsyncProcessRepository {
         entries.truncate(limit);
         let mut processes: HashMap<
             String,
-            crate::scheduler::core::commit::process::ProcessSnapshot,
+            crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         > = HashMap::new();
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -412,7 +412,7 @@ impl AsyncProcessRepository {
     pub(crate) async fn replace(
         &self,
         loaded: &LoadedProcess,
-        replacement_snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+        replacement_snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         current_recovery_entries: &std::collections::BTreeMap<String, Vec<u8>>,
     ) -> Result<ReplaceOutcome, AsyncRepositoryError> {
         let (transaction, ..) =
@@ -528,12 +528,12 @@ pub(crate) enum OperationCommitOutcome {
         operation: crate::scheduler::core::model::operation::OperationRecord,
         /// The snapshot this commit installed. Handed back so the driver does
         /// not have to decode the whole aggregate again to form the hop's plan.
-        snapshot: crate::scheduler::core::commit::process::ProcessSnapshot,
+        snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     },
     AlreadyCommitted {
         operation: crate::scheduler::core::model::operation::OperationRecord,
         /// The authoritative aggregate another writer installed.
-        snapshot: crate::scheduler::core::commit::process::ProcessSnapshot,
+        snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     },
     Conflict {},
 }
@@ -542,11 +542,11 @@ pub(crate) enum OperationCommitOutcome {
 pub(crate) enum TransitionCommitOutcome {
     Committed {
         receipt: CommitReceipt,
-        snapshot: crate::scheduler::core::commit::process::ProcessSnapshot,
+        snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     },
     AlreadyCommitted {
         receipt: CommitReceipt,
-        snapshot: crate::scheduler::core::commit::process::ProcessSnapshot,
+        snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     },
     Conflict {},
 }
@@ -599,8 +599,8 @@ impl std::error::Error for AsyncRepositoryError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::core::commit::process::ProcessSnapshot;
-    use crate::scheduler::core::commit::process::TaskSnapshot;
+    use crate::scheduler::core::commit::aggregate::ProcessSnapshot;
+    use crate::scheduler::core::commit::aggregate::TaskSnapshot;
     use crate::scheduler::core::model::model_graph::NodeId;
     use crate::scheduler::core::model::operation::ClaimToken;
     use crate::scheduler::core::model::operation::OperationId;

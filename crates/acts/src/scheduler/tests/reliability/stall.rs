@@ -39,7 +39,7 @@ use std::sync::Arc;
 use serial_test::serial;
 
 use crate::LegacyTaskState;
-use crate::scheduler::core::commit::process::ProcessSnapshot;
+use crate::scheduler::core::commit::aggregate::ProcessSnapshot;
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
 use crate::scheduler::core::model::operation::OperationState;
 use crate::scheduler::core::model::task_graph::TaskState;

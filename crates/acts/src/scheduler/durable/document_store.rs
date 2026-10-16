@@ -1,6 +1,6 @@
 use crate::scheduler::{
     core::{
-        commit::process::ProcessSnapshot,
+        commit::aggregate::ProcessSnapshot,
         outbox::outbox_index::{OutboxIndex, OutboxIndexCodec},
         recovery::{
             recovery_entry::RecoveryEntryDocument,

@@ -36,7 +36,7 @@ use std::sync::atomic::Ordering;
 use serial_test::serial;
 
 use crate::Step;
-use crate::scheduler::core::commit::process::ProcessSnapshot;
+use crate::scheduler::core::commit::aggregate::ProcessSnapshot;
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
 use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
 use crate::utils::test::{USES_IRQ, USES_MSG};

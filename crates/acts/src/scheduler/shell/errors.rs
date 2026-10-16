@@ -106,7 +106,7 @@ pub(super) fn is_conflict(error: &ActError) -> bool {
 pub(super) fn repository_error(
     error: crate::scheduler::durable::async_document_store::AsyncRepositoryError,
 ) -> ActError {
-    use crate::scheduler::core::commit::process::CommitError;
+    use crate::scheduler::core::commit::aggregate::CommitError;
     match &error {
         crate::scheduler::durable::async_document_store::AsyncRepositoryError::Store(error) => {
             error.clone()

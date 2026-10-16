@@ -1,5 +1,5 @@
 use crate::scheduler::core::{
-    commit::process::{CommitError, ProcessSnapshot, TaskSnapshot},
+    commit::aggregate::{CommitError, ProcessSnapshot, TaskSnapshot},
     model::{
         model_graph::NodeId,
         operation::{
@@ -525,8 +525,8 @@ mod tests {
             .expect("test fixture contains the requested u32 field");
         u32::from_be_bytes(field.try_into().expect("test fixture u32 has four bytes"))
     }
-    use crate::scheduler::core::commit::process::MemoryProcessRepository;
-    use crate::scheduler::core::commit::process::{
+    use crate::scheduler::core::commit::aggregate::MemoryProcessRepository;
+    use crate::scheduler::core::commit::aggregate::{
         MemoryProcessRepositoryAccess, ProcessRepository,
     };
 
@@ -656,7 +656,7 @@ mod tests {
         let encoded = SnapshotCodecV2::encode(&snapshot()).unwrap();
         assert_eq!(encoded.len(), 286);
         assert_eq!(
-            crate::scheduler::core::commit::process::sha256_hex(&encoded),
+            crate::scheduler::core::commit::aggregate::sha256_hex(&encoded),
             "26dc1279e7f4eddd825ee0c655877f26236ad360ba3ae62adcfac54168b7e693"
         );
     }

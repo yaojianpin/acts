@@ -1,5 +1,5 @@
 use crate::scheduler::{
-    core::commit::process::ProcessSnapshot,
+    core::commit::aggregate::ProcessSnapshot,
     durable::{
         envelope::{EnvelopeError, ProcessEnvelope},
         snapshot_codec::{SnapshotCodecError, SnapshotCodecV2},
@@ -58,7 +58,7 @@ impl std::error::Error for ProcessDocumentError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::core::commit::process::TaskSnapshot;
+    use crate::scheduler::core::commit::aggregate::TaskSnapshot;
     use crate::scheduler::core::model::model_graph::NodeId;
     use crate::scheduler::core::model::operation::ClaimToken;
     use crate::scheduler::core::model::operation::OperationId;

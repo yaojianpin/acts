@@ -12,7 +12,7 @@
 use crate::{
     ActError, Result,
     scheduler::core::{
-        commit::process::{ProcessSnapshot, TaskSnapshot},
+        commit::aggregate::{ProcessSnapshot, TaskSnapshot},
         model::{
             model_graph::{
                 ChildRole, ModelGraph, ModelGraphBuilder, NodeDefinition, NodeId, NodeKind,

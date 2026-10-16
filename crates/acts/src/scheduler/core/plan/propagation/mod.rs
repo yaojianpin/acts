@@ -1,5 +1,5 @@
 use crate::scheduler::core::{
-    commit::process::ProcessSnapshot,
+    commit::aggregate::ProcessSnapshot,
     model::{
         model_graph::NodeId,
         operation::{OperationId, OperationKind},

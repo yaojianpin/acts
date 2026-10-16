@@ -3,7 +3,7 @@ use super::*;
 /// The declaring model of a snapshot, read from the durable root-scope
 /// variable. `None` only for aggregates seeded before the nested import.
 pub(super) fn model_of(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> Result<Option<crate::model::Workflow>> {
     let Some(raw) = root_variable(snapshot, model::MODEL_VAR)? else {
         return Ok(None);
@@ -16,7 +16,7 @@ pub(super) fn model_of(
 /// The root execution of an aggregate: the `$` node's earliest generation —
 /// the generation a re-entry never removes.
 pub(super) fn root_task(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> Option<crate::scheduler::core::model::task_graph::TaskId> {
     snapshot
         .tasks
@@ -29,7 +29,7 @@ pub(super) fn root_task(
 /// One root-scope variable (root = the `$` execution, earliest generation —
 /// the generation a re-entry never removes).
 pub(super) fn root_variable(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     name: &str,
 ) -> Result<Option<String>> {
     Ok(root_task(snapshot)
@@ -41,7 +41,7 @@ pub(super) fn root_variable(
 /// seed produces one) reads as running, so the run asks for a slot instead of
 /// being admitted for free.
 pub(super) fn root_state(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> crate::scheduler::core::model::task_graph::TaskState {
     root_task(snapshot)
         .and_then(|root| snapshot.tasks.get(&root).map(|task| task.state))
@@ -55,7 +55,7 @@ pub(super) fn root_state(
 /// waits for the outbox and the channel deliveries: those keep the run's rows
 /// alive, never its slot.
 pub(super) fn run_settled(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> bool {
     !snapshot.tasks.is_empty() && snapshot.tasks.values().all(|task| task.state.is_terminal())
 }
@@ -64,7 +64,7 @@ pub(super) fn run_settled(
 /// queue. A run seeded before the fact existed reads as `0` and outranks
 /// nothing.
 pub(super) fn created_stamp(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> i64 {
     root_variable(snapshot, concurrency::CREATED_VAR)
         .ok()
@@ -76,7 +76,7 @@ pub(super) fn created_stamp(
 /// The durable auto/waiting decision of one model node, from the import-time
 /// map. A missing entry is an import inconsistency, not a default.
 pub(super) fn auto_decision(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     node: &str,
 ) -> Result<bool> {
     let Some(raw) = root_variable(snapshot, model::AUTO_MAP_VAR)? else {
@@ -109,7 +109,7 @@ pub(super) fn auto_decision(
 /// timeout branch), so it travels with the scope — a timeout branch's effect
 /// params answer the same cost the legacy branch task did.
 pub(crate) fn scope_vars(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     scope: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> Vec<(String, String)> {
     let mut chain = vec![scope.clone()];
@@ -144,7 +144,7 @@ pub(crate) fn scope_vars(
 /// predates the seed reads nothing, exactly like a process nobody sealed
 /// ([`crate::ScopePolicy::default`] is `deny_all`).
 pub(super) fn owner_of(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> Result<crate::ScopePolicy> {
     match root_variable(snapshot, crate::utils::consts::PROC_OWNER)? {
         Some(raw) => serde_json::from_str(&raw).map_err(runtime),
@@ -181,7 +181,7 @@ pub(super) fn is_error_fact(name: &str) -> bool {
 /// decoded), filtered by `keep`. Private names and the durable engine facts
 /// ([`is_engine_fact`]) are never part of a run's data.
 pub(super) fn root_variables(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     root: &crate::scheduler::core::model::task_graph::TaskId,
     keep: impl Fn(&str) -> bool,
 ) -> crate::Vars {
@@ -208,7 +208,7 @@ pub(super) fn root_variables(
 /// legacy `fill_outputs` rules). A name that resolves to nothing completes as
 /// `null` rather than failing the run.
 pub(super) fn exposed_variables(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     root: &crate::scheduler::core::model::task_graph::TaskId,
     exposes: &[crate::Variant],
 ) -> crate::Vars {
@@ -255,7 +255,7 @@ fn evaluate_expression(expr: &str, scope: &[(String, String)]) -> Option<serde_j
 /// are the model's `exposes` ([`exposed_variables`]) — the run's whole variable
 /// space only when it declares none ([`root_variables`]).
 pub(super) fn process_message(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     root: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> crate::Message {
     let model = model_of(snapshot).ok().flatten();
@@ -312,7 +312,7 @@ pub(super) fn lifecycle_state(
 
 /// The failed root's error variables (`error.code` / `error.message`).
 pub(super) fn root_error(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     root: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> (String, String) {
     // The value is read the way every other scope reader reads it
@@ -382,7 +382,7 @@ pub(super) fn json_var(value: &str) -> String {
 
 /// One variable of one execution scope, raw (the aggregate's own text).
 pub(super) fn task_variable<'a>(
-    snapshot: &'a crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &'a crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task: &crate::scheduler::core::model::task_graph::TaskId,
     name: &str,
 ) -> Option<&'a str> {
@@ -403,7 +403,7 @@ pub(super) struct ActFacts {
 /// The act facts the start hop pinned on `execution`, when a runner resolved
 /// them at start.
 pub(super) fn act_facts(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> Option<ActFacts> {
     let read = |name: &str| {
@@ -449,7 +449,7 @@ pub(super) fn message_topic(
 /// predecessor's own (its outputs) first, the acting execution's own on top —
 /// the legacy `Task::inputs` merges the node's vars last, so they win.
 pub(super) fn input_vars(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut inputs = serde_json::Map::new();
@@ -476,7 +476,7 @@ pub(super) fn input_vars(
 /// Validate the run's `exposes` against the message's outputs, like the legacy
 /// `on_proc` handler; `Some(text)` is the legacy error text.
 pub(super) fn exposes_error(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     message: &crate::Message,
 ) -> Option<String> {
     let model = model_of(snapshot).ok().flatten()?;
@@ -498,7 +498,7 @@ pub(super) fn exposes_error(
 /// is an `Invalid` predicate — an error, never a silent `False` (the legacy
 /// engine fails the task on the same conditions).
 pub(super) fn evaluate_predicate(
-    snapshot: &crate::scheduler::core::commit::process::ProcessSnapshot,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     scope: &crate::scheduler::core::model::task_graph::TaskId,
     expr: &str,
     overlay: &[(String, String)],

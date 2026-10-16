@@ -303,7 +303,7 @@ fn newest_generation<'a>(
     node: &str,
 ) -> Option<(
     TaskId,
-    &'a crate::scheduler::core::commit::process::TaskSnapshot,
+    &'a crate::scheduler::core::commit::aggregate::TaskSnapshot,
 )> {
     snapshot
         .tasks

@@ -14,7 +14,7 @@
 //! operations whose hops spread the death into the remaining subtrees.
 
 use crate::scheduler::core::{
-    commit::process::ProcessSnapshot,
+    commit::aggregate::ProcessSnapshot,
     model::{
         operation::OperationKind,
         task_graph::{TaskId, TaskState},
