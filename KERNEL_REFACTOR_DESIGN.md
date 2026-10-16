@@ -309,6 +309,30 @@ core/plan/branch/{mod.rs, errors.rs}
 
 ---
 
+### 3.8 host 的 hop 分相(H1,2026-10-16)
+
+**问题(用户)**:`KernelHost::execute_one` 曾是一个 745 行的 `match OperationKind`,把「准备(load/place/park 判定/预检/claim)」、各 kind 的业务(解析、跑包、求值)、各 kind 的计划(状态变更/后继操作/outbox)、以及提交后的收尾(deliver/commit/wake/lifecycle/投影/槽位)全部串在一个函数里;客户端动作路径(`apply_action_once`)为此另写了一份同样的提交→唤醒→投影→槽位,两处容易漂移。
+
+**终态:四阶段 + 按 kind 的 driver**。`shell/hop/` 是唯一知道「一个 hop 怎么走完」的地方:
+
+| 阶段 | 位置 | 内容 |
+|---|---|---|
+| 1 准备 | `hop/prepare.rs` | parked 快路径、槽位策略(`place_run`)、按 kind 的 **pre-check 策略**(`OperationDriver::precheck`,今天只有计时器的 idle round)、`ClaimAndPrepare` 认领 —— 一次原子事件交回「本 hop 唯一权威快照」。`Slot::Policy`(驱动自己的 hop)/`Slot::Direct`(客户端动作:决策已持久化,不当被 parked 队列拦住) |
+| 2 执行 | `OperationDriver::run` | 该 kind 自己的工作,返回 **`Outcome`**(kind 自己的词汇:`Start`/`Effect`/`TimeoutRound`/`Planned`/`Nothing`) |
+| 3 计划 | `OperationDriver::next` | 把 `Outcome` 折成 **`TransitionPlan`**(状态变更、后继操作、outbox 记录) |
+| 4 分发 | `hop/dispatch.rs` | deliver → commit(冲突 → 释放 claim + `ECONFLICT`)→ wake → lifecycle → 行投影(`Touched`/`Whole`)→ 槽位结算 |
+
+- **trait 是 `OperationDriver`**(`#[async_trait]`,`Send + Sync`),三个方法 `precheck`/`run`/`next`;`driver(kind)` 是唯一的查表入口,驱动侧不再 `match OperationKind`。driver 不持状态:`KernelHost` 显式传入,事实都在 `Pending`/`Claimed`/`Hop` 上下文里。
+- **每 kind 一模块**:`hop/task.rs`(ExecuteTask)、`hop/action.rs`(ApplyAction)、`hop/timeout.rs`(DispatchTimeout)、`hop/cascade.rs`(SkipTask/AbortTask)、`hop/propagate.rs`(PropagateTask)、`hop/reentry.rs`(ReenterTask)。kind 自有的规划器(入口检查、`start_plan`、`completion_plan`、`timeout_round/plan`、容器 fan-out、catch fan-out、上行/join 计划…)随 arm 一起搬进对应模块,仍以 `impl KernelHost` 方法存在(最小改写),因此同模块内互调无需放宽可见性。
+- **`Hop` 上下文只服务 trait**:`{id, claim, task_id, task, snapshot, now_ms}`;kind 内部的规划器保持既有签名(拆出上下文不会让签名变清楚),driver 在入口处解构。
+- **`Outcome` 的边界**:`Nothing` 表示「claim 之后发现其实无事可做」(计时器在预检与 claim 之间转 idle):claim 归还(next tick 重新推导),`next` 不会被调用。
+- **客户端动作走同一条流水线**:预检(命令校验 + Back/Cancel/catch 拒绝)→ 意图提交(`__action` 持久化)→ `prepare_hop(Slot::Direct)` → 同一 `run`/`next` → `dispatch_hop(Projection::Whole)`,因此动作路径不再持有自己的 commit/wake/投影/槽位代码;claim fence 改由**操作自身的 attempt** 派生(与 hop 路径同源),`apply_action_once` 的 `attempt` 参数随之删除。
+- **未动**:`OperationKind`/`OperationEvent`/状态机/`core/plan/**`/codec/`wire()`/读模型行表口径。CAS 冲突的错误类别从 `Runtime` 收紧为 `conflict`(ECONFLICT)——这是 hop 与动作两条路径共用一个冲突出口后的必然修正(动作重试循环靠 `is_conflict` 判定)。
+
+**行为差异(登记)**:①动作路径现在也上报 lifecycle(事件集合不变、`ReportedRuns` 去重,但「进程终态」可能由动作自己的提交上报);②动作路径的槽位结算改用提交返回的快照(原为额外一次聚合读);③`KernelHost::snapshot` 现在只服务测试(`#[cfg(test)]`)。
+
+---
+
 ## 4. 实施计划(提交切分)
 
 > **任务清单的唯一真值在 `KERNEL_CUTOVER_NOTES.md` §11**(已完成项已从那里删除;编号 `C1…C8c` 与本节一致)。

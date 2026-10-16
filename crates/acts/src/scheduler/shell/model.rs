@@ -293,8 +293,8 @@ pub(crate) fn step_branches(step: &crate::model::Step) -> Option<&[crate::model:
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StepPlace {
     /// A seeded chain step of the workflow root: its auto decision joins the
-    /// seed set. Its own `if`/`while` is its guard, evaluated at its start hop
-    /// (see `KernelHost::guard_plan`).
+    /// seed set. Its own `if`/`while` is its guard, evaluated by the start
+    /// hop's entry check.
     TopLevel,
     /// A `catches` handler of a step. Its `if` is the handler's own
     /// selection — the legacy `Step::init` guard, evaluated when the failed

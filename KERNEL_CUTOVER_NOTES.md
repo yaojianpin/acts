@@ -2186,6 +2186,52 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 门禁(**在"提交状态"上跑,即探针 WIP 旁置时**):`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**、
 `cargo fmt --all --check` 干净、`cargo test -p acts --lib --tests` **869 passed / 1 failed** —— 挂的仍是基线已证的那条既有抖动。
 
+### H1 完成(2026-10-16):host 的 hop 分相 —— 四阶段流水线 + 按 kind 的 driver 模块
+
+**用户指令**:`execute_one`/`apply_action` 结构太乱;应分成「1 准备(claim/prepare)→ 2 执行并返回结果 → 3 生成 next plan → 4 分发 next 操作」四个过程,
+不同状态/类型/操作由上层 trait 抽象屏蔽,具体实现交按层、按类型的模块。**只动 `scheduler/shell/`,公共面与落盘格式零变更。**
+
+| 之前 | 之后 |
+|---|---|
+| `shell/mod.rs` 4666 行:745 行的 `execute_one`(match `OperationKind`,内含 load/place/park 判定/预检/claim + 各 kind 业务 + 各 kind 计划 + deliver/commit/wake/lifecycle/投影/槽位),`apply_action_once` 229 行**另写一份**同样的提交→唤醒→投影→槽位 | `shell/mod.rs` 2033 行(宿主基础设施:seam、驱动循环、恢复、outbox、读模型、计划词汇表、客户端动作入口)+ `shell/hop/` 3210 行 |
+| — | `hop/mod.rs`(236 行):`OperationDriver` trait(`precheck`/`run`/`next`)、`Pending`/`Claimed`/`Hop` 上下文、`Outcome`、`Slot`、`Precheck`、`driver(kind)` 查表,以及四阶段流水线 `KernelHost::execute_one`(~40 行) |
+| — | `hop/prepare.rs`(阶段 1 parked 快路径 + 槽位策略 + 按 kind 的 precheck + `ClaimAndPrepare`;`Slot::Direct` 供动作路径绕过槽位)、`hop/dispatch.rs`(阶段 4 deliver → commit(冲突 → 释放 claim + `ECONFLICT`)→ wake → lifecycle → 投影(`Touched`/`Whole`)→ 槽位结算) |
+| 各 kind 的 arm 与规划器散在 `execute_one`/mod.rs | `hop/task.rs`(ExecuteTask)、`hop/action.rs`(ApplyAction)、`hop/timeout.rs`(DispatchTimeout)、`hop/cascade.rs`(SkipTask/AbortTask)、`hop/propagate.rs`(PropagateTask)、`hop/reentry.rs`(ReenterTask);kind 自有的规划器(入口检查、启动计划、完成计划、timeout round/plan、容器 fan-out、catch fan-out、上行/join、重入)随 arm 搬入对应模块,仍以 `impl KernelHost` 方法存在(最小改写、同模块互调无需放宽可见性) |
+| `apply_action_once`:自持 claim/计划/提交/唤醒/投影/槽位(与 hop 路径重复约 120 行) | 预检 → 意图提交 → **同一条流水线**(`prepare_hop(Slot::Direct)` → 同一 `run`/`next` → `dispatch_hop(Projection::Whole)`);`attempt` 参数删除(claim fence 改由**操作自身的 attempt** 派生,与 hop 路径同源) |
+
+设计与分相理由见 `KERNEL_REFACTOR_DESIGN.md` §3.8。**行为差异(逐条登记,均非语义变更)**:
+
+1. **冲突错误类别**:统一后的分发把 CAS 冲突报成 `conflict(...)`(ECONFLICT)而不是 `Runtime(...)` —— 这是修 bug:动作路径并入统一分发后,
+   原 `Runtime` 类别会让 `apply_action` 的重试循环(靠 `is_conflict` 判定)不再重试,`reliability::action::racing_completes_converge_on_one_decision_and_one_effect`
+   因此由红转绿(见下验收)。hop 路径只把该错误写进日志,不受影响。
+2. **动作路径现在也上报 lifecycle**(`report_lifecycle` 在 `dispatch_hop` 内):事件**集合**不变(`ReportedRuns` 去重),
+   但「进程终态」事件可能由动作自己的提交上报,而不是等下一个 hop。
+3. **动作路径的槽位结算改用提交返回的快照**(原先多读一次聚合):`place_run` 的判定与 hop 路径同源。
+4. `KernelHost::snapshot` 现在只被测试使用 ⇒ 加 `#[cfg(test)]`(仓库门禁 `-D warnings`)。
+5. **探针 WIP 旁置/回填**(与 C2/C3 同口径):本笔提交**不含** P1 工作区那笔未提交的 `shell::hop_trace` 探针 ——
+   `shell/mod.rs` 的计时垫片已摘除、`shell/tests/mod.rs` 回到 HEAD、`tests/perf_probe.rs` 保持 untracked;提交后按同一管线**回填到新结构**
+   (`LOAD`/`PLACE1`/`CLAIM` 落 `hop/prepare.rs`,`PLAN` 覆盖 `run`+`next` —— 与拆分前那 745 行的 match 同一跨度,`DELIVER…PLACE2` 落 `hop/dispatch.rs`)。
+   顺带登记:**非 test 垫片里从未被读的 `HOPS` 常量必须删掉**(它在写码状态就让 `-D warnings` EXIT 101);cfg(test) 那份不动,探针可照跑。
+
+**验收(在提交状态门上跑)**:
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**;`cargo fmt --all --check` 干净。
+- `cargo test -p acts --lib --tests` = **869 passed / 1 failed / 1 ignored**;唯一挂的仍是基线已证的那条既有抖动
+  (`export::actions::tests::a_run_cannot_seal_another_subjects_scope`,见下)。
+- `cargo test -p acts --lib scheduler::tests::reliability:: -- --test-threads=1` = **65 passed**(含上面那条由红转绿的动作竞态用例)。
+
+**抖动复现与归因(实测,防止把既有竞态记成回归)**:
+- `kernel_task_and_act_messages_are_emitted` 在 `--lib scheduler::shell::tests:: -- --test-threads=1` 下会挂:失败形态恒为
+  `$|running` 与 `$|completed` 之差(**只差根节点行**)。**基线(HEAD)同样挂**(实测 2–3/3),不是本次引入。
+- 机制(带临时埋点实测,埋点已删):终态提交里 `deliver → commit → wake → **lifecycle** → 投影` —— 事件的读者可在
+  `RowProjector::project_nodes` 写完 `proc` 行、**尚未**写节点行的窗口里读到:`LIFE(all_terminal=true) → PROC(root=Completed) → PROJ(node=$)=Completed`。
+  测试的同步点正是「进程终态事件」+「proc 行转终态」,于是可能先读到 proc 行终态、再读到 `$` 行还是上一版 `running`。同一窗口也让
+  `a_run_cannot_seal_another_subjects_scope` 偶发(`state=Running`;基线 `--lib export::actions::tests:: -- --test-threads=1` 实测 1/3 挂)。
+- **未修,登记待裁**(超出本次切面):`project_nodes` 先写 `proc` 行、后写节点行是窗口本身;把 `proc` 行挪到节点行之后写即可闭合,
+  但那属于读模型口径变更,应与 L6(投影降频/唤醒驱动)一起拍。
+
+**未触碰**:`examples/simple/main.rs`(C3 那笔误重置的遗留,仍停在 HEAD 版本)、`core/**`、`durable/**` 与一切公共面。
+
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2223,6 +2269,15 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 
 **与第二波的关系**:C1/C8a/C8b 是纯搬移/删死件,与性能项零冲突;从 C4 起动的是 `core/model` + `commit/aggregate` + `shell/mod.rs`,
 与性能探针同一批文件 ⇒ **性能项一律排在 C8c 之后**(第二波),不在第一波中途插入。
+
+### A2. 独立结构性重构(用户指令,不占 C1-C8c 的序)
+
+> 与第一波并行存在、**不改变 C1-C8c 的顺序**(C4 仍是 §12 指向的下一笔);每笔同样过 §11.C 的门禁。
+
+| 编号 | 任务 | 阻塞/前置 | 状态 |
+|---|---|---|---|
+| **H1** | host 的 hop 分相:`shell/hop/` 四阶段(准备 / 执行并返回结果 / 生成 next plan / 分发 next 操作)+ `OperationDriver` trait + 按 kind 的 driver 模块;`execute_one` 与 `apply_action_once` 走同一条流水线 | — | **已做(§10「H1 完成」,设计见 `KERNEL_REFACTOR_DESIGN.md` §3.8)** |
+| **H2** | `core/plan/**` 的 plan 抽象层:不同 plan 类型实现同一个 plan trait(用户 2026-10-16 指令) | H1 先落地;形态待拍 | 未做 |
 
 ### B. 第二波:性能与遗留(可与彼此交错)
 

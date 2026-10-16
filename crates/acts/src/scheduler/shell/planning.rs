@@ -15,8 +15,8 @@ pub(super) fn startable(state: crate::scheduler::core::model::task_graph::TaskSt
     )
 }
 
-/// What one timeout dispatch round decided (see
-/// [`KernelHost::timeout_round`]).
+/// What one timeout dispatch round decided (see the `DispatchTimeout` hop's
+/// phase 2).
 pub(super) enum TimeoutRound {
     /// The due branch and its decided guard: the hop dispatches it.
     Dispatch {
@@ -166,7 +166,7 @@ pub(super) fn walk_step<'a>(
         // legacy tree builds them as `NodeOutputKind::Catch` children, which
         // `Node::children()` (Normal kind) does not return, so a successful
         // completion never runs into them — only `Step::on_error` dispatches
-        // them, on the failure path ([`KernelHost::catch_fanout`]).
+        // them, on the failure path (the completion hop's catch fan-out).
         return model::step_branches(step).map(ContainerShape::Branches);
     }
     for branch in model::step_branches(step).unwrap_or_default() {
