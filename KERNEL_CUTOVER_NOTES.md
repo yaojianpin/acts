@@ -2161,10 +2161,30 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
   `build()` 只用那张 map 做**存在性**校验(`contains_key`),产出的 `ModelGraph` 只留 `declaration_next`/`explicit_next` ⇒ `kind` 是**写进去就丢**的死字段。
 - **比"缺变体"更糟:它现在给的是错答案** —— `shell/model.rs:554-568` 把**每个**子节点(step/branch/act)一律标成 `Act`。
 - 4 值的真值来源是 `view::NodeKind`(`crate::NodeKind` 就是它;`Node::kind()`/`is_kind()` 用它;行/消息的 kind 由 `node_kind_and_name` 从声明模型算,C6 再加 `act`)。
-- ⇒ **C8b③ 的"两份合一"应改成:删掉 policy 侧这个 enum(顺带 `NodeDefinition.name`),只留 `view::NodeKind`**;哪天真需要 policy 图区分节点种类,得喂 4 值的 kind,而不是常量 `Act`。
+- ⇒ 结论(**已按用户裁决执行,见下一节**):policy 侧的 `NodeKind` **恢复成 4 值并如实标注**(`shell/model.rs` 的子节点从 `Act` 改成 `Step`),
+  `view::NodeKind` 仍是行/消息的真值来源;§3.7 的注("两份模型图、两种用途,不合并")不变,C8b③ 只做 id 分配/投影/词汇**对齐**。
 
 **过程登记(探针 WIP)**:同 C2/C3 —— 旁置 `shell/mod.rs`/`shell/tests/mod.rs`,提交后按同一管线回填(这次只需把模块路径 `commit::process` → `commit::aggregate`);
 `examples/simple/main.rs` 那笔已在 C3 被误重置丢失(见 §10「C3 完成」),本轮它停在 HEAD 版本、未被触碰。
+
+### NodeKind 恢复 4 值(2026-10-16):policy 图说回模型自己的四种节点
+
+**用户指令**:把 `model_graph::NodeKind` 恢复成 4 值(它在 `7e8c791` 的 cutover 里被缩成 2 值),**保证语义不变**,并更新文档。
+
+**做了什么**:
+
+- `model_graph::NodeKind` = **`Workflow/Step/Branch/Act`**(与 `01a95b9` 一致),并给类型补了文档:planner 走的那张图装的是
+  **workflow 根 + 顶层 step**;一个 step 的 `branches` 与其中的 act 是**计划级 fan-out**,不是图节点 —— 四个变体保留是为了让词汇与
+  `crate::NodeKind`(`view` 那个,行/消息说的就是它)**对齐**。
+- `shell/model.rs` 把子节点的标注从 `Act` 改成 **`Step`**:这些 children 就是 `workflow.steps`(`from_workflow` 从这里种下),
+  `node_kind_and_name` 对同样这些 id 也回答 "step" —— 原先的 `Act` 是**错答案**。
+- `Branch`/`Act` 在非 test 构建里没有构造点 ⇒ 各带一条 **`#[allow(dead_code)]`**,理由写在属性处并指向本节(仓库规则:压 lint 必须写理由 + 登记)。
+
+**为什么语义不变(可复核)**:`NodeDefinition.kind` **一个读者都没有** —— `ModelGraphBuilder` 只把定义存下来做 **id 存在性**校验,
+`build()` 产出的 `ModelGraph` 只有 `declaration_next`/`explicit_next` 两张表 ⇒ 该字段是"写进去就丢"的值,改它不可能改变行为
+(`git grep -n NodeDefinition` 只有构造点与测试;`grep .kind` 在该文件里只有字段声明与测试建造器)。
+门禁(**在"提交状态"上跑,即探针 WIP 旁置时**):`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**、
+`cargo fmt --all --check` 干净、`cargo test -p acts --lib --tests` **869 passed / 1 failed** —— 挂的仍是基线已证的那条既有抖动。
 
 ---
 
@@ -2198,7 +2218,7 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 | **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | 未做 |
 | **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | 未做 |
 | **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | 未做 |
-| **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_kind_and_name` 替投影、`NodeKind` 合一) | C8a | 未做。**注**(§10「C1b 完成」已证):policy 侧 `model_graph::NodeKind` 是**死字段**(`build()` 丢掉 `NodeDefinition`)且把每个子节点一律标成 `Act` ⇒ 应**删**而非合一 |
+| **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_kind_and_name` 替投影、`NodeKind` 对齐) | C8a | 未做。**注**(§10「NodeKind 恢复 4 值」):policy 侧那个 enum 已恢复 4 值并如实标注;两份图不合并(§3.7),这里只做词汇对齐 |
 | **C8c** | `view` 挪位(§3.7 c)+ §3.7(d) 的登记项 —— **先验证 effect seam 是否丢弃 `Context::build_acts` 的结果**(若成立即"每 hop 跑了但不生效"的白付开销) | C8b;**D4 需先拍** | 未做(登记待验证) |
 
 **与第二波的关系**:C1/C8a/C8b 是纯搬移/删死件,与性能项零冲突;从 C4 起动的是 `core/model` + `commit/aggregate` + `shell/mod.rs`,

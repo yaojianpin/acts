@@ -234,7 +234,8 @@ pub(crate) struct OperationId {                              // task_id 换类�
 > `ExecutionSnapshot → TaskSnapshot`、`ExecutionGraph/Node → TaskGraph/Node`;模块随之成了 `core::commit::process` / `core::model::task_graph`。
 > 逐项映射、边界(字面量/散文不动)与验收见 `KERNEL_CUTOVER_NOTES.md` §10「C2 完成」「C3 完成」;
 > `TaskId`/`OperationId` 的**类型化**(`node: NodeId`、`OperationId.task: TaskId`、`wire()`)是 C4,`shell Process/Task` 仍按"不动,等删"。
-> 另:`core/commit/{aggregate,command}` 已按 C1 的办法目录化(见 §10「C1b 完成」)。
+> 另:`core/commit/{aggregate,command}` 已按 C1 的办法目录化(见 §10「C1b 完成」);
+> `model_graph::NodeKind` 已恢复 4 值并**如实标注**(policy 图装的是根 + 顶层 step;分支/act 是计划级 fan-out),见 §10「NodeKind 恢复 4 值」。
 
 ### 3.3 投影(第 ③ 条)
 
