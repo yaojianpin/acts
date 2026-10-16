@@ -73,7 +73,7 @@ pub(crate) fn is_guard_skip(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {
         .contains_key(&(task.clone(), GUARD_SKIP_VAR.to_string()))
 }
 
-pub(crate) struct PropagationPlanner;
+pub(crate) struct Propagate;
 
 /// The terminal states a join accepts as "this predecessor is done and the
 /// flow may continue". `Skipped` is deliberately absent: a skipped

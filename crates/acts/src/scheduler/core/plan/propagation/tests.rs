@@ -1,10 +1,12 @@
 use super::*;
+
 use crate::scheduler::core::commit::aggregate::TaskSnapshot;
 use crate::scheduler::core::model::model_graph::NodeId;
 use crate::scheduler::core::model::operation::ClaimToken;
 use crate::scheduler::core::model::task_graph::TaskGraphBuilder;
 use crate::scheduler::core::model::task_graph::TaskNode;
 use crate::scheduler::core::model::transition_plan::ProcessVersion;
+use crate::scheduler::core::plan::ActPlan;
 use std::collections::{BTreeMap, HashMap};
 
 fn id(name: &str) -> TaskId {
@@ -111,9 +113,11 @@ fn command(source: &str, policy: JoinPolicy) -> PropagateCommand {
 
 #[test]
 fn join_waits_until_every_predecessor_is_terminal() {
-    let plan = PropagationPlanner::plan(
-        &graph(),
-        &snapshot(TaskState::Completed, TaskState::Running),
+    let plan = Propagate::plan(
+        (
+            &graph(),
+            &snapshot(TaskState::Completed, TaskState::Running),
+        ),
         &command("a", JoinPolicy::AllSucceeded),
     )
     .unwrap();
@@ -123,9 +127,11 @@ fn join_waits_until_every_predecessor_is_terminal() {
 
 #[test]
 fn last_successful_predecessor_schedules_join_once() {
-    let plan = PropagationPlanner::plan(
-        &graph(),
-        &snapshot(TaskState::Completed, TaskState::Completed),
+    let plan = Propagate::plan(
+        (
+            &graph(),
+            &snapshot(TaskState::Completed, TaskState::Completed),
+        ),
         &command("b", JoinPolicy::AllSucceeded),
     )
     .unwrap();
@@ -136,9 +142,8 @@ fn last_successful_predecessor_schedules_join_once() {
 
 #[test]
 fn dead_predecessor_puts_success_join_into_the_skip_cascade() {
-    let plan = PropagationPlanner::plan(
-        &graph(),
-        &snapshot(TaskState::Failed, TaskState::Completed),
+    let plan = Propagate::plan(
+        (&graph(), &snapshot(TaskState::Failed, TaskState::Completed)),
         &command("b", JoinPolicy::AllSucceeded),
     )
     .unwrap();
@@ -160,8 +165,7 @@ fn dead_source_sends_admitted_unfinished_successors_into_the_cascade() {
     if let Some(target) = snap.tasks.get_mut(&id("join")) {
         target.state = TaskState::Ready;
     }
-    let plan =
-        PropagationPlanner::plan(&graph(), &snap, &command("a", JoinPolicy::AllSucceeded)).unwrap();
+    let plan = Propagate::plan((&graph(), &snap), &command("a", JoinPolicy::AllSucceeded)).unwrap();
     // A `Ready` target needs no admission change, just the skip operation.
     assert!(plan.state_changes.is_empty());
     assert_eq!(plan.operations.len(), 1);
@@ -191,8 +195,8 @@ fn a_running_successor_of_a_dead_source_is_skipped_in_place() {
     if let Some(target) = snapshot.tasks.get_mut(&id("b")) {
         target.revision = 6;
     }
-    let plan = PropagationPlanner::plan(&graph, &snapshot, &command("a", JoinPolicy::AllSucceeded))
-        .unwrap();
+    let plan =
+        Propagate::plan((&graph, &snapshot), &command("a", JoinPolicy::AllSucceeded)).unwrap();
     // The plan only schedules the skip; the hop owns the state change
     // against the authoritative state.
     assert!(plan.state_changes.is_empty());
@@ -204,9 +208,8 @@ fn a_running_successor_of_a_dead_source_is_skipped_in_place() {
 
 #[test]
 fn a_live_source_leaves_admitted_successors_alone() {
-    let plan = PropagationPlanner::plan(
-        &graph(),
-        &snapshot(TaskState::Completed, TaskState::Ready),
+    let plan = Propagate::plan(
+        (&graph(), &snapshot(TaskState::Completed, TaskState::Ready)),
         &command("a", JoinPolicy::AllSucceeded),
     )
     .unwrap();

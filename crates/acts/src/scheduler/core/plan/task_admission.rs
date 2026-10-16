@@ -3,6 +3,8 @@
 //! Resident objects, queues, caches and storage adapt into this policy. The
 //! kernel owns the rule; scheduler code owns only atomic observation/mutation.
 
+use crate::scheduler::core::plan::ActPlan;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TaskSlotKind {
     Once,
@@ -47,48 +49,62 @@ pub(crate) enum AdmissionDecision {
     AllocateGeneration,
 }
 
-pub(crate) struct GenerationAdmissionPolicy;
-impl GenerationAdmissionPolicy {
-    pub(crate) const fn decide(
-        kind: TaskSlotKind,
-        intent: AdmissionIntent,
-        observation: SlotObservation,
-    ) -> AdmissionDecision {
+/// The plan of one execution-generation admission: whether the execution a
+/// node wants may take its slot, reuse one a rewind recreated, or is ignored.
+pub(crate) struct Admit;
+
+impl ActPlan for Admit {
+    type Reading<'a> = ();
+    type Command<'a> = (TaskSlotKind, AdmissionIntent, SlotObservation);
+    type Output = AdmissionDecision;
+    type Error = std::convert::Infallible;
+
+    /// Decide one admission: the whole input is the command.
+    fn plan(_reading: (), command: &Self::Command<'_>) -> Result<Self::Output, Self::Error> {
+        let (kind, intent, observation) = *command;
         if observation.process_completed {
-            return AdmissionDecision::Ignore;
+            return Ok(AdmissionDecision::Ignore);
         }
         if matches!(intent, AdmissionIntent::Forward)
             && matches!(kind, TaskSlotKind::Once)
             && observation.predecessor_failed
         {
-            return AdmissionDecision::Ignore;
+            return Ok(AdmissionDecision::Ignore);
         }
-        match (kind, observation.existing) {
+        Ok(match (kind, observation.existing) {
             (_, ExistingGeneration::Unstarted) => AdmissionDecision::ReadmitExisting,
             (TaskSlotKind::Once, ExistingGeneration::Absent | ExistingGeneration::Completed) => {
                 AdmissionDecision::AllocateGeneration
             }
             (TaskSlotKind::Once, ExistingGeneration::Active) => AdmissionDecision::Ignore,
-        }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::core::plan::infallible;
+
     #[test]
     fn terminal_process_and_failed_forward_are_rejected() {
         assert_eq!(
-            GenerationAdmissionPolicy::decide(
-                TaskSlotKind::Once,
-                AdmissionIntent::Forward,
-                SlotObservation::vacant(true, false)
-            ),
+            infallible(Admit::plan(
+                (),
+                &(
+                    TaskSlotKind::Once,
+                    AdmissionIntent::Forward,
+                    SlotObservation::vacant(true, false)
+                )
+            )),
             AdmissionDecision::Ignore
         );
         let failed = SlotObservation::vacant(false, true);
         assert_eq!(
-            GenerationAdmissionPolicy::decide(TaskSlotKind::Once, AdmissionIntent::Forward, failed),
+            infallible(Admit::plan(
+                (),
+                &(TaskSlotKind::Once, AdmissionIntent::Forward, failed)
+            )),
             AdmissionDecision::Ignore
         );
     }

@@ -12,6 +12,7 @@
 //! Nothing here reads a clock, a store or a layer above this one.
 
 use crate::scheduler::core::model::task_graph::TaskState;
+use crate::scheduler::core::plan::ActPlan;
 
 /// The creation stamp of one run, written into its seed on the root scope.
 ///
@@ -33,28 +34,41 @@ pub(crate) enum Admission {
     Park,
 }
 
-/// The slot decision for one run:
-///
-/// - `cap` is the configured bound on runs in flight at once;
-/// - `active` is how many runs hold a slot right now;
-/// - `state` is the run's root execution state.
-///
-/// A run whose root already reached a terminal state is admitted without a
-/// slot: nothing is left to bound, and parking it would let a finished run's
-/// own bookkeeping (a timer operation still open) wait behind the cap. Every
-/// other run takes one of the `cap` slots — a cap of zero admits none, exactly
-/// like an empty legacy resident set — or parks.
-pub(crate) fn admit(cap: usize, active: usize, state: TaskState) -> Admission {
-    if state.is_terminal() || active < cap {
-        Admission::Admit
-    } else {
-        Admission::Park
+/// The plan of one run's slot decision: whether the driver lets it hop now or
+/// holds it back until a slot frees.
+pub(crate) struct Admit;
+
+impl ActPlan for Admit {
+    type Reading<'a> = ();
+    type Command<'a> = (usize, usize, TaskState);
+    type Output = Admission;
+    type Error = std::convert::Infallible;
+
+    /// The slot decision for one run:
+    ///
+    /// - `cap` is the configured bound on runs in flight at once;
+    /// - `active` is how many runs hold a slot right now;
+    /// - `state` is the run's root execution state.
+    ///
+    /// A run whose root already reached a terminal state is admitted without a
+    /// slot: nothing is left to bound, and parking it would let a finished run's
+    /// own bookkeeping (a timer operation still open) wait behind the cap. Every
+    /// other run takes one of the `cap` slots — a cap of zero admits none, exactly
+    /// like an empty legacy resident set — or parks.
+    fn plan(_reading: (), command: &Self::Command<'_>) -> Result<Self::Output, Self::Error> {
+        let (cap, active, state) = *command;
+        Ok(if state.is_terminal() || active < cap {
+            Admission::Admit
+        } else {
+            Admission::Park
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::core::plan::infallible;
 
     /// The two states a run can ask for a slot in: a fresh start seeds its
     /// root `Ready`, a parked one is seeded `Created`.
@@ -63,12 +77,18 @@ mod tests {
     #[test]
     fn a_free_slot_admits_and_a_full_set_parks() {
         for state in ASKING {
-            assert_eq!(admit(2, 0, state), Admission::Admit);
-            assert_eq!(admit(2, 1, state), Admission::Admit);
-            assert_eq!(admit(2, 2, state), Admission::Park);
+            assert_eq!(
+                infallible(Admit::plan((), &(2, 0, state))),
+                Admission::Admit
+            );
+            assert_eq!(
+                infallible(Admit::plan((), &(2, 1, state))),
+                Admission::Admit
+            );
+            assert_eq!(infallible(Admit::plan((), &(2, 2, state))), Admission::Park);
             // A set beyond the cap (a cap lowered under a running driver, or a
             // concurrent start) must not admit anything more.
-            assert_eq!(admit(1, 4, state), Admission::Park);
+            assert_eq!(infallible(Admit::plan((), &(1, 4, state))), Admission::Park);
         }
     }
 
@@ -81,15 +101,21 @@ mod tests {
             TaskState::Skipped,
             TaskState::Removed,
         ] {
-            assert_eq!(admit(0, 0, state), Admission::Admit);
-            assert_eq!(admit(1, 9, state), Admission::Admit);
+            assert_eq!(
+                infallible(Admit::plan((), &(0, 0, state))),
+                Admission::Admit
+            );
+            assert_eq!(
+                infallible(Admit::plan((), &(1, 9, state))),
+                Admission::Admit
+            );
         }
     }
 
     #[test]
     fn a_zero_cap_admits_nothing_with_work_left() {
         for state in ASKING {
-            assert_eq!(admit(0, 0, state), Admission::Park);
+            assert_eq!(infallible(Admit::plan((), &(0, 0, state))), Admission::Park);
         }
     }
 }

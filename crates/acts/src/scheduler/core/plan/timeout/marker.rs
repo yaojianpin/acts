@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::scheduler::core::plan::ActPlan;
+
 /// The cost start of one execution, written by its own start hop (`Ready →
 /// Running`/`Waiting`). Not part of the expression variable space: it is a
 /// kernel fact, so it stays `__`-private and never reaches a headless scope.
@@ -96,22 +98,44 @@ pub(crate) fn has_live_children(
         .any(|branch| has_live_child(snapshot, owner, &branch.node))
 }
 
-/// Which branch the next round examines: declaration order, skipping the ones
-/// that already fired, stopping at the first branch that is in flight.
-pub(crate) fn candidate(
-    snapshot: &ProcessSnapshot,
-    owner: &TaskId,
-    branches: &[TimeoutBranch],
-) -> TimeoutCandidate {
-    let fired = claimed(snapshot, owner);
-    for (index, branch) in branches.iter().enumerate() {
-        if fired.iter().any(|id| id == &branch.node) {
-            continue;
+/// The command of one timeout round: whose timer fired and the branches it
+/// declared, in declaration order.
+pub(crate) struct RoundCommand<'a> {
+    /// The execution whose timer fired.
+    pub(crate) owner: &'a TaskId,
+    /// The branches the owner declared.
+    pub(crate) branches: &'a [TimeoutBranch],
+}
+
+/// The plan of one timeout round: which declared branch the next tick may
+/// dispatch.
+pub(crate) struct Round;
+
+impl ActPlan for Round {
+    type Reading<'a> = &'a ProcessSnapshot;
+    type Command<'a> = RoundCommand<'a>;
+    type Output = TimeoutCandidate;
+    type Error = std::convert::Infallible;
+
+    /// Which branch the next round examines: declaration order, skipping the ones
+    /// that already fired, stopping at the first branch that is in flight.
+    fn plan(
+        reading: Self::Reading<'_>,
+        command: &Self::Command<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        let snapshot = reading;
+        let owner = command.owner;
+        let branches = command.branches;
+        let fired = claimed(snapshot, owner);
+        for (index, branch) in branches.iter().enumerate() {
+            if fired.iter().any(|id| id == &branch.node) {
+                continue;
+            }
+            if has_live_child(snapshot, owner, &branch.node) {
+                return Ok(TimeoutCandidate::Blocked);
+            }
+            return Ok(TimeoutCandidate::Branch(index));
         }
-        if has_live_child(snapshot, owner, &branch.node) {
-            return TimeoutCandidate::Blocked;
-        }
-        return TimeoutCandidate::Branch(index);
+        Ok(TimeoutCandidate::None)
     }
-    TimeoutCandidate::None
 }

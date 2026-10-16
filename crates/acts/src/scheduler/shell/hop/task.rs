@@ -60,7 +60,7 @@ pub(in crate::scheduler::shell) enum Start {
 pub(super) struct ExecuteTask;
 
 #[async_trait::async_trait]
-impl OperationDriver for ExecuteTask {
+impl ActOperation for ExecuteTask {
     /// Nothing to check before the claim: a startable execution always starts.
     async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)

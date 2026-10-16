@@ -66,9 +66,7 @@ fn join_completes_the_parent_when_every_child_is_terminal() {
         process_id: "p1".into(),
         parent: id("step1", 0),
     };
-    let (change, operation) = ContainerPlanner::plan_join(&graph, &snapshot, &command)
-        .unwrap()
-        .unwrap();
+    let (change, operation) = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
     assert_eq!(change.task, id("step1", 0));
     assert_eq!(change.from, TaskState::Running);
     assert_eq!(change.to, TaskState::Completed);
@@ -139,20 +137,24 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
         snapshot
     };
     assert!(
-        ContainerPlanner::plan_join(
-            &graph,
-            &parked_child(TaskState::Running, TaskState::Completed),
-            &command
+        Join::plan(
+            (
+                &graph,
+                &parked_child(TaskState::Running, TaskState::Completed)
+            ),
+            &command,
         )
         .unwrap()
         .is_none()
     );
     // An aborted child leaves the outcome to the abort walk.
     assert!(
-        ContainerPlanner::plan_join(
-            &graph,
-            &parked_child(TaskState::Completed, TaskState::Aborted),
-            &command
+        Join::plan(
+            (
+                &graph,
+                &parked_child(TaskState::Completed, TaskState::Aborted)
+            ),
+            &command,
         )
         .unwrap()
         .is_none()
@@ -163,11 +165,7 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     // a container until its flow says so.
     let mut unmarked = parked_child(TaskState::Completed, TaskState::Skipped);
     unmarked.variables.clear();
-    assert!(
-        ContainerPlanner::plan_join(&graph, &unmarked, &command)
-            .unwrap()
-            .is_none()
-    );
+    assert!(Join::plan((&graph, &unmarked), &command).unwrap().is_none());
     // A parent deciding its catches is never joined by the plain join
     // either — that flow belongs to the catch join.
     let mut decider = parked_child(TaskState::Completed, TaskState::Skipped);
@@ -175,11 +173,7 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
         (id("step1", 0), FLOW_VAR.to_string()),
         FLOW_CATCHES.to_string(),
     );
-    assert!(
-        ContainerPlanner::plan_join(&graph, &decider, &command)
-            .unwrap()
-            .is_none()
-    );
+    assert!(Join::plan((&graph, &decider), &command).unwrap().is_none());
     // A `Waiting` parent is never joined either: its act is unanswered.
     let mut waiting = parked_child(TaskState::Completed, TaskState::Skipped);
     waiting.tasks.insert(
@@ -192,9 +186,5 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
             revision: 3,
         },
     );
-    assert!(
-        ContainerPlanner::plan_join(&graph, &waiting, &command)
-            .unwrap()
-            .is_none()
-    );
+    assert!(Join::plan((&graph, &waiting), &command).unwrap().is_none());
 }

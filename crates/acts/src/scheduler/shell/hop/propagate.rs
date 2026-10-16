@@ -146,10 +146,10 @@ impl KernelHost {
 }
 
 /// The propagation hop: a settled execution carried into its successors.
-pub(super) struct Propagate;
+pub(super) struct PropagateTask;
 
 #[async_trait::async_trait]
-impl OperationDriver for Propagate {
+impl ActOperation for PropagateTask {
     /// Nothing to check before the claim: a settled execution always
     /// propagates.
     async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
@@ -182,7 +182,7 @@ impl OperationDriver for Propagate {
                 join_policy: crate::scheduler::core::plan::propagation::JoinPolicy::AllSucceeded,
                 flow: host.flow_of(snapshot, &task_id).await?,
             };
-            let mut plan = PropagationPlanner::plan(&graph, snapshot, &command).map_err(runtime)?;
+            let mut plan = Propagate::plan((&graph, snapshot), &command).map_err(runtime)?;
             // A completed execution's own scope data folds into its parent
             // — the legacy `Task::next` → `parent.update_data(&outputs)`:
             // what a step's package wrote is what the step (and, up the
@@ -252,17 +252,15 @@ impl OperationDriver for Propagate {
                     .iter()
                     .any(|create| create.parent.as_ref() == Some(&parent))
             {
-                let catch_join =
-                    crate::scheduler::core::plan::container::ContainerPlanner::plan_catch_join(
-                        &graph,
-                        snapshot,
-                        &crate::scheduler::core::plan::container::CatchJoinCommand {
-                            process_id: id.process_id.clone(),
-                            parent: parent.clone(),
-                            source: task_id.clone(),
-                        },
-                    )
-                    .map_err(runtime)?;
+                let catch_join = CatchJoin::plan(
+                    (&graph, snapshot),
+                    &crate::scheduler::core::plan::container::CatchJoinCommand {
+                        process_id: id.process_id.clone(),
+                        parent: parent.clone(),
+                        source: task_id.clone(),
+                    },
+                )
+                .map_err(runtime)?;
                 match catch_join {
                     Some(crate::scheduler::core::plan::container::CatchJoinOutcome::Resumed(
                         change,
@@ -322,10 +320,7 @@ impl OperationDriver for Propagate {
                             parent,
                         };
                         if let Some((change, operation)) =
-                            crate::scheduler::core::plan::container::ContainerPlanner::plan_join(
-                                &graph, snapshot, &join,
-                            )
-                            .map_err(runtime)?
+                            Join::plan((&graph, snapshot), &join).map_err(runtime)?
                         {
                             host.attach_join_message(
                                 snapshot,
@@ -340,16 +335,15 @@ impl OperationDriver for Propagate {
                 }
             }
             if let Some(to) = upward_to {
-                let (changes, operations) =
-                    crate::scheduler::core::plan::upward::UpwardPlanner::plan_upward(
-                        snapshot,
-                        &crate::scheduler::core::plan::upward::UpwardCommand {
-                            process_id: id.process_id.clone(),
-                            source: task_id.clone(),
-                            to,
-                        },
-                    )
-                    .map_err(runtime)?;
+                let (changes, operations) = Upward::plan(
+                    snapshot,
+                    &crate::scheduler::core::plan::upward::UpwardCommand {
+                        process_id: id.process_id.clone(),
+                        source: task_id.clone(),
+                        to,
+                    },
+                )
+                .map_err(runtime)?;
                 // The error the decision carries travels up with it: the
                 // legacy `emit_error` → `parent.set_err` wrote the same
                 // code/message into every ancestor it decided, so an

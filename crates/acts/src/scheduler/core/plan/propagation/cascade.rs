@@ -7,12 +7,17 @@ fn is_error_fact(name: &str) -> bool {
     matches!(name, "ecode" | "message" | "error.code" | "error.message")
 }
 
-impl PropagationPlanner {
-    pub(crate) fn plan(
-        graph: &TaskGraph,
-        snapshot: &ProcessSnapshot,
-        command: &PropagateCommand,
-    ) -> Result<TransitionPlan, PropagationError> {
+impl crate::scheduler::core::plan::ActPlan for Propagate {
+    type Reading<'a> = (&'a TaskGraph, &'a ProcessSnapshot);
+    type Command<'a> = PropagateCommand;
+    type Output = TransitionPlan;
+    type Error = PropagationError;
+
+    fn plan(
+        reading: Self::Reading<'_>,
+        command: &Self::Command<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        let (graph, snapshot) = reading;
         validate_envelope(graph, snapshot, command)?;
         let source = snapshot
             .tasks

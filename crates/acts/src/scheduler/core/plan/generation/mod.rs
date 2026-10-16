@@ -10,6 +10,8 @@ use crate::scheduler::core::{
     },
 };
 
+use crate::scheduler::core::plan::ActPlan;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
@@ -23,9 +25,14 @@ pub(crate) struct ReenterCommand {
     pub(crate) source_operation: OperationCommit,
 }
 
-pub(crate) struct GenerationPlanner;
+pub(crate) struct Reenter;
 
-impl GenerationPlanner {
+impl ActPlan for Reenter {
+    type Reading<'a> = (&'a TaskGraph, &'a ProcessSnapshot);
+    type Command<'a> = ReenterCommand;
+    type Output = TransitionPlan;
+    type Error = GenerationError;
+
     /// Re-enter one task with a fresh generation. The re-entered execution's
     /// whole forward closure is recreated alongside it (new generations in
     /// breadth-first order, predecessor and parent edges remapped to the new
@@ -36,11 +43,11 @@ impl GenerationPlanner {
     /// root receives an `ExecuteTask` operation - its completion propagates
     /// into the recreated chain. `graph` is the snapshot's execution graph
     /// (rebuilt by the caller).
-    pub(crate) fn plan_reentry(
-        graph: &TaskGraph,
-        snapshot: &ProcessSnapshot,
-        command: &ReenterCommand,
-    ) -> Result<TransitionPlan, GenerationError> {
+    fn plan(
+        reading: Self::Reading<'_>,
+        command: &Self::Command<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        let (graph, snapshot) = reading;
         if snapshot.process_id != command.process_id {
             return Err(GenerationError::WrongProcess);
         }

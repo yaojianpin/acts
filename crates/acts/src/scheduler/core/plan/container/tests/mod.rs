@@ -2,6 +2,7 @@ use super::*;
 use crate::scheduler::core::commit::aggregate::TaskSnapshot;
 use crate::scheduler::core::model::operation::ClaimToken;
 use crate::scheduler::core::model::transition_plan::ProcessVersion;
+use crate::scheduler::core::plan::ActPlan;
 use std::collections::{BTreeMap, HashMap};
 
 fn id(task: &str, generation: u64) -> TaskId {

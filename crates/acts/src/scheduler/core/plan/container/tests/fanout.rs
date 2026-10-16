@@ -18,7 +18,7 @@ fn fanout_keeps_the_source_running_and_admits_entry_and_skip_children() {
             ),
         ],
     );
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     assert_eq!(plan.task_creates.len(), 2);
     assert!(
         plan.task_creates
@@ -71,7 +71,7 @@ fn fanout_resumes_a_waiting_source_into_running() {
             vec![ContainerPredecessor::Source],
         )],
     );
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     assert_eq!(plan.state_changes.len(), 1);
     let change = &plan.state_changes[0];
     assert_eq!(change.task, id("step1", 0));
@@ -97,7 +97,7 @@ fn fanout_queues_chain_successors_behind_the_entry() {
             ),
         ],
     );
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     assert_eq!(plan.task_creates.len(), 2);
     let queued = plan
         .task_creates
@@ -114,7 +114,7 @@ fn fanout_queues_chain_successors_behind_the_entry() {
 #[test]
 fn empty_container_completes_and_propagates_in_the_same_hop() {
     let (snapshot, command) = fanout_command("b1", TaskState::Running, vec![]);
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     assert!(plan.task_creates.is_empty());
     assert_eq!(plan.state_changes[0].to, TaskState::Completed);
     assert_eq!(plan.operations[0].kind, OperationKind::PropagateTask);
@@ -158,7 +158,7 @@ fn a_rewound_created_child_is_readmitted_not_duplicated() {
         inputs: Vec::new(),
         source_park: TaskState::Running,
     };
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     assert!(plan.task_creates.is_empty(), "no duplicate generation");
     // The running source stays running (the park is the state it is
     // already in); the readmitted child is the only change.
@@ -204,7 +204,7 @@ fn an_active_child_is_ignored_not_doubled() {
         inputs: Vec::new(),
         source_park: TaskState::Running,
     };
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     assert!(plan.task_creates.is_empty());
     assert!(plan.operations.is_empty());
 }
@@ -235,7 +235,7 @@ fn a_completed_child_reruns_as_a_fresh_generation() {
         inputs: Vec::new(),
         source_park: TaskState::Running,
     };
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     let create = &plan.task_creates[0];
     assert_eq!(create.task, id("b1", 1), "next generation allocated");
 }
@@ -251,7 +251,7 @@ fn a_terminal_source_is_not_a_container() {
             vec![ContainerPredecessor::Source],
         )],
     );
-    let error = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap_err();
+    let error = Fanout::plan(&snapshot, &command).unwrap_err();
     assert!(matches!(error, ContainerError::SourceNotContainer { .. }));
 }
 
@@ -267,7 +267,7 @@ fn a_failure_fanout_keeps_the_step_running() {
         )],
     );
     command.source_park = TaskState::Running;
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     let change = plan
         .state_changes
         .iter()
@@ -292,7 +292,7 @@ fn a_failure_fanout_keeps_the_step_running() {
         )],
     );
     command.source_park = TaskState::Running;
-    let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
     assert!(
         plan.state_changes
             .iter()

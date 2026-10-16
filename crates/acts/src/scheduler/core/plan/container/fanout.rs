@@ -1,4 +1,5 @@
 use super::*;
+use crate::scheduler::core::plan::{ActPlan, infallible};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ContainerFanoutCommand {
@@ -23,15 +24,23 @@ pub(crate) struct ContainerFanoutCommand {
     pub(crate) source_park: TaskState,
 }
 
-impl ContainerPlanner {
+/// Fan a container's children out in one atomic plan.
+pub(crate) struct Fanout;
+
+impl ActPlan for Fanout {
+    type Reading<'a> = &'a ProcessSnapshot;
+    type Command<'a> = ContainerFanoutCommand;
+    type Output = TransitionPlan;
+    type Error = ContainerError;
+
     /// Fan the container's children out in one atomic plan. The source parks
     /// in `command.source_park` — `Running` for every container (the legacy
     /// step stays running while its children run, and a failed step
     /// dispatching its CATCH children is running too); the join (see
-    /// [`Self::plan_join`] /
-    /// [`Self::plan_catch_join`]) decides it once every child is terminal. An
+    /// [`Join`] /
+    /// [`CatchJoin`]) decides it once every child is terminal. An
     /// empty container completes immediately.
-    pub(crate) fn plan_fanout(
+    fn plan(
         snapshot: &ProcessSnapshot,
         command: &ContainerFanoutCommand,
     ) -> Result<TransitionPlan, ContainerError> {
@@ -136,11 +145,14 @@ impl ContainerPlanner {
                 ),
                 None => base,
             };
-            let task = match crate::scheduler::core::plan::task_admission::GenerationAdmissionPolicy::decide(
-                crate::scheduler::core::plan::task_admission::TaskSlotKind::Once,
-                crate::scheduler::core::plan::task_admission::AdmissionIntent::Forward,
-                observation,
-            ) {
+            let task = match infallible(crate::scheduler::core::plan::task_admission::Admit::plan(
+                (),
+                &(
+                    crate::scheduler::core::plan::task_admission::TaskSlotKind::Once,
+                    crate::scheduler::core::plan::task_admission::AdmissionIntent::Forward,
+                    observation,
+                ),
+            )) {
                 crate::scheduler::core::plan::task_admission::AdmissionDecision::Ignore => {
                     resolved.push(
                         existing.ok_or(ContainerError::TaskNotFound(command.source.clone()))?,
@@ -217,7 +229,9 @@ impl ContainerPlanner {
             .map_err(|error| ContainerError::InvalidPlan(error.to_string()))?;
         Ok(plan)
     }
+}
 
+impl Fanout {
     fn empty_container_plan(
         snapshot: &ProcessSnapshot,
         command: &ContainerFanoutCommand,

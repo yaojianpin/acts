@@ -317,12 +317,12 @@ core/plan/branch/{mod.rs, errors.rs}
 
 | 阶段 | 位置 | 内容 |
 |---|---|---|
-| 1 准备 | `hop/prepare.rs` | parked 快路径、槽位策略(`place_run`)、按 kind 的 **pre-check 策略**(`OperationDriver::precheck`,今天只有计时器的 idle round)、`ClaimAndPrepare` 认领 —— 一次原子事件交回「本 hop 唯一权威快照」。`Slot::Policy`(驱动自己的 hop)/`Slot::Direct`(客户端动作:决策已持久化,不当被 parked 队列拦住) |
-| 2 执行 | `OperationDriver::run` | 该 kind 自己的工作,返回 **`Outcome`**(kind 自己的词汇:`Start`/`Effect`/`TimeoutRound`/`Planned`/`Nothing`) |
-| 3 计划 | `OperationDriver::next` | 把 `Outcome` 折成 **`TransitionPlan`**(状态变更、后继操作、outbox 记录) |
+| 1 准备 | `hop/prepare.rs` | parked 快路径、槽位策略(`place_run`)、按 kind 的 **pre-check 策略**(`ActOperation::precheck`,今天只有计时器的 idle round)、`ClaimAndPrepare` 认领 —— 一次原子事件交回「本 hop 唯一权威快照」。`Slot::Policy`(驱动自己的 hop)/`Slot::Direct`(客户端动作:决策已持久化,不当被 parked 队列拦住) |
+| 2 执行 | `ActOperation::run` | 该 kind 自己的工作,返回 **`Outcome`**(kind 自己的词汇:`Start`/`Effect`/`TimeoutRound`/`Planned`/`Nothing`) |
+| 3 计划 | `ActOperation::next` | 把 `Outcome` 折成 **`TransitionPlan`**(状态变更、后继操作、outbox 记录) |
 | 4 分发 | `hop/dispatch.rs` | deliver → commit(冲突 → 释放 claim + `ECONFLICT`)→ wake → lifecycle → 行投影(`Touched`/`Whole`)→ 槽位结算 |
 
-- **trait 是 `OperationDriver`**(`#[async_trait]`,`Send + Sync`),三个方法 `precheck`/`run`/`next`;`driver(kind)` 是唯一的查表入口,驱动侧不再 `match OperationKind`。driver 不持状态:`KernelHost` 显式传入,事实都在 `Pending`/`Claimed`/`Hop` 上下文里。
+- **trait 是 `ActOperation`**(`#[async_trait]`,`Send + Sync`;H1 落地时名为 `OperationDriver`,H2 起改此名),三个方法 `precheck`/`run`/`next`;`driver(kind)` 是唯一的查表入口,驱动侧不再 `match OperationKind`。driver 不持状态:`KernelHost` 显式传入,事实都在 `Pending`/`Claimed`/`Hop` 上下文里。
 - **每 kind 一模块**:`hop/task.rs`(ExecuteTask)、`hop/action.rs`(ApplyAction)、`hop/timeout.rs`(DispatchTimeout)、`hop/cascade.rs`(SkipTask/AbortTask)、`hop/propagate.rs`(PropagateTask)、`hop/reentry.rs`(ReenterTask)。kind 自有的规划器(入口检查、`start_plan`、`completion_plan`、`timeout_round/plan`、容器 fan-out、catch fan-out、上行/join 计划…)随 arm 一起搬进对应模块,仍以 `impl KernelHost` 方法存在(最小改写),因此同模块内互调无需放宽可见性。
 - **`Hop` 上下文只服务 trait**:`{id, claim, task_id, task, snapshot, now_ms}`;kind 内部的规划器保持既有签名(拆出上下文不会让签名变清楚),driver 在入口处解构。
 - **`Outcome` 的边界**:`Nothing` 表示「claim 之后发现其实无事可做」(计时器在预检与 claim 之间转 idle):claim 归还(next tick 重新推导),`next` 不会被调用。
@@ -330,6 +330,63 @@ core/plan/branch/{mod.rs, errors.rs}
 - **未动**:`OperationKind`/`OperationEvent`/状态机/`core/plan/**`/codec/`wire()`/读模型行表口径。CAS 冲突的错误类别从 `Runtime` 收紧为 `conflict`(ECONFLICT)——这是 hop 与动作两条路径共用一个冲突出口后的必然修正(动作重试循环靠 `is_conflict` 判定)。
 
 **行为差异(登记)**:①动作路径现在也上报 lifecycle(事件集合不变、`ReportedRuns` 去重,但「进程终态」可能由动作自己的提交上报);②动作路径的槽位结算改用提交返回的快照(原为额外一次聚合读);③`KernelHost::snapshot` 现在只服务测试(`#[cfg(test)]`)。
+
+---
+
+### 3.9 `core/plan/**` 的计划抽象:一个 `ActPlan` trait,每个计划/判定一个类型(H2,2026-10-16)
+
+**问题(用户)**:`core/plan` 这边是 6 个 `*Planner` 静态方法命名空间,签名各不同
+(`ContainerPlanner::{plan_fanout,plan_join,plan_catch_join}`、`PropagationPlanner::plan`、`GenerationPlanner::plan_reentry`、
+`UpwardPlanner::plan_upward`、`BranchPlanner::decide`、`GenerationAdmissionPolicy::decide`、`timeout::{candidate,dispatch,admit}`)——
+上层每处都要点名具体实现,没有统一契约。
+
+**终态:每个计划/判定 = 一个类型,实现 `ActPlan`**。trait 只有四个关联项(两个 GAT + 两个普通项):
+
+```rust
+pub(crate) trait ActPlan {
+    /// 本 plan 读什么:快照,以及它另外需要的形状(今天:重建的任务图);只读命令的用 `()`。
+    type Reading<'a>;
+    /// 调用方为本 plan 从读取视图里整理出的输入(可借用读取视图)。
+    type Command<'a>;
+    /// 产物:整张计划、一个判定,或调用方折入的片段。
+    type Output;
+    /// 本 plan 自己的拒因(不是引擎错误:shell 在调用点映射)。
+    type Error: std::fmt::Display;
+
+    fn plan(reading: Self::Reading<'_>, command: &Self::Command<'_>) -> Result<Self::Output, Self::Error>;
+}
+
+/// 不会拒绝的 plan 的输出:`Result` 恒为 `Ok`。
+pub(crate) fn infallible<T>(planned: Result<T, std::convert::Infallible>) -> T;
+```
+
+| 类型 | 旧身 | Reading | Output |
+|---|---|---|---|
+| `container::Fanout` | `ContainerPlanner::plan_fanout` | `&ProcessSnapshot` | `TransitionPlan` |
+| `container::Join` | `ContainerPlanner::plan_join` | `(&TaskGraph, &ProcessSnapshot)` | `Option<(StateChange, OperationIntent)>` |
+| `container::CatchJoin` | `ContainerPlanner::plan_catch_join` | `(&TaskGraph, &ProcessSnapshot)` | `Option<CatchJoinOutcome>` |
+| `propagation::Propagate` | `PropagationPlanner::plan` | `(&TaskGraph, &ProcessSnapshot)` | `TransitionPlan` |
+| `generation::Reenter` | `GenerationPlanner::plan_reentry` | `(&TaskGraph, &ProcessSnapshot)` | `TransitionPlan` |
+| `upward::Upward` | `UpwardPlanner::plan_upward` | `&ProcessSnapshot` | `(Vec<StateChange>, Vec<OperationIntent>)` |
+| `branch::Decide` | `BranchPlanner::decide` | `()` | `BranchDecision` |
+| `timeout::Round` | `timeout::candidate` | `&ProcessSnapshot` | `TimeoutCandidate` |
+| `timeout::Dispatch` | `timeout::dispatch` | `&ProcessSnapshot` | `TimeoutDispatch` |
+| `task_admission::Admit` | `GenerationAdmissionPolicy::decide` | `()` | `AdmissionDecision` |
+| `concurrency::Admit` | `concurrency::admit` | `()` | `Admission` |
+
+**三条设计取舍(都不是风格问题)**
+
+1. **`Reading` 是值,不是 `&Reading`**:读取视图就是引用(或引用的元组),按值传 ⇒ 不用图的两个入口(fan-out / upward)
+   **零额外开销**,要图的入口照旧拿到调用方已经建好的那张图(不会为了签名统一而多建一次图 —— 那会落在容器完成与 timeout 派发的热路径上)。
+2. **`Command` 也是 GAT**:允许**借用**命令 —— `timeout::Round` 的命令是 `RoundCommand<'a>{ owner: &'a TaskId, branches: &'a [TimeoutBranch] }`,
+   免得计时器每 tick 克隆整张分支表;字段本来就 owned 的命令(`ContainerFanoutCommand` 等)写 `type Command<'a> = X;` 即可。
+3. **`Error: Display` + `infallible`**:判定型计划(`Decide`/`Round`/`Dispatch`/`Admit`)不会拒绝,`Error = Infallible`;
+   契约仍然只有一份,由调用点的 `infallible(..)` 解开 —— 不搞"会失败的走 Result、只会回答的直接返回"两套形状。
+
+**边界(不是计划,保持原样)**:`timeout::{claimed, claim, cost_ms, has_live_child(ren), start_write}` 与 `branch::PredicateValue`
+是事实读写与取值;**`cron::Cron` 是带状态的值类型**(`parse`/`next_fire_millis`),不是"某个类型实现的一个计划"。
+
+**零行为变更**:判定逻辑、错误类型、错误消息、DTO 字段全部逐字保留;`*Planner`/`GenerationAdmissionPolicy` 整体删除,不留兼容壳。
 
 ---
 

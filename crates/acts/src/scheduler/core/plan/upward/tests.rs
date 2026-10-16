@@ -1,7 +1,9 @@
 use super::*;
+
 use crate::scheduler::core::commit::aggregate::TaskSnapshot;
 use crate::scheduler::core::model::model_graph::NodeId;
 use crate::scheduler::core::model::transition_plan::ProcessVersion;
+use crate::scheduler::core::plan::ActPlan;
 use std::collections::{BTreeMap, HashMap};
 
 fn id(task: &str, generation: u64) -> TaskId {
@@ -53,8 +55,7 @@ fn upward_walk_aborts_every_ancestor_and_seeds_their_cascade() {
         task("step1", 0, Some(id("$", 0)), TaskState::Completed),
         task("step2", 0, Some(id("step1", 0)), TaskState::Aborted),
     ]);
-    let (changes, operations) =
-        UpwardPlanner::plan_upward(&snapshot, &abort_command(id("step2", 0))).unwrap();
+    let (changes, operations) = Upward::plan(&snapshot, &abort_command(id("step2", 0))).unwrap();
     // Nearest ancestor first, root last — the legacy walk's order.
     let executed: Vec<&str> = changes
         .iter()
@@ -80,8 +81,7 @@ fn an_already_aborted_ancestor_is_left_to_its_own_cascade() {
         task("step1", 0, Some(id("$", 0)), TaskState::Aborted),
         task("step2", 0, Some(id("step1", 0)), TaskState::Aborted),
     ]);
-    let (changes, operations) =
-        UpwardPlanner::plan_upward(&snapshot, &abort_command(id("step2", 0))).unwrap();
+    let (changes, operations) = Upward::plan(&snapshot, &abort_command(id("step2", 0))).unwrap();
     assert!(changes.is_empty());
     assert!(operations.is_empty());
 }
@@ -89,7 +89,7 @@ fn an_already_aborted_ancestor_is_left_to_its_own_cascade() {
 #[test]
 fn the_walk_rides_an_aborted_source_only() {
     let snapshot = snapshot(vec![task("step1", 0, None, TaskState::Cancelled)]);
-    let error = UpwardPlanner::plan_upward(&snapshot, &abort_command(id("step1", 0))).unwrap_err();
+    let error = Upward::plan(&snapshot, &abort_command(id("step1", 0))).unwrap_err();
     assert!(matches!(error, UpwardError::SourceNotDecided { .. }));
 }
 
@@ -104,7 +104,7 @@ fn the_error_walk_rides_a_failed_source_upward() {
         source: id("step1", 0),
         to: TaskState::Failed,
     };
-    let (changes, operations) = UpwardPlanner::plan_upward(&snapshot, &command).unwrap();
+    let (changes, operations) = Upward::plan(&snapshot, &command).unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].task, id("$", 0));
     assert_eq!(changes[0].to, TaskState::Failed);
@@ -115,7 +115,7 @@ fn the_error_walk_rides_a_failed_source_upward() {
 #[test]
 fn only_abort_and_fail_walk_upward() {
     let snapshot = snapshot(vec![task("step1", 0, None, TaskState::Skipped)]);
-    let error = UpwardPlanner::plan_upward(
+    let error = Upward::plan(
         &snapshot,
         &UpwardCommand {
             process_id: "p1".into(),

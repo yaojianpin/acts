@@ -11,10 +11,10 @@ use crate::scheduler::shell::*;
 
 /// The rewind hop: `Back` to an earlier step, or `Cancel` of the closed
 /// execution itself.
-pub(super) struct Reenter;
+pub(super) struct ReenterTask;
 
 #[async_trait::async_trait]
-impl OperationDriver for Reenter {
+impl ActOperation for ReenterTask {
     /// Nothing to check before the claim: a rewind always has its work.
     async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
@@ -53,10 +53,7 @@ impl OperationDriver for Reenter {
                 target_task_id: target,
                 source_operation: claim.clone(),
             };
-            crate::scheduler::core::plan::generation::GenerationPlanner::plan_reentry(
-                &graph, snapshot, &command,
-            )
-            .map_err(runtime)?
+            Reenter::plan((&graph, snapshot), &command).map_err(runtime)?
         };
         Ok(plan)
     }

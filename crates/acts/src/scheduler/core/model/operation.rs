@@ -36,7 +36,7 @@ pub(crate) enum OperationKind {
     /// deciding commit closes the source generation (`Backed`) and creates
     /// this operation in the *same* atomic batch, so the re-entry cannot be
     /// lost to a crash or a lost compare-and-swap — its hop plans the fresh
-    /// generations ([`crate::scheduler::core::plan::generation::GenerationPlanner::plan_reentry`]) and the
+    /// generations ([`crate::scheduler::core::plan::generation::Reenter`]) and the
     /// recovery scan re-drives it if that hop fails. The target task id is
     /// the durable fact `__reenter_target` the deciding commit writes (`Back`
     /// names an earlier step, `Cancel` the closed execution itself).

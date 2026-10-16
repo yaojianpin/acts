@@ -1,4 +1,5 @@
 use super::*;
+use crate::scheduler::core::plan::ActPlan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ContainerJoinCommand {
@@ -6,7 +7,16 @@ pub(crate) struct ContainerJoinCommand {
     pub(crate) parent: TaskId,
 }
 
-impl ContainerPlanner {
+/// The plain container join: complete a parked container once every child is
+/// terminal.
+pub(crate) struct Join;
+
+impl ActPlan for Join {
+    type Reading<'a> = (&'a TaskGraph, &'a ProcessSnapshot);
+    type Command<'a> = ContainerJoinCommand;
+    type Output = Option<(StateChange, OperationIntent)>;
+    type Error = ContainerError;
+
     /// The join: when a container's children are all terminal (and none was
     /// aborted — an abort owns the container's outcome, exactly like the
     /// legacy `auto_complete`), the parked container completes and hands
@@ -14,11 +24,11 @@ impl ContainerPlanner {
     /// "not mine": only a `Running` container carrying the park mark joins,
     /// so a child settling under an execution that is still waiting for its
     /// own act decides nothing.
-    pub(crate) fn plan_join(
-        graph: &TaskGraph,
-        snapshot: &ProcessSnapshot,
+    fn plan(
+        reading: (&TaskGraph, &ProcessSnapshot),
         command: &ContainerJoinCommand,
     ) -> Result<Option<(StateChange, OperationIntent)>, ContainerError> {
+        let (graph, snapshot) = reading;
         if snapshot.process_id != command.process_id || graph.process_id != command.process_id {
             return Err(ContainerError::WrongProcess);
         }

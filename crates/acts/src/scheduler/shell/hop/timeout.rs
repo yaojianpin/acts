@@ -100,7 +100,13 @@ impl KernelHost {
                 ))
                 .map(String::as_str),
         );
-        match crate::scheduler::core::plan::timeout::candidate(snapshot, owner, &branches) {
+        match infallible(Round::plan(
+            snapshot,
+            &RoundCommand {
+                owner,
+                branches: &branches,
+            },
+        )) {
             crate::scheduler::core::plan::timeout::TimeoutCandidate::None => {
                 Ok(TimeoutRound::Retire)
             }
@@ -191,20 +197,18 @@ impl KernelHost {
             &crate::scheduler::core::plan::timeout::claimed(snapshot, task_id),
             &branch.node,
         );
-        let dispatch = crate::scheduler::core::plan::timeout::dispatch(
+        let dispatch = infallible(Dispatch::plan(
             snapshot,
-            task_id,
-            claim.clone(),
-            &branch,
-            pinned,
-            &claimed_after,
-            cost_ms,
-        );
-        let mut plan = crate::scheduler::core::plan::container::ContainerPlanner::plan_fanout(
-            snapshot,
-            &dispatch.command,
-        )
-        .map_err(runtime)?;
+            &DispatchCommand {
+                owner: task_id,
+                source_operation: claim.clone(),
+                branch: &branch,
+                extra_vars: pinned,
+                claimed_after: &claimed_after,
+                cost_ms,
+            },
+        ));
+        let mut plan = Fanout::plan(snapshot, &dispatch.command).map_err(runtime)?;
         if dispatch.claimed_after.len() < declared {
             // Declared branches remain unfired: the timer re-arms for them
             // instead of retiring (a window that has not opened yet must still
@@ -249,7 +253,7 @@ impl KernelHost {
 pub(super) struct DispatchTimeout;
 
 #[async_trait::async_trait]
-impl OperationDriver for DispatchTimeout {
+impl ActOperation for DispatchTimeout {
     /// The round, asked *before* the claim: a timer that wakes on the tick
     /// with nothing due must not consume its own operation, so the pre-claim
     /// verdict is the same round the hop would decide — an [`Precheck::Ignore`]

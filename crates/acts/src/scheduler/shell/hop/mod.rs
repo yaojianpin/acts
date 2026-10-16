@@ -7,14 +7,14 @@
 //!
 //! 1. **Prepare** ([`prepare`]): the parked fast path, the slot policy
 //!    ([`KernelHost::place_run`]), the kind's own pre-claim policy
-//!    ([`OperationDriver::precheck`]) and the claim, as one atomic
+//!    ([`ActOperation::precheck`]) and the claim, as one atomic
 //!    `ClaimAndPrepare` event. The snapshot that commit hands back is the
 //!    authoritative state the rest of the hop is formed from.
-//! 2. **Perform** ([`OperationDriver::run`]): the operation's own work —
+//! 2. **Perform** ([`ActOperation::run`]): the operation's own work —
 //!    evaluating a step's guard and resolving its act, running a package's
 //!    effect, deciding a timer's round, or nothing at all for a hop whose whole
 //!    job is its plan.
-//! 3. **Plan** ([`OperationDriver::next`]): that outcome folded into the
+//! 3. **ActPlan** ([`ActOperation::next`]): that outcome folded into the
 //!    durable next plan — the state changes, the successor operations and the
 //!    outbox records it implies.
 //! 4. **Dispatch** ([`dispatch`]): the plan's records delivered, its
@@ -37,8 +37,8 @@ mod timeout;
 use self::action::ApplyAction;
 use self::cascade::{AbortTask, SkipTask};
 pub(super) use self::dispatch::Projection;
-use self::propagate::Propagate;
-use self::reentry::Reenter;
+use self::propagate::PropagateTask;
+use self::reentry::ReenterTask;
 use self::task::ExecuteTask;
 use self::timeout::DispatchTimeout;
 
@@ -126,7 +126,7 @@ pub(super) struct Hop<'a> {
 
 /// Phase 2's product: what running one operation decided. Each variant is the
 /// kind's own vocabulary — the driver below only carries it from
-/// [`OperationDriver::run`] to [`OperationDriver::next`].
+/// [`ActOperation::run`] to [`ActOperation::next`].
 pub(super) enum Outcome {
     /// `ExecuteTask`: the act's start was decided.
     Start(task::Start),
@@ -151,7 +151,7 @@ pub(super) enum Outcome {
 /// module under this one. The host is passed in rather than held: the drivers
 /// are stateless, and every fact they work with is in the [`Hop`].
 #[async_trait::async_trait]
-pub(super) trait OperationDriver: Send + Sync {
+pub(super) trait ActOperation: Send + Sync {
     /// Phase 1's kind-specific half, decided before the claim consumes
     /// anything.
     async fn precheck(&self, host: &KernelHost, pending: &Pending<'_>) -> Result<Precheck>;
@@ -173,15 +173,15 @@ pub(super) trait OperationDriver: Send + Sync {
 /// The driver of one operation kind, or `None` for a kind this host does not
 /// drive yet (the kinds the engine only persists as vocabulary:
 /// `DeliverMessage`, `FireTrigger`, `RunPostCommit`).
-pub(super) fn driver(kind: OperationKind) -> Option<&'static dyn OperationDriver> {
+pub(super) fn driver(kind: OperationKind) -> Option<&'static dyn ActOperation> {
     match kind {
         OperationKind::ExecuteTask => Some(&ExecuteTask),
         OperationKind::ApplyAction => Some(&ApplyAction),
         OperationKind::SkipTask => Some(&SkipTask),
         OperationKind::AbortTask => Some(&AbortTask),
         OperationKind::DispatchTimeout => Some(&DispatchTimeout),
-        OperationKind::PropagateTask => Some(&Propagate),
-        OperationKind::ReenterTask => Some(&Reenter),
+        OperationKind::PropagateTask => Some(&PropagateTask),
+        OperationKind::ReenterTask => Some(&ReenterTask),
         OperationKind::DeliverMessage
         | OperationKind::FireTrigger
         | OperationKind::RunPostCommit => None,

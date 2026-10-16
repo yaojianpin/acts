@@ -250,7 +250,7 @@ impl KernelHost {
             ))
     }
 
-    /// The container fan-out plan: [`ContainerPlanner::plan_fanout`] plus the
+    /// The container fan-out plan: [`Fanout`] plus the
     /// park mark the join reads.
     ///
     /// The mark belongs to this path, not to the planner: the container path is
@@ -264,10 +264,7 @@ impl KernelHost {
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         command: &crate::scheduler::core::plan::container::ContainerFanoutCommand,
     ) -> Result<TransitionPlan> {
-        let mut plan = crate::scheduler::core::plan::container::ContainerPlanner::plan_fanout(
-            snapshot, command,
-        )
-        .map_err(runtime)?;
+        let mut plan = Fanout::plan(snapshot, command).map_err(runtime)?;
         // A container without children completes in this very hop: it never
         // parks, so it carries no mark.
         if !command.children.is_empty() {
@@ -513,7 +510,7 @@ impl KernelHost {
     /// a failed step `Running`, pins the error variables its CATCH predicates
     /// read (`$ecode()` answers the legacy `ecode`; the ERROR sign marks the
     /// step as deciding), and dispatches every `catches` child as a container
-    /// child. The step's own join ([`crate::scheduler::core::plan::container::ContainerPlanner::plan_catch_join`])
+    /// child. The step's own join ([`crate::scheduler::core::plan::container::CatchJoin`])
     /// decides it once they settled: every handler skipped resumes the error,
     /// anything else catches it.
     ///
@@ -633,10 +630,7 @@ impl KernelHost {
             inputs,
             source_park: crate::scheduler::core::model::task_graph::TaskState::Running,
         };
-        let mut plan = crate::scheduler::core::plan::container::ContainerPlanner::plan_fanout(
-            snapshot, &command,
-        )
-        .map_err(runtime)?;
+        let mut plan = Fanout::plan(snapshot, &command).map_err(runtime)?;
         // The error facts of the failed act: the legacy task-data names a
         // catch predicate selects with (`$ecode()` / `message`) and the
         // kernel's own error variables, which the resumed error keeps
@@ -859,7 +853,7 @@ impl KernelHost {
 
     /// The fan-out command for a container execution, or `None` when the
     /// model node is a plain leaf. Branch selection goes through the kernel's
-    /// own `BranchPlanner::decide`; the inner chain of a branch is queued
+    /// own `Decide`; the inner chain of a branch is queued
     /// behind its first step.
     async fn fanout_command(
         &self,
@@ -977,7 +971,7 @@ impl KernelHost {
                         unresolved_dependencies: Vec::new(),
                         source_operation: claim.clone(),
                     };
-                    match BranchPlanner::decide(&command) {
+                    match infallible(Decide::plan((), &command)) {
                         BranchDecision::Selected(selected) => selected
                             .into_iter()
                             .map(|candidate| candidate.node)
@@ -1099,7 +1093,7 @@ pub(in crate::scheduler::shell) enum Effect {
 pub(super) struct ApplyAction;
 
 #[async_trait::async_trait]
-impl OperationDriver for ApplyAction {
+impl ActOperation for ApplyAction {
     /// Nothing to check before the claim: a completion always has its work.
     async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)

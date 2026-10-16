@@ -3,6 +3,8 @@ use crate::scheduler::core::{
     model::{model_graph::NodeId, task_graph::TaskId, transition_plan::OperationCommit},
 };
 
+use crate::scheduler::core::plan::ActPlan;
+
 use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,12 +57,34 @@ pub(crate) struct BranchCommand {
     pub(crate) source_operation: OperationCommit,
 }
 
-pub(crate) struct BranchPlanner;
+pub(crate) struct Decide;
 
-impl BranchPlanner {
+impl ActPlan for Decide {
+    type Reading<'a> = ();
+    type Command<'a> = BranchCommand;
+    type Output = BranchDecision;
+    type Error = std::convert::Infallible;
+
+    fn plan(
+        _reading: Self::Reading<'_>,
+        command: &Self::Command<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        if let Err(error) = Self::validate_command(command) {
+            return Ok(BranchDecision::Invalid {
+                message: error.to_string(),
+            });
+        }
+        Ok(Self::select(
+            &command.candidates,
+            &command.unresolved_dependencies,
+        ))
+    }
+}
+
+impl Decide {
     /// Validate the command's structural facts before considering dependency
     /// deferral. An invalid model must never masquerade as healthy waiting.
-    pub(crate) fn validate_command(command: &BranchCommand) -> Result<(), BranchError> {
+    fn validate_command(command: &BranchCommand) -> Result<(), BranchError> {
         let else_count = command
             .candidates
             .iter()
@@ -94,20 +118,11 @@ impl BranchPlanner {
         Ok(())
     }
 
-    pub(crate) fn decide(command: &BranchCommand) -> BranchDecision {
-        if let Err(error) = Self::validate_command(command) {
-            return BranchDecision::Invalid {
-                message: error.to_string(),
-            };
-        }
-        Self::select(&command.candidates, &command.unresolved_dependencies)
-    }
-
     /// The pure selection over already-validated candidates: every `true`
     /// predicate runs, the `else` candidate runs only when no `if` matched,
     /// and an unmatched set without `else` is an explicit `NoMatch`.
     /// Dependency deferral is layered on top by the caller.
-    pub(crate) fn select(
+    fn select(
         candidates: &[BranchCandidate],
         unresolved_dependencies: &[String],
     ) -> BranchDecision {

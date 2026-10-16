@@ -7,7 +7,7 @@
 //! durable aggregate variables (`__model`, `__auto`): the fan-out hop reads
 //! them from the snapshot, so recovery replays never need the declaring
 //! spec. Branch executions and their inner chains come alive through
-//! `crate::scheduler::core::plan::container::ContainerPlanner` fan-outs, never at seed time.
+//! `crate::scheduler::core::plan::container::Fanout` fan-outs, never at seed time.
 
 use crate::{
     ActError, Result,
@@ -732,7 +732,7 @@ impl ProcessSpec {
 /// seeded from the model at creation and extended by every
 /// `TaskCreate`. The root is the single parentless execution; the
 /// revision is the aggregate's graph revision, which is what
-/// `PropagationPlanner` checks.
+/// `Propagate` checks.
 pub(crate) fn task_graph(snapshot: &ProcessSnapshot) -> Result<TaskGraph> {
     let mut builder =
         TaskGraphBuilder::new(&snapshot.process_id, snapshot.version.graph).map_err(runtime)?;

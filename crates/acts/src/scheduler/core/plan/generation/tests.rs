@@ -1,8 +1,10 @@
 use super::*;
+
 use crate::scheduler::core::commit::aggregate::TaskSnapshot;
 use crate::scheduler::core::model::model_graph::NodeId;
 use crate::scheduler::core::model::operation::ClaimToken;
 use crate::scheduler::core::model::transition_plan::ProcessVersion;
+use crate::scheduler::core::plan::ActPlan;
 use std::collections::{BTreeMap, HashMap};
 
 fn id(task: &str, generation: u64) -> TaskId {
@@ -105,7 +107,7 @@ fn command() -> ReenterCommand {
 
 #[test]
 fn reentry_creates_new_generation_and_never_mutates_history() {
-    let plan = GenerationPlanner::plan_reentry(&graph(), &snapshot(), &command()).unwrap();
+    let plan = Reenter::plan((&graph(), &snapshot()), &command()).unwrap();
     assert!(plan.state_changes.is_empty());
     // The re-entered source generation runs again; the downstream target
     // is recreated one generation up, waiting for the source's
@@ -132,7 +134,7 @@ fn non_reenterable_source_cannot_reenter() {
     let mut snapshot = snapshot();
     snapshot.tasks.get_mut(&id("source", 1)).unwrap().state = TaskState::Waiting;
     assert!(matches!(
-        GenerationPlanner::plan_reentry(&graph(), &snapshot, &command()),
+        Reenter::plan((&graph(), &snapshot), &command()),
         Err(GenerationError::SourceNotReenterable { .. })
     ));
 }
@@ -144,7 +146,7 @@ fn cancelled_source_reenters_and_recreates_the_forward_closure() {
     // The old target generation was skipped by the cascade that followed
     // the cancellation.
     snapshot.tasks.get_mut(&id("target", 1)).unwrap().state = TaskState::Skipped;
-    let plan = GenerationPlanner::plan_reentry(&graph(), &snapshot, &command()).unwrap();
+    let plan = Reenter::plan((&graph(), &snapshot), &command()).unwrap();
     // Both the target and the forward source generation are recreated.
     let created: Vec<TaskId> = plan
         .task_creates
@@ -227,7 +229,7 @@ fn back_reenters_the_named_step_and_carries_the_backed_source() {
     };
     let mut command = command();
     command.target_task_id = "target".into();
-    let plan = GenerationPlanner::plan_reentry(&graph, &snapshot, &command).unwrap();
+    let plan = Reenter::plan((&graph, &snapshot), &command).unwrap();
     let created: Vec<TaskId> = plan
         .task_creates
         .iter()
@@ -338,7 +340,7 @@ fn back_to_a_step_outside_the_redo_closure_is_refused() {
         },
     };
     assert!(matches!(
-        GenerationPlanner::plan_reentry(&graph, &snapshot, &command),
+        Reenter::plan((&graph, &snapshot), &command),
         Err(GenerationError::SourceOutsideRedoClosure { .. })
     ));
 }

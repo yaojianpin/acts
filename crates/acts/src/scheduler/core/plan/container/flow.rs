@@ -20,9 +20,9 @@ pub(crate) const SIGN_CATCH: &str = "catch";
 /// Two values, one axis:
 ///
 /// - [`FLOW_CHILDREN`]: the execution admitted children and is `Running` while
-///   they settle; the plain join ([`ContainerPlanner::plan_join`]) decides it.
+///   they settle; the plain join ([`Join`]) decides it.
 /// - [`FLOW_CATCHES`]: its failure is durable and it dispatched its `catches`;
-///   the catch join ([`ContainerPlanner::plan_catch_join`]) decides it — and
+///   the catch join ([`CatchJoin`]) decides it — and
 ///   only that join, so a plain container join can never mistake a failed step
 ///   for one waiting on its children (or a child's settlement for a completed
 ///   step's).

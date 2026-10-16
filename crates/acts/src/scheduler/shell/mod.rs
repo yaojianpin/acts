@@ -48,16 +48,21 @@ use crate::{
             },
             outbox::records::{DeliveryClaim, OutboxEvent},
             plan::{
+                ActPlan,
                 branch::{
-                    BranchCandidate, BranchCommand, BranchDecision, BranchPlanner, PredicateBasis,
+                    BranchCandidate, BranchCommand, BranchDecision, Decide, PredicateBasis,
                     PredicateValue,
                 },
-                concurrency::{self, Admission},
+                concurrency::{self, Admission, Admit},
                 container::{
-                    ContainerChild, ContainerChildPlan, ContainerFanoutCommand,
-                    ContainerPredecessor,
+                    CatchJoin, ContainerChild, ContainerChildPlan, ContainerFanoutCommand,
+                    ContainerPredecessor, Fanout, Join,
                 },
-                propagation::{PropagateCommand, PropagationPlanner},
+                generation::Reenter,
+                infallible,
+                propagation::{Propagate, PropagateCommand},
+                timeout::{Dispatch, DispatchCommand, Round, RoundCommand},
+                upward::Upward,
             },
             recovery::planner::{RecoveryDisposition, RecoveryPlanner, RecoveryReport},
         },
@@ -260,7 +265,7 @@ impl Admissions {
 
     /// The pure rule against the set it bounds.
     fn decide(&self, state: crate::scheduler::core::model::task_graph::TaskState) -> Admission {
-        concurrency::admit(self.cap, self.active.len(), state)
+        infallible(Admit::plan((), &(self.cap, self.active.len(), state)))
     }
 
     /// Reserve a slot for a fresh run — its root is seeded `Ready`, which is
@@ -878,7 +883,10 @@ impl KernelHost {
             true
         } else {
             let state = root_state(snapshot);
-            match concurrency::admit(admissions.cap, admissions.active.len(), state) {
+            match infallible(Admit::plan(
+                (),
+                &(admissions.cap, admissions.active.len(), state),
+            )) {
                 Admission::Admit => {
                     // A settled run is admitted *because* it needs no slot:
                     // taking one here would hold it for a run that never hops

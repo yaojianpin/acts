@@ -9,7 +9,7 @@
 //!   ancestor `Error` when nothing catches.
 //!
 //! The downward half of either death is the ordinary dead-source cascade
-//! ([`crate::scheduler::core::plan::propagation::PropagationPlanner`]); this planner produces the upward half:
+//! ([`crate::scheduler::core::plan::propagation::Propagate`]); this planner produces the upward half:
 //! one atomic batch of ancestor state changes plus the `PropagateTask`
 //! operations whose hops spread the death into the remaining subtrees.
 
@@ -35,14 +35,20 @@ pub(crate) struct UpwardCommand {
     pub(crate) to: TaskState,
 }
 
-pub(crate) struct UpwardPlanner;
+pub(crate) struct Upward;
 
-impl UpwardPlanner {
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn plan_upward(
-        snapshot: &ProcessSnapshot,
-        command: &UpwardCommand,
-    ) -> Result<(Vec<StateChange>, Vec<OperationIntent>), UpwardError> {
+#[allow(clippy::type_complexity)]
+impl crate::scheduler::core::plan::ActPlan for Upward {
+    type Reading<'a> = &'a ProcessSnapshot;
+    type Command<'a> = UpwardCommand;
+    type Output = (Vec<StateChange>, Vec<OperationIntent>);
+    type Error = UpwardError;
+
+    fn plan(
+        reading: Self::Reading<'_>,
+        command: &Self::Command<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        let snapshot = reading;
         if snapshot.process_id != command.process_id {
             return Err(UpwardError::WrongProcess);
         }

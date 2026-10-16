@@ -2232,6 +2232,45 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 **未触碰**:`examples/simple/main.rs`(C3 那笔误重置的遗留,仍停在 HEAD 版本)、`core/**`、`durable/**` 与一切公共面。
 
 
+### H2 完成(2026-10-16):`core/plan/**` 的计划抽象 —— 一个 `ActPlan` trait,每个计划/判定一个类型
+
+**用户指令**:「core/plan 这里也要做一层抽象,不同的类型实现不同的 plan」;形态由用户拍板(见 `KERNEL_REFACTOR_DESIGN.md` §3.9):
+trait + GAT 读取视图(`Reading`/`Command` 都带生命周期),且**连「求值/策略」一起收进同一 trait**。
+中途另有一条命名指令:**`Plan` trait → `ActPlan`,`OperationDriver` trait → `ActOperation`**(H1 落地的名字)。
+
+**做了什么**(纯结构,零行为变更):
+
+- `core/plan/mod.rs` 新增
+  `pub(crate) trait ActPlan { type Reading<'a>; type Command<'a>; type Output; type Error: Display; fn plan(reading, command) -> Result<Output, Error> }`
+  + `pub(crate) fn infallible<T>(Result<T, Infallible>) -> T`(判定型计划的 `Error = Infallible`,调用点用它解开)。
+- 11 个计划/判定从 `*Planner` 静态方法命名空间变成 unit struct 的 trait 实现:
+  `container::{Fanout, Join, CatchJoin}`、`propagation::Propagate`、`generation::Reenter`、`upward::Upward`、
+  `branch::Decide`、`timeout::{Round, Dispatch}`、`task_admission::Admit`、`concurrency::Admit`。
+- 两个新 DTO(借用命令,避免计时器每 tick 克隆分支表):`timeout::RoundCommand<'a>{owner, branches}`、`timeout::DispatchCommand<'a>{owner, source_operation, branch, extra_vars, claimed_after, cost_ms}`。
+- 删除(无兼容壳):`ContainerPlanner`、`PropagationPlanner`、`GenerationPlanner`、`UpwardPlanner`、`BranchPlanner`、`GenerationAdmissionPolicy`,以及自由函数 `timeout::{candidate, dispatch}`、`concurrency::admit`。
+- 调用点:core 内部 ~73 处(含各模块测试)、shell 13 处(`shell/hop/{action,propagate,reentry,timeout}.rs`、`shell/mod.rs`)+ shell 的 plan 导入表(`ActPlan`/`infallible`/各类型)。
+- **顺带修掉 H1 遗留的一处同名冲突**:`shell/hop/{propagate,reentry}.rs` 的 driver 结构与计划类型同名(`Propagate`/`Reenter`)⇒ driver 改名
+  `PropagateTask`/`ReenterTask`(与 operation kind 同名,更一致)。
+- 保持不动(不是计划):`timeout::{claimed, claim, cost_ms, has_live_child(ren), start_write}`、`branch::PredicateValue`、`cron::Cron`(带状态的值类型)。
+
+**行为差异(逐条登记)**:零语义变更。仅两处**借用命令**带来的克隆(命令按 `&` 传,实现里要把字段搬进产物):
+`DispatchCommand.extra_vars`(通常是空 Vec)与 `source_operation`(2 个 String + u64)各克隆一次,都只在 timeout 派发这一条路径上、每 tick 最多一次。
+其余判定逻辑、错误类型与消息、DTO 字段逐字保留。
+
+**层界守卫按预期拦了一次(改法已修)**:新写的 `core/plan/mod.rs` 文档里提了 `crate::scheduler::shell` ⇒
+`scheduler::core::architecture::pure_modules_have_no_infrastructure_dependencies` 立刻报
+`core/plan/mod.rs: forbidden dependency crate::scheduler::shell` —— 纯层不许点名外壳,这正是守卫存在的意义;改写措辞后通过。
+
+**验收(在提交状态门上跑)**:
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**;`cargo fmt --all --check` 干净。
+- `cargo test -p acts --lib --tests` = **869 passed / 1 failed / 1 ignored**;唯一挂的是基线已证的既有抖动
+  (`scheduler::shell::tests::kernel_task_and_act_messages_are_emitted`,见「H1 完成」的抖动归因)。
+- `cargo test -p acts --lib scheduler::tests::reliability:: -- --test-threads=1` 连跑两次 = **65 passed / 0 failed**(两次)。
+  (本笔的某次全量跑里 `reliability::timeout::a_completion_racing_the_timeout_tick_converges_exactly_once` 偶发一次:
+  该用例包在 `bounded(..)` 看门狗里,是负载下的超时类抖动;单跑与两次模块级连跑均绿,记录在案但**未改代码**。)
+- 三处跨切片改动由主 agent 整合完成后一次性验收:编译警告 0、clippy EXIT 0。
+
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2276,8 +2315,8 @@ C1(拆 `core/plan` 目录,纯搬移)可立即起步;`view` 的零风险瘦身另
 
 | 编号 | 任务 | 阻塞/前置 | 状态 |
 |---|---|---|---|
-| **H1** | host 的 hop 分相:`shell/hop/` 四阶段(准备 / 执行并返回结果 / 生成 next plan / 分发 next 操作)+ `OperationDriver` trait + 按 kind 的 driver 模块;`execute_one` 与 `apply_action_once` 走同一条流水线 | — | **已做(§10「H1 完成」,设计见 `KERNEL_REFACTOR_DESIGN.md` §3.8)** |
-| **H2** | `core/plan/**` 的 plan 抽象层:不同 plan 类型实现同一个 plan trait(用户 2026-10-16 指令) | H1 先落地;形态待拍 | 未做 |
+| **H1** | host 的 hop 分相:`shell/hop/` 四阶段(准备 / 执行并返回结果 / 生成 next plan / 分发 next 操作)+ 按 kind 的 driver 模块;`execute_one` 与 `apply_action_once` 走同一条流水线 | — | **已做(§10「H1 完成」,设计见 `KERNEL_REFACTOR_DESIGN.md` §3.8)** |
+| **H2** | `core/plan/**` 的 plan 抽象层:每个计划/判定 = 一个类型,实现 `ActPlan`(用户 2026-10-16 指令;形态:trait + GAT 读取视图,连求值/策略一并收进) | H1 | **已做(§10「H2 完成」,设计见 `KERNEL_REFACTOR_DESIGN.md` §3.9)** |
 
 ### B. 第二波:性能与遗留(可与彼此交错)
 

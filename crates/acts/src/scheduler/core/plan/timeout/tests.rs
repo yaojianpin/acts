@@ -3,6 +3,7 @@ use crate::scheduler::core::commit::aggregate::TaskSnapshot;
 use crate::scheduler::core::model::operation::OperationId;
 use crate::scheduler::core::model::transition_plan::ProcessVersion;
 use crate::scheduler::core::model::transition_plan::TransitionPlan;
+use crate::scheduler::core::plan::{ActPlan, infallible};
 use std::collections::{BTreeMap, HashMap};
 
 fn id(task: &str, generation: u64) -> TaskId {
@@ -106,7 +107,13 @@ fn the_candidate_is_the_first_branch_that_neither_fired_nor_is_in_flight() {
     let branches = vec![branch("t1"), branch("t2")];
     let mut snapshot = snapshot(Vec::new());
     assert_eq!(
-        candidate(&snapshot, &owner, &branches),
+        infallible(Round::plan(
+            &snapshot,
+            &RoundCommand {
+                owner: &owner,
+                branches: &branches
+            }
+        )),
         TimeoutCandidate::Branch(0)
     );
     // t1 fired: the round moves to t2.
@@ -115,7 +122,13 @@ fn the_candidate_is_the_first_branch_that_neither_fired_nor_is_in_flight() {
         r#"["t1"]"#.to_string(),
     );
     assert_eq!(
-        candidate(&snapshot, &owner, &branches),
+        infallible(Round::plan(
+            &snapshot,
+            &RoundCommand {
+                owner: &owner,
+                branches: &branches
+            }
+        )),
         TimeoutCandidate::Branch(1)
     );
     // t2 fired too: nothing left.
@@ -124,7 +137,13 @@ fn the_candidate_is_the_first_branch_that_neither_fired_nor_is_in_flight() {
         r#"["t1","t2"]"#.to_string(),
     );
     assert_eq!(
-        candidate(&snapshot, &owner, &branches),
+        infallible(Round::plan(
+            &snapshot,
+            &RoundCommand {
+                owner: &owner,
+                branches: &branches
+            }
+        )),
         TimeoutCandidate::None
     );
 }
@@ -141,7 +160,13 @@ fn an_in_flight_branch_stops_the_round_instead_of_moving_on() {
         crate::scheduler::core::model::task_graph::TaskState::Running,
     )]);
     assert_eq!(
-        candidate(&in_flight, &owner, &branches),
+        infallible(Round::plan(
+            &in_flight,
+            &RoundCommand {
+                owner: &owner,
+                branches: &branches
+            }
+        )),
         TimeoutCandidate::Blocked
     );
     // A terminal t1 does not block; it only leaves the candidate at t2 when
@@ -152,7 +177,13 @@ fn an_in_flight_branch_stops_the_round_instead_of_moving_on() {
         crate::scheduler::core::model::task_graph::TaskState::Completed,
     )]);
     assert_eq!(
-        candidate(&settled, &owner, &branches),
+        infallible(Round::plan(
+            &settled,
+            &RoundCommand {
+                owner: &owner,
+                branches: &branches
+            }
+        )),
         TimeoutCandidate::Branch(0)
     );
 }
@@ -213,18 +244,20 @@ fn only_the_declared_branches_keep_the_owner_from_completing() {
 fn the_dispatch_admits_one_entry_child_and_freezes_the_cost_and_marker() {
     let owner = id("s1", 0);
     let snapshot = snapshot(Vec::new());
-    let dispatch = dispatch(
+    let dispatch = infallible(Dispatch::plan(
         &snapshot,
-        &owner,
-        commit("s1", 3),
-        &branch("t1"),
-        vec![(
-            "__branch_error".into(),
-            r#"{"code":"","message":"x"}"#.into(),
-        )],
-        &["t1".to_string()],
-        1_617,
-    );
+        &DispatchCommand {
+            owner: &owner,
+            source_operation: commit("s1", 3),
+            branch: &branch("t1"),
+            extra_vars: vec![(
+                "__branch_error".into(),
+                r#"{"code":"","message":"x"}"#.into(),
+            )],
+            claimed_after: &["t1".to_string()],
+            cost_ms: 1_617,
+        },
+    ));
     let command = &dispatch.command;
     assert_eq!(command.source, owner);
     assert_eq!(command.children.len(), 1);
@@ -254,9 +287,7 @@ fn the_dispatch_admits_one_entry_child_and_freezes_the_cost_and_marker() {
         crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
     // The plan the container machinery builds from it is legal.
-    let plan =
-        crate::scheduler::core::plan::container::ContainerPlanner::plan_fanout(&snapshot, command)
-            .unwrap();
+    let plan = crate::scheduler::core::plan::container::Fanout::plan(&snapshot, command).unwrap();
     plan.validate().unwrap();
     assert_eq!(plan.task_creates.len(), 1);
     assert_eq!(
@@ -273,26 +304,30 @@ fn the_dispatch_reports_the_marker_it_leaves_behind() {
     // The caller re-arms its timer while the marker is shorter than the
     // declaration: one branch claimed of two declared re-arms, the last one
     // retires the timer.
-    let one = dispatch(
+    let one = infallible(Dispatch::plan(
         &snapshot,
-        &owner,
-        commit("s1", 3),
-        &branch("t1"),
-        Vec::new(),
-        &["t1".to_string()],
-        10,
-    );
+        &DispatchCommand {
+            owner: &owner,
+            source_operation: commit("s1", 3),
+            branch: &branch("t1"),
+            extra_vars: Vec::new(),
+            claimed_after: &["t1".to_string()],
+            cost_ms: 10,
+        },
+    ));
     assert_eq!(one.claimed_after, vec!["t1".to_string()]);
     assert!(one.claimed_after.len() < 2);
-    let both = dispatch(
+    let both = infallible(Dispatch::plan(
         &snapshot,
-        &owner,
-        commit("s1", 4),
-        &branch("t2"),
-        Vec::new(),
-        &["t1".to_string(), "t2".to_string()],
-        10,
-    );
+        &DispatchCommand {
+            owner: &owner,
+            source_operation: commit("s1", 4),
+            branch: &branch("t2"),
+            extra_vars: Vec::new(),
+            claimed_after: &["t1".to_string(), "t2".to_string()],
+            cost_ms: 10,
+        },
+    ));
     assert!(!(both.claimed_after.len() < 2));
 }
 
@@ -310,18 +345,19 @@ fn the_dispatch_command_plans_through_the_container_machinery() {
     // shape: the command is a `ContainerFanoutCommand`, the plan a
     // `TransitionPlan` built by the same planner every other fan-out uses.
     let snapshot = snapshot(Vec::new());
-    let command: ContainerFanoutCommand = dispatch(
+    let command: ContainerFanoutCommand = infallible(Dispatch::plan(
         &snapshot,
-        &id("s1", 0),
-        commit("s1", 1),
-        &branch("t1"),
-        Vec::new(),
-        &["t1".to_string()],
-        0,
-    )
+        &DispatchCommand {
+            owner: &id("s1", 0),
+            source_operation: commit("s1", 1),
+            branch: &branch("t1"),
+            extra_vars: Vec::new(),
+            claimed_after: &["t1".to_string()],
+            cost_ms: 0,
+        },
+    ))
     .command;
     let plan: TransitionPlan =
-        crate::scheduler::core::plan::container::ContainerPlanner::plan_fanout(&snapshot, &command)
-            .unwrap();
+        crate::scheduler::core::plan::container::Fanout::plan(&snapshot, &command).unwrap();
     assert_eq!(plan.process_id, "p1");
 }

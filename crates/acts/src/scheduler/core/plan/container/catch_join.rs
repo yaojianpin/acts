@@ -1,7 +1,8 @@
 use super::*;
+use crate::scheduler::core::plan::ActPlan;
 
 /// The join of a step that is deciding a caught error: its CATCH children
-/// have settled, and [`ContainerPlanner::plan_catch_join`] decides the step.
+/// have settled, and [`CatchJoin`] decides the step.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CatchJoinCommand {
     pub(crate) process_id: String,
@@ -24,7 +25,15 @@ pub(crate) enum CatchJoinOutcome {
     Caught(StateChange, OperationIntent),
 }
 
-impl ContainerPlanner {
+/// The catch join: decide a failed step from its settled CATCH children.
+pub(crate) struct CatchJoin;
+
+impl ActPlan for CatchJoin {
+    type Reading<'a> = (&'a TaskGraph, &'a ProcessSnapshot);
+    type Command<'a> = CatchJoinCommand;
+    type Output = Option<CatchJoinOutcome>;
+    type Error = ContainerError;
+
     /// The join of a step that is deciding a caught error: every child has
     /// settled and the step itself decides it from its CATCH children, exactly
     /// like the legacy `auto_complete` pass that counted the children of a
@@ -47,11 +56,11 @@ impl ContainerPlanner {
     /// plain join). Any child's settlement may trigger it: a step that declares
     /// both `catches` and `timeouts` has timeout branches among its children,
     /// and the last one to settle is what completes the gate.
-    pub(crate) fn plan_catch_join(
-        graph: &TaskGraph,
-        snapshot: &ProcessSnapshot,
+    fn plan(
+        reading: (&TaskGraph, &ProcessSnapshot),
         command: &CatchJoinCommand,
     ) -> Result<Option<CatchJoinOutcome>, ContainerError> {
+        let (graph, snapshot) = reading;
         if snapshot.process_id != command.process_id || graph.process_id != command.process_id {
             return Err(ContainerError::WrongProcess);
         }

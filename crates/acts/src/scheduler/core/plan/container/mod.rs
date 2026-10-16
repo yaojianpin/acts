@@ -14,16 +14,16 @@
 //! settlement must never decide one of those.
 //!
 //! A failed step fans its `catches` out through the same plan but parks in
-//! `Running`, and its join is the *catch* join ([`ContainerPlanner::plan_catch_join`]):
+//! `Running`, and its join is the *catch* join ([`CatchJoin`]):
 //! the legacy `Step::on_error` keeps the failed step running while the CATCH
 //! children decide whether the error was caught, and `auto_complete` decides
 //! it from their states.
 //!
 //! The planner is pure: it receives the snapshot, the already-evaluated
 //! selection (branch predicates are the host's job, selection semantics are
-//! [`crate::scheduler::core::plan::branch::BranchPlanner`]'s), and the per-child durable facts (`auto`,
+//! [`crate::scheduler::core::plan::branch::Decide`]'s), and the per-child durable facts (`auto`,
 //! declared vars). Admission of each child goes through
-//! [`crate::scheduler::core::plan::task_admission::GenerationAdmissionPolicy`], so a re-entered container reuses the
+//! [`crate::scheduler::core::plan::task_admission::Admit`], so a re-entered container reuses the
 //! generations a Cancel rewind already recreated instead of allocating
 //! duplicates.
 
@@ -42,8 +42,6 @@ use crate::scheduler::core::{
 };
 
 use std::fmt;
-
-pub(crate) struct ContainerPlanner;
 
 mod catch_join;
 mod child;

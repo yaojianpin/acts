@@ -13,7 +13,7 @@ use crate::scheduler::shell::*;
 pub(super) struct SkipTask;
 
 #[async_trait::async_trait]
-impl OperationDriver for SkipTask {
+impl ActOperation for SkipTask {
     /// Nothing to check before the claim: a cascade hop always has its work.
     async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
@@ -105,7 +105,7 @@ impl OperationDriver for SkipTask {
 pub(super) struct AbortTask;
 
 #[async_trait::async_trait]
-impl OperationDriver for AbortTask {
+impl ActOperation for AbortTask {
     /// Nothing to check before the claim: an abort hop always has its work.
     async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)

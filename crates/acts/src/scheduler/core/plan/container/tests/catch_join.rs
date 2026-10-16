@@ -79,7 +79,7 @@ fn catch_command() -> CatchJoinCommand {
 fn catch_join_resumes_the_error_when_every_catcher_skipped() {
     let graph = catch_graph();
     let snapshot = catch_snapshot(TaskState::Skipped, TaskState::Skipped);
-    let outcome = ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command()).unwrap();
+    let outcome = CatchJoin::plan((&graph, &snapshot), &catch_command()).unwrap();
     let Some(CatchJoinOutcome::Resumed(change, operation)) = outcome else {
         panic!("every skipped catcher resumes the error");
     };
@@ -102,8 +102,7 @@ fn catch_join_catches_when_a_catcher_did_not_skip() {
         (TaskState::Failed, TaskState::Skipped),
     ] {
         let snapshot = catch_snapshot(c1, c2);
-        let outcome =
-            ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command()).unwrap();
+        let outcome = CatchJoin::plan((&graph, &snapshot), &catch_command()).unwrap();
         let Some(CatchJoinOutcome::Caught(change, operation)) = outcome else {
             panic!("a non-skipped catcher catches the error ({c1:?}/{c2:?})");
         };
@@ -123,7 +122,7 @@ fn catch_join_waits_for_an_in_flight_catcher_and_yields_to_the_abort_walk() {
     ] {
         let snapshot = catch_snapshot(c1, c2);
         assert!(
-            ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+            CatchJoin::plan((&graph, &snapshot), &catch_command())
                 .unwrap()
                 .is_none(),
             "{c1:?}/{c2:?} must not decide the step"
@@ -199,9 +198,8 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     };
     // Triggered by the timeout branch's settlement, not the handler's: the
     // handler caught the error and the branch has settled.
-    let caught = ContainerPlanner::plan_catch_join(
-        &graph,
-        &mixed(TaskState::Completed, TaskState::Completed),
+    let caught = CatchJoin::plan(
+        (&graph, &mixed(TaskState::Completed, TaskState::Completed)),
         &CatchJoinCommand {
             process_id: "p1".into(),
             parent: id("step1", 0),
@@ -213,9 +211,8 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     assert!(matches!(caught, CatchJoinOutcome::Caught(..)));
     // The handler skipped instead: the error resumes, still triggered by
     // the timeout branch.
-    let resumed = ContainerPlanner::plan_catch_join(
-        &graph,
-        &mixed(TaskState::Skipped, TaskState::Completed),
+    let resumed = CatchJoin::plan(
+        (&graph, &mixed(TaskState::Skipped, TaskState::Completed)),
         &CatchJoinCommand {
             process_id: "p1".into(),
             parent: id("step1", 0),
@@ -229,9 +226,8 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     // handler settled.
     for handler in [TaskState::Completed, TaskState::Skipped] {
         assert!(
-            ContainerPlanner::plan_catch_join(
-                &graph,
-                &mixed(handler, TaskState::Waiting),
+            CatchJoin::plan(
+                (&graph, &mixed(handler, TaskState::Waiting)),
                 &CatchJoinCommand {
                     process_id: "p1".into(),
                     parent: id("step1", 0),
@@ -245,9 +241,8 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
     }
     // A foreign execution's settlement triggers nothing.
     assert!(
-        ContainerPlanner::plan_catch_join(
-            &graph,
-            &mixed(TaskState::Completed, TaskState::Completed),
+        CatchJoin::plan(
+            (&graph, &mixed(TaskState::Completed, TaskState::Completed)),
             &CatchJoinCommand {
                 process_id: "p1".into(),
                 parent: id("step1", 0),
@@ -270,7 +265,7 @@ fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
         .variables
         .remove(&(id("step1", 0), FLOW_VAR.to_string()));
     assert!(
-        ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+        CatchJoin::plan((&graph, &snapshot), &catch_command())
             .unwrap()
             .is_none()
     );
@@ -283,7 +278,7 @@ fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
         FLOW_CHILDREN.to_string(),
     );
     assert!(
-        ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+        CatchJoin::plan((&graph, &snapshot), &catch_command())
             .unwrap()
             .is_none()
     );
@@ -296,7 +291,7 @@ fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
         .variables
         .remove(&(id("c1", 0), SIGN_VAR.to_string()));
     assert!(
-        ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+        CatchJoin::plan((&graph, &snapshot), &catch_command())
             .unwrap()
             .is_some(),
         "the handler role must not gate the trigger"
@@ -308,7 +303,7 @@ fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
     snapshot
         .variables
         .remove(&(id("c2", 0), SIGN_VAR.to_string()));
-    let outcome = ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+    let outcome = CatchJoin::plan((&graph, &snapshot), &catch_command())
         .unwrap()
         .expect("the signed handler still decides");
     assert!(matches!(outcome, CatchJoinOutcome::Resumed(..)));
@@ -322,7 +317,7 @@ fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
             .remove(&(id(task, 0), SIGN_VAR.to_string()));
     }
     assert!(
-        ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+        CatchJoin::plan((&graph, &snapshot), &catch_command())
             .unwrap()
             .is_none()
     );
