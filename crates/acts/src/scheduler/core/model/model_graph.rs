@@ -18,9 +18,26 @@ impl NodeId {
     }
 }
 
+/// What one node of the *policy* graph is, in the model's own vocabulary.
+///
+/// The graph the planners walk holds the workflow root and the model's
+/// top-level steps — the fan-outs (a step's `branches`, their acts) are
+/// plan-level, not graph nodes. The four variants are the model's four node
+/// kinds, kept whole so this vocabulary matches [`crate::NodeKind`] (the
+/// `view` one the read model and the messages speak); a graph that only
+/// materializes steps still cannot say "step" if the word is missing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NodeKind {
     Workflow,
+    Step,
+    /// A model node kind this graph does not materialize as a node: a step's
+    /// `branches` are plan-level fan-outs, not graph nodes. Kept so the
+    /// vocabulary stays the model's own (see the type's docs).
+    #[allow(dead_code)]
+    // no constructor in a non-test build」
+    Branch,
+    /// The `uses` node of a step — likewise plan-level today.
+    #[allow(dead_code)] // see `Branch`
     Act,
 }
 

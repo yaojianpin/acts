@@ -562,7 +562,10 @@ impl ProcessSpec {
             builder
                 .add_node(NodeDefinition {
                     id: id.clone(),
-                    kind: NodeKind::Act,
+                    // The children are the model's top-level *steps*
+                    // (`from_workflow` seeds them from `workflow.steps`), which
+                    // is also what `node_kind_and_name` answers for these ids.
+                    kind: NodeKind::Step,
                     name: child.clone(),
                 })
                 .map_err(runtime)?;
