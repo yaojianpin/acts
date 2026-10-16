@@ -33,11 +33,13 @@ pub(crate) enum NodeKind {
     /// A model node kind this graph does not materialize as a node: a step's
     /// `branches` are plan-level fan-outs, not graph nodes. Kept so the
     /// vocabulary stays the model's own (see the type's docs).
+    // No constructor outside tests; the reason is registered per the repo's
+    // rule for silencing a lint in KERNEL_CUTOVER_NOTES.md, section 10,
+    // "NodeKind 恢复 4 值".
     #[allow(dead_code)]
-    // no constructor in a non-test build」
     Branch,
     /// The `uses` node of a step — likewise plan-level today.
-    #[allow(dead_code)] // see `Branch`
+    #[allow(dead_code)] // same reason as `Branch`
     Act,
 }
 
