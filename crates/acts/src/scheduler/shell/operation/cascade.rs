@@ -56,8 +56,7 @@ impl ActOperation for SkipTask {
             }
             let propagate_id = OperationId {
                 process_id: id.process_id.clone(),
-                node: id.node.clone(),
-                generation: id.generation,
+                task: id.task.clone(),
                 sequence: id.sequence + 1,
             };
             let mut plan = host.task_operation_plan(
@@ -74,7 +73,7 @@ impl ActOperation for SkipTask {
             if let Some(payload) = host.operation_message_payload(
                 snapshot,
                 &task_id,
-                &id.node,
+                id.task.node.as_str(),
                 act_facts(snapshot, &task_id).as_ref(),
                 None,
                 None,
@@ -147,8 +146,7 @@ impl ActOperation for AbortTask {
             } else {
                 let propagate_id = OperationId {
                     process_id: id.process_id.clone(),
-                    node: id.node.clone(),
-                    generation: id.generation,
+                    task: id.task.clone(),
                     sequence: id.sequence + 1,
                 };
                 let mut plan = host.task_operation_plan(
@@ -171,7 +169,7 @@ impl ActOperation for AbortTask {
                 if let Some(payload) = host.operation_message_payload(
                     snapshot,
                     &task_id,
-                    &id.node,
+                    id.task.node.as_str(),
                     act_facts(snapshot, &task_id).as_ref(),
                     None,
                     None,

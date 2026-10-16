@@ -64,8 +64,7 @@ fn source_operation_is_committed_and_closed_in_same_atomic_batch() {
     };
     let source_id = OperationId {
         process_id: "p1".into(),
-        node: "t1".into(),
-        generation: 0,
+        task: TaskId::new("t1", 0).unwrap(),
         sequence: 0,
     };
     let mut repo = repository();
@@ -118,8 +117,7 @@ fn stale_source_claim_rejects_whole_batch() {
     };
     let source_id = OperationId {
         process_id: "p1".into(),
-        node: "t1".into(),
-        generation: 0,
+        task: TaskId::new("t1", 0).unwrap(),
         sequence: 0,
     };
     let mut snapshot = repository().load("p1").unwrap().unwrap();
@@ -149,8 +147,7 @@ fn durable_claim_prepare_commit_has_one_revision_chain() {
     use crate::scheduler::core::model::operation::ClaimToken;
     let id = OperationId {
         process_id: "p1".into(),
-        node: "t1".into(),
-        generation: 0,
+        task: TaskId::new("t1", 0).unwrap(),
         sequence: 0,
     };
     let claim = ClaimToken {
@@ -210,8 +207,7 @@ fn operation_revision_conflict_does_not_advance_state() {
     use crate::scheduler::core::model::operation::ClaimToken;
     let id = OperationId {
         process_id: "p1".into(),
-        node: "t1".into(),
-        generation: 0,
+        task: TaskId::new("t1", 0).unwrap(),
         sequence: 0,
     };
     let mut snapshot = repository().load("p1").unwrap().unwrap();
@@ -288,8 +284,7 @@ fn generation_must_move_forward_without_overwriting_history() {
 fn repository_heartbeat_uses_operation_revision_cas() {
     let id = OperationId {
         process_id: "p1".into(),
-        node: "t1".into(),
-        generation: 0,
+        task: TaskId::new("t1", 0).unwrap(),
         sequence: 0,
     };
     let current = ClaimToken {

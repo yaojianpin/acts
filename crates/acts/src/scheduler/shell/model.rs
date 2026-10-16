@@ -649,7 +649,7 @@ impl ProcessSpec {
         // The auto/waiting decision is durable state, not spec state: the
         // aggregate replays without the model.
         for id in snapshot.tasks.keys() {
-            let auto = id.node == self.root || self.auto.contains(&id.node);
+            let auto = id.node.as_str() == self.root || self.auto.contains(id.node.as_str());
             snapshot.variables.insert(
                 (id.clone(), "auto".to_string()),
                 if auto { "1" } else { "0" }.into(),
@@ -714,8 +714,7 @@ impl ProcessSpec {
 
         let operation_id = OperationId {
             process_id: self.process_id.clone(),
-            node: self.root.clone(),
-            generation: 0,
+            task: TaskId::new(&self.root, 0).map_err(runtime)?,
             sequence: 0,
         };
         snapshot.operations.insert(
@@ -979,7 +978,7 @@ mod tests {
             !snapshot
                 .variables
                 .keys()
-                .any(|(scope, _)| scope.node == "c1"),
+                .any(|(scope, _)| scope.node.as_str() == "c1"),
             "a nested node's vars are seeded when its operation admits it"
         );
 

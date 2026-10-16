@@ -97,7 +97,7 @@ pub(crate) fn canonical_process_bytes(snapshot: &ProcessSnapshot) -> Result<Vec<
         output.push_str(value);
     }
     fn task_id(output: &mut String, id: &TaskId) {
-        field(output, &id.node);
+        field(output, id.node.as_str());
         field(output, &id.generation.to_string());
     }
 
@@ -141,8 +141,8 @@ pub(crate) fn canonical_process_bytes(snapshot: &ProcessSnapshot) -> Result<Vec<
     for operation in operations {
         field(&mut output, "operation");
         field(&mut output, &operation.id.process_id);
-        field(&mut output, &operation.id.node);
-        field(&mut output, &operation.id.generation.to_string());
+        field(&mut output, operation.id.task.node.as_str());
+        field(&mut output, &operation.id.task.generation.to_string());
         field(&mut output, &operation.id.sequence.to_string());
         field(&mut output, operation_kind_tag(operation.kind));
         field(&mut output, &operation_state_tag(&operation.state));

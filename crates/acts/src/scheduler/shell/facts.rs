@@ -21,7 +21,7 @@ pub(super) fn root_task(
     snapshot
         .tasks
         .keys()
-        .filter(|id| id.node == crate::utils::consts::TASK_ROOT_TID)
+        .filter(|id| id.node.as_str() == crate::utils::consts::TASK_ROOT_TID)
         .min_by_key(|id| id.generation)
         .cloned()
 }

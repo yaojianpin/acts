@@ -60,7 +60,9 @@ pub(super) fn next_plan_sequence(
     let from_plan = plan
         .operations
         .iter()
-        .filter(|intent| intent.id.node == node && intent.id.generation == generation)
+        .filter(|intent| {
+            intent.id.task.node.as_str() == node && intent.id.task.generation == generation
+        })
         .map(|intent| intent.id.sequence.saturating_add(1))
         .max()
         .unwrap_or(0);

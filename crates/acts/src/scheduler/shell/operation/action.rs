@@ -48,8 +48,7 @@ impl KernelHost {
             None => {
                 let propagate_id = OperationId {
                     process_id: id.process_id.clone(),
-                    node: id.node.clone(),
-                    generation: id.generation,
+                    task: id.task.clone(),
                     sequence: id.sequence + 1,
                 };
                 // The act's own effect ran *before* its children are
@@ -102,7 +101,7 @@ impl KernelHost {
                 if let Some(payload) = self.operation_message_payload(
                     snapshot,
                     task_id,
-                    &id.node,
+                    id.task.node.as_str(),
                     facts.as_ref(),
                     Some(&plan.variable_writes),
                     None,
@@ -203,7 +202,7 @@ impl KernelHost {
                                 ActError::Runtime("cannot find 'to' value in options".to_string())
                             })?
                     } else {
-                        task_id.node.clone()
+                        task_id.node.as_str().to_owned()
                     };
                     plan.variable_writes.push(VariableWrite {
                         scope: task_id.clone(),
@@ -212,8 +211,7 @@ impl KernelHost {
                     });
                     let reenter_id = OperationId {
                         process_id: id.process_id.clone(),
-                        node: task_id.node.clone(),
-                        generation: task_id.generation,
+                        task: task_id.clone(),
                         sequence: id.sequence + 2,
                     };
                     if !snapshot.operations.contains_key(&reenter_id) {
@@ -287,7 +285,7 @@ impl KernelHost {
             && let Some(payload) = self.operation_message_payload(
                 snapshot,
                 &command.source,
-                &command.source.node,
+                command.source.node.as_str(),
                 act_facts(snapshot, &command.source).as_ref(),
                 Some(&plan.variable_writes),
                 None,
@@ -297,7 +295,9 @@ impl KernelHost {
                 crate::scheduler::core::model::transition_plan::OutboxIntent {
                     key: format!(
                         "completed:{}:{}:{}",
-                        command.process_id, command.source.node, command.source.generation
+                        command.process_id,
+                        command.source.node.as_str(),
+                        command.source.generation
                     ),
                     topic: "task.completed".into(),
                     payload: payload.to_string(),
@@ -356,7 +356,7 @@ impl KernelHost {
             && let Some(payload) = self.operation_message_payload(
                 snapshot,
                 task_id,
-                &id.node,
+                id.task.node.as_str(),
                 act_facts(snapshot, task_id).as_ref(),
                 Some(&plan.variable_writes),
                 None,
@@ -440,8 +440,7 @@ impl KernelHost {
         }
         let propagate_id = OperationId {
             process_id: id.process_id.clone(),
-            node: id.node.clone(),
-            generation: id.generation,
+            task: id.task.clone(),
             sequence: id.sequence + 1,
         };
         let mut plan = self.task_operation_plan(
@@ -481,7 +480,7 @@ impl KernelHost {
         if let Some(payload) = self.operation_message_payload(
             snapshot,
             task_id,
-            &id.node,
+            id.task.node.as_str(),
             act_facts(snapshot, task_id).as_ref(),
             None,
             Some((&failure.code, &failure.message)),
@@ -663,7 +662,7 @@ impl KernelHost {
         if let Some(payload) = self.operation_message_payload(
             snapshot,
             task_id,
-            &task_id.node,
+            task_id.node.as_str(),
             act_facts(snapshot, task_id).as_ref(),
             None,
             Some((&failure.code, &failure.message)),
@@ -672,7 +671,10 @@ impl KernelHost {
                 crate::scheduler::core::model::transition_plan::OutboxIntent {
                     key: format!(
                         "failed:{}:{}:{}:{}",
-                        snapshot.process_id, task_id.node, task_id.generation, claim.id.sequence
+                        snapshot.process_id,
+                        task_id.node.as_str(),
+                        task_id.generation,
+                        claim.id.sequence
                     ),
                     topic: "task.failed".into(),
                     payload: payload.to_string(),
@@ -730,7 +732,7 @@ impl KernelHost {
         if let Some(payload) = self.operation_message_payload(
             snapshot,
             task_id,
-            &task_id.node,
+            task_id.node.as_str(),
             facts.as_ref(),
             Some(&plan.variable_writes),
             error,
@@ -741,7 +743,9 @@ impl KernelHost {
                     crate::scheduler::core::model::transition_plan::OutboxIntent {
                         key: format!(
                             "message:{}:{}:{}",
-                            plan.process_id, task_id.node, task_id.generation
+                            plan.process_id,
+                            task_id.node.as_str(),
+                            task_id.generation
                         ),
                         topic: topic.to_string(),
                         payload: payload.to_string(),

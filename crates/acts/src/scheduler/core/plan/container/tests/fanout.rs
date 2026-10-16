@@ -28,25 +28,25 @@ fn fanout_keeps_the_source_running_and_admits_entry_and_skip_children() {
     let entry = plan
         .task_creates
         .iter()
-        .find(|create| create.task.node == "b1")
+        .find(|create| create.task.node.as_str() == "b1")
         .unwrap();
     assert_eq!(entry.initial_state, TaskState::Ready);
     let skip = plan
         .task_creates
         .iter()
-        .find(|create| create.task.node == "b2")
+        .find(|create| create.task.node.as_str() == "b2")
         .unwrap();
     assert_eq!(skip.initial_state, TaskState::Ready);
     assert_eq!(plan.operations.len(), 2);
     assert!(
         plan.operations
             .iter()
-            .any(|op| op.id.node == "b1" && op.kind == OperationKind::ExecuteTask)
+            .any(|op| op.id.task.node.as_str() == "b1" && op.kind == OperationKind::ExecuteTask)
     );
     assert!(
         plan.operations
             .iter()
-            .any(|op| op.id.node == "b2" && op.kind == OperationKind::SkipTask)
+            .any(|op| op.id.task.node.as_str() == "b2" && op.kind == OperationKind::SkipTask)
     );
     assert_eq!(
         plan.state_changes.len(),
@@ -102,7 +102,7 @@ fn fanout_queues_chain_successors_behind_the_entry() {
     let queued = plan
         .task_creates
         .iter()
-        .find(|create| create.task.node == "s2")
+        .find(|create| create.task.node.as_str() == "s2")
         .unwrap();
     assert_eq!(queued.initial_state, TaskState::Created);
     assert_eq!(queued.predecessors, vec![id("s1", 0)]);
@@ -144,8 +144,7 @@ fn a_rewound_created_child_is_readmitted_not_duplicated() {
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                node: "step1".into(),
-                generation: 1,
+                task: id("step1", 1),
                 sequence: 4,
             },
             claim: claim(),
@@ -170,8 +169,7 @@ fn a_rewound_created_child_is_readmitted_not_duplicated() {
         plan.operations[0].id,
         OperationId {
             process_id: "p1".into(),
-            node: "b1".into(),
-            generation: 1,
+            task: id("b1", 1),
             sequence: 0,
         }
     );
@@ -221,8 +219,7 @@ fn a_completed_child_reruns_as_a_fresh_generation() {
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                node: "step1".into(),
-                generation: 1,
+                task: id("step1", 1),
                 sequence: 2,
             },
             claim: claim(),

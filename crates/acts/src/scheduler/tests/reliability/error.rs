@@ -162,7 +162,7 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
     let act = snapshot
         .tasks
         .iter()
-        .find(|(id, _)| id.node == tid)
+        .find(|(id, _)| id.node.as_str() == tid)
         .map(|(_, task)| task)
         .expect("the act's execution");
     assert!(
@@ -436,7 +436,7 @@ async fn engine_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState
             snapshot
                 .tasks
                 .iter()
-                .find(|(id, _)| id.node == tid)
+                .find(|(id, _)| id.node.as_str() == tid)
                 .map(|(_, task)| task.state)
         })
 }

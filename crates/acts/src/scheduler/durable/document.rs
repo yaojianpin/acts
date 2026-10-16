@@ -74,8 +74,7 @@ mod tests {
         let task = TaskId::new("step", 2).unwrap();
         let operation_id = OperationId {
             process_id: "process".into(),
-            node: "step".into(),
-            generation: 2,
+            task: task.clone(),
             sequence: 7,
         };
         let claim = ClaimToken {

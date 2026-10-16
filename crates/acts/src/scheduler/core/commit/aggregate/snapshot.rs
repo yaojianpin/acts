@@ -31,7 +31,7 @@ impl ProcessSnapshot {
     pub(crate) fn next_operation_sequence(&self, node: &str, generation: u64) -> u64 {
         self.operations
             .keys()
-            .filter(|id| id.node == node && id.generation == generation)
+            .filter(|id| id.task.node.as_str() == node && id.task.generation == generation)
             .map(|id| id.sequence)
             .max()
             .map_or(0, |sequence| sequence + 1)

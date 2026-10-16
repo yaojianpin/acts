@@ -71,7 +71,7 @@ fn join_completes_the_parent_when_every_child_is_terminal() {
     assert_eq!(change.from, TaskState::Running);
     assert_eq!(change.to, TaskState::Completed);
     assert_eq!(operation.kind, OperationKind::PropagateTask);
-    assert_eq!(operation.id.node, "step1");
+    assert_eq!(operation.id.task.node.as_str(), "step1");
     assert_eq!(operation.id.sequence, 1);
 }
 

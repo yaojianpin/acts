@@ -163,10 +163,10 @@ impl RowProjector {
         // node id, so one surviving instance may be projected per node.
         let mut latest: BTreeMap<String, TaskId> = BTreeMap::new();
         for id in snapshot.tasks.keys() {
-            match latest.get(&id.node) {
+            match latest.get(id.node.as_str()) {
                 Some(current) if current.generation >= id.generation => {}
                 _ => {
-                    latest.insert(id.node.clone(), id.clone());
+                    latest.insert(id.node.as_str().to_owned(), id.clone());
                 }
             }
         }
@@ -223,7 +223,7 @@ impl RowProjector {
         let Some(root) = snapshot
             .tasks
             .keys()
-            .filter(|id| id.node == consts::TASK_ROOT_TID)
+            .filter(|id| id.node.as_str() == consts::TASK_ROOT_TID)
             .min_by_key(|id| id.generation)
             .cloned()
         else {
@@ -352,9 +352,9 @@ impl RowProjector {
                 .predecessors
                 .iter()
                 .max_by_key(|id| id.generation)
-                .map(|id| id.node.clone()),
+                .map(|id| id.node.as_str().to_owned()),
             next: successors(snapshot, latest, task_id),
-            parent: task.parent.as_ref().map(|id| id.node.clone()),
+            parent: task.parent.as_ref().map(|id| id.node.as_str().to_owned()),
             name: node.name(),
             state: legacy_task_state(task.state).into(),
             err: error_of(snapshot, task_id),
@@ -452,7 +452,7 @@ fn successors(
                 .map(|task| task.predecessors.contains(task_id))
                 .unwrap_or(false)
         })
-        .map(|id| id.node.clone())
+        .map(|id| id.node.as_str().to_owned())
         .collect();
     next.sort();
     next

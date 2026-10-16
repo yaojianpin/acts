@@ -94,7 +94,7 @@ impl KernelHost {
         let reopen = snapshot
             .tasks
             .iter()
-            .filter(|(id, _)| id.node == target)
+            .filter(|(id, _)| id.node.as_str() == target)
             .max_by_key(|(id, _)| id.generation)
             .is_some_and(|(_, task)| {
                 task.state != crate::scheduler::core::model::task_graph::TaskState::Created
@@ -127,13 +127,16 @@ impl KernelHost {
             return Ok(());
         }
         if let Some(payload) =
-            self.task_message_payload(snapshot, parent, &parent.node, None, None)?
+            self.task_message_payload(snapshot, parent, parent.node.as_str(), None, None)?
         {
             plan.outbox.push(
                 crate::scheduler::core::model::transition_plan::OutboxIntent {
                     key: format!(
                         "completed:{}:{}:{}:{}",
-                        snapshot.process_id, parent.node, parent.generation, operation.id.sequence
+                        snapshot.process_id,
+                        parent.node.as_str(),
+                        parent.generation,
+                        operation.id.sequence
                     ),
                     topic: "task.completed".into(),
                     payload: payload.to_string(),
@@ -272,7 +275,7 @@ impl ActOperation for PropagateTask {
                         let record_key = format!(
                             "failed:{}:{}:{}:{}",
                             snapshot.process_id,
-                            parent.node,
+                            parent.node.as_str(),
                             parent.generation,
                             operation.id.sequence
                         );
@@ -291,7 +294,7 @@ impl ActOperation for PropagateTask {
                         if let Some(payload) = host.operation_message_payload(
                             snapshot,
                             &parent,
-                            &parent.node,
+                            parent.node.as_str(),
                             act_facts(snapshot, &parent).as_ref(),
                             None,
                             Some((&code, &text)),

@@ -75,11 +75,7 @@ impl ActPlan for Join {
         let sequence = snapshot
             .operations
             .keys()
-            .filter(|id| {
-                id.process_id == command.process_id
-                    && id.node == command.parent.node
-                    && id.generation == command.parent.generation
-            })
+            .filter(|id| id.process_id == command.process_id && id.task == command.parent)
             .map(|id| id.sequence)
             .max()
             .unwrap_or(0)
@@ -95,8 +91,7 @@ impl ActPlan for Join {
             OperationIntent {
                 id: OperationId {
                     process_id: command.process_id.clone(),
-                    node: command.parent.node.clone(),
-                    generation: command.parent.generation,
+                    task: command.parent.clone(),
                     sequence,
                 },
                 kind: OperationKind::PropagateTask,

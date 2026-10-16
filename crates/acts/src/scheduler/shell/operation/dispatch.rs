@@ -104,16 +104,16 @@ impl KernelHost {
                 let touched: std::collections::BTreeSet<String> = plan
                     .state_changes
                     .iter()
-                    .map(|change| change.task.node.clone())
+                    .map(|change| change.task.node.as_str().to_owned())
                     .chain(
                         plan.task_creates
                             .iter()
-                            .map(|create| create.task.node.clone()),
+                            .map(|create| create.task.node.as_str().to_owned()),
                     )
                     .chain(
                         plan.variable_writes
                             .iter()
-                            .map(|write| write.scope.node.clone()),
+                            .map(|write| write.scope.node.as_str().to_owned()),
                     )
                     .collect();
                 self.project_touched(&loaded, &touched).await;

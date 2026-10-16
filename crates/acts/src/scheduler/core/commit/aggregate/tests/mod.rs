@@ -50,8 +50,7 @@ fn plan() -> TransitionPlan {
         operations: vec![OperationIntent {
             id: OperationId {
                 process_id: "p1".into(),
-                node: "t1".into(),
-                generation: 0,
+                task: id(),
                 sequence: 1,
             },
             kind: OperationKind::PropagateTask,

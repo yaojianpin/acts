@@ -1,4 +1,7 @@
-use crate::scheduler::core::{commit::aggregate::ProcessSnapshot, model::operation::OperationId};
+use crate::scheduler::core::{
+    commit::aggregate::ProcessSnapshot,
+    model::{operation::OperationId, task_graph::TaskId},
+};
 
 use std::collections::HashSet;
 use std::fmt;
@@ -52,8 +55,8 @@ impl RecoveryIndexCodec {
         );
         for entry in &index.entries {
             write_string(&mut output, &entry.operation_id.process_id)?;
-            write_string(&mut output, &entry.operation_id.node)?;
-            output.extend_from_slice(&entry.operation_id.generation.to_be_bytes());
+            write_string(&mut output, entry.operation_id.task.node.as_str())?;
+            output.extend_from_slice(&entry.operation_id.task.generation.to_be_bytes());
             output.extend_from_slice(&entry.operation_id.sequence.to_be_bytes());
             output.extend_from_slice(&entry.revision.to_be_bytes());
         }
@@ -84,8 +87,12 @@ impl RecoveryIndexCodec {
         for _ in 0..count {
             let operation_id = OperationId {
                 process_id: reader.string()?,
-                node: reader.string()?,
-                generation: reader.u64()?,
+                // The identity type refuses an empty node, so bytes no valid
+                // writer can produce are rejected here — the aggregate codec's
+                // `InvalidTaskId` discipline (the old pipeline let the empty
+                // string through and failed later, in `validate`).
+                task: TaskId::new(reader.string()?, reader.u64()?)
+                    .map_err(|_| RecoveryIndexError::InvalidTaskId)?,
                 sequence: reader.u64()?,
             };
             let revision = reader.u64()?;
@@ -123,9 +130,6 @@ fn validate(index: &RecoveryIndex) -> Result<(), RecoveryIndexError> {
                 entry.operation_id.clone(),
             ));
         }
-        if entry.operation_id.node.trim().is_empty() {
-            return Err(RecoveryIndexError::EmptyTaskId(entry.operation_id.clone()));
-        }
         if let Some(previous) = previous {
             match operation_order(previous, &entry.operation_id) {
                 std::cmp::Ordering::Less => {}
@@ -145,8 +149,8 @@ fn validate(index: &RecoveryIndex) -> Result<(), RecoveryIndexError> {
 pub(crate) fn operation_order(left: &OperationId, right: &OperationId) -> std::cmp::Ordering {
     left.process_id
         .cmp(&right.process_id)
-        .then_with(|| left.node.cmp(&right.node))
-        .then_with(|| left.generation.cmp(&right.generation))
+        .then_with(|| left.task.node.cmp(&right.task.node))
+        .then_with(|| left.task.generation.cmp(&right.task.generation))
         .then_with(|| left.sequence.cmp(&right.sequence))
 }
 fn write_string(output: &mut Vec<u8>, value: &str) -> Result<(), RecoveryIndexError> {
@@ -212,7 +216,9 @@ pub(crate) enum RecoveryIndexError {
     InvalidUtf8,
     EmptyProcessId,
     EmptyIndex,
-    EmptyTaskId(OperationId),
+    /// The bytes name an identity the [`TaskId`] type refuses (an empty
+    /// node) — only corrupt or foreign bytes can carry one.
+    InvalidTaskId,
     ForeignOperation(OperationId),
     DuplicateOperation(OperationId),
     NonCanonicalOrder,
@@ -243,8 +249,7 @@ mod tests {
             entries: vec![RecoveryIndexEntry {
                 operation_id: OperationId {
                     process_id: "p".into(),
-                    node: "t".into(),
-                    generation: 1,
+                    task: TaskId::new("t", 1).unwrap(),
                     sequence: 2,
                 },
                 revision: 3,
@@ -263,8 +268,7 @@ mod tests {
         RecoveryIndexEntry {
             operation_id: OperationId {
                 process_id: "p".into(),
-                node: node.into(),
-                generation: 0,
+                task: TaskId::new(node, 0).unwrap(),
                 sequence,
             },
             revision: sequence,

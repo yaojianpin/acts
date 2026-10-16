@@ -208,7 +208,7 @@ impl Writer {
         Ok(())
     }
     fn task_id(&mut self, id: &TaskId) -> Result<(), SnapshotCodecError> {
-        self.string(&id.node)?;
+        self.string(id.node.as_str())?;
         self.u64(id.generation);
         Ok(())
     }
@@ -224,8 +224,8 @@ impl Writer {
     }
     fn operation_id(&mut self, id: &OperationId) -> Result<(), SnapshotCodecError> {
         self.string(&id.process_id)?;
-        self.string(&id.node)?;
-        self.u64(id.generation);
+        self.string(id.task.node.as_str())?;
+        self.u64(id.task.generation);
         self.u64(id.sequence);
         Ok(())
     }
@@ -361,8 +361,8 @@ impl<'a> Reader<'a> {
     fn operation_id(&mut self) -> Result<OperationId, SnapshotCodecError> {
         Ok(OperationId {
             process_id: self.string()?,
-            node: self.string()?,
-            generation: self.u64()?,
+            task: TaskId::new(self.string()?, self.u64()?)
+                .map_err(|_| SnapshotCodecError::InvalidTaskId)?,
             sequence: self.u64()?,
         })
     }
@@ -486,8 +486,8 @@ fn decode_operation_kind(tag: u8) -> Result<OperationKind, SnapshotCodecError> {
 fn operation_id_order(left: &OperationId, right: &OperationId) -> std::cmp::Ordering {
     left.process_id
         .cmp(&right.process_id)
-        .then_with(|| left.node.cmp(&right.node))
-        .then_with(|| left.generation.cmp(&right.generation))
+        .then_with(|| left.task.node.cmp(&right.task.node))
+        .then_with(|| left.task.generation.cmp(&right.task.generation))
         .then_with(|| left.sequence.cmp(&right.sequence))
 }
 
@@ -535,8 +535,7 @@ mod tests {
         let child = TaskId::new("child", 1).unwrap();
         let operation_id = OperationId {
             process_id: "p".into(),
-            node: "child".into(),
-            generation: 1,
+            task: child.clone(),
             sequence: 4,
         };
         let claim = ClaimToken {

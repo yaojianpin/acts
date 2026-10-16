@@ -89,10 +89,9 @@ impl crate::scheduler::core::plan::ActPlan for Upward {
                 operations.push(OperationIntent {
                     id: crate::scheduler::core::model::operation::OperationId {
                         process_id: command.process_id.clone(),
-                        node: ancestor.node.clone(),
-                        generation: ancestor.generation,
+                        task: ancestor.clone(),
                         sequence: snapshot
-                            .next_operation_sequence(&ancestor.node, ancestor.generation),
+                            .next_operation_sequence(ancestor.node.as_str(), ancestor.generation),
                     },
                     kind: OperationKind::PropagateTask,
                 });

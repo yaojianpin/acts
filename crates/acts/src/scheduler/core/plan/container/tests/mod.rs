@@ -23,8 +23,7 @@ fn commit(task: &str, sequence: u64) -> OperationCommit {
     OperationCommit {
         id: OperationId {
             process_id: "p1".into(),
-            node: task.into(),
-            generation: 0,
+            task: id(task, 0),
             sequence,
         },
         claim: claim(),

@@ -149,7 +149,7 @@ async fn legacy_task_state(engine: &Engine, pid: &str, node: &str) -> Option<Tas
     snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == node)
+        .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }

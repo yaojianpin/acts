@@ -98,10 +98,7 @@ impl Claimed {
     /// claim, the authoritative snapshot, and the execution the operation
     /// names (absent for an operation whose execution a decision removed).
     pub(super) fn operation(&self) -> Operation<'_> {
-        let task_id = crate::scheduler::core::model::task_graph::TaskId {
-            node: self.id.node.clone(),
-            generation: self.id.generation,
-        };
+        let task_id = self.id.task.clone();
         let task = self.snapshot.tasks.get(&task_id);
         Operation {
             id: &self.id,

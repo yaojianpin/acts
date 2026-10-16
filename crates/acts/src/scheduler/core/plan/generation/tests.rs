@@ -91,8 +91,7 @@ fn command() -> ReenterCommand {
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                node: "source".into(),
-                generation: 1,
+                task: id("source", 1),
                 sequence: 8,
             },
             claim: ClaimToken {
@@ -119,8 +118,8 @@ fn reentry_creates_new_generation_and_never_mutates_history() {
         .collect();
     assert_eq!(created, vec![id("source", 2), id("target", 2)]);
     assert_eq!(plan.task_creates[0].initial_state, TaskState::Ready);
-    assert_eq!(plan.operations[0].id.node, "source");
-    assert_eq!(plan.operations[0].id.generation, 2);
+    assert_eq!(plan.operations[0].id.task.node.as_str(), "source");
+    assert_eq!(plan.operations[0].id.task.generation, 2);
     let target = plan
         .task_creates
         .iter()
@@ -157,8 +156,8 @@ fn cancelled_source_reenters_and_recreates_the_forward_closure() {
     // The recreated source carries an ExecuteTask; the recreated target
     // waits for the source's propagation.
     assert_eq!(plan.operations.len(), 1);
-    assert_eq!(plan.operations[0].id.node, "source");
-    assert_eq!(plan.operations[0].id.generation, 2);
+    assert_eq!(plan.operations[0].id.task.node.as_str(), "source");
+    assert_eq!(plan.operations[0].id.task.generation, 2);
     // The recreated target's predecessor edge points at the recreated
     // source, not at the dead generation.
     let target = plan
@@ -243,8 +242,8 @@ fn back_reenters_the_named_step_and_carries_the_backed_source() {
         TaskState::Ready,
         "the named redo step runs again immediately"
     );
-    assert_eq!(plan.operations[0].id.node, "target");
-    assert_eq!(plan.operations[0].id.generation, 2);
+    assert_eq!(plan.operations[0].id.task.node.as_str(), "target");
+    assert_eq!(plan.operations[0].id.task.generation, 2);
     let source = plan
         .task_creates
         .iter()
@@ -327,8 +326,7 @@ fn back_to_a_step_outside_the_redo_closure_is_refused() {
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                node: "stray".into(),
-                generation: 0,
+                task: id("stray", 0),
                 sequence: 1,
             },
             claim: ClaimToken {

@@ -147,7 +147,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .await
         .tasks
         .keys()
-        .filter(|id| id.node == tid)
+        .filter(|id| id.node.as_str() == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -160,7 +160,7 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskStat
         .await
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == tid)
+        .filter(|(id, _)| id.node.as_str() == tid)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -172,7 +172,7 @@ async fn open_operations(engine: &Engine, pid: &str, tid: &str) -> Vec<Operation
         .await
         .operations
         .values()
-        .filter(|operation| operation.id.node == tid && !operation.is_terminal())
+        .filter(|operation| operation.id.task.node.as_str() == tid && !operation.is_terminal())
         .map(|operation| (operation.id.sequence, operation.state.clone()))
         .collect();
     open.sort_by_key(|(sequence, _)| *sequence);
@@ -716,7 +716,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                     shifted
                         .reconciliation_required
                         .iter()
-                        .any(|operation| operation.node == step1),
+                        .any(|operation| operation.task.node.as_str() == step1),
                     "the effect boundary must be surfaced for reconciliation: {shifted:?}"
                 );
                 assert_eq!(
@@ -865,7 +865,9 @@ async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner() {
         ("surfaced for reconciliation", &scan.reconciliation_required),
     ] {
         assert!(
-            !operations.iter().any(|operation| operation.node == step1),
+            !operations
+                .iter()
+                .any(|operation| operation.task.node.as_str() == step1),
             "the applied propagation must leave the scan nothing to replay; it may not be {what}: {scan:?}"
         );
     }

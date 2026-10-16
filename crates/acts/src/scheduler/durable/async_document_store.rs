@@ -623,8 +623,7 @@ mod tests {
         let task = TaskId::new("step", 0).unwrap();
         let operation_id = OperationId {
             process_id: "process".into(),
-            node: "step".into(),
-            generation: 0,
+            task: task.clone(),
             sequence: 0,
         };
         let claim = ClaimToken {
@@ -770,8 +769,7 @@ mod tests {
         };
         let operation_id = OperationId {
             process_id: "process".into(),
-            node: "step".into(),
-            generation: 0,
+            task: TaskId::new("step", 0).unwrap(),
             sequence: 0,
         };
         // The pair the pre-fold operation committed in two rounds: claim-and-prepare,

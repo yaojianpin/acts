@@ -120,7 +120,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node == tid)
+        .filter(|id| id.node.as_str() == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -144,7 +144,7 @@ async fn generation_state(
     snapshot
         .tasks
         .iter()
-        .find(|(id, _)| id.node == tid && id.generation == generation)
+        .find(|(id, _)| id.node.as_str() == tid && id.generation == generation)
         .map(|(_, task)| task.state)
 }
 
@@ -161,7 +161,7 @@ async fn has_pending_operation(engine: &Engine, pid: &str, tid: &str) -> bool {
     snapshot
         .operations
         .values()
-        .any(|operation| operation.id.node == tid && !operation.is_terminal())
+        .any(|operation| operation.id.task.node.as_str() == tid && !operation.is_terminal())
 }
 
 // ---------------------------------------------------------------------------

@@ -70,8 +70,8 @@ fn upward_walk_aborts_every_ancestor_and_seeds_their_cascade() {
             .iter()
             .all(|op| op.kind == OperationKind::PropagateTask)
     );
-    assert_eq!(operations[0].id.node, "step1");
-    assert_eq!(operations[1].id.node, "$");
+    assert_eq!(operations[0].id.task.node.as_str(), "step1");
+    assert_eq!(operations[1].id.task.node.as_str(), "$");
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn the_error_walk_rides_a_failed_source_upward() {
     assert_eq!(changes[0].task, id("$", 0));
     assert_eq!(changes[0].to, TaskState::Failed);
     assert_eq!(operations.len(), 1);
-    assert_eq!(operations[0].id.node, "$");
+    assert_eq!(operations[0].id.task.node.as_str(), "$");
 }
 
 #[test]

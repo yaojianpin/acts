@@ -125,13 +125,12 @@ impl ActPlan for CatchJoin {
             // did not produce: refuse to guess a catch outcome for it.
             return Ok(None);
         }
-        let sequence =
-            snapshot.next_operation_sequence(&command.parent.node, command.parent.generation);
+        let sequence = snapshot
+            .next_operation_sequence(command.parent.node.as_str(), command.parent.generation);
         let operation = OperationIntent {
             id: OperationId {
                 process_id: command.process_id.clone(),
-                node: command.parent.node.clone(),
-                generation: command.parent.generation,
+                task: command.parent.clone(),
                 sequence,
             },
             kind: OperationKind::PropagateTask,

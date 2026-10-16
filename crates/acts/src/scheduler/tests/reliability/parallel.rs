@@ -182,7 +182,7 @@ async fn node_generations(engine: &Engine, pid: &str) -> Vec<(String, u64)> {
         .await
         .tasks
         .keys()
-        .map(|id| (id.node.clone(), id.generation))
+        .map(|id| (id.node.as_str().to_owned(), id.generation))
         .collect();
     nodes.sort();
     nodes
@@ -196,7 +196,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .await
         .tasks
         .keys()
-        .filter(|id| id.node == tid)
+        .filter(|id| id.node.as_str() == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -209,7 +209,7 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskStat
         .await
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == tid)
+        .filter(|(id, _)| id.node.as_str() == tid)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -268,7 +268,7 @@ async fn assert_join_once(engine: &Engine, pid: &str, first: &str, second: &str)
         .tasks
         .iter()
         .filter(|(_, task)| !task.state.is_terminal())
-        .map(|(id, task)| format!("{}/{}:{:?}", id.node, id.generation, task.state))
+        .map(|(id, task)| format!("{}/{}:{:?}", id.node.as_str(), id.generation, task.state))
         .collect();
     assert!(
         unfinished.is_empty(),
@@ -727,7 +727,7 @@ async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
     let mut bindings: Vec<(String, String)> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node == "step1#item")
+        .filter(|id| id.node.as_str() == "step1#item")
         .map(|id| {
             let read = |name: &str| {
                 snapshot
@@ -752,13 +752,13 @@ async fn item_predecessors(engine: &Engine, pid: &str) -> Vec<(u64, Vec<String>)
     let mut edges: Vec<(u64, Vec<String>)> = snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == "step1#item")
+        .filter(|(id, _)| id.node.as_str() == "step1#item")
         .map(|(id, task)| {
             (
                 id.generation,
                 task.predecessors
                     .iter()
-                    .map(|parent| format!("{}@{}", parent.node, parent.generation))
+                    .map(|parent| format!("{}@{}", parent.node.as_str(), parent.generation))
                     .collect(),
             )
         })

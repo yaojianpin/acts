@@ -2,19 +2,49 @@ use crate::scheduler::core::model::model_graph::NodeId;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+/// The identity of one instance of a model node: the node's `generation`-th
+/// run. Deterministic and a pure function of its parts — idempotency (whole
+/// snapshot equality), the canonical digest and CAS retries all depend on it.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct TaskId {
-    pub(crate) node: String,
+    pub(crate) node: NodeId,
     pub(crate) generation: u64,
 }
 
 impl TaskId {
     pub(crate) fn new(node: impl Into<String>, generation: u64) -> Result<Self, TaskGraphError> {
-        let node = node.into();
-        if node.trim().is_empty() {
-            return Err(TaskGraphError::EmptyTaskId);
-        }
+        let node = NodeId::parse(node).map_err(|_| TaskGraphError::EmptyTaskId)?;
         Ok(Self { node, generation })
+    }
+
+    /// The single derivation of the identity's wire form. Every boundary that
+    /// turns a [`TaskId`] into a string must go through here, so there is
+    /// exactly one place that decides what an instance looks like on the wire.
+    ///
+    /// Today that form *is* the node id (the kernel's `tid`), so every derived
+    /// byte — row keys, recovery-entry keys, codec fields — is unchanged. The
+    /// hex form is C5's switch (design §2.2 D2), and it will land in this one
+    /// function.
+    pub(crate) fn wire(&self) -> String {
+        self.node.as_str().to_owned()
+    }
+}
+
+impl fmt::Debug for TaskId {
+    /// Renders the identity flat — the node string, not the newtype — so
+    /// diagnostics that interpolate an id (`execution {task_id:?} not found`)
+    /// keep their historical byte shape.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskId")
+            .field("node", &self.node.as_str())
+            .field("generation", &self.generation)
+            .finish()
+    }
+}
+
+impl fmt::Display for TaskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.wire())
     }
 }
 

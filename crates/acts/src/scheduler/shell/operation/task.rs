@@ -97,7 +97,9 @@ impl ActOperation for ExecuteTask {
         // seal must fail the act at start, never a completion.
         let created_key = format!(
             "message.created:{}:{}:{}",
-            operation.id.process_id, operation.id.node, operation.id.generation
+            operation.id.process_id,
+            operation.id.task.node.as_str(),
+            operation.id.task.generation
         );
         let announced = snapshot
             .outbox
@@ -134,7 +136,7 @@ impl ActOperation for ExecuteTask {
                     // fails it — the same error walk, one operation later.
                     tracing::debug!(
                         pid = %snapshot.process_id,
-                        node = %task_id.node,
+                        node = task_id.node.as_str(),
                         error = %error,
                         "act resolution failed at start; failing it on its effect operation"
                     );
@@ -171,8 +173,7 @@ impl ActOperation for ExecuteTask {
         // whether it is already durable.
         let action_id = OperationId {
             process_id: id.process_id.clone(),
-            node: id.node.clone(),
-            generation: id.generation,
+            task: id.task.clone(),
             sequence: id.sequence + 1,
         };
         let action_exists = snapshot.operations.contains_key(&action_id);
@@ -258,7 +259,7 @@ impl ActOperation for ExecuteTask {
                     && let Some(payload) = host.operation_message_payload(
                         snapshot,
                         &task_id,
-                        &id.node,
+                        id.task.node.as_str(),
                         facts.as_ref(),
                         None,
                         None,
@@ -268,7 +269,9 @@ impl ActOperation for ExecuteTask {
                         crate::scheduler::core::model::transition_plan::OutboxIntent {
                             key: format!(
                                 "message.created:{}:{}:{}",
-                                id.process_id, id.node, id.generation
+                                id.process_id,
+                                id.task.node.as_str(),
+                                id.task.generation
                             ),
                             topic: "message.created".into(),
                             payload: payload.to_string(),
@@ -310,13 +313,16 @@ impl ActOperation for ExecuteTask {
                         plan.variable_writes.push(
                             crate::scheduler::core::plan::timeout::start_write(&task_id, now_ms),
                         );
-                        let sequence =
-                            next_plan_sequence(snapshot, &plan, &task_id.node, task_id.generation);
+                        let sequence = next_plan_sequence(
+                            snapshot,
+                            &plan,
+                            task_id.node.as_str(),
+                            task_id.generation,
+                        );
                         plan.operations.push(OperationIntent {
                             id: OperationId {
                                 process_id: id.process_id.clone(),
-                                node: task_id.node.clone(),
-                                generation: task_id.generation,
+                                task: task_id.clone(),
                                 sequence,
                             },
                             kind: OperationKind::DispatchTimeout,
@@ -418,8 +424,7 @@ impl KernelHost {
     ) -> Result<TransitionPlan> {
         let propagate_id = OperationId {
             process_id: id.process_id.clone(),
-            node: id.node.clone(),
-            generation: id.generation,
+            task: id.task.clone(),
             sequence: id.sequence + 1,
         };
         let mut plan = self.task_operation_plan(
@@ -442,7 +447,7 @@ impl KernelHost {
         if let Some(payload) = self.operation_message_payload(
             snapshot,
             task_id,
-            &id.node,
+            id.task.node.as_str(),
             act_facts(snapshot, task_id).as_ref(),
             None,
             None,

@@ -87,7 +87,7 @@ fn catch_join_resumes_the_error_when_every_catcher_skipped() {
     assert_eq!(change.from, TaskState::Running);
     assert_eq!(change.to, TaskState::Failed);
     assert_eq!(operation.kind, OperationKind::PropagateTask);
-    assert_eq!(operation.id.node, "step1");
+    assert_eq!(operation.id.task.node.as_str(), "step1");
     assert_eq!(operation.id.sequence, 0);
 }
 

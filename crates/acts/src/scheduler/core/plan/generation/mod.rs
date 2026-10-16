@@ -62,10 +62,7 @@ impl ActPlan for Reenter {
             });
         }
         let operation = &command.source_operation.id;
-        if operation.process_id != command.process_id
-            || operation.node != command.source.node
-            || operation.generation != command.source.generation
-        {
+        if operation.process_id != command.process_id || operation.task != command.source {
             return Err(GenerationError::SourceOperationTargetsDifferentTask);
         }
         if command.target_task_id.trim().is_empty() {
@@ -77,13 +74,13 @@ impl ActPlan for Reenter {
         // and the backed source must lie inside the closure it spawns (the
         // redo re-runs everything downstream of the target, the source
         // included).
-        let root = if command.target_task_id == command.source.node {
+        let root = if command.target_task_id == command.source.node.as_str() {
             command.source.clone()
         } else {
             snapshot
                 .tasks
                 .keys()
-                .filter(|id| id.node == command.target_task_id)
+                .filter(|id| id.node.as_str() == command.target_task_id)
                 .max_by_key(|id| id.generation)
                 .cloned()
                 .ok_or_else(|| {
@@ -133,7 +130,7 @@ impl ActPlan for Reenter {
                 .unwrap_or(0)
                 .checked_add(1)
                 .ok_or(GenerationError::GenerationOverflow)?;
-            let new_id = TaskId::new(old_id.node.clone(), generation)
+            let new_id = TaskId::new(old_id.node.as_str(), generation)
                 .map_err(|_| GenerationError::EmptyTargetTaskId)?;
             remap.insert(old_id.clone(), new_id.clone());
             closure.push((old_id.clone(), old, new_id));
@@ -142,10 +139,9 @@ impl ActPlan for Reenter {
         // carried by its `ExecuteTask` operation); the recreated downstream
         // starts `Created`, so ordinary propagation admits each of them in
         // turn as their predecessors settle.
-        let next = remap
-            .get(&root)
-            .cloned()
-            .ok_or_else(|| GenerationError::TargetNeverInstantiated(root.node.clone()))?;
+        let next = remap.get(&root).cloned().ok_or_else(|| {
+            GenerationError::TargetNeverInstantiated(root.node.as_str().to_owned())
+        })?;
         let task_creates: Vec<TaskCreate> = closure
             .iter()
             .map(|(old_id, old, new_id)| TaskCreate {
@@ -197,8 +193,7 @@ impl ActPlan for Reenter {
         // recreated downstream waits for its propagation.
         let next_operation = OperationId {
             process_id: command.process_id.clone(),
-            node: next.node.clone(),
-            generation: next.generation,
+            task: next.clone(),
             sequence: 0,
         };
         let plan = TransitionPlan {
@@ -216,12 +211,12 @@ impl ActPlan for Reenter {
                 key: format!(
                     "reenter:{}:{}:{}:{}",
                     command.process_id,
-                    next.node,
+                    next.node.as_str(),
                     next.generation,
                     command.source_operation.id.sequence,
                 ),
                 topic: "task.reentered".into(),
-                payload: format!("{}:{}", next.node, next.generation),
+                payload: format!("{}:{}", next.node.as_str(), next.generation),
                 receipt: None,
             }],
         };

@@ -346,14 +346,16 @@ impl Admissions {
 fn resume_operation(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> OperationId {
-    let root = root_task(snapshot);
+    let root = root_task(snapshot).unwrap_or_else(|| {
+        crate::scheduler::core::model::task_graph::TaskId::new(
+            crate::utils::consts::TASK_ROOT_TID,
+            0,
+        )
+        .expect("the root tid constant is a valid node id")
+    });
     OperationId {
         process_id: snapshot.process_id.clone(),
-        node: root
-            .as_ref()
-            .map(|root| root.node.clone())
-            .unwrap_or_else(|| crate::utils::consts::TASK_ROOT_TID.to_string()),
-        generation: root.map(|root| root.generation).unwrap_or(0),
+        task: root,
         sequence: 0,
     }
 }
@@ -603,7 +605,7 @@ impl KernelHost {
         let Some(root) = snapshot
             .tasks
             .keys()
-            .filter(|id| id.node == crate::utils::consts::TASK_ROOT_TID)
+            .filter(|id| id.node.as_str() == crate::utils::consts::TASK_ROOT_TID)
             .min_by_key(|id| id.generation)
             .cloned()
         else {
@@ -754,8 +756,8 @@ impl KernelHost {
         self.project(&snapshot).await;
         let root = OperationId {
             process_id: spec.process_id.clone(),
-            node: spec.root.clone(),
-            generation: 0,
+            task: crate::scheduler::core::model::task_graph::TaskId::new(&spec.root, 0)
+                .map_err(runtime)?,
             sequence: 0,
         };
         match admission {
@@ -1063,7 +1065,7 @@ impl KernelHost {
         if forward.iter().all(|task| task.state.is_terminal()) {
             return Err(ActError::Action(format!(
                 "task('{}') is not allowed to cancel",
-                source.node
+                source.node.as_str()
             )));
         }
         Ok(())
@@ -1102,8 +1104,8 @@ impl KernelHost {
             .keys()
             .filter(|id| {
                 id.process_id == process_id
-                    && id.node == node
-                    && id.generation == task_id.generation
+                    && id.task.node.as_str() == node
+                    && id.task.generation == task_id.generation
             })
             .map(|id| id.sequence)
             .max()
@@ -1114,8 +1116,11 @@ impl KernelHost {
                 task: task_id.clone(),
                 operation: OperationId {
                     process_id: process_id.into(),
-                    node: node.into(),
-                    generation: task_id.generation,
+                    task: crate::scheduler::core::model::task_graph::TaskId::new(
+                        node,
+                        task_id.generation,
+                    )
+                    .map_err(runtime)?,
                     sequence,
                 },
             };
@@ -1159,7 +1164,7 @@ impl KernelHost {
         action: &crate::scheduler::core::commit::command::ActionKind,
     ) -> Result<crate::scheduler::core::model::task_graph::TaskId> {
         use crate::scheduler::core::commit::command::action_allowed;
-        let generations = || snapshot.tasks.keys().filter(|id| id.node == node);
+        let generations = || snapshot.tasks.keys().filter(|id| id.node.as_str() == node);
         generations()
             .filter(|id| action_allowed(snapshot.tasks[*id].state, action))
             .max_by_key(|id| id.generation)
@@ -1372,7 +1377,7 @@ impl KernelHost {
         {
             return Err(ActError::Action(format!(
                 "step '{}' is deciding its catches; the act it folds is decided",
-                task_id.node
+                task_id.node.as_str()
             )));
         }
 
@@ -1468,7 +1473,12 @@ impl KernelHost {
             operations: Vec::new(),
             outbox: vec![
                 crate::scheduler::core::model::transition_plan::OutboxIntent {
-                    key: format!("{note}:{}:{}:{}", id.process_id, id.node, id.generation),
+                    key: format!(
+                        "{note}:{}:{}:{}",
+                        id.process_id,
+                        id.task.node.as_str(),
+                        id.task.generation
+                    ),
                     topic: topic.into(),
                     payload: String::new(),
                     receipt: None,
@@ -1653,7 +1663,7 @@ impl KernelHost {
     ) -> Result<scope::ScopeSpec> {
         Ok(scope::ScopeSpec {
             process_id: snapshot.process_id.clone(),
-            node: task_id.node.clone(),
+            node: task_id.node.as_str().to_owned(),
             model,
             vars: scope_vars(snapshot, task_id),
             env: projection::env_map(snapshot)?,

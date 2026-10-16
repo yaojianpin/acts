@@ -12,8 +12,7 @@ fn source() -> OperationCommit {
     OperationCommit {
         id: OperationId {
             process_id: "p1".into(),
-            node: "step".into(),
-            generation: 2,
+            task: task(),
             sequence: 4,
         },
         claim: ClaimToken {
@@ -117,7 +116,7 @@ fn back_closes_current_generation_without_reopening_it() {
         ActionPlanner::plan(&snapshot(TaskState::Waiting), &command(ActionKind::Back)).unwrap();
     assert_eq!(plan.state_changes[0].to, TaskState::Backed);
     assert_eq!(plan.operations[0].kind, OperationKind::ApplyAction);
-    assert_eq!(plan.operations[0].id.generation, 2);
+    assert_eq!(plan.operations[0].id.task.generation, 2);
 }
 
 #[test]

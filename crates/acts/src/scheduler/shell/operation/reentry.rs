@@ -45,7 +45,7 @@ impl ActOperation for ReenterTask {
                 .variables
                 .get(&(task_id.clone(), REENTER_TARGET_VAR.to_string()))
                 .cloned()
-                .unwrap_or_else(|| id.node.clone());
+                .unwrap_or_else(|| id.task.node.as_str().to_owned());
             let graph = task_graph(snapshot)?;
             let command = crate::scheduler::core::plan::generation::ReenterCommand {
                 process_id: id.process_id.clone(),

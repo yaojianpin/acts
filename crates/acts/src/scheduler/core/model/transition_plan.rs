@@ -315,8 +315,7 @@ mod tests {
         p.operations.push(OperationIntent {
             id: OperationId {
                 process_id: "other".into(),
-                node: "t1".into(),
-                generation: 0,
+                task: TaskId::new("t1", 0).unwrap(),
                 sequence: 1,
             },
             kind: OperationKind::PropagateTask,

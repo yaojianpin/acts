@@ -61,10 +61,7 @@ impl ActPlan for Fanout {
             });
         }
         let operation = &command.source_operation.id;
-        if operation.process_id != command.process_id
-            || operation.node != command.source.node
-            || operation.generation != command.source.generation
-        {
+        if operation.process_id != command.process_id || operation.task != command.source {
             return Err(ContainerError::SourceOperationTargetsDifferentTask);
         }
         if command.children.is_empty() {
@@ -247,8 +244,7 @@ impl Fanout {
         let mut operations = Vec::new();
         let propagate_id = OperationId {
             process_id: command.process_id.clone(),
-            node: command.source.node.clone(),
-            generation: command.source.generation,
+            task: command.source.clone(),
             sequence,
         };
         if !snapshot.operations.contains_key(&propagate_id) {
@@ -285,7 +281,7 @@ fn existing_children(snapshot: &ProcessSnapshot, parent: &TaskId, node: &str) ->
     let mut children: Vec<TaskId> = snapshot
         .tasks
         .iter()
-        .filter(|(id, task)| id.node == node && task.parent.as_ref() == Some(parent))
+        .filter(|(id, task)| id.node.as_str() == node && task.parent.as_ref() == Some(parent))
         .map(|(id, _)| id.clone())
         .collect();
     children.sort_by_key(|id| id.generation);
@@ -309,7 +305,7 @@ fn next_generation(snapshot: &ProcessSnapshot, node: &str) -> Option<u64> {
     snapshot
         .tasks
         .keys()
-        .filter(|id| id.node == node)
+        .filter(|id| id.node.as_str() == node)
         .map(|id| id.generation)
         .max()
         .map_or(Some(0), |value| value.checked_add(1))
@@ -355,8 +351,7 @@ fn child_operation(
     Ok(Some(OperationIntent {
         id: OperationId {
             process_id: command.process_id.clone(),
-            node: task.node.clone(),
-            generation: task.generation,
+            task: task.clone(),
             sequence: 0,
         },
         kind,
@@ -407,12 +402,16 @@ fn fanout_outbox(command: &ContainerFanoutCommand, outcome: &str) -> OutboxInten
         key: format!(
             "fanout:{}:{}:{}:{}",
             command.process_id,
-            command.source.node,
+            command.source.node.as_str(),
             command.source.generation,
             command.source_operation.id.sequence,
         ),
         topic: format!("fanout.{outcome}"),
-        payload: format!("{}:{}", command.source.node, command.source.generation),
+        payload: format!(
+            "{}:{}",
+            command.source.node.as_str(),
+            command.source.generation
+        ),
         receipt: None,
     }
 }

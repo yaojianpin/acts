@@ -82,7 +82,7 @@ pub(crate) fn has_live_child(snapshot: &ProcessSnapshot, owner: &TaskId, branch:
 }
 
 fn is_child_of(parent: Option<&TaskId>, owner: &TaskId, id: &TaskId, branch: &str) -> bool {
-    parent == Some(owner) && id.node == branch
+    parent == Some(owner) && id.node.as_str() == branch
 }
 
 /// Whether any of the declared timeout branches still has a live execution:

@@ -64,8 +64,7 @@ impl ActionPlanner {
             operations: vec![OperationIntent {
                 id: OperationId {
                     process_id: command.process_id.clone(),
-                    node: command.task.node.clone(),
-                    generation: command.task.generation,
+                    task: command.task.clone(),
                     sequence: next_sequence,
                 },
                 kind: operation_kind,
@@ -74,12 +73,12 @@ impl ActionPlanner {
                 key: format!(
                     "action:{}:{}:{}:{}",
                     command.process_id,
-                    command.task.node,
+                    command.task.node.as_str(),
                     command.task.generation,
                     command.source_operation.id.sequence
                 ),
                 topic: format!("task.{}", action_name(&command.action)),
-                payload: format!("{}:{}", command.task.node, command.task.generation),
+                payload: format!("{}:{}", command.task.node.as_str(), command.task.generation),
                 receipt: None,
             }],
         };
@@ -103,7 +102,7 @@ fn validate_envelope(
     if source.process_id != command.process_id {
         return Err(CommandError::ForeignSourceOperation(source.clone()));
     }
-    if source.node != command.task.node || source.generation != command.task.generation {
+    if source.task != command.task {
         return Err(CommandError::SourceOperationTargetsDifferentTask);
     }
     Ok(())

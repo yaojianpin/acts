@@ -105,9 +105,9 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                         operations.push(OperationIntent {
                             id: OperationId {
                                 process_id: command.process_id.clone(),
-                                node: flow.node.clone(),
-                                generation,
-                                sequence: snapshot.next_operation_sequence(&flow.node, generation),
+                                task: task.clone(),
+                                sequence: snapshot
+                                    .next_operation_sequence(task.node.as_str(), generation),
                             },
                             kind: OperationKind::ExecuteTask,
                         });
@@ -206,10 +206,11 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                     operations.push(OperationIntent {
                         id: OperationId {
                             process_id: command.process_id.clone(),
-                            node: successor.node.clone(),
-                            generation: successor.generation,
-                            sequence: snapshot
-                                .next_operation_sequence(&successor.node, successor.generation),
+                            task: successor.clone(),
+                            sequence: snapshot.next_operation_sequence(
+                                successor.node.as_str(),
+                                successor.generation,
+                            ),
                         },
                         kind,
                     });
@@ -234,10 +235,11 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                     operations.push(OperationIntent {
                         id: OperationId {
                             process_id: command.process_id.clone(),
-                            node: successor.node.clone(),
-                            generation: successor.generation,
-                            sequence: snapshot
-                                .next_operation_sequence(&successor.node, successor.generation),
+                            task: successor.clone(),
+                            sequence: snapshot.next_operation_sequence(
+                                successor.node.as_str(),
+                                successor.generation,
+                            ),
                         },
                         kind: OperationKind::ExecuteTask,
                     });
@@ -257,10 +259,11 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                     operations.push(OperationIntent {
                         id: OperationId {
                             process_id: command.process_id.clone(),
-                            node: successor.node.clone(),
-                            generation: successor.generation,
-                            sequence: snapshot
-                                .next_operation_sequence(&successor.node, successor.generation),
+                            task: successor.clone(),
+                            sequence: snapshot.next_operation_sequence(
+                                successor.node.as_str(),
+                                successor.generation,
+                            ),
                         },
                         kind: OperationKind::SkipTask,
                     });
@@ -286,12 +289,12 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                 key: format!(
                     "propagate:{}:{}:{}:{}",
                     command.process_id,
-                    command.task.node,
+                    command.task.node.as_str(),
                     command.task.generation,
                     command.source_operation.id.sequence,
                 ),
                 topic: "task.propagated".into(),
-                payload: format!("{}:{}", command.task.node, command.task.generation),
+                payload: format!("{}:{}", command.task.node.as_str(), command.task.generation),
                 receipt: None,
             }],
         };
@@ -313,7 +316,7 @@ fn newest_generation<'a>(
     snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == node)
+        .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(id, task)| (id.clone(), task))
 }
@@ -333,10 +336,7 @@ fn validate_envelope(
         });
     }
     let source = &command.source_operation.id;
-    if source.process_id != command.process_id
-        || source.node != command.task.node
-        || source.generation != command.task.generation
-    {
+    if source.process_id != command.process_id || source.task != command.task {
         return Err(PropagationError::SourceOperationTargetsDifferentTask);
     }
     if graph.node(&command.task).is_none() {

@@ -5,8 +5,7 @@ fn process_rejects_operation_key_value_identity_mismatch() {
     let mut snapshot = repository().load("p1").unwrap().unwrap();
     let key = OperationId {
         process_id: "p1".into(),
-        node: "t1".into(),
-        generation: 0,
+        task: TaskId::new("t1", 0).unwrap(),
         sequence: 10,
     };
     let record_id = OperationId {
@@ -31,8 +30,7 @@ fn process_rejects_foreign_operation_and_dangling_variable_scope() {
     let mut foreign = repository().load("p1").unwrap().unwrap();
     let foreign_id = OperationId {
         process_id: "other".into(),
-        node: "t1".into(),
-        generation: 0,
+        task: TaskId::new("t1", 0).unwrap(),
         sequence: 1,
     };
     foreign.operations.insert(
@@ -64,8 +62,7 @@ fn recovery_pages_are_stable_non_overlapping_and_skip_terminal_rows() {
     for sequence in 0..5 {
         let id = OperationId {
             process_id: "p1".into(),
-            node: "t1".into(),
-            generation: 0,
+            task: TaskId::new("t1", 0).unwrap(),
             sequence,
         };
         let mut record = OperationRecord::pending(id.clone(), OperationKind::ExecuteTask);

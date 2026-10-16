@@ -1,12 +1,29 @@
+use super::task_graph::TaskId;
 use std::fmt;
 
 /// Stable identity of one durable unit of work.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+///
+/// `task` is the instance the work is attached to; `sequence` numbers the
+/// work items of that one instance.
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) struct OperationId {
     pub(crate) process_id: String,
-    pub(crate) node: String,
-    pub(crate) generation: u64,
+    pub(crate) task: TaskId,
     pub(crate) sequence: u64,
+}
+
+impl fmt::Debug for OperationId {
+    /// Renders the identity flat — process, node, generation, sequence — so
+    /// diagnostics that interpolate an operation (`operation {id:?} not
+    /// found`) keep their historical byte shape.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OperationId")
+            .field("process_id", &self.process_id)
+            .field("node", &self.task.node.as_str())
+            .field("generation", &self.task.generation)
+            .field("sequence", &self.sequence)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -288,7 +305,7 @@ impl OperationRecord {
             (S::Pending, E::Supersede { by_generation })
             | (S::RetryScheduled { .. }, E::Supersede { by_generation })
             | (S::EffectUnknown { .. }, E::Supersede { by_generation })
-                if by_generation > self.id.generation =>
+                if by_generation > self.id.task.generation =>
             {
                 S::Superseded { by_generation }
             }
@@ -354,8 +371,7 @@ mod tests {
     fn id() -> OperationId {
         OperationId {
             process_id: "p1".into(),
-            node: "t1".into(),
-            generation: 3,
+            task: TaskId::new("t1", 3).unwrap(),
             sequence: 9,
         }
     }
@@ -549,8 +565,7 @@ mod tests {
         let operation = OperationRecord {
             id: OperationId {
                 process_id: "p".into(),
-                node: "t".into(),
-                generation: 0,
+                task: TaskId::new("t", 0).unwrap(),
                 sequence: 0,
             },
             kind: OperationKind::ExecuteTask,

@@ -309,8 +309,7 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
     const PID: &str = "p-conflict-release";
     let root = OperationId {
         process_id: PID.into(),
-        node: "root".into(),
-        generation: 0,
+        task: crate::scheduler::core::model::task_graph::TaskId::new("root", 0).unwrap(),
         sequence: 0,
     };
     let stored = ConflictKv::new(PID, root.clone());
@@ -605,7 +604,11 @@ async fn kernel_path_runs_a_flat_chain_to_completion() {
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     assert!(host.process_completed("k-parity").await.unwrap());
     let snapshot = host.snapshot("k-parity").await.unwrap().unwrap();
-    let mut kernel_tasks: Vec<String> = snapshot.tasks.keys().map(|id| id.node.clone()).collect();
+    let mut kernel_tasks: Vec<String> = snapshot
+        .tasks
+        .keys()
+        .map(|id| id.node.as_str().to_owned())
+        .collect();
     kernel_tasks.sort();
     assert_eq!(kernel_tasks, expected_tasks);
     assert!(snapshot.tasks.values().all(|e| e.state.is_terminal()));
@@ -653,7 +656,11 @@ async fn kernel_engine_serves_a_run_to_completion() {
     let host = runtime.kernel();
     assert!(host.process_completed(&pid).await.unwrap());
     let snapshot = host.snapshot(&pid).await.unwrap().expect("aggregate");
-    let mut tasks: Vec<String> = snapshot.tasks.keys().map(|id| id.node.clone()).collect();
+    let mut tasks: Vec<String> = snapshot
+        .tasks
+        .keys()
+        .map(|id| id.node.as_str().to_owned())
+        .collect();
     tasks.sort();
     assert_eq!(
         tasks,
@@ -755,7 +762,7 @@ async fn kernel_engine_serves_client_actions_on_an_irq_workflow() {
             snapshot
                 .tasks
                 .iter()
-                .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
+                .map(|(id, task)| format!("{}:{:?}", id.node.as_str(), task.state))
                 .collect::<Vec<_>>()
         });
         assert!(
@@ -1817,7 +1824,7 @@ async fn a_failed_step_waits_for_its_timeout_branch_before_the_catch_join() {
                 .expect("the aggregate")
                 .tasks
                 .iter()
-                .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
+                .map(|(id, task)| format!("{}:{:?}", id.node.as_str(), task.state))
                 .collect::<Vec<_>>()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -2155,7 +2162,7 @@ async fn host_state(
     snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == node)
+        .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -2674,7 +2681,7 @@ async fn wait_kernel_settled(host: &Arc<KernelHost>, pid: &str) -> Snapshot {
             snapshot
                 .tasks
                 .iter()
-                .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
+                .map(|(id, task)| format!("{}:{:?}", id.node.as_str(), task.state))
                 .collect::<Vec<_>>()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -2903,7 +2910,7 @@ async fn manual_task_waits_for_the_client_action() {
         snapshot
             .tasks
             .iter()
-            .find(|(id, _)| id.node == task)
+            .find(|(id, _)| id.node.as_str() == task)
             .map(|(_, e)| e.state)
             .unwrap()
     };
@@ -3916,10 +3923,10 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
             .iter()
             .filter(|(id, task)| {
                 id.generation == 0
-                    && id.node != crate::utils::consts::TASK_ROOT_TID
+                    && id.node.as_str() != crate::utils::consts::TASK_ROOT_TID
                     && !task.state.is_terminal()
             })
-            .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
+            .map(|(id, task)| format!("{}:{:?}", id.node.as_str(), task.state))
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -4030,7 +4037,9 @@ fn host_all_terminal_generations_0(snapshot: &Snapshot) -> bool {
     snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.generation == 0 && id.node != crate::utils::consts::TASK_ROOT_TID)
+        .filter(|(id, _)| {
+            id.generation == 0 && id.node.as_str() != crate::utils::consts::TASK_ROOT_TID
+        })
         .all(|(_, task)| task.state.is_terminal())
 }
 
@@ -4061,12 +4070,11 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
     let task = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     let operation = OperationId {
         process_id: PID.into(),
-        node: "s1".into(),
-        generation: 0,
+        task: crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap(),
         sequence: snapshot
             .operations
             .keys()
-            .filter(|id| id.node == "s1" && id.generation == 0)
+            .filter(|id| id.task.node.as_str() == "s1" && id.task.generation == 0)
             .map(|id| id.sequence)
             .max()
             .unwrap_or(0)
@@ -4134,12 +4142,11 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
         operations: vec![OperationIntent {
             id: OperationId {
                 process_id: "p-bare-action".into(),
-                node: "s1".into(),
-                generation: 0,
+                task: crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap(),
                 sequence: snapshot
                     .operations
                     .keys()
-                    .filter(|id| id.node == "s1" && id.generation == 0)
+                    .filter(|id| id.task.node.as_str() == "s1" && id.task.generation == 0)
                     .map(|id| id.sequence)
                     .max()
                     .unwrap_or(0)
@@ -4168,7 +4175,7 @@ fn tasks_of(snapshot: &Snapshot, task: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node == task)
+        .filter(|id| id.node.as_str() == task)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -4220,7 +4227,7 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
         crate::scheduler::core::model::task_graph::TaskState::Backed
     );
     let source = crate::scheduler::core::model::task_graph::TaskId {
-        node: "s1".into(),
+        node: crate::scheduler::core::model::model_graph::NodeId::parse("s1").unwrap(),
         generation: 0,
     };
     assert_eq!(
@@ -4754,7 +4761,7 @@ async fn kernel_parent_state_stays_running_while_a_fired_branch_runs() {
             snapshot
                 .tasks
                 .iter()
-                .map(|(id, task)| format!("{}:{:?}", id.node, task.state))
+                .map(|(id, task)| format!("{}:{:?}", id.node.as_str(), task.state))
                 .collect::<Vec<_>>()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -4894,7 +4901,7 @@ async fn run_timeout_engine(pid: &str, workflow: &crate::model::Workflow) -> cra
                 snapshot
                     .variables
                     .iter()
-                    .filter(|((scope, _), _)| scope.node == "s1")
+                    .filter(|((scope, _), _)| scope.node.as_str() == "s1")
                     .map(|((_, name), value)| format!("{name}={value}"))
                     .collect::<Vec<_>>(),
             );

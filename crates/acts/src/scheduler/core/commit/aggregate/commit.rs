@@ -276,7 +276,7 @@ pub(super) fn operation_order(
 ) -> std::cmp::Ordering {
     left.process_id
         .cmp(&right.process_id)
-        .then_with(|| left.node.cmp(&right.node))
-        .then_with(|| left.generation.cmp(&right.generation))
+        .then_with(|| left.task.node.cmp(&right.task.node))
+        .then_with(|| left.task.generation.cmp(&right.task.generation))
         .then_with(|| left.sequence.cmp(&right.sequence))
 }

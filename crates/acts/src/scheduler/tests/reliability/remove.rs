@@ -103,7 +103,7 @@ async fn durable_shape(engine: &Engine, pid: &str) -> Durable {
     let mut tasks: Vec<String> = snapshot
         .tasks
         .iter()
-        .map(|(id, task)| format!("{}#{}={:?}", id.node, id.generation, task.state))
+        .map(|(id, task)| format!("{}#{}={:?}", id.node.as_str(), id.generation, task.state))
         .collect();
     tasks.sort();
     let mut scheduled: Vec<String> = snapshot
@@ -174,7 +174,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node == tid)
+        .filter(|id| id.node.as_str() == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();

@@ -22,8 +22,7 @@ fn pending_operation_snapshot() -> (ProcessSnapshot, OperationId, ClaimToken) {
     let mut current = repository().load("p1").unwrap().unwrap();
     let operation_id = OperationId {
         process_id: "p1".into(),
-        node: "t1".into(),
-        generation: 0,
+        task: TaskId::new("t1", 0).unwrap(),
         sequence: 9,
     };
     current.operations.insert(

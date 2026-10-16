@@ -166,7 +166,7 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .await
         .tasks
         .keys()
-        .filter(|id| id.node == tid)
+        .filter(|id| id.node.as_str() == tid)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -179,7 +179,7 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskStat
         .await
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == tid)
+        .filter(|(id, _)| id.node.as_str() == tid)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -191,7 +191,7 @@ async fn open_shapes(engine: &Engine, pid: &str, tid: &str) -> Vec<&'static str>
         .await
         .operations
         .values()
-        .filter(|operation| operation.id.node == tid && !operation.is_terminal())
+        .filter(|operation| operation.id.task.node.as_str() == tid && !operation.is_terminal())
         .map(|operation| (operation.id.sequence, shape(&operation.state)))
         .collect();
     open.sort_by_key(|(sequence, _)| *sequence);
@@ -319,7 +319,7 @@ async fn outstanding(engine: &Engine, pid: &str) -> String {
         if !operation.is_terminal() {
             out.push(format!(
                 "op {task} seq{sequence} -> {state}",
-                task = id.node,
+                task = id.task.node.as_str(),
                 sequence = id.sequence,
                 state = shape(&operation.state)
             ));

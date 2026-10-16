@@ -115,8 +115,7 @@ fn every_action_and_predicate_outcome_is_represented() {
 fn operation_recovery_states_and_kinds_are_exercised() {
     let id = OperationId {
         process_id: "p".into(),
-        node: "t".into(),
-        generation: 0,
+        task: TaskId::new("t", 0).unwrap(),
         sequence: 0,
     };
     let claim = ClaimToken {

@@ -25,10 +25,14 @@ impl RecoveryEntryDocument {
 }
 
 pub(crate) fn recovery_entry_key(id: &OperationId) -> String {
+    // Byte shape is load-bearing (`hex(pid).hex(node).gen.seq`): existing
+    // stores hold keys in exactly this form, so the typed identity feeds the
+    // same components — the node string and the generation — unchanged.
+    let node = id.task.node.as_str();
     let mut key = String::with_capacity(
         RECOVERY_ENTRY_KEY_PREFIX.len()
             + id.process_id.len() * 2
-            + id.node.len() * 2
+            + node.len() * 2
             + 2
             + 16
             + 1
@@ -37,9 +41,9 @@ pub(crate) fn recovery_entry_key(id: &OperationId) -> String {
     key.push_str(RECOVERY_ENTRY_KEY_PREFIX);
     push_hex(&mut key, id.process_id.as_bytes());
     key.push(COMPONENT_SEPARATOR);
-    push_hex(&mut key, id.node.as_bytes());
+    push_hex(&mut key, node.as_bytes());
     key.push(COMPONENT_SEPARATOR);
-    key.push_str(&format_u64(id.generation));
+    key.push_str(&format_u64(id.task.generation));
     key.push(COMPONENT_SEPARATOR);
     key.push_str(&format_u64(id.sequence));
     key
@@ -68,8 +72,7 @@ mod tests {
     fn id(process_id: &str, node: &str, generation: u64, sequence: u64) -> OperationId {
         OperationId {
             process_id: process_id.into(),
-            node: node.into(),
-            generation,
+            task: crate::scheduler::core::model::task_graph::TaskId::new(node, generation).unwrap(),
             sequence,
         }
     }

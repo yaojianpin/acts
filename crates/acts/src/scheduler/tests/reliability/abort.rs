@@ -98,7 +98,7 @@ async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<TaskState
     let mut states: Vec<TaskState> = snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == tid)
+        .filter(|(id, _)| id.node.as_str() == tid)
         .map(|(_, task)| task.state)
         .collect();
     // HashMap iteration order is not stable; the compared form is.
@@ -113,7 +113,7 @@ async fn act_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node == tid)
+        .filter(|(id, _)| id.node.as_str() == tid)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -138,7 +138,7 @@ async fn act_error_variables(engine: &Engine, pid: &str, tid: &str) -> Vec<Strin
         .variables
         .keys()
         .filter(|(scope, name)| {
-            scope.node == tid && (name == "error.code" || name == "error.message")
+            scope.node.as_str() == tid && (name == "error.code" || name == "error.message")
         })
         .map(|(_, name)| name.clone())
         .collect();

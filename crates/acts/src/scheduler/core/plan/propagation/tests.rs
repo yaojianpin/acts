@@ -96,8 +96,7 @@ fn command(source: &str, policy: JoinPolicy) -> PropagateCommand {
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
-                node: source.into(),
-                generation: 0,
+                task: id(source),
                 sequence: 1,
             },
             claim: ClaimToken {
@@ -154,7 +153,7 @@ fn dead_predecessor_puts_success_join_into_the_skip_cascade() {
     assert_eq!(plan.state_changes[0].to, TaskState::Ready);
     assert_eq!(plan.operations.len(), 1);
     assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
-    assert_eq!(plan.operations[0].id.node, "join");
+    assert_eq!(plan.operations[0].id.task.node.as_str(), "join");
 }
 
 #[test]
@@ -170,7 +169,7 @@ fn dead_source_sends_admitted_unfinished_successors_into_the_cascade() {
     assert!(plan.state_changes.is_empty());
     assert_eq!(plan.operations.len(), 1);
     assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
-    assert_eq!(plan.operations[0].id.node, "join");
+    assert_eq!(plan.operations[0].id.task.node.as_str(), "join");
 }
 
 #[test]
@@ -202,7 +201,7 @@ fn a_running_successor_of_a_dead_source_is_skipped_in_place() {
     assert!(plan.state_changes.is_empty());
     assert_eq!(plan.operations.len(), 1);
     assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
-    assert_eq!(plan.operations[0].id.node, "b");
+    assert_eq!(plan.operations[0].id.task.node.as_str(), "b");
     assert_eq!(
         plan.operations[0].id.sequence, 0,
         "no prior operations on b"

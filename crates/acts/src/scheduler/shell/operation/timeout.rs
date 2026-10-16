@@ -213,12 +213,12 @@ impl KernelHost {
             // Declared branches remain unfired: the timer re-arms for them
             // instead of retiring (a window that has not opened yet must still
             // fire, and only a fresh round can see it).
-            let sequence = next_plan_sequence(snapshot, &plan, &task_id.node, task_id.generation);
+            let sequence =
+                next_plan_sequence(snapshot, &plan, task_id.node.as_str(), task_id.generation);
             plan.operations.push(OperationIntent {
                 id: OperationId {
                     process_id: id.process_id.clone(),
-                    node: task_id.node.clone(),
-                    generation: task_id.generation,
+                    task: task_id.clone(),
                     sequence,
                 },
                 kind: OperationKind::DispatchTimeout,
@@ -260,10 +260,7 @@ impl ActOperation for DispatchTimeout {
     /// leaves the operation `Pending` for the next tick.
     async fn precheck(&self, host: &KernelHost, pending: &Pending<'_>) -> Result<Precheck> {
         let id = pending.id;
-        let task_id = crate::scheduler::core::model::task_graph::TaskId {
-            node: id.node.clone(),
-            generation: id.generation,
-        };
+        let task_id = id.task.clone();
         let task = pending.snapshot.tasks.get(&task_id);
         let idle = matches!(
             host.timeout_round(pending.snapshot, &task_id, task, pending.now_ms)
