@@ -2518,6 +2518,26 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 
 `git diff -M --stat`(本笔含文档)= **8 文件,+304/−89**(代码 5:`facts.rs`/`message.rs`/`mod.rs`/`projection.rs`/`tests/mod.rs`;文档 3:`CHANGELOG.md`/设计/本文件;精确增删以 `git show --stat HEAD` 为准)。
 
+### C7 完成(2026-10-17):投递边界入文档 —— at-least-once + 无订阅者不留行(零代码)
+
+**边界前后(设计 §3.5)**:
+
+| 边界 | 前(§3.5 原稿) | 后(已定) |
+|---|---|---|
+| at-least-once | 「deliver 与 commit 之间崩溃会重发(`shell/mod.rs:917-928`)。」 | `deliver_plan` 在提交**之前**发本 plan 的 outbox 记录(`shell/mod.rs:804-864`;调用点 `operation/dispatch.rs:37`);transport 确认的 receipt 随这次提交落成 `Delivered`(`core/commit/aggregate/commit.rs:100-112`);未确认的记录提交为 `Pending`(`shell/mod.rs:852-857`),由 driver 的重试 pass(`dispatch_outbox`,`shell/mod.rs:1880-1971`)在下一次通知或 tick 再发(`shell/mod.rs:666-695`);deliver 与 commit 之间崩溃 ⇒ 重发。 |
+| 无 handler 不留行 | 「`messages`/`deliveries` 只由 ack 通道写(`export/channel.rs:321-336`)——"马上发出去"是内存事件,不是持久化事实。」 | outbox 只把记录写进聚合(`core/commit/aggregate/commit.rs:88-115`),**不写**两张行表;唯一落行链路是 ack 通道 —— `Channel::on_message`(`export/channel.rs:149-172`)→ `deliver`/`store_if`(`export/channel.rs:266-346`,`ack` 条件 `:323`)→ `Runtime::store_delivery`(`runtime.rs:186-194`)→ `writebehind::store_delivery`(`store/writebehind.rs:431-446`)→ `Store::store_message_delivery`(`store/store.rs:590-608`);没有订阅者 ⇒ 存储无痕。 |
+
+- **取舍(已定)**:发在提交前 = 延迟最低、与 effect seam 同序(一个 operation 一次 commit 一次投递,不等 tick);代价 = 重复窗口,消费者必须幂等。**行为零变化**。
+- **file:line 核对(按 C7 提交状态;本地探针 WIP 让 `shell/mod.rs` 行号 +9,不随提交)**:`deliver_plan` 由 §1.5 的 `907-958` 漂到 `804-864`;`dispatch_outbox` 由 `4609-4750` 漂到 `1880-1971`;`aggregate.rs:459-472` 随 C1b 目录化后落在 `core/commit/aggregate/commit.rs:100-112`;`deliver: Arc<Notify>` 在 `shell/mod.rs:163-170`(初始化 `:407`)。逐条对照 HEAD blob 的 `grep -n`/`sed -n` 均命中。**§1.5 按本笔边界未改** —— 它是历史事实表,当前引用由 §3.5 承载。
+- **CHANGELOG**:`Unreleased` 末尾新增 `docs(acts): the delivery boundary is a contract now, not an implementation detail (design §3.5)...`(指向设计 §3.5;**不写 BREAKING** —— 行为未变)。
+- **门禁与验收(在提交状态上跑,探针 WIP 旁置)**:`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**;`cargo fmt --all --check` 干净;
+  `cargo test -p acts --lib --tests` = **873 passed / 2 failed**:`export::actions::tests::a_run_cannot_seal_another_subjects_scope`
+  与 `tests::a_backward_next_re_enters_the_node_it_names`(后者是 §10「P4 收尾续」/§4 已登记的负载抖动);
+  docs-stash 基线同命令 = **872 passed / 3 failed**,同一组两条外加 `scheduler::shell::tests::kernel_task_and_act_messages_are_emitted`
+  (C5/C6 已登记;本轮通过)⇒ C7 没有新增失败。首轮全量还曾翻 `kernel_engine_projects_the_legacy_read_model` 与
+  `the_driver_leaves_a_settled_run_alone`;前者随后单跑 3/3 绿、后者单跑绿,复跑全量未再出现 ⇒ 负载抖动,非本笔(零代码)。
+- `git diff -M --stat`(本笔含文档)= **3 文件,+91/−39**(`CHANGELOG.md` +1;`KERNEL_CUTOVER_NOTES.md` +71/−33;`KERNEL_REFACTOR_DESIGN.md` +19/−6;精确增删以 `git show --stat HEAD` 为准)。
+
 
 ---
 
@@ -2549,7 +2569,7 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 | **C4** | `TaskId` 显式化 + `OperationId.task` 换类型(`wire()` 派生,输出仍是 node id ⇒ golden 全绿) | C3 | **已做(§10「C4 完成」)**(承载原 §7a) |
 | **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG BREAKING | C4;**D2/D3 已拍**(2026-10-16:乙案摘要 / 行链保持 node id / 重冻结接受 / 孤儿键与 L1 同批,见设计 §2.2) | **已做(§10「C5 完成」)**(BREAKING) |
 | **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | **已做(§10「C6 完成」)** |
-| **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | 未做 |
+| **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | **已做(§10「C7 完成」)** |
 | **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | 未做 |
 | **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_kind_and_name` 替投影、`NodeKind` 对齐) | C8a | 未做。**注**(§10「NodeKind 恢复 4 值」):policy 侧那个 enum 已恢复 4 值并如实标注;两份图不合并(§3.7),这里只做词汇对齐 |
 | **C8c** | `view` 挪位(§3.7 c)+ §3.7(d) 的登记项 —— **先验证 effect seam 是否丢弃 `Context::build_acts` 的结果**(若成立即"每 hop 跑了但不生效"的白付开销) | C8b;**D4 需先拍** | 未做(登记待验证) |
@@ -2604,44 +2624,62 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:C7 —— 投递边界写进设计 §3.5 + CHANGELOG(§11 A 段第七笔,零代码)
+# 当前任务:C8a —— `core/model/view` 删死件 + `tree_output` 改自递归(§11 A 段第八笔)
 
-**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.5(第 ⑤ 条,决策已定);事实表 §1.5;决策 §2.1。
-**本笔零代码**:只把已定的投递边界写成文档与 CHANGELOG,不改任何 `.rs` / manifest / 测试。
+**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.7(a)(删死件档)、§1.8(`view` 的现状与死件清单)、§4 的 C8a 行、§5 的
+`view` 换渲染实现风险。**基准**:C7 提交之后的 HEAD;本笔只动 `crates/acts/src/scheduler/core/model/view/**`
+及其直接调用点/测试。
 
-**C7 的内容**:
+**C8a 的内容**(先逐条核对当前 file:line,代码若已移动就按现状):
 
-1. **§3.5 定稿**:把两条边界写成"已定",每条给当下可命中的 file:line(先核对,代码若已移动就更新引用):
-   - **at-least-once**:`deliver_plan` 在提交**之前**发本 plan 的 outbox 记录;transport 确认的 receipt 随提交落成 `Delivered`;
-     未确认的记录由 driver 的重试 pass(tick)再发 —— deliver 与 commit 之间崩溃会重发。
-   - **无 handler 时不留行**:outbox 不写 `messages`/`deliveries` 行;行只由 ack 通道(`on_message` → `store_delivery`)写。
-     "马上发出去"是内存事件,不是持久化事实。
-   写明取舍:延迟最低、与 effect seam 同序;代价是重复窗口 —— 消费者必须幂等。
-2. **CHANGELOG**:在 `Unreleased` 末尾加一条 `docs(acts):`(或 `feat(acts):` 口径)条目,写明 at-least-once 与"无订阅者不留行"
-   是契约而非实现细节,并指向设计 §3.5。**不写 BREAKING**(行为未变)。
-3. **§10 追加「C7 完成」**:两条边界的前后措辞、核对的 file:line、CHANGELOG 条目、`git diff -M --stat`、门禁结果。
-4. 把 §11 A 段 **C7** 改成「已做(§10「C7 完成」)」+ 原地重写本节「当前任务」(下一笔 C8a)。
+1. **删死件**(每条先 `git grep` 确认零生产调用者):
+   - `view/visit.rs` 全簇:只服务 `Workflow::print`/`tree_output`;`Visitor` 每实例克隆 `Box<VisitRoot>`,
+     `visit()` 只改克隆 ⇒ `visits` 计数恒 0 ⇒ 循环 `next` 链无界递归(§1.8)。
+   - `Node::from_str`(仅测试使用):删除实现与 `FromStr` impl,测试改用 `NodeTree::load`/直接构造。
+   - `NodeTree::build` + `build_workflow`(仅测试):删除;需要的树走 `NodeTree::load` 或现有夹具。
+   - `view/build.rs` 里注释掉的 `build_act`(§1.8 记为 `build.rs:183-213`,以现状为准)。
+   - `Workflow::print`(无调用者):删除。
+2. **`tree_output` 改自递归**:`Workflow::tree_output` 不再经 `visit`;沿 `Node.children` 做同一 DFS
+   (同一顺序、同一缩进、同一行文本),**逐字保持输出**。这是本笔唯一的渲染实现变更,顺手修掉 `visit` 的
+   循环守卫缺陷(不再有 `visits` 计数)。
+3. **清理模块声明与 import**:`view/mod.rs` 删 `mod visit;`(或对应的 re-export),删只在死件里用的
+   import/类型;不留下 `#[allow(dead_code)]`。
+4. **测试**:删掉只测死件的用例;保留/调整仍覆盖活路径的 `view` 用例。新增或沿用一条 `tree_output` 的
+   逐字输出测试(§5 已登记它没有输出 pin —— 本笔补上,才配"逐字保持"的承诺);若 `model:get fmt=tree`
+   有现成测试,补一条同输出的断言。
 
-**边界**:不动代码/测试/manifest;不改 §1.5 的历史事实,只补 §3.5 的"已定"状态与 CHANGELOG。
+**边界**:
+
+- 不动 `NodeData`、`NodeTree::load`、`view` 的模块位置、id 分配逻辑、`NodeKind`、`projection`
+  (§3.7(b)/(c)/(d) 不在本笔)。
+- 不改 `model:deploy` 的校验规则、不改持久化列格式、不改任何业务行为。
+- 一次提交只做一个切面;文件改写只用 `edit`/`ast_edit`;WIP 旁置/回填(见下)。
 
 **硬性做法**:
 
-1. 先读 §3.5、§1.5、§2.1;逐条对照 `shell/mod.rs`(`deliver_plan`/`dispatch_outbox`)与 `export/channel.rs`(`on_message` → `store_delivery`)的现状。
-2. 文档里的每个 file:line 必须当下可命中;移动过的引用要更新。
-3. 一次提交只做一个切面;文件改写只用 `edit`/`ast_edit`;WIP 旁置(见下)。
+1. 先读设计 §3.7、§1.8、§4 C8a、§5 的 `view` 风险行;再 `git grep` 每个死件的调用者,逐个确认
+   "零生产调用者"后才删(测试引用要一并改)。
+2. `tree_output` 的"改前/改后"用同一输入逐字对比:准备一个带 `next`/`children`/多分支的模型,删前用
+   HEAD 的旧实现跑出输出,删后同一模型输出 `diff` 必须为 0;这项 smoke 写进 §10。
+3. 每删一个符号就跑一次 `cargo check -p acts`(串行),防止一次删太多难归因;最终门禁照跑。
+4. 工作区那笔未提交的性能探针 WIP(`shell::operation_trace` + `ApplyActionCommand`→`ActionCommand` +
+   `mod perf_probe;`,旁置副本在 `.git/c4-wip/` 与 `.git/c5-full/`):提交状态 == 验证状态,WIP 永不进提交
+   (剥离/回填:临时提交提供 postimage → `git apply -R --3way` → `reset --soft`;或本笔用的字节副本旁置法)。
 
 **验收**:
 
-- §3.5 两条边界都标"已定",各自有代码证据;CHANGELOG 有条目;`.rs`/manifest 零变更(用 `git diff --stat` 证明)。
+- `grep` 证明死件零命中(生产 + 测试);`tree_output` 输出逐字不变;`model:get fmt=tree` smoke 通过。
 - `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt --all --check` 干净;
-  `cargo test -p acts --lib --tests` 与基线同口径(两条已登记既有抖动不变)。
-- §10 追加「C7 完成」;§11 C7 状态更新;§12 重写为 C8a。
+  `cargo test -p acts --lib --tests` 与基线同口径(已登记既有抖动不变)。
+- §10 追加「C8a 完成」(删了什么/逐字输出证据/门禁/`git diff -M --stat`);§11 C8a 状态更新;§12 重写为 C8b。
 
 # 限制与约束
 
-- **先读**:设计 §3.5、§1.5、§2.1;§11 A 段;§10「C6 完成」+「C5 完成」+ §6(文件改写的两条事故口径)。
-- **一次提交只做一个切面**:只做 C7;不得夹带行为变更、结构重构、清理或顺手修 bug。
-- **不新增 `#[allow(...)]`**;文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write(§10 §6 的事故);串行构建。
+- **先读**:设计 §3.7(a)、§1.8、§4 C8a、§5 的 `view` 风险;§11 A 段;§10「C7 完成」+「C6 完成」+
+  §6(文件改写的两条事故口径)。
+- **一次提交只做一个切面**:只做 C8a;不得夹带行为变更、§3.7(b)(c)(d) 的去重/挪位/登记项、或顺手修 bug。
+- **不新增 `#[allow(...)]`**;文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write
+  (§10 §6 的事故);串行构建。
 - 全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4);读**投影行**之前 `runtime.flush_writer()`。
 - 测试环境:`acts-server`"全部 target 一条命令"本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
 - 工作区有一笔未提交的性能探针 WIP(`shell::operation_trace` + `ApplyActionCommand`→`ActionCommand` + `mod perf_probe;`,
@@ -2653,13 +2691,13 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
 cargo fmt
 cargo test -p acts --lib --tests
-…(C7 只动文档,但门禁照跑;动了 manifest 才跑 cargo deny check bans)
+…(C8a 只动 `core/model/view/**` 与测试时,`-p acts` 套件足够;动了 manifest 才跑 `cargo deny check bans`)
 
 # 交付
 
-一笔提交(conventional 前缀 `feat`/`fix`/`docs`,单行 imperative 主语)
-+ §10 追加「C7 完成」(边界前后、file:line 核对、CHANGELOG 条目、`git diff -M --stat`、验收结果)
-→ 把 §11 A 段 **C7** 的状态改成「已做(§10「C7 完成」)」+ **原地重写本节的「当前任务」(下一笔 C8a)**
+一笔提交(conventional 前缀 `refactor`/`chore`,单行 imperative 主语)
++ §10 追加「C8a 完成」(删死件清单、`tree_output` 改前/改后逐字对照、门禁、`git diff -M --stat`)
+→ 把 §11 A 段 **C8a** 的状态改成「已做(§10「C8a 完成」)」+ **原地重写本节的「当前任务」(下一笔 C8b)**
 + 停下等用户确认。
 ```
 

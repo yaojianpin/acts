@@ -266,12 +266,25 @@ pub(crate) struct OperationId {                              // task_id 换类�
 4. **每终态恰一条(已做)**:`message_from_record` 的 9 项 topic→state 表仍是唯一真值源;测试补两处 —— 9 主题的完整映射表,以及
    `TaskState` 每个终态必须命名一个主题(穷尽 match:新增状态在编译期就迫使决定),并钉住 `tid` = 实例 wire / `nid` = 模型节点的契约(C5 的 BREAKING 承接)。
 
-### 3.5 投递(第 ⑤ 条,决策已定)
+### 3.5 投递(第 ⑤ 条;2026-10-17 C7 定稿)
 
-不改代码。只在文档里写明两条边界:
+两条边界都是**契约**,不是实现细节;本笔零代码,以下引用均以 C7 提交状态为准:
 
-- at-least-once:deliver 与 commit 之间崩溃会重发(`shell/mod.rs:917-928`)。
-- **无 handler 时不留行**:`messages`/`deliveries` 只由 ack 通道写(`export/channel.rs:321-336`)——"马上发出去"是内存事件,不是持久化事实。
+1. **at-least-once(已定)**:`deliver_plan` 在提交**之前**发本 plan 的 outbox 记录
+   (`shell/mod.rs:804-864`;调用点 `operation/dispatch.rs:37`,紧接着才是 `commit_transition`);
+   transport 确认的 receipt 随这次提交落成 `Delivered`(`core/commit/aggregate/commit.rs:100-112`),
+   未确认的记录提交为 `Pending`(`shell/mod.rs:852-857`),由 driver 的重试 pass
+   (`dispatch_outbox`,`shell/mod.rs:1880-1971`)在下一次通知或 tick 再发(`shell/mod.rs:666-695`)。
+   **deliver 与 commit 之间崩溃 ⇒ 重发**,与 effect seam 是同一个窗口(`shell/mod.rs:812-814`)。
+2. **无 handler 时不留行(已定)**:outbox 只把记录写进聚合(`core/commit/aggregate/commit.rs:88-115`),
+   **不写** `messages`/`deliveries` 行;这两张表的写者只有 ack 通道 —— `Channel::on_message` 注册的 handler
+   (`export/channel.rs:149-172`)调 `deliver`/`store_if`(`export/channel.rs:266-346`,`ack` 条件在 `:323`),
+   经 `Runtime::store_delivery`(`runtime.rs:186-194`)→ `writebehind::store_delivery`(`store/writebehind.rs:431-446`)
+   → `Store::store_message_delivery`(`store/store.rs:590-608`)落行。没有订阅者时,"马上发出去"是内存事件,
+   不是持久化事实。
+
+**取舍(已定)**:发在提交前 = 延迟最低、与 effect seam 同序(一个 operation 一次 commit 一次投递,不等 tick);
+代价是重复窗口 —— **消费者必须幂等**。
 
 ### 3.6 模块划分(第 ⑥ 条)
 
