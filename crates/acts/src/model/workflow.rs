@@ -108,12 +108,6 @@ impl Workflow {
         ret
     }
 
-    pub fn print(&self) {
-        let mut root = NodeTree::new();
-        root.load(self).unwrap();
-        root.print();
-    }
-
     pub fn tree_output(&self) -> String {
         let mut root = NodeTree::new();
         root.load(self).unwrap();

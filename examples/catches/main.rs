@@ -12,7 +12,7 @@ async fn main() -> Result<()> {
     let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
-    workflow.print();
+    print!("{}", workflow.tree_output());
 
     let executor = engine.executor(&acts::Principal::unrestricted()).clone();
     engine

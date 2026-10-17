@@ -2538,6 +2538,67 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
   `the_driver_leaves_a_settled_run_alone`;前者随后单跑 3/3 绿、后者单跑绿,复跑全量未再出现 ⇒ 负载抖动,非本笔(零代码)。
 - `git diff -M --stat`(本笔含文档)= **3 文件,+91/−39**(`CHANGELOG.md` +1;`KERNEL_CUTOVER_NOTES.md` +71/−33;`KERNEL_REFACTOR_DESIGN.md` +19/−6;精确增删以 `git show --stat HEAD` 为准)。
 
+### C8a 完成(2026-10-17):`view` 删死件 + `tree_output` 自递归 —— 输出逐字不变
+
+**删掉的死件(逐条 `git grep`,按 C8a 提交前的 HEAD 行号)**
+
+| 死件 | 旧位置 | 判定与处理 |
+|---|---|---|
+| `visit.rs` 全簇(`VisitRoot`/`Visitor`) | `view/visit.rs`(116 行) | 只服务 `tree_output`/`print`;`Visitor` 每实例克隆 `Box<VisitRoot>` ⇒ `visits` 恒空 ⇒ `next` 环无界递归。**整文件删除** |
+| `Node::from_str` | `view/node.rs:314-324` | 仅测试使用,而且是 inherent fn —— 仓库里从来没有 `impl FromStr for Node`(设计里的 "FromStr impl" 一句不成立,按现状只删这一个)。**删除** |
+| `Node::print` | `view/node.rs:326-362` | 只被 `NodeTree::print` 调用。**删除** |
+| `NodeTree::build` | `view/node_tree.rs:31-36` | 仅 `shell/tests/tree.rs` 使用。**删除**,测试改走 `NodeTree::load` |
+| `build_workflow` | `view/build.rs:11-13` | 只被 `NodeTree::build` 调用。**删除**;`NodeTree::load` 直接走 `build_owned_workflow` |
+| 注释掉的 `build_act` | `view/build.rs:179-209` | 纯注释块。**删除** |
+| `NodeTree::print` | `view/node_tree.rs:122-127` | `visit` 簇在 `tree_output` 换实现后的最后消费者(测试里只有一行 `tree.print()`)。**删除** |
+| `Workflow::print` | `model/workflow.rs:111-115` | **不是"无调用者"**:15 个 example 文件调用它(其中 6 个是 workspace member)。**删除**,全部调用点改为 `print!("{}", workflow.tree_output())`(对 Workflow 模型两者逐字同输出:模型装载不会产生 `NodeContent::Act`) |
+
+模块清理:`view/mod.rs` 删 `mod visit;`;`NodeOutputKind` 不再 re-export(只在 `view` 内的 `build`/`node` 使用);`NodeContent` 的 re-export 加 `#[cfg(test)]`(唯一消费者是 `scheduler/mod.rs` 的 test-only re-export),因此不需要 `#[allow(unused_imports)]`;`visit.rs` 删除后不再有 `#[allow(clippy::borrowed_box)]`/`#[allow(unused)]` 残留。
+
+**`tree_output` 换实现(本笔唯一的渲染实现变更)**
+
+- 旧:`NodeTree::tree_output` → `VisitRoot::walk`(每节点 `Visitor` 克隆 `VisitRoot`,计数永不回写)。
+- 新:`NodeTree::tree_output` 沿 `Node.children` 自递归,顺序与旧实现相同 —— 先本行,再 `NodeOutputKind::{Normal,Catch,Timeout}` 三组 children,最后 `next`;`is_last` 与 `path` 的算法逐条照搬(children 的 `i == len-1`,有未访问 `next` 则非末;`next` 的 `is_last = next.next().is_none()`),行文本与 `format!("{} id:{} name={}  next={}\n", …)` 一字未改。
+- 循环守卫:`HashSet<String>` 按 node id 标记,进入节点即插入;children/next 只在未访问时下探。旧的 `visits` 计数与 `visit()` 一起消失。
+- **逐字证据**:同一模型(3 个顶层 step、`first` 下 2 个 branch 各 2 步、`second` 带 catch+timeout、显式/链式 `next` 都在内)用 HEAD 旧实现与提交状态新实现各跑一次,输出均 **563 bytes**,`diff -u before.txt after-fmt.txt` **为空**(`TREE_OUTPUT_DIFF=0`);该输出已固化为 `tree.rs::sch_tree_output_is_byte_stable`。探针 test 目标随后删除,不入提交。
+- 旧输出里 catch/timeout 的 `│   └──` 两条同层连接线(没有区分 child 类型的标记)是既有行为,按"逐字保持"原样保留。
+
+**测试调整**
+
+- 删除 5 条只测 `Node::from_str` 的 `*_ser_de` 用例;新增 2 条覆盖仍在生产路径上的 `Node::to_string`/`NodeData` 往返(`sch_tree_node_data_round_trips`、`sch_tree_act_node_data_round_trips`,含 parent/next/level、动态 act 的真实 `Act.id`)。
+- `shell/tests/tree.rs` 的 `NodeTree::build` 全部改走本地 `try_tree_of`/`tree_of`(`NodeTree::new` + `load`),`sch_tree_next_error` 改用 `try_tree_of` 断言错误。
+- 新增 `sch_tree_output_is_byte_stable`(见上);`export/tests.rs::export_manager_model_get_tree` 从"非空"升级为逐字断言(`model:get fmt=tree` 的 smoke):
+  `workflow id:<id> name=  next=nil\n└── step id:step1 name=  next=nil\n`。
+- `tree::` 17 条全绿;`export_manager_model_get_tree` 单跑绿。
+
+**门禁与验收(提交状态,WIP 旁置;本笔不动 manifest)**
+
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = **EXIT 0**(15 个 example 一并编译,证明 `Workflow::print` 的迁移没有漏点);`cargo fmt --all --check` 干净。
+- `cargo test -p acts --lib --tests` = **870 passed / 3 failed**(共 873;测试总数较 C6 的 875 少 2 = 删 5 + 增 3):
+  - `scheduler::shell::tests::kernel_task_and_act_messages_are_emitted`(C5/C6 已登记;本轮单跑绿)
+  - `scheduler::tests::reliability::timeout::the_driver_leaves_a_settled_run_alone`(C7 已登记;本轮单跑绿)
+  - `tests::a_backward_next_re_enters_the_node_it_names`(C7/§10「P4 收尾续」已登记;自带 20 s 上限,本轮单跑 27.64 s 超时)**HEAD 基线复核**:`git stash` 掉本笔全部改动、在同一 target 上单跑同命令,同样 `Elapsed(())`(29.65 s)⇒ 既有环境/负载窗口,非本笔引入。
+- 本笔只动 `crates/acts/src/scheduler/core/model/view/**`、`model/workflow.rs`、`export/tests.rs`、`shell/tests/tree.rs` 与 examples;**未跑 per-crate 套件**(无跨 crate 代码与 manifest 变化);`cargo deny` 不需要。
+
+**过程登记(WIP 剥离的一次事故,已恢复)**
+
+- 按惯例先剥 WIP 再跑门禁,但这一次 `git diff > .git/c8a/wip.patch` 是在**本笔改动已经落到工作区之后**生成的 ⇒ 该 patch 同时含 WIP 与 C8a;`git apply -R` 把两者一起反解,`node.rs`/`build.rs`/`tree.rs`/`export/tests.rs`/examples 回到 HEAD。恢复:从同一 patch 用 `git apply --include='…/view/*' --include='model/workflow.rs' --include='export/tests.rs' --include='shell/tests/tree.rs' --include='examples/*'` 只重放 C8a 路径,逐条 `grep` 核对 + 重跑 `tree::`/`export_manager_model_get_tree` 与 563-byte diff,全部通过后才继续。**教训(补进 §6 口径)**:剥离 WIP 的 patch 必须在动手前生成;恢复时要按路径过滤,不能整包重放。
+- 提交后按 `.git/c8a/wip.patch` 的 WIP 路径子集正向回填(`git apply --3way`),`perf_probe.rs` 从 `.git/c8a/perf_probe.rs` 恢复;提交本身只含 C8a 的 23 个代码/示例文件 + 2 个文档。
+
+**`git diff -M --stat`(本笔含文档)**
+
+| 区域 | 文件 | + | − |
+|---|---|---|---|
+| `core/model/view/**`(`build`/`mod`/`node`/`node_tree`/`visit`) | 5 | 77 | 259 |
+| `shell/tests/tree.rs` | 1 | 128 | 117 |
+| `export/tests.rs`(`model:get fmt=tree` pin) | 1 | 7 | 1 |
+| `model/workflow.rs`(`Workflow::print`) | 1 | 0 | 6 |
+| `examples/**`(`print` → `tree_output`) | 15 | 15 | 15 |
+| **代码/示例小计** | **23** | **227** | **398** |
+| 文档(`CHANGELOG.md` + 本文件) | 2 | 121 | 51 |
+| **合计** | **25** | **348** | **449** |
+
+(精确逐文件增删以 `git show --stat HEAD` 为准;`visit.rs` 的 −116 行是整文件删除。)
 
 ---
 
@@ -2570,7 +2631,7 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 | **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG BREAKING | C4;**D2/D3 已拍**(2026-10-16:乙案摘要 / 行链保持 node id / 重冻结接受 / 孤儿键与 L1 同批,见设计 §2.2) | **已做(§10「C5 完成」)**(BREAKING) |
 | **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | **已做(§10「C6 完成」)** |
 | **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | **已做(§10「C7 完成」)** |
-| **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | 未做 |
+| **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | **已做(§10「C8a 完成」)** |
 | **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_kind_and_name` 替投影、`NodeKind` 对齐) | C8a | 未做。**注**(§10「NodeKind 恢复 4 值」):policy 侧那个 enum 已恢复 4 值并如实标注;两份图不合并(§3.7),这里只做词汇对齐 |
 | **C8c** | `view` 挪位(§3.7 c)+ §3.7(d) 的登记项 —— **先验证 effect seam 是否丢弃 `Context::build_acts` 的结果**(若成立即"每 hop 跑了但不生效"的白付开销) | C8b;**D4 需先拍** | 未做(登记待验证) |
 
@@ -2624,80 +2685,88 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:C8a —— `core/model/view` 删死件 + `tree_output` 改自递归(§11 A 段第八笔)
+# 当前任务:C8b —— `core/model/view` 去重(§11 A 段第九笔)
 
-**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.7(a)(删死件档)、§1.8(`view` 的现状与死件清单)、§4 的 C8a 行、§5 的
-`view` 换渲染实现风险。**基准**:C7 提交之后的 HEAD;本笔只动 `crates/acts/src/scheduler/core/model/view/**`
-及其直接调用点/测试。
+**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.7(b) 三档(①id 分配合一 ②投影 name/kind ③`NodeKind` 词汇)、
+§4 的 C8b 行、§11 A 段 C8b 注、§10「NodeKind 恢复 4 值」与「C6 完成」的行 `kind` 契约。
+**基准**:C8a 提交之后的 HEAD;本笔只动 `view/build.rs` 的 id 分配、`shell/model.rs` 的调用点、
+`shell/projection.rs` 的 name/kind 取值、`view::NodeKind` 与 `model_graph::NodeKind` 的词汇对齐及其测试。
 
-**C8a 的内容**(先逐条核对当前 file:line,代码若已移动就按现状):
+**C8b 的内容**(先逐条核对当前 file:line):
 
-1. **删死件**(每条先 `git grep` 确认零生产调用者):
-   - `view/visit.rs` 全簇:只服务 `Workflow::print`/`tree_output`;`Visitor` 每实例克隆 `Box<VisitRoot>`,
-     `visit()` 只改克隆 ⇒ `visits` 计数恒 0 ⇒ 循环 `next` 链无界递归(§1.8)。
-   - `Node::from_str`(仅测试使用):删除实现与 `FromStr` impl,测试改用 `NodeTree::load`/直接构造。
-   - `NodeTree::build` + `build_workflow`(仅测试):删除;需要的树走 `NodeTree::load` 或现有夹具。
-   - `view/build.rs` 里注释掉的 `build_act`(§1.8 记为 `build.rs:183-213`,以现状为准)。
-   - `Workflow::print`(无调用者):删除。
-2. **`tree_output` 改自递归**:`Workflow::tree_output` 不再经 `visit`;沿 `Node.children` 做同一 DFS
-   (同一顺序、同一缩进、同一行文本),**逐字保持输出**。这是本笔唯一的渲染实现变更,顺手修掉 `visit` 的
-   循环守卫缺陷(不再有 `visits` 计数)。
-3. **清理模块声明与 import**:`view/mod.rs` 删 `mod visit;`(或对应的 re-export),删只在死件里用的
-   import/类型;不留下 `#[allow(dead_code)]`。
-4. **测试**:删掉只测死件的用例;保留/调整仍覆盖活路径的 `view` 用例。新增或沿用一条 `tree_output` 的
-   逐字输出测试(§5 已登记它没有输出 pin —— 本笔补上,才配"逐字保持"的承诺);若 `model:get fmt=tree`
-   有现成测试,补一条同输出的断言。
+1. **id 分配合一(§3.7 b①)**
+   - 现状:`view/build.rs::prepare_workflow_ids/prepare_step_ids/prepare_branch_ids` 与
+     `shell/model.rs::assign_ids/assign_step_ids/assign_branch_ids` 是同一套递归(未命名 workflow→`longid`,
+     step/branch/catch/timeout→`shortid`)。`build_owned_workflow` 先自己 `workflow.id = longid()` 再调
+     `prepare_workflow_ids`;`shell::assign_ids` 则把 workflow id 一起分配。
+   - 目标:**一份实现、单一入口**,两个调用方(`NodeTree::load` → `build_owned_workflow`,以及 kernel
+     import/deploy 的 `shell/model.rs`)共用。不得改变:未命名 workflow 的 `longid`、未命名
+     step/branch/catch/timeout 的 `shortid`、分配发生在 model 被 `Arc::new` 之前的顺序(见
+     `build_owned_workflow` 的注释),以及 deploy 之后落进聚合的 durable model 形状。
+   - 测试:`NodeTree::load` 与 deploy/import 两条路径各自对未命名节点得到非空且合法的 id;现有
+     `tree::` 用例保持绿。
+2. **投影 name/kind 去重(§3.7 b②)—— 先解决一个已登记冲突**
+   - C6 明确:行的 `kind` 对 `uses` step 仍写 `step`(读模型契约),而 `facts::node_kind_and_name` 对
+     `uses` step 返回 `Act`。所以**不要**直接把 `project_task` 的 `kind` 换成该函数。
+   - 可做的:让投影的 `name` 走同一真值源(含 root 的 `model.name`),并在**不改变行 `kind`**的前提下
+     复用/抽取 helper。若 helper 需要同时给出"声明 kind"与"消息 kind",把两值显式命名并在注释里指向
+     C6 的契约。`uses` step 的 `kind == "step"` 必须有测试 pin;消息面的 `act` 不变。
+3. **`NodeKind` 词汇对齐(§3.7 b③,§11 A 注)**
+   - 现状:`view/node.rs::NodeKind` 4 值(serde + `Display` + `From<String/&str>`)是行/消息词汇的可执行
+     真值源;`model_graph::NodeKind` 也是 4 值(policy 图只物化 `Workflow`/`Step`,`Branch`/`Act` 带
+     §10「NodeKind 恢复 4 值」登记过的 `#[allow(dead_code)]`)。
+   - 目标:四个词只留一个可执行真值源,或给出明确的双向转换;不合并两张图(§3.7 的告诫),不改变
+     `Display` 输出(`workflow|branch|step|act`)、serde 形状、`crate::NodeKind` 的公共面。若删除
+     `model_graph` 的 `#[allow(dead_code)]`,必须先让测试/构造点真正使用这些变体;否则保留原有书面理由。
 
 **边界**:
 
-- 不动 `NodeData`、`NodeTree::load`、`view` 的模块位置、id 分配逻辑、`NodeKind`、`projection`
-  (§3.7(b)/(c)/(d) 不在本笔)。
-- 不改 `model:deploy` 的校验规则、不改持久化列格式、不改任何业务行为。
+- 不动 `NodeData`、`NodeTree::load` 的校验规则、`view` 的模块位置、`projection` 的行格式、持久化列格式。
+- 不改 `model:deploy` 的校验规则、不改任何业务行为、不夹带 C8c 的挪位/§3.7(d) 登记项。
 - 一次提交只做一个切面;文件改写只用 `edit`/`ast_edit`;WIP 旁置/回填(见下)。
 
 **硬性做法**:
 
-1. 先读设计 §3.7、§1.8、§4 C8a、§5 的 `view` 风险行;再 `git grep` 每个死件的调用者,逐个确认
-   "零生产调用者"后才删(测试引用要一并改)。
-2. `tree_output` 的"改前/改后"用同一输入逐字对比:准备一个带 `next`/`children`/多分支的模型,删前用
-   HEAD 的旧实现跑出输出,删后同一模型输出 `diff` 必须为 0;这项 smoke 写进 §10。
-3. 每删一个符号就跑一次 `cargo check -p acts`(串行),防止一次删太多难归因;最终门禁照跑。
-4. 工作区那笔未提交的性能探针 WIP(`shell::operation_trace` + `ApplyActionCommand`→`ActionCommand` +
-   `mod perf_probe;`,旁置副本在 `.git/c4-wip/` 与 `.git/c5-full/`):提交状态 == 验证状态,WIP 永不进提交
-   (剥离/回填:临时提交提供 postimage → `git apply -R --3way` → `reset --soft`;或本笔用的字节副本旁置法)。
+1. 先读设计 §3.7(b)、§4 C8b、§11 A 段 C8b 注、§10「NodeKind 恢复 4 值」与「C6 完成」;再逐条
+   `git grep` 当前实现与调用点,确认要合并的是哪两份、哪些行为不能动。
+2. 每完成一个子项(①/②/③)跑一次 `cargo check -p acts` + 对应用例(串行),防止一次改太多难归因。
+3. **WIP 旁置**:工作区那笔性能探针 WIP(`shell::operation_trace` + `ApplyActionCommand`→`ActionCommand` +
+   `mod perf_probe;`)永不进提交。**必须在动手前**生成 WIP patch 并复制 `perf_probe.rs`(C8a 的教训:
+   动手后生成的 `git diff` 会把自己的改动一起吃进去,反解时按路径过滤能恢复但很危险);提交状态 ==
+   验证状态,提交后用 `git apply --3way` 回填。
 
 **验收**:
 
-- `grep` 证明死件零命中(生产 + 测试);`tree_output` 输出逐字不变;`model:get fmt=tree` smoke 通过。
+- `git grep` 证明 `prepare_*` 只剩一份(或两个调用方都走同一 helper),`NodeKind` 的四个词只有一个真值源
+  (或转换闭合);`uses` step 的投影行 `kind` 仍为 `step`,root/step/branch 的 name 与旧值逐字一致。
 - `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt --all --check` 干净;
-  `cargo test -p acts --lib --tests` 与基线同口径(已登记既有抖动不变)。
-- §10 追加「C8a 完成」(删了什么/逐字输出证据/门禁/`git diff -M --stat`);§11 C8a 状态更新;§12 重写为 C8b。
+  `cargo test -p acts --lib --tests` 与基线同口径(已登记既有抖动不变;翻用例先 `git stash` 对照 HEAD)。
+- §10 追加「C8b 完成」(合并了什么/行为不变的证据/门禁/`git diff -M --stat`);§11 C8b 状态更新;§12 重写为 C8c。
 
 # 限制与约束
 
-- **先读**:设计 §3.7(a)、§1.8、§4 C8a、§5 的 `view` 风险;§11 A 段;§10「C7 完成」+「C6 完成」+
-  §6(文件改写的两条事故口径)。
-- **一次提交只做一个切面**:只做 C8a;不得夹带行为变更、§3.7(b)(c)(d) 的去重/挪位/登记项、或顺手修 bug。
-- **不新增 `#[allow(...)]`**;文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write
-  (§10 §6 的事故);串行构建。
-- 全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4);读**投影行**之前 `runtime.flush_writer()`。
-- 测试环境:`acts-server`"全部 target 一条命令"本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
-- 工作区有一笔未提交的性能探针 WIP(`shell::operation_trace` + `ApplyActionCommand`→`ActionCommand` + `mod perf_probe;`,
-  旁置副本在 `.git/c4-wip/` 与 `.git/c5-full/`):提交状态 == 验证状态,WIP 永不进提交
-  (剥离/回填办法:临时提交提供 postimage → `git apply -R --3way` → `reset --soft`)。
+- **先读**:设计 §3.7(b)、§4 C8b、§11 A 段、§10「NodeKind 恢复 4 值」+「C6 完成」+「C8a 完成」;
+  §6/§10 的“文件改写与 WIP 剥离”事故口径。
+- **一次提交只做一个切面**:只做 C8b;不得夹带行为变更、C8c 的挪位/§3.7(d) 登记项、或顺手修 bug。
+- **不新增 `#[allow(...)]`**;文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write;
+  串行构建。
+- 全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4);读**投影行**之前
+  `runtime.flush_writer()`。
+- 测试环境:`acts-server`“全部 target 一条命令”本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
 
 # 每阶段收口(必须全绿才算完成)
 
 cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
 cargo fmt
 cargo test -p acts --lib --tests
-…(C8a 只动 `core/model/view/**` 与测试时,`-p acts` 套件足够;动了 manifest 才跑 `cargo deny check bans`)
+…(C8b 只动 `core/model/view/**`、`shell/model.rs`、`shell/projection.rs` 与测试时,`-p acts` 套件足够;
+动了 manifest 才跑 `cargo deny check bans`)
 
 # 交付
 
 一笔提交(conventional 前缀 `refactor`/`chore`,单行 imperative 主语)
-+ §10 追加「C8a 完成」(删死件清单、`tree_output` 改前/改后逐字对照、门禁、`git diff -M --stat`)
-→ 把 §11 A 段 **C8a** 的状态改成「已做(§10「C8a 完成」)」+ **原地重写本节的「当前任务」(下一笔 C8b)**
++ §10 追加「C8b 完成」(单一来源的证据、行契约不变的证据、门禁、`git diff -M --stat`)
+→ 把 §11 A 段 **C8b** 的状态改成「已做(§10「C8b 完成」)」+ **原地重写本节的「当前任务」(下一笔 C8c)**
 + 停下等用户确认。
 ```
 

@@ -1,16 +1,12 @@
 use super::{
     build,
-    node::{Node, NodeContent},
-    visit::VisitRoot,
+    node::{Node, NodeContent, NodeOutputKind},
 };
 use crate::{ActError, Result, Workflow, utils::shortid};
 
 use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-};
 
 #[derive(Default, Clone)]
 pub struct NodeTree {
@@ -26,13 +22,6 @@ impl NodeTree {
 
     pub fn root(&self) -> Option<Arc<Node>> {
         self.root.clone()
-    }
-
-    pub fn build(workflow: &mut Workflow) -> Result<NodeTree> {
-        let mut tree = NodeTree::new();
-        build::build_workflow(workflow, &mut tree)?;
-
-        Ok(tree)
     }
 
     pub fn load(&mut self, model: &Workflow) -> Result<()> {
@@ -119,48 +108,80 @@ impl NodeTree {
         map.get(key).cloned()
     }
 
-    #[allow(unused)]
-    pub fn print(&self) {
-        if let Some(ref root) = self.root.clone() {
-            root.print();
+    pub fn tree_output(&self) -> String {
+        let mut output = String::new();
+        if let Some(root) = &self.root {
+            let mut visited = HashSet::new();
+            write_tree_output(root, true, &HashMap::new(), &mut visited, &mut output);
+        }
+        output
+    }
+}
+
+fn write_tree_output(
+    node: &Arc<Node>,
+    is_last: bool,
+    parent_path: &HashMap<usize, bool>,
+    visited: &mut HashSet<String>,
+    output: &mut String,
+) {
+    if !visited.insert(node.id().to_string()) {
+        return;
+    }
+
+    let mut path = parent_path.clone();
+    path.insert(node.level, !is_last);
+
+    if node.level > 0 {
+        for index in 1..node.level {
+            if path.get(&index).copied().unwrap_or(false) {
+                output.push_str("│   ");
+            } else {
+                output.push_str("    ");
+            }
+        }
+        output.push_str(if is_last { "└── " } else { "├── " });
+    }
+
+    let next = match node.next().upgrade() {
+        Some(next) => next.id().to_string(),
+        None => "nil".to_string(),
+    };
+    output.push_str(&format!(
+        "{} id:{} name={}  next={}\n",
+        node.kind(),
+        node.id(),
+        node.name(),
+        next
+    ));
+
+    for typ in [
+        NodeOutputKind::Normal,
+        NodeOutputKind::Catch,
+        NodeOutputKind::Timeout,
+    ] {
+        let children = node.children_in(typ);
+        let len = children.len();
+        for (index, child) in children.iter().enumerate() {
+            let mut child_is_last = index == len - 1;
+            if let Some(next) = child.next().upgrade()
+                && !visited.contains(next.id())
+            {
+                child_is_last = false;
+            }
+            write_tree_output(child, child_is_last, &path, visited, output);
         }
     }
 
-    #[allow(unused)]
-    pub fn tree_output(&self) -> String {
-        let s = &RefCell::new(String::new());
-        if let Some(ref root) = self.root.clone() {
-            VisitRoot::walk(root, &move |n| {
-                // print single line
-                if n.level > 0 {
-                    for index in 1..n.level {
-                        if n.path[&index] {
-                            s.borrow_mut().push_str("│   ");
-                        } else {
-                            s.borrow_mut().push_str("    ");
-                        }
-                    }
-                    if n.is_last {
-                        s.borrow_mut().push_str("└── ");
-                    } else {
-                        s.borrow_mut().push_str("├── ");
-                    }
-                }
-
-                let next = match n.next().upgrade() {
-                    Some(n) => n.id().to_string(),
-                    None => "nil".to_string(),
-                };
-
-                s.borrow_mut().push_str(&format!(
-                    "{} id:{} name={}  next={}\n",
-                    n.kind(),
-                    n.id(),
-                    n.name(),
-                    next
-                ));
-            });
-        }
-        s.clone().into_inner()
+    if let Some(next) = node.next().upgrade()
+        && !visited.contains(next.id())
+    {
+        write_tree_output(
+            &next,
+            next.next().upgrade().is_none(),
+            &path,
+            visited,
+            output,
+        );
     }
 }

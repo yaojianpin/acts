@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
         })
         .with_step(|step| step.with_id("done"));
 
-    workflow.print();
+    print!("{}", workflow.tree_output());
 
     let executor = engine.executor(&acts::Principal::unrestricted());
     executor.model().deploy(&workflow, None).await?;

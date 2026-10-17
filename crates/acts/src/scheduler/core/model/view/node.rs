@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Weak};
 
-use super::{node_tree, visit::VisitRoot};
+use super::node_tree;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeContent {
@@ -309,57 +309,6 @@ impl Node {
             next_id: self.next().upgrade().map(|n| n.id.clone()),
         };
         serde_json::to_string(&data).map_err(|err| ActError::Store(err.to_string()))
-    }
-
-    pub fn from_str(s: &str, tree: &node_tree::NodeTree) -> Result<Arc<Self>> {
-        let data: NodeData =
-            serde_json::from_str(s).map_err(|err| ActError::Store(err.to_string()))?;
-        let ret = Arc::new(Self::new(&data.id, data.content, data.level));
-        if let Some(node) = tree.node(&ret.id) {
-            return Ok(node);
-        }
-
-        Ok(ret)
-    }
-
-    #[allow(unused)]
-    pub fn print(self: &Arc<Self>) {
-        VisitRoot::walk(self, &move |n| {
-            // print single line
-            if n.level > 0 {
-                for index in 1..n.level {
-                    if n.path.contains_key(&index) {
-                        if n.path[&index] {
-                            print!("│   ");
-                        } else {
-                            print!("    ");
-                        }
-                    }
-                }
-                if n.is_last {
-                    print!("└── ");
-                } else {
-                    print!("├── ");
-                }
-            }
-            let next = match n.next().upgrade() {
-                Some(n) => n.id().to_string(),
-                None => "nil".to_string(),
-            };
-
-            if n.kind() == NodeKind::Act {
-                println!(
-                    "{}:{} uses={} name={}  next={}",
-                    n.kind(),
-                    n.id(),
-                    n.uses().unwrap_or("nil".to_string()),
-                    n.name(),
-                    next,
-                );
-            } else {
-                println!("{}:{} name={}  next={}", n.kind(), n.id(), n.name(), next);
-            }
-        });
     }
 }
 

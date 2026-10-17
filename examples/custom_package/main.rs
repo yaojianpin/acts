@@ -21,7 +21,7 @@ async fn main() -> acts::Result<()> {
 
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;
-    workflow.print();
+    print!("{}", workflow.tree_output());
     engine
         .executor(&acts::Principal::unrestricted())
         .model()

@@ -475,7 +475,13 @@ async fn export_manager_model_get_tree() {
 
     let result = manager.model().get(&model.id, "tree").await.unwrap();
     assert_eq!(result.id, model.id);
-    assert!(!result.data.is_empty());
+    assert_eq!(
+        result.data,
+        format!(
+            "workflow id:{} name=  next=nil\n└── step id:step1 name=  next=nil\n",
+            model.id
+        )
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -4,9 +4,9 @@
 mod build;
 mod node;
 mod node_tree;
-mod visit;
 
 pub use build::dyn_build_act;
-#[allow(unused_imports)]
-pub use node::{Node, NodeContent, NodeData, NodeKind, NodeOutputKind};
+#[cfg(test)]
+pub use node::NodeContent;
+pub use node::{Node, NodeData, NodeKind};
 pub use node_tree::NodeTree;

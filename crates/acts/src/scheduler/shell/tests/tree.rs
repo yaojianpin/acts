@@ -1,8 +1,18 @@
 use crate::{
-    Act, NodeKind, Workflow,
+    Act, Workflow,
     scheduler::core::model::view::{Node, NodeContent, NodeData, NodeTree, dyn_build_act},
 };
 use std::sync::Arc;
+
+fn try_tree_of(workflow: &Workflow) -> crate::Result<NodeTree> {
+    let mut tree = NodeTree::new();
+    tree.load(workflow)?;
+    Ok(tree)
+}
+
+fn tree_of(workflow: &Workflow) -> NodeTree {
+    try_tree_of(workflow).unwrap()
+}
 
 const SIMPLE_WORKFLOW: &str = r#"
 id: m1
@@ -14,15 +24,15 @@ steps:
 
 #[tokio::test]
 async fn sch_tree_from() {
-    let mut workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
-    let tr = NodeTree::build(&mut workflow).unwrap();
+    let workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
+    let tr = tree_of(&workflow);
     assert!(tr.root.is_some());
 }
 
 #[tokio::test]
 async fn sch_tree_shares_workflow_model() {
-    let mut workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
-    let tr = NodeTree::build(&mut workflow).unwrap();
+    let workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
+    let tr = tree_of(&workflow);
 
     let NodeContent::Workflow(model) = &tr.root.unwrap().content else {
         panic!("workflow root has invalid content");
@@ -32,8 +42,8 @@ async fn sch_tree_shares_workflow_model() {
 
 #[tokio::test]
 async fn sch_tree_get() {
-    let mut workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
-    let tr = NodeTree::build(&mut workflow).unwrap();
+    let workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
+    let tr = tree_of(&workflow);
 
     let step1 = tr.node("step1");
     assert!(step1.is_some());
@@ -90,11 +100,11 @@ async fn sch_tree_set_next() {
 
 #[tokio::test]
 async fn sch_tree_steps() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|s| s.with_id("step1"))
         .with_step(|s| s.with_id("step2"));
-    let tree = NodeTree::build(&mut workflow).unwrap();
+    let tree = tree_of(&workflow);
     let root = tree.root().unwrap();
 
     let node1 = tree.node("step1").unwrap();
@@ -107,12 +117,12 @@ async fn sch_tree_steps() {
 
 #[tokio::test]
 async fn sch_tree_step_auto_next() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step2"))
         .with_step(|step| step.with_id("step3"));
-    let tree = NodeTree::build(&mut workflow).unwrap();
+    let tree = tree_of(&workflow);
     let step1 = tree.node("step1").unwrap();
     let step2 = tree.node("step2").unwrap();
     let step3 = tree.node("step3").unwrap();
@@ -123,24 +133,24 @@ async fn sch_tree_step_auto_next() {
 
 #[tokio::test]
 async fn sch_tree_step_next_value() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step2"))
         .with_step(|step| step.with_id("step3").with_next("step1"));
-    let tree = NodeTree::build(&mut workflow).unwrap();
+    let tree = tree_of(&workflow);
     let step3 = tree.node("step3").unwrap();
     assert_eq!(step3.next().upgrade().unwrap().id(), "step1");
 }
 
 #[tokio::test]
 async fn sch_tree_step_prev() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step2"))
         .with_step(|step| step.with_id("step3"));
-    let tree = NodeTree::build(&mut workflow).unwrap();
+    let tree = tree_of(&workflow);
     let step1 = tree.node("step1").unwrap();
     let step2 = tree.node("step2").unwrap();
     let step3 = tree.node("step3").unwrap();
@@ -151,12 +161,12 @@ async fn sch_tree_step_prev() {
 
 #[tokio::test]
 async fn sch_tree_branches() {
-    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
+    let workflow = Workflow::new().with_id("w1").with_step(|step| {
         step.with_id("step1")
             .with_branch(|b| b.with_id("b1"))
             .with_branch(|b| b.with_id("b2"))
     });
-    let tree = NodeTree::build(&mut workflow).unwrap();
+    let tree = tree_of(&workflow);
     let step = tree.node("step1").unwrap();
     let b1 = tree.node("b1").unwrap();
     let b2 = tree.node("b2").unwrap();
@@ -167,7 +177,7 @@ async fn sch_tree_branches() {
 
 #[tokio::test]
 async fn sch_tree_branch_steps() {
-    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
+    let workflow = Workflow::new().with_id("w1").with_step(|step| {
         step.with_id("step1")
             .with_branch(|b| {
                 b.with_id("b1")
@@ -180,8 +190,7 @@ async fn sch_tree_branch_steps() {
                     .with_step(|step| step.with_id("step22"))
             })
     });
-    let tree = NodeTree::build(&mut workflow).unwrap();
-    tree.print();
+    let tree = tree_of(&workflow);
     let b1 = tree.node("b1").unwrap();
     let b2 = tree.node("b2").unwrap();
     assert_eq!(b1.children().len(), 1);
@@ -193,126 +202,72 @@ async fn sch_tree_branch_steps() {
     assert_eq!(step12.parent().unwrap().id(), "b1");
 }
 
-#[tokio::test]
-async fn sch_tree_node_workflow_ser_de() {
-    let mut workflow = Workflow::new()
-        .with_id("w1")
-        .with_step(|step| step.with_id("step1"));
-    let tree = NodeTree::build(&mut workflow).unwrap();
-    let w = tree.node("w1").unwrap();
-
-    let data = w.to_string().unwrap();
-    let w2 = Node::from_str(&data, &tree).unwrap();
-    assert_eq!(w2.children().len(), w.children().len());
-    assert_eq!(w2.id, w.id);
-    assert_eq!(w2.kind(), w.kind());
-    assert_eq!(w2.level, w.level);
-    assert!(w2.parent().is_none());
-    assert!(w2.prev().upgrade().is_none());
-}
-
-#[tokio::test]
-async fn sch_tree_node_step_ser_de() {
-    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
+#[test]
+fn sch_tree_node_data_round_trips() {
+    let workflow = Workflow::new().with_id("w1").with_step(|step| {
         step.with_id("step1")
             .with_branch(|b| b.with_id("b1").with_step(|s| s.with_id("step2")))
             .with_branch(|b| b.with_id("b2").with_step(|s| s.with_id("step3")))
     });
-    let tree = NodeTree::build(&mut workflow).unwrap();
-    let step1 = tree.node("step1").unwrap();
+    let tree = tree_of(&workflow);
 
-    let data = step1.to_string().unwrap();
-    let step = Node::from_str(&data, &tree).unwrap();
-    assert_eq!(step.children().len(), 2);
-    assert_eq!(step.id, "step1");
-    assert_eq!(step.kind(), NodeKind::Step);
-    assert_eq!(step.level, step.level);
-    assert_eq!(step.parent().unwrap().id, "w1");
-    assert!(step.prev().upgrade().is_none());
+    for (id, parent, next, level) in [
+        ("w1", None, None, 0usize),
+        ("step1", Some("w1"), None, 1),
+        ("b1", Some("step1"), None, 2),
+        ("step2", Some("b1"), None, 3),
+    ] {
+        let node = tree.node(id).unwrap();
+        let data: NodeData = serde_json::from_str(&node.to_string().unwrap()).unwrap();
+        assert_eq!(data.id, id);
+        assert_eq!(data.content.id(), id);
+        assert_eq!(data.level, level);
+        assert_eq!(data.parent_id.as_deref(), parent);
+        assert_eq!(data.next_id.as_deref(), next);
+    }
 }
 
-#[tokio::test]
-async fn sch_tree_node_branch_ser_de() {
-    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
-        step.with_id("step1")
-            .with_branch(|b| b.with_id("b1").with_step(|s| s.with_id("step2")))
-            .with_branch(|b| b.with_id("b2").with_step(|s| s.with_id("step3")))
-    });
-    let tree = NodeTree::build(&mut workflow).unwrap();
-    let b1 = tree.node("b1").unwrap();
-    let data = b1.to_string().unwrap();
-
-    let b = Node::from_str(&data, &tree).unwrap();
-    assert_eq!(b.children().len(), 1);
-    assert_eq!(b.id, "b1");
-    assert_eq!(b.kind(), NodeKind::Branch);
-    assert_eq!(b.level, b1.level);
-    assert_eq!(b.parent().unwrap().id, "step1");
-}
-
-#[tokio::test]
-async fn sch_tree_node_act_ser_de() {
-    let mut workflow = Workflow::new()
+#[test]
+fn sch_tree_act_node_data_round_trips() {
+    let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|step| step.with_id("step1"));
-    let tree = NodeTree::build(&mut workflow).unwrap();
+    let tree = tree_of(&workflow);
     let step1 = tree.node("step1").unwrap();
     let act1 = Arc::new(Node::new(
         "act_id_1",
-        NodeContent::Act(Act::irq(|r| r.with_params_vars(|v| v.with("key", "act1")))),
+        NodeContent::Act(
+            Act::irq(|r| r.with_params_vars(|v| v.with("key", "act1"))).with_id("act_id_1"),
+        ),
         step1.level + 1,
     ));
-
-    act1.set_parent(&step1);
-
-    let data = act1.to_string().unwrap();
-    let act = Node::from_str(&data, &tree).unwrap();
-    assert_eq!(act.children().len(), 0);
-    assert_eq!(act.id, "act_id_1");
-    assert_eq!(act.kind(), NodeKind::Act);
-    assert_eq!(act.level, step1.level + 1);
-
-    // not care about the parent when deserialize
-    assert!(act.parent().is_none());
-}
-
-#[tokio::test]
-async fn sch_tree_node_act2_ser_de() {
-    let mut workflow = Workflow::new()
-        .with_id("w1")
-        .with_step(|step| step.with_id("step1"));
-    let tree = NodeTree::build(&mut workflow).unwrap();
-    let step1 = tree.node("step1").unwrap();
-    let act1 = Arc::new(Node::new(
-        "act_id_1",
-        NodeContent::Act(Act::irq(|r| r.with_params_vars(|v| v.with("key", "act1")))),
-        step1.level + 1,
-    ));
-
     let act2 = Arc::new(Node::new(
         "act_id_2",
-        NodeContent::Act(Act::irq(|r| r.with_params_vars(|v| v.with("key", "act2")))),
+        NodeContent::Act(
+            Act::irq(|r| r.with_params_vars(|v| v.with("key", "act2"))).with_id("act_id_2"),
+        ),
         act1.level + 1,
     ));
 
+    act1.set_parent(&step1);
     act2.set_parent(&act1);
 
-    let data = act2.to_string().unwrap();
-    let act = Node::from_str(&data, &tree).unwrap();
-    assert_eq!(act.children().len(), 0);
-    assert_eq!(act.id, "act_id_2");
-    assert_eq!(act.kind(), NodeKind::Act);
-    assert_eq!(act.level, act1.level + 1);
-    // not care the parent for act when resume data from string
-    assert!(act.parent().is_none());
+    let data: NodeData = serde_json::from_str(&act2.to_string().unwrap()).unwrap();
+    assert_eq!(data.id, "act_id_2");
+    assert_eq!(data.content.id(), "act_id_2");
+    assert!(matches!(data.content, NodeContent::Act(_)));
+    assert_eq!(data.level, act1.level + 1);
+    assert_eq!(data.parent_id.as_deref(), Some("act_id_1"));
+    assert_eq!(data.prev_id, None);
+    assert_eq!(data.next_id, None);
 }
 #[tokio::test]
 async fn sch_tree_dyn_acts_restore_chain() {
     // build the dynamic act chain exactly like ctx.build_acts does
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|step| step.with_id("step1"));
-    let tree = NodeTree::build(&mut workflow).unwrap();
+    let tree = tree_of(&workflow);
     let step1 = tree.node("step1").unwrap();
 
     let mut acts = [
@@ -349,7 +304,7 @@ async fn sch_tree_dyn_acts_restore_chain() {
 
     // restore into a fresh tree (mirrors store::load_proc + load_tasks:
     // register all dynamic nodes first, then rebuild the links)
-    let tree2 = NodeTree::build(&mut workflow).unwrap();
+    let tree2 = tree_of(&workflow);
     let mut dyn_nodes = Vec::new();
     for data in datas.iter() {
         let node = tree2
@@ -378,12 +333,68 @@ async fn sch_tree_dyn_acts_restore_chain() {
 
 #[tokio::test]
 async fn sch_tree_next_error() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|step| step.with_id("step1").with_next("next1"));
-    let tree = NodeTree::build(&mut workflow);
+    let tree = try_tree_of(&workflow);
     assert!(
         tree.is_err(),
         "next node 'next1' does not exist, should error"
     );
+}
+
+const TREE_OUTPUT_MODEL: &str = r#"
+name: tree output
+id: c8a-tree
+ver: 0.1.0
+steps:
+  - name: first
+    id: first
+    branches:
+      - name: left
+        id: left
+        if: "true"
+        steps:
+          - name: left-1
+            id: left-1
+          - name: left-2
+            id: left-2
+      - name: right
+        id: right
+        if: "false"
+        steps:
+          - name: right-1
+            id: right-1
+          - name: right-2
+            id: right-2
+  - name: second
+    id: second
+    catches:
+      - name: caught
+        id: caught
+    timeouts:
+      - name: timed-out
+        id: timed-out
+  - name: third
+    id: third
+"#;
+
+const TREE_OUTPUT: &str = r#"workflow id:c8a-tree name=tree output  next=nil
+├── step id:first name=first  next=second
+│   ├── branch id:left name=left  next=nil
+│   │   ├── step id:left-1 name=left-1  next=left-2
+│   │   └── step id:left-2 name=left-2  next=nil
+│   └── branch id:right name=right  next=nil
+│       ├── step id:right-1 name=right-1  next=right-2
+│       └── step id:right-2 name=right-2  next=nil
+├── step id:second name=second  next=third
+│   └── step id:caught name=caught  next=nil
+│   └── step id:timed-out name=timed-out  next=nil
+└── step id:third name=third  next=nil
+"#;
+
+#[test]
+fn sch_tree_output_is_byte_stable() {
+    let workflow = Workflow::from_yml(TREE_OUTPUT_MODEL).unwrap();
+    assert_eq!(workflow.tree_output(), TREE_OUTPUT);
 }

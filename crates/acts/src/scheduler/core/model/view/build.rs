@@ -8,10 +8,6 @@ use crate::{
 };
 use std::sync::Arc;
 
-pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()> {
-    build_owned_workflow(workflow.clone(), tree)
-}
-
 pub(crate) fn build_owned_workflow(mut workflow: Workflow, tree: &mut NodeTree) -> Result<()> {
     let level = 0;
     if workflow.id.is_empty() {
@@ -179,38 +175,6 @@ fn prepare_branch_ids(branch: &mut Branch) {
         prepare_step_ids(step);
     }
 }
-
-// pub fn build_act(
-//     act: &mut Act,
-//     tree: &mut NodeTree,
-//     parent: &Arc<Node>,
-//     prev: &mut Arc<Node>,
-//     level: usize,
-//     is_sequence: bool,
-//     typ: NodeOutputKind,
-// ) -> Result<()> {
-//     if act.id.is_empty() {
-//         act.id = shortid();
-//     }
-
-//     let data = NodeContent::Act(act.clone());
-
-//     let node = tree.make(&act.id, data, level)?;
-
-//     if is_sequence {
-//         // set the act order one by one
-//         if node.level == prev.level {
-//             prev.set_next(&node, true);
-//         } else {
-//             node.set_parent_in(typ, parent);
-//         }
-//         *prev = node.clone();
-//     } else {
-//         node.set_parent_in(typ, parent);
-//     }
-
-//     Ok(())
-// }
 
 pub fn dyn_build_act(
     act: &mut Act,
