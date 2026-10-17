@@ -1,6 +1,6 @@
 # scheduler(内核)重构设计笔记(2026-10-15)
 
-> **状态:设计稿,未动生产代码。** 4 个待拍项见 §2.2(D1 命名 / D2 实例 id 形态 / D3 行内链 / D4 `view` 挪位),拍完即可按 §4 的 C1 起步。
+> **状态:D1-D4 已全部拍定(C1-C8c 已落地;D4 = 暂不挪,2026-10-17)。** 决策记录见 §2.2;第二波(P1/L*)见 `KERNEL_CUTOVER_NOTES.md` §11 B。
 > **范围**:用户提出的 7 条 scheduler 重构思路 —— ①聚合命名 ②task 身份 ③投影出行 ④outbox 消息 ⑤立即投递 ⑥`core/plan/` 模块拆分 ⑦`core/model/view/` 的去留。
 > **关系**:本文档落实 `KERNEL_CUTOVER_NOTES.md` §11 C4/C5(「先写设计再动手」),并把 §11 L1 (删 `ops`)、§10「读模型行表 `procs`/`tasks`/`vars` 的去留」两个待决项的影响面写清。
 > **性质**:第 ⑤ 条是**决策**(已定,见 §2.1),第 ③ 条**已经实现**(真实改动只是"一行一实例",依赖第 ② 条),第 ② 条是唯一动持久化格式的改动,第 ①/⑥ 条是命名与搬运。
@@ -116,7 +116,7 @@
 - **第 ② 条的铁律**:实例 id 必须是 `(node, generation)` 的**纯函数**。理由见 §1.2 的 `AlreadyCommitted` 条目 —— 这不是风格问题,是"会不会多造一个实例"的问题。
 - **第 ③ 条**:不改"投影已存在"这件事,真实改动只有"一行一实例",且它**依赖第 ② 条**。
 
-### 2.2 待拍(D1 已拍;D2/D3 已拍 2026-10-16,余 D4)
+### 2.2 决策记录(D1/D2/D3/D4 均已拍)
 
 **D1 —— 命名词汇:取 `{Process, Task, Operation}`(推荐),不取 `{Action, Task}`。
 → 已拍(2026-10-16,用户裁决):`{Process, Task, Operation}`。执行见 `KERNEL_CUTOVER_NOTES.md` §11 C2 / §10「C2 完成」
@@ -163,7 +163,11 @@ impl TaskId {
 
 **D4 —— `core/model/view/**` 是否挪位(§3.7 (c))。**
 
-推荐**先做瘦身 (C8a/C8b),挪位与替代按 §3.7 (c)/(d) 登记**(保守:动路径与热路径的收益低于风险)。要挪就选 (c2) `crate::model::view`(方向最正 —— `view` 本来就同时服务 `crate::model::{valid,tree_output}` 与 `crate::store` 的行重建),并给架构守卫加一条"谁可以命名 `model::view`";不挪则明确接受"core 里住着一个 shell/tooling 关注点",在 §3.7 写明,不再反复讨论。
+→ 已拍(2026-10-17,用户裁决):**暂时不挪,后续考虑**。`view` 保留在 `scheduler/core/model/view`;
+接受"core 里住着一个读模型关注点"这一边界(§3.7(c))。后续重评放在 §11 L11/L12 之后(它们会删掉 `view` 的约 3/4);
+若届时仍需挪,优先 (c2) `crate::model::view`,不取 (c1)。effect seam 已验证成立,见 `KERNEL_CUTOVER_NOTES.md` §10「C8c 完成」。
+
+不挪的代价与依据:动路径的收益低于风险,且 `NodeTree`/`Node` 会在 L11 被删;要挪就应并入 L11,而不是先搬后删。
 
 ---
 
@@ -328,12 +332,12 @@ core/plan/branch/{mod.rs, errors.rs}
 |---|---|---|
 | **(a) 删死件** | `visit.rs` 全簇(只服务 `print`/`tree_output`,且它自带缺陷:每 `Visitor` 克隆 `Box<VisitRoot>` ⇒ 计数恒 0 ⇒ 循环 `next` 链无界递归);`Node::from_str`(仅测试);`NodeTree::build`+`build_workflow`(仅测试);`build.rs:183-213` 注释掉的 `build_act`;`Workflow::print`(无调用者)。`tree_output` 改成沿 `Node.children` 自递归(顺手修掉那个递归缺陷) | 低:纯删 + 一个渲染函数换实现(无测试 pin 其输出,只有 `Node::from_str` 的往返测试) |
 | **(b) 去重** | ①**id 分配写了两遍**:`view/build.rs` 的 `prepare_workflow_ids/prepare_step_ids/prepare_branch_ids` 与 `shell/model.rs:83-113` 的 `assign_ids` 合一 ②`projection.rs:323-350` 的 `node.kind()/name()` 换成已有的 `facts.rs:595-613 node_kind_and_name`(含根 `("workflow", model.name)`)③`NodeKind` 两份合一(`view::NodeKind` 4 变体 vs `model_graph::NodeKind` 2 变体) | 中:单一来源,行为等价 |
-| **(c) 挪位(D4,待拍)** | `view` 今天住在 `core/`,而 core 层**零策略代码**用它(只有 `core/model/mod.rs:9` 一行声明),消费者全在 shell/root/`crate::model`/`crate::store`。两个方向:(c1) 挪进 `scheduler/shell/` —— 零守卫改动,但 `crate::model → scheduler::shell` 的方向更难看(该依赖今天已存在:它就是 `crate::model → scheduler`);(c2) 挪成 crate 级 `crate::model::view`(与 `model_graph` 对称)——方向最正,但要给守卫新增一条"谁可以命名 `model::view`" | 低-中:路径 + import(+ 守卫条目) |
+| **(c) 挪位(D4 已拍:暂时不挪,2026-10-17;后续重评)** | `view` 今天住在 `core/`,而 core 层**零策略代码**用它(只有 `core/model/mod.rs:9` 一行声明),消费者全在 shell/root/`crate::model`/`crate::store`。两个方向:(c1) 挪进 `scheduler/shell/` —— 零守卫改动,但 `crate::model → scheduler::shell` 的方向更难看(该依赖今天已存在:它就是 `crate::model → scheduler`);(c2) 挪成 crate 级 `crate::model::view`(与 `model_graph` 对称)——方向最正,但要给守卫新增一条"谁可以命名 `model::view`"。**裁决:暂不挪;后续重评优先 c2、不取 c1。** | 低-中:路径 + import(+ 守卫条目);本轮零代码 |
 | **(d) 需替代先行(登记;已收敛为 §11 L9-L12)** | ①`shell/scope.rs` 的"每 hop 建整棵树"换成轻量 `ModelNode` 视图(要带 `params/options/exposes/kind/name`,step 与 branch 都要)→ **L10** ②`node_data` 列形状重定(**独立,仍登记;NodeData/NodeContent 在 L9-L12 中必须保留**)③`Workflow::valid`/`tree_output` 搬到 `Workflow` 上(~40 行规则)→ **L11** ④`Task` 不再持 `Arc<Node>`、`Process`/`Task` 退役 → **L12** ⑤动态 act 簇与 `Context::build_acts` → **L9**:**2026-10-17 已验证成立** —— `effects::run` 只取 `task.data()`/`process.env()`/包 `outputs`,不读 tree;`projection` 从 durable model 重建树;三个容器包调用方的产物被丢弃,而 `materialize_container_acts` 已在 import 时重写同一形状 | 高:动热路径与持久化列 |
 
 > 注意:`view` 与 `model_graph.rs` 是**两份模型图、两种用途**(`view` = 导入期 id/索引 + 读模型形状 + 打印/校验;`model_graph` = 纯策略面的 `NodeId`/`successor`),不要合成一份 —— 本节的 (b)① 只合并"重复的 id 分配",不合并这两份图。
 >
-> `Process`/`Task`/`NodeTree` 的退役按 **§11 L9→L12** 四笔执行(Phase 0 死件 → headless `ScopeTask` → model 直出 view → 读 API 改行查询并删类型);`NodeData`/`NodeContent` 是持久化形状,始终保留。D4 的挪位若先行,搬走的对象会在 L11/L12 被删 ⇒ 拍 D4 时一并决定是否让 L9-L12 取代 (c) 档。
+> `Process`/`Task`/`NodeTree` 的退役按 **§11 L9→L12** 四笔执行(Phase 0 死件 → headless `ScopeTask` → model 直出 view → 读 API 改行查询并删类型);`NodeData`/`NodeContent` 是持久化形状,始终保留。**D4 已拍为暂不挪(2026-10-17)**;后续重评建议放在 L11/L12 之后,并直接按 c2 落点一次完成——`NodeTree`/`Node` 会在 L11 被删,先搬后删是白工。
 
 ---
 
@@ -450,7 +454,7 @@ graph LR
 | **C7** | §3.5 两条边界写进本文档 + `CHANGELOG` 说明 | 无 | — | — |
 | **C8a** | `view` 删死件:`visit.rs` 全簇 + `Node::from_str` + `NodeTree::build`/`build_workflow` + 注释掉的 `build_act` + `Workflow::print`;`tree_output` 改自递归 | 无(渲染实现等价,且修掉 `visit` 的循环守卫缺陷) | — | 独立可回 |
 | **C8b** | `view` 去重:`prepare_*_ids` 与 `shell/model.rs::assign_ids` 合一(§3.7 b①);投影的 `node.kind()/name()` 换 `node_kind_and_name`(b②);`NodeKind` 两份合一(b③) | 无(单一来源) | C8a | 独立可回 |
-| **C8c** | `view` 挪位(§3.7 (c),需先拍 D4)+ (d) 的登记项(含验证 effect seam 是否丢弃 `build_acts` 的结果) | 视结论 | C8b | — |
+| **C8c** | D4 = 暂不挪(2026-10-17):只做 effect seam 验证 + 三案材料;`view` 留在原路径,零代码。effect seam 成立(见 §10「C8c 完成」) | 无 | C8b | 文档提交,无代码回滚面 |
 
 **每笔的收口门禁**(AGENTS.md):`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt`;C1-C4 至少跑 `cargo test -p acts --lib --tests`;C5/C6 跑全量 per-crate 套件(`-p acts`、`-p acts-acl`、`-p acts-expr --all-features`、`-p acts-channel`、`-p acts-plugin-*`、`-p acts-package-*`、`-p acts-store --features sled,sqlite,postgres`、`-p acts-cli`、`-p acts-server`);不动 manifest 就不必跑 `cargo deny check bans`。
 

@@ -2651,6 +2651,67 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 
 ---
 
+### C8c 完成(2026-10-17):D4 = 暂不挪 —— effect seam 成立,`view` 留原路径(零代码)
+
+**裁决**:用户 2026-10-17 拍 D4 = **暂时不挪,后续考虑**。`view` 仍在 `scheduler/core/model/view`;
+C8c 的交付是 effect seam 取证 + D4 三案材料,无生产代码。后续重评放在 §11 L11/L12 之后;
+若届时仍需挪,优先 c2、不取 c1(理由见下)。
+
+**effect seam:成立**
+
+调用链(基准 HEAD = C8b `5eb441a`):
+
+1. `shell/mod.rs:1662 scope_spec` 从快照取 durable `__model`(`facts.rs:5 model_of`),构造 `ScopeSpec`;
+   `shell/mod.rs:1681 step_effect` 只把 `step.uses` 作为包 id 放进 `EffectRequest`。
+2. `shell/operation/action.rs:1163` 的 `StepDriver` 调 `runner.run(request)`。
+3. `shell/effects.rs:125 PackageEffectRunner::run` → `:101 headless` → `shell/scope.rs:47 headless_scope`:
+   `Process::new` + `process.load(&spec.model)`(`process/process.rs:88`)在一棵**新的内存树**上 `NodeTree::load`;
+   acting task 的 node 也取自这棵树。
+4. 容器包执行 → `context.rs:255 build_acts` → `self.proc.tree()`(`process.rs:105`)→ `dyn_build_act`
+   (`view/build.rs:191`)→ `tree.append_node`;只改这份 headless `NodeTree`。三个调用点:
+   `package/core/block.rs:107`、`parallel.rs:98`、`sequence.rs:98`,全部返回 `Ok(None)`。
+5. `effects.rs:172` 只构造 `EffectOutcome { outputs, data: data_delta(&task, ...), env: non_private(process.env()) }`;
+   结构体只有这三个字段(`:57,61,65`),`process`/`task`/`ctx` 在函数返回时 drop —— **没有 tree 字段或回传路径**。
+6. `action.rs:376 fold_effect_outcome` 只把 `outputs`/`data`/`env` 折进 `TransitionPlan`(`:392`、`:399`)。
+7. 投影 `shell/projection.rs:149 project_nodes` 另从 `model_of(snapshot)` 读 durable model,再
+   `:159-160 NodeTree::new(); tree.load(&model)`;行 `node_data` 与 headless 树无关。
+8. 模型侧 `shell/model.rs:450 from_workflow` → `:461 assign_ids` → `:465 materialize_container_acts`(`:107`)
+   在 import 时把同一形状写进 durable model;kernel fan-out 读的是它。
+
+**证据**(HEAD 状态;临时探针已删,副本 `.wip/c8c-effect-seam-probe.rs`):
+
+- 临时测试 `zz_probe_build_acts_result_is_discarded`:自定义 Func 包 `test.dyn-acts` 调
+  `ctx.build_acts(&[Act::irq(... "dyn1")], true)` 并返回标记 `ran=true`;手写 `ProcessSpec` 绕开
+  `materialize_container_acts`。结果:进程完成、`ran == "true"`(包与 `build_acts` 确已执行)、聚合只有
+  `$`/`s1` 两个 execution、outbox 无 `dyn1` 消息。`cargo test -p acts --lib zz_probe...` = **1 passed**。
+- 既有 `a_block_packages_inline_acts_run_as_children_in_both_modes` = **1 passed**:模型 materialize 出的
+  inline acts 恰好两个、两条消息都到;若 headless 树也参与会多出子执行/消息。
+- 既有 `sch_tree_dyn_acts_restore_chain` = **1 passed**:`dyn_build_act` 只操作内存树的链/父子关系。
+
+结论:**`build_acts` 的树产物被 effect seam 丢弃**,是每 hop 的白付开销。唯一仍可观察的残留是
+`dyn_build_act` 失败会让 effect 失败(错误传播);L9 删除时保留该语义即可。
+
+**D4 三案(材料;已拍“暂不挪”)**
+
+| 案 | 改动面 | 守卫 | L11/L12 后 | 评价 |
+|---|---|---|---|---|
+| **c1** 挪 `scheduler/shell/view` | 4 文件/781 行移动;`shell/mod.rs` +`mod view;`;7 个 shell/test import;`core/model/mod.rs` 删声明;`scheduler/mod.rs` 2 行 + 文档;外部 4 个消费者经 façade 不动 | **0**;`forbidden(Pure)` 已含 `crate::scheduler::shell` | `NodeTree`/`Node` 被 L11 删;`NodeData` 留在 shell,与 `model/info.rs`/`store` 的方向冲突 | 不取 |
+| **c2** 挪 `crate::model::view` | 4 文件/781 行移动;`model/mod.rs` 加 `pub(crate) mod view;`;`core/model/mod.rs` 删声明;7 个 shell/test + 4 个外部消费者 + `scheduler/mod.rs` + `lib.rs:59`;`model/workflow.rs` 可去掉对 scheduler 的依赖 | 需新增:最小 1 行 `ENGINE_VOCABULARY` 加 `"crate::model::view"`,完整为 ~30-50 行 importers 白名单 + `model/view/**` 纯度扫描 | `NodeTree`/`Node` 被 L11 删;`NodeData`/`NodeContent`/`NodeKind` 归 `model`,正确 | 方向最正;后续重评优先 |
+| **不挪 + 写边界** | 0 代码;只写 §3.7(c)/§2.2 | 0 | 无先搬后删;L11/L12 后残件再定 | **本轮采用** |
+
+**删除边界**:按 §11 L9-L12,不重复逐方法评估。L9 删 `build_acts`/`dyn_build_act`/`append_node` 与三处调用;
+L10 换 headless scope;L11 删 `NodeTree`/`Node`(粗算 `view` 只剩 `NodeData`/`NodeContent`/`NodeKind`/`assign_ids`
+约 1/4);L12 删 `Process`/`Task`/`TaskTree`/`store/process_rows`。因此现在搬 781 行的大部分会在 L11 被删。
+
+**门禁**(提交状态,WIP 旁置;本笔零代码):
+`cargo fmt --all --check` 干净;`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = EXIT 0;
+`cargo test -p acts --lib --tests` = **873 passed / 1 failed**(共 874)—— 唯一失败
+`export::actions::tests::a_run_cannot_seal_another_subjects_scope` 是 C2/C5/C6/C8b 已登记的负载/时序抖动,
+**单跑 `--exact` 绿**(0.07 s);本轮无新增失败名。其余 `--tests` 目标未报失败。
+**过程**:WIP(性能探针)按 C8b 口径旁置/回填;`git diff` 哈希与动手前一致;提交不含 `.wip/`、`perf_probe.rs` 或探针改动。
+
+---
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -2682,14 +2743,14 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 | **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | **已做(§10「C7 完成」)** |
 | **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | **已做(§10「C8a 完成」)** |
 | **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_facts` 统一 name/kind、`NodeKind` 对齐) | C8a | **已做(§10「C8b 完成」)**。policy 侧 enum 已删,`NodeDefinition.kind` 直接用 `crate::NodeKind`;两份图未合并(§3.7) |
-| **C8c** | `view` 挪位(§3.7 c);D4 材料里引用 §11 B 的 L9-L12 取代关系 —— effect seam **已验证成立**(`build_acts` 产物被丢弃),退役另立 L9-L12 | C8b;**D4 需先拍** | 未做 |
+| **C8c** | `view` 挪位(§3.7 c);D4 材料里引用 §11 B 的 L9-L12 取代关系 —— effect seam **已验证成立**(`build_acts` 产物被丢弃),退役另立 L9-L12 | C8b;**D4 已拍(2026-10-17:暂不挪,后续考虑)** | **已做(§10「C8c 完成」)**。零代码;`view` 留原路径;后续重评放在 L11/L12 之后,优先 c2、不取 c1 |
 
 **与第二波的关系**:C1/C8a/C8b 是纯搬移/删死件,与性能项零冲突;从 C4 起动的是 `core/model` + `commit/aggregate` + `shell/mod.rs`,
-与性能探针同一批文件 ⇒ **性能项一律排在 C8c 之后**(第二波),不在第一波中途插入。
+与性能探针同一批文件 ⇒ **性能项一律排在 C8c 之后**(第二波),不在第一波中途插入。**C8c 已完成(零代码)⇒ 第二波解锁,§12 指向 P1。**
 
 ### A2. 独立结构性重构(用户指令,不占 C1-C8c 的序)
 
-> 与第一波并行存在、**不改变 C1-C8c 的顺序**(C4 仍是 §12 指向的下一笔);每笔同样过 §11.C 的门禁。
+> 与第一波并行存在、**不改变 C1-C8c 的顺序**;每笔同样过 §11.C 的门禁。第一波已完成,§12 当前项以 §11 B 为准。
 
 | 编号 | 任务 | 阻塞/前置 | 状态 |
 |---|---|---|---|
@@ -2708,6 +2769,8 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
+**状态:未做(§12 当前项)。**
+
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
 | **L1** | 删死掉的 `ops` 族(**BREAKING**):`Store::ops()`/`StoreIden::Ops`/`store/data/op.rs` + `remove_proc_rows` 家族清单那一行;先决定老库 `ops-*` 孤儿行的处理(接受 / 保留只删不建 / 一次性清理) | 原 §5 | 未做。验收:生产侧 `grep` 为 0 + 全量门禁绿 + CHANGELOG BREAKING |
@@ -2723,7 +2786,7 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 | **L11** | **退役 Phase 2:model 直出 view** —— `Workflow::valid`/`tree_output` 与投影 `node_data` 直接走 `Workflow`/`Step`/`Branch`(逐字保持行与树输出);删 `NodeTree`/`Node`;`NodeData`/`NodeContent` 持久化形状保留 | 设计 §3.7(d)③ | 未做;前置 L10。验收:`sch_tree_output_is_byte_stable` 563-byte、`model:get fmt=tree`、`node_data` 逐字、投影行格式不变 |
 | **L12** | **退役 Phase 3:读 API 改行查询并删类型** —— `proc:get` 用 task 行 + `TaskInfo::from(&data::Task)` + vars join;删 `Runtime::proc`/`Store::load_proc`/`store/process_rows`/`Process`/`Task`/`TaskTree`;`Executor::proc().get_process` 删除或改读模型 DTO(**BREAKING**) | 设计 §3.7(d)④ | 未做;前置 L11。验收:`proc:get` 字段不变、reliability 测试改读行/快照后全绿、`git grep "struct Process\|struct Task\|struct NodeTree"` = 0、CHANGELOG BREAKING |
 
-> **L9-L12 的关系**:四笔按序、每笔独立可回;`NodeData`/`NodeContent` 是持久化形状,必须保留。若 D4 先按 (c1)/(c2) 挪了 `view`,挪位对象会在 L11/L12 被删 —— **拍 D4 时一并决定是否让 L9-L12 取代 (c) 档的挪位**,避免先搬后删的白工。
+> **L9-L12 的关系**:四笔按序、每笔独立可回;`NodeData`/`NodeContent` 是持久化形状,必须保留。**D4 已拍(2026-10-17):暂不挪**;`view` 的挪位不再作为独立笔。L11/L12 后若重评,优先 c2(c1 不取:`NodeData` 会留在 shell)。L9 的“零行为变更”已由 C8c 的 effect seam 取证背书:headless tree 的产物本来就被 `effects::run` 丢弃,`projection` 从 durable model 重建。
 
 ### C. 每笔的收口门禁(原 §3;不是"一项",是每笔都要过的闸)
 
@@ -2740,51 +2803,60 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:C8c —— `view` 挪位 + §3.7(d) 的前置验证(§11 A 段第十笔)
+# 当前任务:P1 —— engine 形状的 hop CPU 分阶段画像(§11 B,P1;只量不改代码)
 
-**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.7(c)/(d)、§4 的 C8c 行、§11 A 段 C8c 行与 §11 B 的 L9-L12、
-§10「C8b 完成」。**基准**:C8b 提交之后的 HEAD。**D4 未拍** ⇒ 本轮先取证,不先改路径、不挪代码。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 B 的 P1 行、§10「P6-1 性能收口」的探针形状与 §10 §5n 的 release 口径;
+`KERNEL_REFACTOR_DESIGN.md` §3.7(d) 的后续项。第一波 C1-C8c 已完成(C8c = 零代码,D4 暂不挪)。
 
-**本笔的内容(按序,第 1/2 项只读)**
+**目标**:把 engine 形状每 hop 那 ~1 ms 既非 codec、也非 store 的 plan/记账 CPU 分解到具体块
+(计划构造、消息 payload、`place_run`/`deliver_plan`、行投影、wake/lifecycle/slot),据此给出下一块动谁;
+本轮**只量不改生产代码**,探针不提交。
 
-1. **effect seam 验证**:核对 `shell/context.rs::build_acts` 写入 `self.proc.tree()`、
-   `shell/effects.rs::run` 只取 `task.data()`/`process.env()`/包返回的 `outputs`(不读 tree)、
-   `shell/projection.rs` 的 `NodeTree` 来自 durable model(`NodeTree::load`),以及三个调用方
-   `package/core/{block,parallel,sequence}.rs` 与 kernel `materialize_container_acts` 的关系。
-   给出可复核的调用链 + 一条证明"结果被丢弃"的测试证据,结论写"成立/不成立"。
-2. **删除边界已登记,不重复评估**:`Process`/`Task`/`NodeTree` 的退役已收敛为 **§11 L9-L12**
-   (Phase 0 死件 → headless `ScopeTask` → model 直出 view → 读 API 改行查询并删类型);
-   本笔只在 D4 材料里引用:**若 L9-L12 先行,D4 的挪位对象会在 L11/L12 被删**。
-3. **D4 拍板材料**:c1 挪 `scheduler/shell`、c2 挪 `crate::model::view`、不挪+写边界 三案的改动面、
-   `core/architecture.rs` 守卫改动、风险与回滚面;列完**停下等用户拍 D4**。拍定后才动代码。
+**基准与口径**
 
-**边界**:
+- **release**,内存 store,30 步线性 workflow(93 operations);`--test-threads=1`;per-call 微基准与 run 内计时都标环境比。
+- 参考:§10 §5n 的 **7.4 ms/hop(136 hop/s)** 与 §10「P6-1」的 engine 形状 **4.163 ms/hop(240 hop/s)**;
+  debug 的 11.2 hop/s 已作废,**不得再用 debug 数字**。
+- 工作区已有未提交的 engine 探针:`.wip/c8b-perf-probe.patch`(8 文件,含 `shell::operation_trace` 计时)
+  与 `.wip/perf_probe.rs`(经 `shell/tests/mod.rs` 的 `mod perf_probe;` 挂载)。先核对工作区 = patch
+  (`git apply --check -R .wip/c8b-perf-probe.patch`),再在它上面扩展;探针代码最终不提交。
 
-- 本轮不改代码、不夹带 C8b 遗留清理/性能 WIP/§3.7(d) 的实现;不新增 `#[allow(...)]`。
-- 文件改写只用 `edit`/`ast_edit`;WIP 旁置在动手前生成 patch(提交状态 == 验证状态);postimage 不在对象库时
-  先 `git apply -R --check` 再 direct `git apply -R`(C8b 口径)。
+**本笔内容**
 
-**验收**:
+1. 跑 `cargo test --release -p acts --lib perf_probe -- --ignored --nocapture --test-threads=1`,
+   记录 3 轮的 operations/wall/ms-per-operation、各阶段占比与聚合字节。
+2. 若阶段粒度不够,在同一 `#[cfg(test)]` 探针里细分:计划构造、消息 payload、`place_run`/`deliver_plan`、
+   行投影、wake/lifecycle/slot。只动 `#[cfg(test)]` 探针,不改业务路径,不引入 `#[allow(...)]`。
+3. 把 ~1 ms 分解成有序的块(每块 ms/hop + 占 run 百分比),与 §10「P6-1」的 codec/store 数字对照,
+   明确下一块动谁、为什么不是别的;若结论是“先拆文档/append-only”,引用 §9.3.4 并说明它是独立格式项。
+4. 写 §10「P1 完成」记录;§11 B 的 P1 状态改为已做;§12 原地改成下一项(下一块的具体改动)。
 
-- 第 1 项:调用链 + 测试证据 + "成立/不成立";第 2 项:确认 §11 L9-L12 与 D4 的取代关系(不重复逐方法评估);第 3 项:三案对照表。
-- 若用户在本轮指令里已拍 D4:按 §11.C 跑门禁、提交一笔,并更新 §10/§11/§12;否则只交评估报告,不改代码。
+**边界**
+
+- 只动 `#[cfg(test)]` 探针与文档;不提交探针、不改持久化格式/列/业务行为、不加 `#[allow]`。
+- WIP 旁置口径同 C8b:先 `git apply -R --check` 再 direct `git apply -R`;提交状态 == 验证状态;
+  回填后确认 `git diff` 与动手前一致。P1 只提交文档(§10/§11/§12),不含探针。
+- 串行构建;`acts-server` 若需跑全量,按 §10 §5k 用 `-j 2` 逐 target。
+
+**验收**
+
+- 阶段表(每块 ms/hop + 占比)+ 与 P6-1 对照 + 明确的下一块结论;
+- 文档提交前 `cargo fmt --check`、clippy(无生产代码改动时也应绿);§11 B P1 标为已做、§12 指向下一项。
 
 # 限制与约束
 
-- **先读**:设计 §3.7(c)/(d)、§4 C8c、§11 A 段 C8c、§10「C8b 完成」、§6/§10 的 WIP 事故口径。
-- 不改 `NodeData`/列格式/`model:deploy` 校验/业务行为;串行构建;全量套件翻用例先对照基线(§10 §4)。
+- **先读**:§11 B P1、§10「P6-1」与 §10 §5n、§10「C8c 完成」、§6/§10 的 WIP 事故口径。
+- 不改 `NodeData`/列格式/`model:deploy` 校验/业务行为;性能结论一律 release;全量套件翻用例先对照基线(§10 §4)。
 - 测试环境:`acts-server`“全部 target 一条命令”本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
 
-# 每阶段收口(只有代码改动后)
+# 每阶段收口
 
-cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
-cargo fmt
-cargo test -p acts --lib --tests
-…(只动 `core/model/view/**` 与测试时 `-p acts` 足够;动 manifest 才跑 `cargo deny check bans`)
+探针阶段只跑 `cargo test --release -p acts --lib perf_probe -- --ignored --nocapture --test-threads=1`;
+文档提交前跑 `cargo fmt --check` + `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`;
+若 P1 结论引出了代码改动,按 §11.C 的 `-p acts --lib --tests` 与 per-crate 规则执行,动 manifest 才跑 `cargo deny check bans`。
 
 # 交付
 
-评估报告(调用链/证据/三案) → 停下等用户拍 D4。D4 拍定后按 §11.C 门禁提交一笔,
-并更新 §10 记录、§11 状态与本节的下一项。
+阶段画像 + 与 P6-1 对照 + 下一块结论 → 写 §10/§11/§12 并提交**文档**一笔(探针与 `.wip/` 不进提交)。
 ```
 
