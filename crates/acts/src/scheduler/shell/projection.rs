@@ -334,6 +334,10 @@ impl RowProjector {
             pid: snapshot.process_id.clone(),
             tid: wire.to_string(),
             node_data: node.to_string()?,
+            // The row's kind is the declaration's node kind: a `uses` step
+            // stays "step" here even though the message vocabulary calls the
+            // same node an act (`facts::node_kind_and_name`). This word is a
+            // pinned read-model contract, not a spelling of the message level.
             kind: node.kind().to_string(),
             // The model chain (D3): predecessor/successor/parent stay node
             // ids — they say which *node* follows, not which instance.

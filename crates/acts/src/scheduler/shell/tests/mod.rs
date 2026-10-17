@@ -5264,10 +5264,12 @@ async fn uses_steps_write_created_message_records() {
     let s1_message = message_of("s1");
     let s1_payload: serde_json::Value = serde_json::from_str(&s1_message.payload).unwrap();
     assert_eq!(s1_payload["uses"], "test.func");
+    assert_eq!(s1_payload["kind"], "act");
     assert_eq!(s1_payload["inputs"]["params"]["k1"], "v1");
     let s2_message = message_of("s2");
     let s2_payload: serde_json::Value = serde_json::from_str(&s2_message.payload).unwrap();
     assert_eq!(s2_payload["uses"], "test.irq");
+    assert_eq!(s2_payload["kind"], "act");
     assert_eq!(s2_payload["inputs"]["params"]["key"], "irq-1");
 
     // The Irq execution is parked on its message; the plain leaf behind

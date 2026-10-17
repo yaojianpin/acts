@@ -3,12 +3,15 @@
 //! The outbox is the durable fact (`message.created`, `task.completed`,
 //! `task.failed`, `task.skipped` carrying the act payload); the driver's
 //! transport maps each record onto the `Message` the legacy engine's task
-//! events produced and hands it to the engine channel. Identity matches the
-//! shadow's action hook: the kernel keys executions by model node id, so
-//! `tid`/`nid` are the node id.
+//! events produced and hands it to the engine channel.
+//!
+//! Identity is split exactly like the read model (C5): `tid` is the execution
+//! instance's wire digest, `nid` is the model node it instantiates. `nid` is
+//! the node lookup key — code that needs the model node (`$step`, model
+//! lookups, rows) reads `nid`; `tid` addresses the instance.
 
 use crate::{
-    Message, MessageState, Vars,
+    Message, MessageState, NodeKind, Vars,
     scheduler::core::outbox::{
         outbox_dispatch::{DeliveryOutcome, OutboxTransport},
         records::OutboxRecord,
@@ -25,7 +28,10 @@ use crate::{
 /// package and resolved params) and a *task* payload (a package-less step, a
 /// branch or the workflow root, which the legacy engine also announced — its
 /// `on_task` emits every state change that is not `pending`/`running`). The
-/// `type` is the legacy node kind; the act shape omits it.
+/// `type` is the legacy node level (`workflow|branch|step|act`); both shapes
+/// carry it explicitly since C6. A record an earlier kernel wrote omits it on
+/// the act shape, where `act` remains the default — the legacy act was the
+/// only shape without `kind`.
 pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
     let state = match record.topic.as_str() {
         "message.created" => MessageState::Created,
@@ -55,11 +61,11 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         .and_then(|value| value.as_str())
         .unwrap_or(&nid)
         .to_string();
-    let kind = payload
-        .get("kind")
-        .and_then(|value| value.as_str())
-        .unwrap_or("act")
-        .to_string();
+    let kind = match payload.get("kind").and_then(|value| value.as_str()) {
+        Some(kind) => kind.to_string(),
+        // An earlier kernel's act payload omitted it; `act` is the level.
+        None => NodeKind::Act.to_string(),
+    };
     let mid = payload
         .get("mid")
         .and_then(|value| value.as_str())
@@ -175,6 +181,7 @@ mod tests {
         let payload = serde_json::json!({
             "nid": "s2",
             "name": "approve",
+            "kind": "act",
             "uses": "acts.core.irq",
             "inputs": {"params": {"key": "act1"}, "options": {"ui": true}},
             "mid": "wf1",
@@ -241,8 +248,8 @@ mod tests {
         assert_eq!(skipped.state, MessageState::Skipped);
     }
 
-    /// Every decided state announces itself on its own topic — the act
-    /// message the legacy engine emitted for that transition.
+    /// Every topic the outbox writes maps onto its message state — all nine,
+    /// the only table that turns a decided state into a message.
     #[test]
     fn decided_state_topics_map_onto_message_states() {
         let payload = serde_json::json!({
@@ -254,16 +261,88 @@ mod tests {
         })
         .to_string();
         for (topic, state) in [
+            ("message.created", MessageState::Created),
+            ("task.completed", MessageState::Completed),
             ("task.submitted", MessageState::Submitted),
             ("task.backed", MessageState::Backed),
             ("task.cancelled", MessageState::Cancelled),
+            ("task.failed", MessageState::Error),
             ("task.aborted", MessageState::Aborted),
+            ("task.skipped", MessageState::Skipped),
             ("task.removed", MessageState::Removed),
         ] {
             let message = message_from_record(&record(topic, &payload))
                 .unwrap_or_else(|| panic!("{topic} must map onto an act message"));
             assert_eq!(message.state, state, "{topic}");
         }
+    }
+
+    /// Every terminal state names the topic it announces; a state that turns
+    /// terminal without one would be lost (the topic is the only way a state
+    /// becomes a message). The match is exhaustive, so adding a task state
+    /// forces a decision here.
+    #[test]
+    fn every_terminal_state_names_the_topic_it_announces() {
+        use crate::scheduler::core::model::task_graph::TaskState as S;
+
+        let topic_of = |state: S| -> Option<&'static str> {
+            match state {
+                S::Completed => Some("task.completed"),
+                S::Submitted => Some("task.submitted"),
+                S::Backed => Some("task.backed"),
+                S::Cancelled => Some("task.cancelled"),
+                S::Failed => Some("task.failed"),
+                S::Aborted => Some("task.aborted"),
+                S::Skipped => Some("task.skipped"),
+                S::Removed => Some("task.removed"),
+                S::Created | S::Ready | S::Running | S::Waiting => None,
+            }
+        };
+        for state in [
+            S::Created,
+            S::Ready,
+            S::Running,
+            S::Waiting,
+            S::Completed,
+            S::Submitted,
+            S::Backed,
+            S::Cancelled,
+            S::Failed,
+            S::Aborted,
+            S::Skipped,
+            S::Removed,
+        ] {
+            assert_eq!(
+                super::super::facts::message_topic(state),
+                topic_of(state),
+                "{state:?}: the topic a terminal state announces"
+            );
+            assert_eq!(
+                state.is_terminal(),
+                topic_of(state).is_some(),
+                "{state:?}: terminal iff it announces a topic"
+            );
+        }
+    }
+
+    /// `nid` names the model node (the lookup key), `tid` the execution
+    /// instance (C5's wire): consumers must never derive one from the other.
+    #[test]
+    fn nid_names_the_node_and_tid_the_instance() {
+        let payload = serde_json::json!({
+            "tid": "abc123",
+            "nid": "s2",
+            "name": "approve",
+            "kind": "act",
+            "uses": "acts.core.irq",
+            "inputs": {},
+            "mid": "wf1",
+        })
+        .to_string();
+        let message = message_from_record(&record("message.created", &payload)).unwrap();
+        assert_eq!(message.tid, "abc123");
+        assert_eq!(message.nid, "s2");
+        assert_eq!(message.r#type, "act");
     }
 
     #[test]

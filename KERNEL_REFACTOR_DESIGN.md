@@ -49,10 +49,10 @@
 
 | 事实 | 位置 |
 |---|---|
-| 主题→状态映射只此一张表(9 个主题能变消息) | `shell/message.rs:30-41` |
-| 消息的 `tid`/`nid` 都是 node id | `shell/message.rs:96-112` |
-| `type` 的来源只有 `workflow\|branch\|step`;**`"act"` 只是 payload 缺省值** | `shell/facts.rs:596-608`、`shell/message.rs:51-54` |
-| act 载荷不写 `kind`;branch 被显式抑制(忠实 legacy `Branch::init` 关 emit) | `shell/mod.rs:3120-3186`、`:3202-3205` |
+| 主题→状态映射只此一张表(9 个主题能变消息) | `shell/message.rs:36-48` |
+| 消息的 `tid` 是实例 wire(C5)、`nid` 是模型节点;`nid` 是取节点的键 | `shell/message.rs:49-58`、`facts.rs:281-287` |
+| `type` 的来源是 `workflow\|branch\|step\|act`;act 载荷自 C6 显式写 `kind=act`,此前靠缺省值 | `shell/facts.rs:583-636`、`shell/message.rs:65-69` |
+| act 载荷写 `kind=act`;branch 被显式抑制(忠实 legacy `Branch::init` 关 emit) | `shell/mod.rs:1511-1575`、`:1593-1603` |
 | `message.created`(Created)覆盖 uses step / 无包 step / 根 `$`(kind=workflow);branch 不写 | 写入条件 `:2605-2613` + push `:2695-2705`;实测断言 `shell/tests/mod.rs:5165-5169` |
 | `task.started` 是**空载荷**的 hop 注记(每 ExecuteTask 一次) | `shell/mod.rs:2572-2580`、模板 `:2782-2788` |
 | `task.completed` 有 4 个写入点(叶子/容器 join/fan-out/park),互斥且带序列限定 | `:2928-2950`、`:3597-3608`、`:3661-3673`、`:3688-3734` |
@@ -251,14 +251,20 @@ pub(crate) struct OperationId {                              // task_id 换类�
 - D3 决定 `prev/next/parent` 的取值。
 - `ops` 是死件:删它归 §11 L1 ,**不要**在本轮顺手删(避免一个 commit 混两件事)。
 
-### 3.4 消息(第 ④ 条)
+### 3.4 消息(第 ④ 条;2026-10-17 C6 落地)
 
-现状(§1.4)已经能发 Created/Completed 三层级,缺的是纪律:
+现状(§1.4)已经能发 Created/Completed 三层级;C6 把纪律补齐:
 
-1. **层级显式化**:act 载荷也写 `kind`(`shell/mod.rs:3120-3186`),`node_kind_and_name` 的返回值扩到 `workflow|branch|step|act`;对外字符串形态保持不变(它同时是 `data::Message.r#type` / channel / gRPC 的载荷),**不**改成 enum 上公共面 —— 内部加一个 `MessageLevel` 类型化即可。
-2. **静默 topic 拍一下**:`task.propagated`/`task.reentered`/`fanout.selected|empty` 保持静默(= legacy 无此事件,保持一致),或给状态。倾向**保持静默并写明**。
-3. **根节点双发**确认:outbox(kind=workflow)与 lifecycle 通道**都**保留(= legacy `on_task` + `on_proc` 的忠实复刻)。
-4. **每终态恰一条**:为每个 `ExecutionState` 终态补一条"该发什么状态"的映射测试,防止新增状态漏发(今天 `message_from_record` 的 9 项映射是唯一的真值源)。
+1. **层级显式化(已做)**:act 载荷与 task 载荷都写 `kind`;层级词汇复用 `crate::NodeKind`(`workflow|branch|step|act`,与行/模型同一真值来源),
+   `node_kind_and_name` 对 `uses` step 回答 `NodeKind::Act`。对外字符串逐字节不变:`Message.r#type` / channel / gRPC 仍是这四个词(旧记录缺 `kind` 时
+   `message_from_record` 仍以 `act` 兜底)。**行 `kind` 故意不跟**:读模型行对 `uses` step 仍写 `step`(见 `projection::project_task` 的注释;
+   读模型契约),消息词汇的 `act` 只属于消息面。
+2. **静默 topic(已拍:保持静默)**:`task.propagated`、`task.reentered`、`fanout.selected`、`fanout.empty` 四主题**不加状态载荷** ——
+   legacy 对这些转换没有事件,静默是决策,不是遗漏。它们是 outbox 的投递/诊断记录;`message_from_record` 不识别即返回 `None`(transport 记为 lifecycle receipt)。
+3. **根节点双发(确认保留)**:outbox(`kind=workflow` 的 `message.created`/终态)与 `LifecycleSink`(`on_start`/`on_complete`/`on_error`)**都**保留,
+   = legacy `on_task` + `on_proc` 的忠实复刻;两条路的载荷不同、用途不同,互相不替代。
+4. **每终态恰一条(已做)**:`message_from_record` 的 9 项 topic→state 表仍是唯一真值源;测试补两处 —— 9 主题的完整映射表,以及
+   `TaskState` 每个终态必须命名一个主题(穷尽 match:新增状态在编译期就迫使决定),并钉住 `tid` = 实例 wire / `nid` = 模型节点的契约(C5 的 BREAKING 承接)。
 
 ### 3.5 投递(第 ⑤ 条,决策已定)
 

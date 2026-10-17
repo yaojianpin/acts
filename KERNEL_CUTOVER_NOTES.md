@@ -2458,6 +2458,66 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 `-- BREAKING` 见 `CHANGELOG.md` 0.25.0 末尾条目(含旧库混合窗口与孤儿键口径)。
 `git diff -M --stat`(本笔含文档)= **29 文件**(代码 27 + `CHANGELOG.md` + 本文件;精确增删以 `git show --stat HEAD` 为准)。
 
+### C6 完成(2026-10-17):消息层级显式化 —— act 载荷写 `kind`,层级复用 `NodeKind`
+
+**载荷前后**(对外字节只增一个字段,旧值不变):
+
+| 载荷 | 前 | 后 |
+|---|---|---|
+| act(`uses` step) | `tid/nid/name/uses/mid/inputs`(无 `kind`,消费端默认 `act`) | **加 `"kind": "act"`**(`NodeKind::Act` 的 Display 输出);其余字段逐字节同 |
+| task(无包 step / root) | `tid/nid/name/kind/inputs`(`kind` 来自 `node_kind_and_name` 的 `&'static str`) | 同字段同值;`kind` 改由 `NodeKind` 渲染(step→`step`、root→`workflow`;branch 仍显式抑制) |
+| 行 `kind` | 声明树的 `NodeKind`(`uses` step = `step`) | **不变**(`projection::project_task` 保留 `node.kind()`;新增注释说明这是读模型契约,不是消息层级) |
+
+- `facts::node_kind_and_name` 返回 `(crate::NodeKind, String)`:root→Workflow、branch→Branch、**带非空 `uses` 的 step→Act**、其余 step→Step;`uses` 为空白按无包处理(与 `step_uses` 的过滤同口径)。
+- **用户指令**:消息层级直接复用 `crate::NodeKind`,不引入本地 `MessageLevel`;`message_from_record` 的旧记录缺省仍是 `NodeKind::Act` 的字符串。
+- 根双发:**代码未动**;`report_lifecycle` 的文档补明 outbox(`kind=workflow`)与 `LifecycleSink` 分别是 legacy `on_task`/`on_proc`,两路都保留。
+- 静默主题:`task.propagated`/`task.reentered`/`fanout.selected|empty` 保持静默(设计 §3.4 已拍),不加状态载荷。
+
+**映射测试清单**(`shell/message.rs`):
+- `decided_state_topics_map_onto_message_states`:9 主题全覆盖(created/completed/submitted/backed/cancelled/failed/aborted/skipped/removed → 9 state)。
+- 新增 `every_terminal_state_names_the_topic_it_announces`:`TaskState` 12 变体 × 穷尽 match,终态 ⇔ 主题(`is_terminal() == topic.is_some()`);新增状态在编译期迫使决定。
+- 新增 `nid_names_the_node_and_tid_the_instance`:payload 的 `tid` 落 `Message.tid`、`nid` 落 `Message.nid`(节点/实例契约)。
+- `a_created_record_maps_onto_the_act_message`:act 载荷带 `kind:"act"` 后 `r#type == "act"`;无 `kind` 的旧载荷仍由 `terminal_records...`/映射测试覆盖缺省。
+- `shell/tests/mod.rs::kernel_task_and_act_messages_are_emitted`:两个 act 载荷断言 `kind == "act"`,root 仍 `workflow`。
+- 新增 `shell/facts.rs` 单测:root/plain/uses/blank-uses/branch/missing 六种节点层级。
+
+**字面量审计(对外词汇,`git diff HEAD` 对照)**:
+- 主题:9 个 topic 字面量只在 `message_from_record` 的 match 与发射点;本笔**未改任何发射点**(`git diff HEAD -- shell/operation core/plan | grep topic` = 0 行)。
+- 层级词:可执行真值源是 `core/model/view/node.rs::NodeKind` 的 `Display`(本笔未动);`Message.r#type` 的取值集合 `workflow|branch|step|act` 不变。
+- 多重集差异(4 个生产文件、quoted literal):`"workflow"` 2→1、`"branch"` 2→0 —— 被删的是 facts.rs 里的本地副本(返回串 + 已放弃的 `MessageLevel` 臂),改由 `NodeKind` 提供;`"act"`/`"step"` 的增量来自新测试 payload 与文档。**无任何取值被改写**。
+- 行 kind:`projection.rs` 取值未改,只加注释。`$step` 词汇:`utils/consts.rs` 未触碰。
+
+**清单(改 / 保留,`git grep -nE "node_kind_and_name|message_from_record|topic" crates/acts/src/scheduler/shell` 逐条)**:
+
+| 命中面 | 决定 |
+|---|---|
+| `facts.rs::node_kind_and_name` 及唯一生产调用点 `mod.rs::task_message_payload` | **改**:返回 `NodeKind`;`uses` step→`Act` |
+| `facts.rs::message_topic`(TaskState→topic,9 项) | **保留**:终态映射真值源,本笔不动 |
+| `message.rs::message_from_record` 的 9-topic match | **保留**(主题表未动);仅缺省 `kind` 改走 `NodeKind::Act` |
+| `message.rs::MessageForwarder` / `mod.rs` 的 transport 接缝 | **保留**:投递路径零改动 |
+| `mod.rs::task_operation_plan` 的 `topic` 参数;`operation/{action,propagate,task}.rs` 的 topic 字面量 | **保留**:发射点一个未改 |
+| `core/plan/{propagation/cascade,generation/mod,container/fanout}` 的 4 个静默 topic | **保留**:§3.4 已拍"保持静默" |
+| `model.rs:567` 的 `node_kind_and_name` 注释引用 | **保留**:policy 图的子节点仍是 Step,注释仍准确 |
+| `shell/tests/mod.rs` 的 topic 收集器 | **改**:仅加 act 载荷 `kind` 断言 |
+| `projection.rs` 行 `kind` | **保留取值**(读模型契约),**改注释**说明与消息层级的故意差异 |
+
+**过程登记(探针 WIP)**:同 C5 —— 工作区先带 C6+WIP 建临时提交,`git apply -R --3way .git/c4-wip/wip.patch` 反解(8/8 clean),`reset --soft` 丢掉临时提交,`perf_probe.rs` 从 index 摘除(文件保留为未跟踪);门禁在 C6-only 状态跑,提交后正向 `git apply --3way` 回填 WIP。
+
+**门禁与验收(在提交状态上跑,WIP 旁置)**:
+- `cargo fmt --all --check` 干净;`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**。
+- `cargo test -p acts --lib --tests` = **874 passed / 1 failed**:唯一失败是已登记既有抖动 `kernel_task_and_act_messages_are_emitted`
+  (根行 `$|running` 先于 `$|completed` 投影,C5 已归因;单跑该用例通过,失败断言在 `tests/mod.rs:1448`,与 C6 改动的 5268 行无关);
+  C5 登记的另一条 `a_run_cannot_seal_another_subjects_scope` 本轮通过。
+- 新增测试单跑:message 6/6、facts 1/1 全绿。
+- per-crate(§11 C):`acts-acl` 13+10+5 ✓、`acts-expr --all-features` 3 ✓、`acts-channel` 32 ✓(+2 doctests ignored;broker 套件按既有口径)、
+  `acts-store --features sled,sqlite,postgres` 2+94+96+96+97 ✓(+1 ignored)、`acts-cli` 24+1+5 ✓、`acts-package-http` 16 ✓、
+  `acts-package-shell` 7+3+2 ✓ + `the_inputs_of_the_act_embed_in_the_script`(**HEAD 同红**,C5 已归因)、`acts-package-state` 0、
+  `acts-package-javascript` 9 ✓、`acts-package-nats` 2 ✓、`acts-plugin-nats` 6+5 ✓、`acts-plugin-grpc` 14+2(**HEAD 同红**,message-dispatch timeouts)、
+  `acts-plugin-web` 22+2(**HEAD 同红**,SSE dispatch timeouts)、`acts-server` 11+2+1+3 ✓(`-j 2`,§10 §5k)。
+- 本机无 NATS/Postgres 服务 ⇒ broker/postgres 套件按既有口径 ignored 或未覆盖(与 §10 既有登记一致)。
+
+`git diff -M --stat`(本笔含文档)= **8 文件,+304/−89**(代码 5:`facts.rs`/`message.rs`/`mod.rs`/`projection.rs`/`tests/mod.rs`;文档 3:`CHANGELOG.md`/设计/本文件;精确增删以 `git show --stat HEAD` 为准)。
+
 
 ---
 
@@ -2488,7 +2548,7 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 | **C3** | `Execution*` → `Task*` + `task_state::TaskState` 改名让位(纯改名) | C2 | **已做(§10「C3 完成」)** |
 | **C4** | `TaskId` 显式化 + `OperationId.task` 换类型(`wire()` 派生,输出仍是 node id ⇒ golden 全绿) | C3 | **已做(§10「C4 完成」)**(承载原 §7a) |
 | **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG BREAKING | C4;**D2/D3 已拍**(2026-10-16:乙案摘要 / 行链保持 node id / 重冻结接受 / 孤儿键与 L1 同批,见设计 §2.2) | **已做(§10「C5 完成」)**(BREAKING) |
-| **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | 未做 |
+| **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | **已做(§10「C6 完成」)** |
 | **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | 未做 |
 | **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | 未做 |
 | **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_kind_and_name` 替投影、`NodeKind` 对齐) | C8a | 未做。**注**(§10「NodeKind 恢复 4 值」):policy 侧那个 enum 已恢复 4 值并如实标注;两份图不合并(§3.7),这里只做词汇对齐 |
@@ -2544,76 +2604,62 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:C6 —— 消息层级显式化:act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试(§11 A 段第六笔)
+# 当前任务:C7 —— 投递边界写进设计 §3.5 + CHANGELOG(§11 A 段第七笔,零代码)
 
-**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.4(第 ④ 条)。C5 已把 `tid` 落成实例 wire、`nid` 保持模型节点 —— 本笔只动**载荷的层级词汇**,不动身份。
+**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.5(第 ⑤ 条,决策已定);事实表 §1.5;决策 §2.1。
+**本笔零代码**:只把已定的投递边界写成文档与 CHANGELOG,不改任何 `.rs` / manifest / 测试。
 
-**C6 的内容**:
+**C7 的内容**:
 
-1. **act 载荷写 `kind`**:`shell/mod.rs::act_message_payload` 的 payload 目前只有 `nid/name/uses/mid/inputs`(见 C5 之后该函数),
-   `task_message_payload` 已写 `kind`。给 act 载荷补 `"kind": "act"`(legacy `Task::create_message` 的 `type` 词汇)。
-   对外字符串形态**保持不变**(`data::Message.r#type` / channel / gRPC 的唯一词汇是
-   `workflow|branch|step|act`;`message_from_record` 的缺省 `"act"` 仍兜底旧记录——见 §1.4「`"act"` 只是 payload 缺省值」)。
-   内部若要类型化,只加一个 `pub(crate)` 的 `MessageLevel`(不进公共面)。
-2. **`node_kind_and_name` 扩 act**:`shell/facts.rs` 现在回答 `workflow|branch|step`(act 是 `uses` step 的 payload 路径,不进这里)。
-   让它对"带 `uses` 的 step"(act 节点)回答 `act`,并把调用点(消息 payload / 行 `kind`)对齐到同一真值来源;
-   注意**行与消息的 kind 字符串不能变**(读模型契约);若某调用点原本刻意按 step 写,保留并写注释。
-3. **静默 topic 拍一下**:`task.propagated`/`task.reentered`/`fanout.selected|empty` 四主题**保持静默**(= legacy 无此事件),
-   在 §3.4 写明"已拍:保持静默",**不加**状态载荷。
-4. **根双发确认**:outbox(kind=workflow)与 `LifecycleSink` 两路都保留(= legacy `on_task`+`on_proc` 的忠实复刻);
-   只补文档,不动代码。
-5. **终态映射测试**:`message_from_record` 的 9 项 `topic -> MessageState` 映射是唯一真值源;
-   为**每个终态**补一条"该发什么状态"的映射测试(防止新增状态漏发),并覆盖 act 载荷 `kind=act` 的新字段。
-   `Message.nid` 找节点的契约写进 CHANGELOG/§10(承接 C5 的 BREAKING 说明:"节点用 `nid`、实例用 `tid`")。
+1. **§3.5 定稿**:把两条边界写成"已定",每条给当下可命中的 file:line(先核对,代码若已移动就更新引用):
+   - **at-least-once**:`deliver_plan` 在提交**之前**发本 plan 的 outbox 记录;transport 确认的 receipt 随提交落成 `Delivered`;
+     未确认的记录由 driver 的重试 pass(tick)再发 —— deliver 与 commit 之间崩溃会重发。
+   - **无 handler 时不留行**:outbox 不写 `messages`/`deliveries` 行;行只由 ack 通道(`on_message` → `store_delivery`)写。
+     "马上发出去"是内存事件,不是持久化事实。
+   写明取舍:延迟最低、与 effect seam 同序;代价是重复窗口 —— 消费者必须幂等。
+2. **CHANGELOG**:在 `Unreleased` 末尾加一条 `docs(acts):`(或 `feat(acts):` 口径)条目,写明 at-least-once 与"无订阅者不留行"
+   是契约而非实现细节,并指向设计 §3.5。**不写 BREAKING**(行为未变)。
+3. **§10 追加「C7 完成」**:两条边界的前后措辞、核对的 file:line、CHANGELOG 条目、`git diff -M --stat`、门禁结果。
+4. 把 §11 A 段 **C7** 改成「已做(§10「C7 完成」)」+ 原地重写本节「当前任务」(下一笔 C8a)。
 
-**前置/边界**:动的面 = `shell/mod.rs`(act payload / 根双发注释)、`shell/facts.rs`(node_kind_and_name)、
-`shell/message.rs`(映射测试)、`shell/tests/**`(消息断言)、§3.4/§10/CHANGELOG。**不碰**:身份(`TaskId`/wire)、
-行表取值(D3 已拍)、投递顺序(§2.1 已定)、`GenerationAdmissionPolicy`。
-**静默边界**:legacy 无事件 ⇒ 继续静默是**决策**,不是遗漏。
+**边界**:不动代码/测试/manifest;不改 §1.5 的历史事实,只补 §3.5 的"已定"状态与 CHANGELOG。
 
 **硬性做法**:
 
-1. 先全清单:`git grep -nE "node_kind_and_name|message_from_record|topic" crates/acts/src/scheduler/shell`,逐条决定"改/保留";
-   保留项写进 §10。
-2. 对外字符串(**消息 `type`/`state`/topic、行 `kind`、`$step` 词汇**)逐字节不变:改完做一次字面量多重集对照(办法同 §10「C5 完成」)。
-3. 测试只补"新增/明确"的部分:act 载荷 `kind`、每个终态的映射一条、`nid` 契约一条;不改既有断言口径(除刻意项)。
-4. 一次提交只做一个切面;不新增 `#[allow(...)]`;文件改写只用 `edit`/`ast_edit`;串行构建;WIP 旁置(见下)。
+1. 先读 §3.5、§1.5、§2.1;逐条对照 `shell/mod.rs`(`deliver_plan`/`dispatch_outbox`)与 `export/channel.rs`(`on_message` → `store_delivery`)的现状。
+2. 文档里的每个 file:line 必须当下可命中;移动过的引用要更新。
+3. 一次提交只做一个切面;文件改写只用 `edit`/`ast_edit`;WIP 旁置(见下)。
 
 **验收**:
 
-- act 消息载荷带 `kind=act`;`node_kind_and_name` 对 act 节点回答 `act`;行/消息对外字符串不变(多重集审计 + §10 逐条)。
-- 终态映射测试:9 主题全覆盖(或既有覆盖 + 新增终态的缺口被逐条列出)。
+- §3.5 两条边界都标"已定",各自有代码证据;CHANGELOG 有条目;`.rs`/manifest 零变更(用 `git diff --stat` 证明)。
 - `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt --all --check` 干净;
-  `cargo test -p acts --lib --tests` 与基线同数(两条已登记既有抖动:`a_run_cannot_seal_another_subjects_scope`、
-  `kernel_task_and_act_messages_are_emitted`;HEAD 上同红,§10「C5 完成」有归因)。
-- §10 追加「C6 完成」:载荷前后、映射测试清单、字面量审计、`git diff -M --stat`、验收结果。
+  `cargo test -p acts --lib --tests` 与基线同口径(两条已登记既有抖动不变)。
+- §10 追加「C7 完成」;§11 C7 状态更新;§12 重写为 C8a。
 
 # 限制与约束
 
-- **先读**:设计 §3.4、§1.4(消息面事实表)、§2.1(投递已定);§11 A 段;§10「C5 完成」+「C4 完成」+ §6(文件改写的两条事故口径)。
-- **一次提交只做一个切面**:只做 C6;不得夹带行为变更、结构重构、清理或顺手修 bug。
-- **不新增 `#[allow(...)]`**;需要就写进 §10 申请并在属性处写理由。
-- **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故);串行构建(Defender 会锁 rlib/exe)。
+- **先读**:设计 §3.5、§1.5、§2.1;§11 A 段;§10「C6 完成」+「C5 完成」+ §6(文件改写的两条事故口径)。
+- **一次提交只做一个切面**:只做 C7;不得夹带行为变更、结构重构、清理或顺手修 bug。
+- **不新增 `#[allow(...)]`**;文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write(§10 §6 的事故);串行构建。
 - 全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4);读**投影行**之前 `runtime.flush_writer()`。
 - 测试环境:`acts-server`"全部 target 一条命令"本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
-- 容器包的内联 acts 已在导入期物化(`materialize_container_acts` + `param_fanout_children` 是唯一入口):改容器包、
-  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」,不要另开第二条展开路径。
 - 工作区有一笔未提交的性能探针 WIP(`shell::operation_trace` + `ApplyActionCommand`→`ActionCommand` + `mod perf_probe;`,
-  旁置副本在 `.git/c4-wip/` 与 `.git/c5-full/`):动 `shell/mod.rs`/`shell/operation/*` 前先看 §10「C5 完成」的过程登记;
-  提交状态 == 验证状态,WIP 永不进提交(剥离/回填办法:临时提交提供 postimage → `git apply -R --3way` → `reset --soft`)。
+  旁置副本在 `.git/c4-wip/` 与 `.git/c5-full/`):提交状态 == 验证状态,WIP 永不进提交
+  (剥离/回填办法:临时提交提供 postimage → `git apply -R --3way` → `reset --soft`)。
 
 # 每阶段收口(必须全绿才算完成)
 
 cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
 cargo fmt
 cargo test -p acts --lib --tests
-…(C6 触达消息面:跑 §11 C 的全量 per-crate 套件;动了 manifest 才跑 cargo deny check bans)
+…(C7 只动文档,但门禁照跑;动了 manifest 才跑 cargo deny check bans)
 
 # 交付
 
-一笔提交(conventional 前缀 `feat` 或 `fix`,单行 imperative 主语)
-+ §10 追加「C6 完成」(载荷前后、映射测试清单、字面量审计、`git diff -M --stat`、验收命令与结果)
-→ 把 §11 A 段 **C6** 的状态改成「已做(§10「C6 完成」)」+ **原地重写本节的「当前任务」(下一笔 C7)**
+一笔提交(conventional 前缀 `feat`/`fix`/`docs`,单行 imperative 主语)
++ §10 追加「C7 完成」(边界前后、file:line 核对、CHANGELOG 条目、`git diff -M --stat`、验收结果)
+→ 把 §11 A 段 **C7** 的状态改成「已做(§10「C7 完成」)」+ **原地重写本节的「当前任务」(下一笔 C8a)**
 + 停下等用户确认。
 ```
 

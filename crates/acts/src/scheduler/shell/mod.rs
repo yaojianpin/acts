@@ -37,7 +37,7 @@
 //! the plan vocabulary every kind plans with.
 
 use crate::{
-    ActError, Result,
+    ActError, NodeKind, Result,
     scheduler::{
         core::{
             model::{
@@ -594,6 +594,13 @@ impl KernelHost {
     /// for a failed root, a completion for any other terminal, with the
     /// model's `exposes` validated against the run's outputs (a validation
     /// failure is reported as an error, exactly like the legacy handler).
+    ///
+    /// The root is announced twice on purpose: this sink is the legacy
+    /// `on_proc`, while the root's own outbox records (`message.created` with
+    /// `kind=workflow`, then its terminal topics) are the legacy `on_task`.
+    /// The legacy engine emitted both, so both paths stay — neither replaces
+    /// the other, and they carry different fact sets (`process_message` here,
+    /// the task payload there).
     fn report_lifecycle(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -1503,9 +1510,10 @@ impl KernelHost {
 
     /// The act message payload of one `uses` step: the fact set the driver's
     /// transport maps onto the engine's `Message`, faithful to the legacy
-    /// `Task::create_message` — the resolved params and options, the step and
-    /// model inputs, the scope inputs the message carries, then the operation's own
-    /// outputs or its error. `facts` are the start operation's pinned resolution
+    /// `Task::create_message` — the node level (`act`), the resolved params and
+    /// options, the step and model inputs, the scope inputs the message
+    /// carries, then the operation's own outputs or its error. `facts` are the
+    /// start operation's pinned resolution
     /// (absent for a host without a runner or an aggregate seeded before it);
     /// `outputs` are the operation's own scope writes (`__`-private facts and the
     /// error variables excluded); `error` is the failure the operation decided.
@@ -1563,6 +1571,9 @@ impl KernelHost {
             "tid": task_id.wire(&snapshot.process_id),
             "nid": node_id,
             "name": name,
+            // The level is explicit since C6: the act payload used to leave
+            // `kind` to the consumer's "act" default. The word is unchanged.
+            "kind": NodeKind::Act.to_string(),
             "uses": uses,
             "mid": mid,
             "inputs": serde_json::Value::Object(inputs),
@@ -1592,11 +1603,11 @@ impl KernelHost {
         let Some(model) = model_of(snapshot)? else {
             return Ok(None);
         };
-        let (kind, name) = node_kind_and_name(&model, node);
+        let (level, name) = node_kind_and_name(&model, node);
         // A branch task emits nothing: the legacy `Branch::init` clears its
         // emit flag and never re-enables it (only an act's `run` does), so a
         // branch's own state changes are invisible to clients on both engines.
-        if kind == "branch" {
+        if level == NodeKind::Branch {
             return Ok(None);
         }
         let mut inputs = input_vars(snapshot, task_id);
@@ -1614,7 +1625,7 @@ impl KernelHost {
             "tid": task_id.wire(&snapshot.process_id),
             "nid": node,
             "name": name,
-            "kind": kind,
+            "kind": level.to_string(),
             "inputs": serde_json::Value::Object(inputs),
         });
         if let Some((code, message)) = error {
