@@ -1,3 +1,4 @@
+use crate::NodeKind;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -18,32 +19,14 @@ impl NodeId {
     }
 }
 
-/// What one node of the *policy* graph is, in the model's own vocabulary.
+/// One node of the *policy* graph, in the model's own vocabulary.
 ///
 /// The graph the planners walk holds the workflow root and the model's
 /// top-level steps — the fan-outs (a step's `branches`, their acts) are
-/// plan-level, not graph nodes. The four variants are the model's four node
-/// kinds, kept whole so this vocabulary matches [`crate::NodeKind`] (the
-/// `view` one the read model and the messages speak); a graph that only
-/// materializes steps still cannot say "step" if the word is missing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NodeKind {
-    Workflow,
-    Step,
-    /// A model node kind this graph does not materialize as a node: a step's
-    /// `branches` are plan-level fan-outs, not graph nodes. Kept so the
-    /// vocabulary stays the model's own (see the type's docs).
-    // No constructor outside tests; the reason is registered per the repo's
-    // rule for silencing a lint in KERNEL_CUTOVER_NOTES.md, section 10,
-    // "NodeKind 恢复 4 值".
-    #[allow(dead_code)]
-    Branch,
-    /// The `uses` node of a step — likewise plan-level today.
-    #[allow(dead_code)] // same reason as `Branch`
-    Act,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// plan-level, not graph nodes. `kind` still speaks [`crate::NodeKind`], the
+/// model's four-word vocabulary (`view` is its one executable source); a graph
+/// that only materializes steps must not grow a second spelling of the words.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NodeDefinition {
     pub(crate) id: NodeId,
     pub(crate) kind: NodeKind,

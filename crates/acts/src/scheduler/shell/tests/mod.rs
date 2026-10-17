@@ -874,8 +874,9 @@ async fn kernel_engine_projects_the_legacy_read_model() {
 
     let workflow = crate::model::Workflow::new()
         .with_id("wf-rows")
+        .with_name("Rows")
         .with_step(|step| {
-            step.with_id("s1").with_uses(
+            step.with_name("Write").with_id("s1").with_uses(
                 crate::utils::test::USES_SET,
                 crate::Vars::new().with("k1", "v1"),
             )
@@ -903,7 +904,17 @@ async fn kernel_engine_projects_the_legacy_read_model() {
         .await
         .expect("the task row");
     assert_eq!(s1.state, "completed");
+    // The row contract: a `uses` step stays `step` even though its message is
+    // an act (C6), and its name is the declaration's name.
     assert_eq!(s1.r#type, "step");
+    assert_eq!(s1.name, "Write");
+    let root_row = info
+        .tasks
+        .iter()
+        .find(|task| task.id == tid_of(&pid, "$", 0))
+        .expect("the root task row");
+    assert_eq!(root_row.r#type, "workflow");
+    assert_eq!(root_row.name, "Rows", "the root's row name is model.name");
     assert!(
         s1.data.contains("\"k1\":\"v1\""),
         "the task data must carry the effect output: {}",

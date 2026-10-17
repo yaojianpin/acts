@@ -115,6 +115,47 @@ async fn sch_tree_steps() {
     assert_eq!(root.children().len(), 1);
 }
 
+/// `NodeTree::load` and the kernel import share one id pass (`view::assign_ids`):
+/// an unnamed root, step, branch, catch handler and timeout branch all get a
+/// non-empty id the model graph can address. The caller's model is untouched —
+/// the tree carries the assigned copy.
+#[tokio::test]
+async fn sch_tree_assigns_ids_to_unnamed_nodes() {
+    let workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_catch(|catch| catch.with_branch(|branch| branch.with_step(|inner| inner)))
+        })
+        .with_step(|step| step.with_timeout(|timeout| timeout));
+    let tree = tree_of(&workflow);
+
+    let legal = |id: &str| {
+        assert!(!id.trim().is_empty(), "an assigned id must not be empty");
+        crate::scheduler::core::model::model_graph::NodeId::parse(id)
+            .unwrap_or_else(|_| panic!("'{id}' must parse as a node id"));
+    };
+    legal(&tree.model.id);
+    let root = tree.root().unwrap();
+    assert_eq!(root.id(), tree.model.id, "the root node is the workflow");
+    legal(root.id());
+
+    let branching = &tree.model.steps[0];
+    let catch = &branching.catches[0];
+    legal(&catch.id);
+    let branch = &catch.branches[0];
+    legal(&branch.id);
+    legal(&branch.steps[0].id);
+    let timing = &tree.model.steps[1];
+    legal(&timing.timeouts[0].id);
+
+    assert!(tree.node(&branch.steps[0].id).is_some());
+    assert!(
+        workflow.id.is_empty()
+            && workflow.steps[0].catches[0].id.is_empty()
+            && workflow.steps[0].catches[0].branches[0].id.is_empty(),
+        "the caller's model stays untouched"
+    );
+}
+
 #[tokio::test]
 async fn sch_tree_step_auto_next() {
     let workflow = Workflow::new()

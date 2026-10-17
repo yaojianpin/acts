@@ -6,10 +6,11 @@
 //! The imports name each type where it lives rather than globbing a layer:
 //! this suite is the inventory of the pure surface, so it should spell it out.
 
+use crate::NodeKind;
 use crate::scheduler::core::{
     commit::command::ActionKind,
     model::{
-        model_graph::{ChildRole, ModelGraphBuilder, NodeDefinition, NodeId, NodeKind},
+        model_graph::{ChildRole, ModelGraphBuilder, NodeDefinition, NodeId},
         operation::{
             ClaimToken, OperationEvent, OperationId, OperationKind, OperationRecord, OperationState,
         },

@@ -10,11 +10,8 @@ use std::sync::Arc;
 
 pub(crate) fn build_owned_workflow(mut workflow: Workflow, tree: &mut NodeTree) -> Result<()> {
     let level = 0;
-    if workflow.id.is_empty() {
-        workflow.id = longid();
-    }
 
-    prepare_workflow_ids(&mut workflow);
+    assign_ids(&mut workflow);
 
     let workflow = Arc::new(workflow);
     let data = NodeContent::Workflow(workflow.clone());
@@ -143,36 +140,51 @@ pub fn build_branch(
     Ok(())
 }
 
-/// Assign identifiers before the workflow is shared as an immutable `Arc`.
-fn prepare_workflow_ids(workflow: &mut Workflow) {
+/// Assign the ids the model does not declare, before the model is shared as an
+/// immutable `Arc` or carried into the aggregate:
+///
+/// - an unnamed workflow gets a fresh long id — the `mid` every message of the
+///   run carries;
+/// - an unnamed step, branch, catch handler or timeout branch gets a fresh
+///   short id.
+///
+/// The tree build ([`NodeTree::load`]) and the kernel import
+/// (`shell::model::ProcessSpec::from_workflow`) are the two callers: both need
+/// the same pass, and both need it before anything derives node ids from the
+/// model. The import calls it on a copy, so the caller's model stays untouched
+/// and the assigned ids are what land in the aggregate's durable model.
+pub(crate) fn assign_ids(workflow: &mut Workflow) {
+    if workflow.id.is_empty() {
+        workflow.id = longid();
+    }
     for step in workflow.steps.iter_mut() {
-        prepare_step_ids(step);
+        assign_step_ids(step);
     }
 }
 
-fn prepare_step_ids(step: &mut Step) {
+fn assign_step_ids(step: &mut Step) {
     if step.id.is_empty() {
         step.id = shortid();
     }
 
     for branch in step.branches.iter_mut() {
-        prepare_branch_ids(branch);
+        assign_branch_ids(branch);
     }
     for catch in step.catches.iter_mut() {
-        prepare_step_ids(catch);
+        assign_step_ids(catch);
     }
     for timeout in step.timeouts.iter_mut() {
-        prepare_step_ids(timeout);
+        assign_step_ids(timeout);
     }
 }
 
-fn prepare_branch_ids(branch: &mut Branch) {
+fn assign_branch_ids(branch: &mut Branch) {
     if branch.id.is_empty() {
         branch.id = shortid();
     }
 
     for step in branch.steps.iter_mut() {
-        prepare_step_ids(step);
+        assign_step_ids(step);
     }
 }
 

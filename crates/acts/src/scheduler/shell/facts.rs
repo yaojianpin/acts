@@ -580,36 +580,61 @@ pub(super) fn message_outputs(
     serde_json::Value::Object(vars)
 }
 
-/// The legacy node kind and node name of one model node: what a `Message`'s
-/// `type`/`name` carried (`Task::create_message` reads `node.kind()` and
-/// `node.content.name()`). The kernel's own model nodes are steps, branches and
-/// the workflow root; a `uses` step is an act — its message takes the act
-/// payload path, whose level is [`NodeKind::Act`]. The row projection
-/// deliberately keeps the declaration's kind for the same node (`"step"`; see
-/// `projection::project_task`): the read model pins that word, the message
-/// vocabulary names the act.
-pub(super) fn node_kind_and_name(
-    model: &crate::model::Workflow,
-    node: &str,
-) -> (crate::NodeKind, String) {
+/// What one model node says in the two vocabularies it speaks, plus the name
+/// both carry.
+///
+/// `declared_kind` is the node's declaration ([`crate::NodeKind`]): the read
+/// model pins this word, so a `uses` step's row stays `step`
+/// (`projection::project_task`). `message_kind` is the message level C6 fixed:
+/// the same `uses` step is `act` (the act payload path), a plain step is
+/// `step`, the root is `workflow`, and a branch's own messages are suppressed.
+/// The two words deliberately differ for exactly one shape — the row contract
+/// must not be read as a misspelling of the message level (C6, §10).
+pub(super) struct NodeFacts {
+    pub(super) declared_kind: crate::NodeKind,
+    pub(super) message_kind: crate::NodeKind,
+    pub(super) name: String,
+}
+
+/// The single derivation of a model node's name and kinds. The row projection
+/// takes `declared_kind`/`name`; the message payload takes
+/// `message_kind`/`name` — one traversal, one name source (the root's name is
+/// the workflow's `model.name`).
+pub(super) fn node_facts(model: &crate::model::Workflow, node: &str) -> NodeFacts {
     use crate::NodeKind;
     if node == crate::utils::consts::TASK_ROOT_TID {
-        return (NodeKind::Workflow, model.name.clone());
+        return NodeFacts {
+            declared_kind: NodeKind::Workflow,
+            message_kind: NodeKind::Workflow,
+            name: model.name.clone(),
+        };
     }
     for step in &model.steps {
         if let Some(name) = branch_name(step, node) {
-            return (NodeKind::Branch, name);
+            return NodeFacts {
+                declared_kind: NodeKind::Branch,
+                message_kind: NodeKind::Branch,
+                name,
+            };
         }
     }
     match find_step_in_model(model, node) {
         Some(step) => {
-            let level = match step.uses.as_deref() {
+            let message_kind = match step.uses.as_deref() {
                 Some(uses) if !uses.trim().is_empty() => NodeKind::Act,
                 _ => NodeKind::Step,
             };
-            (level, step.name.clone())
+            NodeFacts {
+                declared_kind: NodeKind::Step,
+                message_kind,
+                name: step.name.clone(),
+            }
         }
-        None => (NodeKind::Step, String::new()),
+        None => NodeFacts {
+            declared_kind: NodeKind::Step,
+            message_kind: NodeKind::Step,
+            name: String::new(),
+        },
     }
 }
 
@@ -643,11 +668,11 @@ mod tests {
     use super::*;
     use crate::{NodeKind, Vars, model::Workflow};
 
-    /// The message vocabulary is the legacy four words; a `uses` step is an
-    /// act (the act payload path), a plain step is a step — and the row
-    /// projection's "step" for both is a separate, deliberate contract.
+    /// The two vocabularies are the legacy four words; a `uses` step is an
+    /// act on the message level but stays a step in the row contract — the
+    /// deliberate divergence C6 pinned. The name is the same in both.
     #[test]
-    fn node_kind_and_name_names_the_message_level_of_each_node() {
+    fn node_facts_name_the_row_and_message_kinds_of_each_node() {
         let model = Workflow::new()
             .with_id("wf")
             .with_name("orders")
@@ -668,30 +693,36 @@ mod tests {
                     .with_branch(|branch| branch.with_id("b1").with_name("Branch one"))
             });
 
+        let facts = |node| {
+            let facts = node_facts(&model, node);
+            (facts.declared_kind, facts.message_kind, facts.name)
+        };
+
         assert_eq!(
-            node_kind_and_name(&model, crate::utils::consts::TASK_ROOT_TID),
-            (NodeKind::Workflow, "orders".to_string())
+            facts(crate::utils::consts::TASK_ROOT_TID),
+            (NodeKind::Workflow, NodeKind::Workflow, "orders".to_string())
         );
         assert_eq!(
-            node_kind_and_name(&model, "plain"),
-            (NodeKind::Step, "Plain".to_string())
+            facts("plain"),
+            (NodeKind::Step, NodeKind::Step, "Plain".to_string())
         );
         assert_eq!(
-            node_kind_and_name(&model, "call"),
-            (NodeKind::Act, "Call".to_string())
+            facts("call"),
+            (NodeKind::Step, NodeKind::Act, "Call".to_string()),
+            "a uses step is a row 'step' but a message 'act' (C6)"
         );
         assert_eq!(
-            node_kind_and_name(&model, "blank"),
-            (NodeKind::Step, "Blank".to_string()),
+            facts("blank"),
+            (NodeKind::Step, NodeKind::Step, "Blank".to_string()),
             "a blank uses is not a package: the act path filters it the same way"
         );
         assert_eq!(
-            node_kind_and_name(&model, "b1"),
-            (NodeKind::Branch, "Branch one".to_string())
+            facts("b1"),
+            (NodeKind::Branch, NodeKind::Branch, "Branch one".to_string())
         );
         assert_eq!(
-            node_kind_and_name(&model, "missing"),
-            (NodeKind::Step, String::new())
+            facts("missing"),
+            (NodeKind::Step, NodeKind::Step, String::new())
         );
     }
 }

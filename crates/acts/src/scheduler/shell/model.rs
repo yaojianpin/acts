@@ -10,15 +10,14 @@
 //! `crate::scheduler::core::plan::container::Fanout` fan-outs, never at seed time.
 
 use crate::{
-    ActError, Result,
+    ActError, NodeKind, Result,
     scheduler::core::{
         commit::aggregate::{ProcessSnapshot, TaskSnapshot},
         model::{
-            model_graph::{
-                ChildRole, ModelGraph, ModelGraphBuilder, NodeDefinition, NodeId, NodeKind,
-            },
+            model_graph::{ChildRole, ModelGraph, ModelGraphBuilder, NodeDefinition, NodeId},
             operation::{OperationId, OperationKind, OperationRecord},
             task_graph::{TaskGraph, TaskGraphBuilder, TaskId, TaskNode, TaskState},
+            view::assign_ids,
         },
     },
 };
@@ -69,46 +68,6 @@ pub(crate) struct ProcessSpec {
     /// authenticated carries, exactly like the legacy process without the env
     /// key.
     pub(crate) owner: crate::ScopePolicy,
-}
-
-/// Assign the ids the legacy tree assigns before it builds nodes
-/// (`prepare_workflow_ids` → `prepare_step_ids`/`prepare_branch_ids`): an
-/// unnamed step, branch, catch handler or timeout branch gets a fresh short id,
-/// and an unnamed workflow a long one (the `mid` every message carries). The
-/// kernel derives every node id from the model, so this runs before the import;
-/// the result is what lands in the aggregate as the durable model, which is how
-/// an operation addresses a node the model never named.
-fn assign_ids(workflow: &mut crate::model::Workflow) {
-    if workflow.id.is_empty() {
-        workflow.id = crate::utils::longid();
-    }
-    for step in workflow.steps.iter_mut() {
-        assign_step_ids(step);
-    }
-}
-
-fn assign_step_ids(step: &mut crate::model::Step) {
-    if step.id.is_empty() {
-        step.id = crate::utils::shortid();
-    }
-    for branch in step.branches.iter_mut() {
-        assign_branch_ids(branch);
-    }
-    for catch in step.catches.iter_mut() {
-        assign_step_ids(catch);
-    }
-    for timeout in step.timeouts.iter_mut() {
-        assign_step_ids(timeout);
-    }
-}
-
-fn assign_branch_ids(branch: &mut crate::model::Branch) {
-    if branch.id.is_empty() {
-        branch.id = crate::utils::shortid();
-    }
-    for step in branch.steps.iter_mut() {
-        assign_step_ids(step);
-    }
 }
 
 /// The `uses` ids of the container packages whose inline `acts` the kernel
@@ -325,11 +284,10 @@ fn import_step(
     seed_variables: &mut Vec<(Option<String>, String, String)>,
 ) -> Result<()> {
     if step.id.trim().is_empty() {
-        // `from_workflow` assigns the ids the legacy tree assigns, so only a
-        // *blank* (whitespace) id reaches here: it cannot address a node, and
-        // the legacy tree would keep it as-is (its `prepare_step_ids` tests
-        // `is_empty`), which is a model the kernel refuses to invent a meaning
-        // for.
+        // `from_workflow` runs the shared id pass (`view::assign_ids`), so only
+        // a *blank* (whitespace) id reaches here: it cannot address a node, and
+        // the pass keeps it as-is (it tests `is_empty`), which is a model the
+        // kernel refuses to invent a meaning for.
         return Err(ActError::Runtime(
             "a nested step has a blank id; the kernel derives node ids from the model, and a blank one cannot address the node"
                 .to_string(),
@@ -494,9 +452,9 @@ impl ProcessSpec {
         workflow: &crate::model::Workflow,
         run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>,
     ) -> Result<Self> {
-        // The caller's model stays untouched: the ids the legacy tree assigns
-        // (`prepare_workflow_ids` before it builds nodes) are assigned on a
-        // copy, and that copy is what the aggregate carries as its durable
+        // The caller's model stays untouched: the ids the tree build assigns
+        // (`view::assign_ids`, the single id pass both callers share) are
+        // assigned on a copy, and that copy is what the aggregate carries as its durable
         // model — so an unnamed nested node is addressable by the operations that
         // must reach it, exactly as it is in the legacy run.
         let mut assigned = workflow.clone();
@@ -564,7 +522,7 @@ impl ProcessSpec {
                     id: id.clone(),
                     // The children are the model's top-level *steps*
                     // (`from_workflow` seeds them from `workflow.steps`), which
-                    // is also what `node_kind_and_name` answers for these ids.
+                    // is also what `node_facts` answers for these ids.
                     kind: NodeKind::Step,
                     name: child.clone(),
                 })
@@ -773,13 +731,12 @@ mod tests {
     }
 
     /// The `examples/catches/model.yml` shape: an unnamed catch handler with
-    /// unnamed branches and unnamed inner steps. The legacy tree assigns ids
-    /// before it builds nodes (`prepare_step_ids`), and the import does the same
-    /// on a copy — the ids land in the durable model, which is the only way a
-    /// operation can address a node the model never named. The caller's model stays
-    /// untouched.
+    /// unnamed branches and unnamed inner steps. The tree build and the import
+    /// share one id pass (`view::assign_ids`); the import runs it on a copy, so
+    /// the ids land in the durable model — the only way an operation can address
+    /// a node the model never named. The caller's model stays untouched.
     #[test]
-    fn unnamed_nested_nodes_get_ids_like_the_legacy_tree() {
+    fn unnamed_nested_nodes_get_ids_from_the_shared_pass() {
         let workflow = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1")
                 .with_uses(crate::utils::test::USES_IRQ, crate::Vars::new())

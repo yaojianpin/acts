@@ -29,7 +29,7 @@
 //! terminal *and* every outbox record delivered — is what hands the rows (and
 //! the run's directory) to the legacy sweeper.
 
-use super::{model_of, root_variable};
+use super::{facts::node_facts, model_of, root_variable};
 use crate::{
     ActError, Result, Vars,
     scheduler::core::{
@@ -325,6 +325,11 @@ impl RowProjector {
             return Ok(());
         };
 
+        // The row and the node's message share one derivation (C8b): the row
+        // takes the declaration's kind — a `uses` step stays "step" here even
+        // though the message vocabulary names it an act — and the name both
+        // carry (the root's is the workflow's `model.name`).
+        let facts = node_facts(&tree.model, node_id);
         let row_id = crate::utils::Id::new(&snapshot.process_id, wire).id();
         let collection = self.store().tasks();
         let existing = collection.find_opt(&row_id).await?;
@@ -334,11 +339,11 @@ impl RowProjector {
             pid: snapshot.process_id.clone(),
             tid: wire.to_string(),
             node_data: node.to_string()?,
-            // The row's kind is the declaration's node kind: a `uses` step
-            // stays "step" here even though the message vocabulary calls the
-            // same node an act (`facts::node_kind_and_name`). This word is a
-            // pinned read-model contract, not a spelling of the message level.
-            kind: node.kind().to_string(),
+            // The row's kind is the declaration's node kind (`NodeFacts::declared_kind`),
+            // never the message level: a `uses` step stays "step" here while
+            // its message is an act. This word is a pinned read-model contract,
+            // not a spelling of the message vocabulary (C6, §10).
+            kind: facts.declared_kind.to_string(),
             // The model chain (D3): predecessor/successor/parent stay node
             // ids — they say which *node* follows, not which instance.
             prev: task
@@ -348,7 +353,7 @@ impl RowProjector {
                 .map(|id| id.node.as_str().to_owned()),
             next: successors(snapshot, task_id),
             parent: task.parent.as_ref().map(|id| id.node.as_str().to_owned()),
-            name: node.name(),
+            name: facts.name,
             state: legacy_task_state(task.state).into(),
             err: error_of(snapshot, task_id),
             start_time: if task.state == TaskState::Created {

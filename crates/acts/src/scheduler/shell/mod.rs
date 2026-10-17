@@ -1603,11 +1603,11 @@ impl KernelHost {
         let Some(model) = model_of(snapshot)? else {
             return Ok(None);
         };
-        let (level, name) = node_kind_and_name(&model, node);
+        let facts = node_facts(&model, node);
         // A branch task emits nothing: the legacy `Branch::init` clears its
         // emit flag and never re-enables it (only an act's `run` does), so a
         // branch's own state changes are invisible to clients on both engines.
-        if level == NodeKind::Branch {
+        if facts.message_kind == NodeKind::Branch {
             return Ok(None);
         }
         let mut inputs = input_vars(snapshot, task_id);
@@ -1624,8 +1624,8 @@ impl KernelHost {
         let mut payload = serde_json::json!({
             "tid": task_id.wire(&snapshot.process_id),
             "nid": node,
-            "name": name,
-            "kind": level.to_string(),
+            "name": facts.name,
+            "kind": facts.message_kind.to_string(),
             "inputs": serde_json::Value::Object(inputs),
         });
         if let Some((code, message)) = error {
