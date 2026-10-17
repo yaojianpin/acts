@@ -63,10 +63,11 @@ async fn waiting_head(engine: &Engine) -> (String, String) {
         "the message names the run it was created for"
     );
     assert_eq!(
-        step1, "step1",
-        "the act of a `uses` step is the step's own node"
+        step1,
+        tid_of(&pid, "step1", 0),
+        "the act of a `uses` step is the step's own instance"
     );
-    wait_waiting_task(engine, &pid, &step1).await;
+    wait_waiting_task(engine, &pid, "step1").await;
     flush(engine).await;
     (pid, step1)
 }
@@ -83,16 +84,17 @@ async fn waiting_chain(engine: &Engine) -> (String, String) {
         announced, pid,
         "the message names the run it was created for"
     );
-    wait_waiting_task(engine, &pid, &step1).await;
+    wait_waiting_task(engine, &pid, "step1").await;
 
     let created = capture_created(engine, "act2");
     complete_act(engine, &pid, &step1).await.unwrap();
     let (_, step2) = expect_created(&created).await;
     assert_eq!(
-        step2, "step2",
+        step2,
+        tid_of(&pid, "step2", 0),
         "the propagation schedules the next model node"
     );
-    wait_waiting_task(engine, &pid, &step2).await;
+    wait_waiting_task(engine, &pid, "step2").await;
     flush(engine).await;
     (pid, step1)
 }
@@ -119,7 +121,7 @@ async fn finish_chain(engine: &Engine, pid: &str) {
             };
             for node in ["step1", "step2"] {
                 if waiting_task(&proc, node).is_some() {
-                    let _ = complete_act(engine, pid, node).await;
+                    let _ = complete_act(engine, pid, &tid_of(pid, node, 0)).await;
                 }
             }
             false
@@ -180,11 +182,12 @@ async fn process_snapshot(
 /// The ascending generations the aggregate holds for one model node: how many
 /// times the node was instantiated. An operation applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node.as_str() == tid)
+        .filter(|id| id.node.as_str() == node)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -193,11 +196,12 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 
 /// The aggregate's state for the newest generation of one model node.
 async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
-    process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node.as_str() == tid)
+        .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -205,11 +209,12 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskStat
 /// The non-terminal operations the aggregate holds for one model node, in
 /// sequence order: the durable remainder a crash left for recovery to drive.
 async fn open_operations(engine: &Engine, pid: &str, tid: &str) -> Vec<OperationState> {
-    let mut open: Vec<(u64, OperationState)> = process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    let mut open: Vec<(u64, OperationState)> = snapshot
         .operations
         .values()
-        .filter(|operation| operation.id.task.node.as_str() == tid && !operation.is_terminal())
+        .filter(|operation| operation.id.task.node.as_str() == node && !operation.is_terminal())
         .map(|operation| (operation.id.sequence, operation.state.clone()))
         .collect();
     open.sort_by_key(|(sequence, _)| *sequence);
@@ -247,18 +252,20 @@ async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize 
 }
 
 /// The propagation operation's key family for one act: one `action` record for the
-/// decision and one `propagate` record for the operation it set off.
-fn next_records(pid: &str, tid: &str) -> (String, String) {
+/// decision and one `propagate` record for the operation it set off. The keys
+/// carry the model node and the generation (not the instance wire).
+fn next_records(pid: &str, node: &str) -> (String, String) {
     (
-        format!("action:{pid}:{tid}:"),
-        format!("propagate:{pid}:{tid}:"),
+        format!("action:{pid}:{node}:"),
+        format!("propagate:{pid}:{node}:"),
     )
 }
 
 /// The propagation of `source` landed exactly once: one execution for the act,
 /// the completion it holds, and exactly one record per operation of the decision.
 async fn assert_propagation_once(engine: &Engine, pid: &str, source: &str) {
-    let (action, propagate) = next_records(pid, source);
+    let node = super::node_of(&process_snapshot(engine, pid).await, pid, source);
+    let (action, propagate) = next_records(pid, &node);
     assert_eq!(
         generations(engine, pid, source).await,
         vec![0],
@@ -376,7 +383,7 @@ async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_fin
     // first write of `step2`'s row after arming is the projection of the operation that
     // starts the scheduled step. A row is a projection, so refusing it may not
     // refuse the work it describes.
-    let row_key = task_data_key("tasks", &pid, "step2");
+    let row_key = task_data_key("tasks", &pid, &tid_of(&pid, "step2", 0));
     let created = capture_created(&engine, "act2");
     kv.arm_key(&row_key);
     complete_act(&engine, &pid, &step1)
@@ -393,7 +400,8 @@ async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_fin
         "the message names the run it was created for"
     );
     assert_eq!(
-        step2, "step2",
+        step2,
+        tid_of(&pid, "step2", 0),
         "the propagation schedules the next model node"
     );
     let armed = kv.clone();
@@ -515,7 +523,7 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
         Some(TaskState::Created),
         "a refused propagation may not start the step it schedules"
     );
-    let (action, propagate) = next_records(&pid, &step1);
+    let (action, propagate) = next_records(&pid, "step1");
     for prefix in [&action, &propagate] {
         assert_eq!(
             records_with_prefix(&engine, &pid, prefix).await,
@@ -575,8 +583,12 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
     let created = capture_created(&recovered, "act2");
     complete_act(&recovered, &pid, &step1).await.unwrap();
     let (_, step2) = expect_created(&created).await;
-    assert_eq!(step2, "step2", "the retry schedules the next model node");
-    wait_waiting_task(&recovered, &pid, &step2).await;
+    assert_eq!(
+        step2,
+        tid_of(&pid, "step2", 0),
+        "the retry schedules the next model node"
+    );
+    wait_waiting_task(&recovered, &pid, "step2").await;
     assert_propagation_once(&recovered, &pid, &step1).await;
     assert_eq!(
         generations(&recovered, &pid, &step2).await,
@@ -980,7 +992,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
                     shifted
                         .reconciliation_required
                         .iter()
-                        .any(|operation| operation.task.node.as_str() == step1),
+                        .any(|operation| operation.task.node.as_str() == "step1"),
                     "boundary 3: the ambiguous operation must be surfaced for reconciliation: {shifted:?}"
                 );
                 assert_eq!(

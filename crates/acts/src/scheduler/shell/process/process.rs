@@ -237,7 +237,11 @@ impl Process {
     }
 
     pub fn root(&self) -> Option<Arc<Task>> {
-        self.task(consts::TASK_ROOT_TID)
+        // The root task's id is its instance's wire since C5, so the task is
+        // found on the model's workflow node, not by a literal `$` id.
+        self.find_tasks(|task| task.node().kind() == NodeKind::Workflow)
+            .into_iter()
+            .next()
     }
 
     pub fn task(&self, tid: &str) -> Option<Arc<Task>> {

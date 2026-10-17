@@ -2400,6 +2400,64 @@ H3 起不再用它:**记录**叫 operation,那一趟在需要区分时叫 **driv
 本笔 diff 均为小块 ⇒ 无整文件行尾翻转;`file` 复核通过。工具纪律自纠一处:中途两次误用 `sed` 做了个别编辑(其中一次方向写反,
 `commit.rs` 测试里一行 `TaskId::new("t1", 1)` 被错误替换,当即核对 `git diff` 还原),此后全部回到 `edit`;教训与 §6 相同。
 
+### C5 完成(2026-10-17):`wire()` 切定长摘要 + codec V3 + 行按实例 —— BREAKING,身份落地
+
+**裁决(2026-10-16 用户拍板,设计 §2.2 已记录)**:D2 = **乙**(`sha256(pid ‖ 0x00 ‖ node ‖ 0x00 ‖ gen_le)[..32]`,定长 32 hex、不可逆);
+D3 = **行链保持 node id**;golden **全量重冻结已接受**;恢复条目旧键 **登记不实现,与 §11 L1 同批**。
+
+**身份(唯一派生入口)**:`TaskId::wire(&self, process_id: &str) -> String` —— 摘要吃 pid,`TaskId` 本体仍只存
+`(node, generation)`;`Display for TaskId`(C4 加的门)**删除**(无 pid 无法渲染 wire,而 wire 是唯一字符串形态)。
+全部身份→字符串边界都过它:恢复条目键、行键/行 `tid`、消息 `tid`、动作寻址、`$step.task_id`、投影 touched 集。
+
+**落点(逐项)**:
+
+| 面 | 前(C4) | 后(C5) |
+|---|---|---|
+| 恢复条目键 | `hex(pid).hex(node).gen.seq` | **`hex(pid).wire.seq`**(定长:wire 32;gen 已并入 wire) |
+| 恢复索引文档 | `ACTRIDX` V1(process/node/gen/seq/rev) | **不变**(结构化字段够用,wire 由 pid+node+gen 可再派生) |
+| 聚合 codec | `ACTSPV2`(TaskId = node+gen;OperationId = pid+node+gen+seq) | **`ACTSPV3`**:每 TaskId 落 `wire+node+gen`;每 OperationId 落 `pid+wire+node+gen+seq`;**V2 作 upcast 读路径保留**(`ProcessDocumentCodec::decode` 遇 `InvalidMagic` 回退 V2;两版布局只差 wire 段,实例 id 退化等价);V2 写者仅 `cfg(test)` 夹具 |
+| 消息 | payload 无 `tid`,`message_from_record` 把 `tid := nid` | payload 落 **`"tid": wire`**;`Message.tid` 取 payload(旧记录回退 `nid` —— V2 退化);`Message.nid` 仍是 node;根 lifecycle 消息 `process_message` 的 `tid` 也换 wire |
+| 动作寻址 | `action_target(node: &str)` 按 node 比较,选"能接受动作的最新代" | 参数语义成为**客户端给的 tid**:`action_target` 比较 `id.wire(process_id) == tid`;**选法未动**(newest-acceptable 结构原样保留);`action_identity` 的意图 operation 直接 `task: task_id.clone()`,sequence 扫描改按 TaskId 相等 |
+| 行表 | 一行 = 节点最新代(`latest` 折叠);行键 `Id(pid, node)`;`tid = node` | **一行 = 一个实例**(折叠删除,每代一行);行键 `Id(pid, wire)`;`tid = wire`;`prev/next/parent` **仍 = node id(D3)**;`next` 改为"任何一代认我为前驱的节点(去重排序)";touched 集 = wire 集;`close_deliveries` 按 wire |
+| 根/模型 | `proc.root()` 按 `tid == "$"` | 按**工作流节点**(`kind == Workflow`)找根(grep 证实无生产调用者,仅 env 测试读重建进程);聚合侧根查找本就是 `node == "$"`(C4 形状) |
+| 包内动作 | `action` 包把 `task.node().id()` 当动作地址 | `ScopeSpec` 新增 **`task_id: TaskId`**;headless 任务直接以 `wire` 为 id 构造(不再 `create_task` 随机 id),`action` 包转发 `task.id`(acting 实例的 wire) |
+| `$step` 契约 | `task_id` 槽 = node | `task_id` 槽 = **wire**(`node_id`/`node_name` 不变) |
+
+**字节对照(量了写数)**:golden 夹具(**6 个身份出现点**)—— V2 **286 B** / `26dc1279…` → V3 **502 B** / `4887924d…`,
+**+216 B = 6 × 36 B**(每个身份多 4 字节长度前缀 + 32 字符 wire)。键侧:恢复条目键由 `hex(pid)+2×len(node)+gen(16)+seq(16)`
+变为 `hex(pid)+32+seq(16)` —— node 名 > 8 字符时更短,短名时略长,但**恒定**;行键 `pid+wire(32)` 同理恒长。
+canonical 字节(`"aggregate-v1"` 域)与 commit digest **未动**:`a47d4bd4…` golden 原样通过。
+
+**重冻结清单(逐条改写)**:`snapshot_wire_format_matches_golden_fingerprint` → V3(502/4887924d…);原 V2 golden 原样保留为
+`v2_documents_still_decode` 的锚(286/26dc1279… + V2 解码回环 + V3 仅以 magic 拒绝);`document.rs` 增
+`v2_documents_upcast_to_the_loaded_snapshot`(V2 信封 → `ProcessDocumentCodec::decode` 等值);恢复条目键的"排序=operation_order"
+性质**随设计消失**(wire 序 ≠ node 序),测试改钉**单射 + 稳定 + 前缀**;行投影口径:同一节点多代 → 多行(shell 的 redo 对照测试:
+s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legacy_read_model`、`$step`/消息/动作相关断言全部换成
+`tid_of(pid, node, gen)` 形式(测试夹具助手,node 名才是模型身份)。C5 前置检查(设计 §4)的清单:所有 pin 住 `tid == 节点 id` 的
+断言全部在上述文件与 reliability 矩阵内,已逐条改写。
+
+**过程登记(探针 WIP 的剥离与回填)**:C4 后工作区仍带着那笔未提交 WIP(`ApplyActionCommand`→`ActionCommand`、`prepare`/`dispatch`
+改名、`shell::operation_trace` 探针 + `mod perf_probe;`)。C5 的 9 个文件与它同住,提交前用"临时提交提供 postimage blob → `git apply -R --3way`
+反解 → `reset --soft` 丢弃临时提交 → 提交 C5"把它剥干净(反解 8/8 clean,`operation_trace`/`ActionCommand`/`mod perf_probe` 归零);
+提交后按正向 `git apply --3way` 回填,`perf_probe.rs` 归位(见下方"回填登记")。
+
+**门禁与验收(在提交状态上跑,WIP 旁置)**:
+- `cargo fmt --all --check` 干净;`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` **EXIT 0**。
+- `cargo test -p acts --lib --tests` = **870 passed / 2 failed**(两条均为已登记既有抖动,HEAD 上同红:
+  `export::actions::tests::a_run_cannot_seal_another_subjects_scope`(C2/C3 基线红)、`scheduler::shell::tests::kernel_task_and_act_messages_are_emitted`
+  (H1 登记的 `$|running`/`$|completed` 根行窗口,C4 已实测 HEAD 单跑同样红));`scheduler::tests::reliability::` **65 passed / 0 failed**。
+- per-crate(§11 C):`acts-acl` 28 ✓、`acts-expr --all-features` 45 ✓、`acts-channel` 32 ✓(+2 broker ignored)、
+  `acts-store --features sled,sqlite,postgres` 96+97 ✓(+1 ignored)、`acts-cli` 6 ✓、`acts-package-http` 16 ✓、
+  `acts-package-shell` 3+1(**HEAD 同红**:`the_inputs_of_the_act_embed_in_the_script`,`$inputs().data` 为空,HEAD stash 对照实测同失败)、
+  `acts-package-state` 0、`acts-package-javascript` 9 ✓、`acts-package-nats` 2 ✓、`acts-plugin-nats` 5 ✓、
+  `acts-plugin-grpc` 14+2(**HEAD 同红**:two message-dispatch timeouts)、`acts-plugin-web` 22+2(**HEAD 同红**:two SSE dispatch timeouts)、
+  `acts-server` 17 ✓(`-j 2`,§10 §5k)。
+- 本机无 NATS/Postgres 服务 ⇒ broker/postgres 套件按既有口径 ignored 或未覆盖(与 §10 既有登记一致)。
+
+**§10 记录(身份前后)**:`TaskId` = `(node, generation)` 不变;其**外部渲染**由 node id 变为摘要;`OperationId.task` 语义不变。
+`-- BREAKING` 见 `CHANGELOG.md` 0.25.0 末尾条目(含旧库混合窗口与孤儿键口径)。
+`git diff -M --stat`(本笔含文档)= **29 文件**(代码 27 + `CHANGELOG.md` + 本文件;精确增删以 `git show --stat HEAD` 为准)。
+
 
 ---
 
@@ -2429,7 +2487,7 @@ H3 起不再用它:**记录**叫 operation,那一趟在需要区分时叫 **driv
 | **C2** | `Aggregate*` 全族 → `Process*`(纯改名) | C1;**D1 已拍**(`{Process, Task, Operation}`) | **已做(§10「C2 完成」)** |
 | **C3** | `Execution*` → `Task*` + `task_state::TaskState` 改名让位(纯改名) | C2 | **已做(§10「C3 完成」)** |
 | **C4** | `TaskId` 显式化 + `OperationId.task` 换类型(`wire()` 派生,输出仍是 node id ⇒ golden 全绿) | C3 | **已做(§10「C4 完成」)**(承载原 §7a) |
-| **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG BREAKING | C4;**D2/D3 必须先拍** | 未做(**BREAKING**) |
+| **C5** | `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结 + CHANGELOG BREAKING | C4;**D2/D3 已拍**(2026-10-16:乙案摘要 / 行链保持 node id / 重冻结接受 / 孤儿键与 L1 同批,见设计 §2.2) | **已做(§10「C5 完成」)**(BREAKING) |
 | **C6** | act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试 | C5 | 未做 |
 | **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | 未做 |
 | **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | 未做 |
@@ -2486,83 +2544,76 @@ H3 起不再用它:**记录**叫 operation,那一趟在需要区分时叫 **driv
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:C5 —— `wire()` 切 hex + codec V3 + upcast + 行按实例 + golden 重冻结(§11 A 段第五笔;**BREAKING**)
+# 当前任务:C6 —— 消息层级显式化:act 载荷写 `kind` + `node_kind_and_name` 扩 act + 终态映射测试(§11 A 段第六笔)
 
-**前置(硬阻塞,未拍不得动工)**:**D2 与 D3 必须先拍**(设计 §2.2)——
+**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.4(第 ④ 条)。C5 已把 `tid` 落成实例 wire、`nid` 保持模型节点 —— 本笔只动**载荷的层级词汇**,不动身份。
 
-- **D2(实例 id 的形态)**:甲 = 可逆定宽 hex(`{:016x}` gen 前缀 + hex(node),O(1) 反解);乙(设计推荐)= 不可逆定长 32 hex
-  摘要(`sha256_hex`,键长恒定,反解靠查 snapshot)。设计同时警告:一旦选"一律 hex","gen==0 沿用裸 node id"作废(同一字段混两种形态)。
-- **D3(`data::Task.{prev,next,parent}` 的取值)**:设计推荐**保持 node id**(模型链语义,前端 join 不用解 hex)。
-- 需要用户书面给的三件事:①C5 的最终形态(D2 甲/乙 + D3);②golden 重冻结的书面理由(§5 风险表:P0 有意冻结 parity 为常量);
-  ③老库 upcast 的退化口径(V2 → V3:`instance id := 该代 node 的 wire`,§3.1「持久化」)与恢复条目旧键成孤儿后的处理(与 §11 L1 一起定)。
+**C6 的内容**:
 
-**C5 的内容(拍板后)**:
+1. **act 载荷写 `kind`**:`shell/mod.rs::act_message_payload` 的 payload 目前只有 `nid/name/uses/mid/inputs`(见 C5 之后该函数),
+   `task_message_payload` 已写 `kind`。给 act 载荷补 `"kind": "act"`(legacy `Task::create_message` 的 `type` 词汇)。
+   对外字符串形态**保持不变**(`data::Message.r#type` / channel / gRPC 的唯一词汇是
+   `workflow|branch|step|act`;`message_from_record` 的缺省 `"act"` 仍兜底旧记录——见 §1.4「`"act"` 只是 payload 缺省值」)。
+   内部若要类型化,只加一个 `pub(crate)` 的 `MessageLevel`(不进公共面)。
+2. **`node_kind_and_name` 扩 act**:`shell/facts.rs` 现在回答 `workflow|branch|step`(act 是 `uses` step 的 payload 路径,不进这里)。
+   让它对"带 `uses` 的 step"(act 节点)回答 `act`,并把调用点(消息 payload / 行 `kind`)对齐到同一真值来源;
+   注意**行与消息的 kind 字符串不能变**(读模型契约);若某调用点原本刻意按 step 写,保留并写注释。
+3. **静默 topic 拍一下**:`task.propagated`/`task.reentered`/`fanout.selected|empty` 四主题**保持静默**(= legacy 无此事件),
+   在 §3.4 写明"已拍:保持静默",**不加**状态载荷。
+4. **根双发确认**:outbox(kind=workflow)与 `LifecycleSink` 两路都保留(= legacy `on_task`+`on_proc` 的忠实复刻);
+   只补文档,不动代码。
+5. **终态映射测试**:`message_from_record` 的 9 项 `topic -> MessageState` 映射是唯一真值源;
+   为**每个终态**补一条"该发什么状态"的映射测试(防止新增状态漏发),并覆盖 act 载荷 `kind=act` 的新字段。
+   `Message.nid` 找节点的契约写进 CHANGELOG/§10(承接 C5 的 BREAKING 说明:"节点用 `nid`、实例用 `tid`")。
 
-- `TaskId::wire()` 换成 D2 选的形态(C4 已把入口收成一个函数,`Display` 跟着走);
-- `snapshot_codec` V2 → **V3**:每个 `TaskId`/`OperationId.task` 落 `wire` + node 字符串 + gen(§3.1「持久化」);V2 文档 upcast(退化等价,行为不变);
-- 恢复条目键 → `hex(pid).wire.seq`(gen 已进 wire;老键孤儿口径同上);
-- 行按实例化:投影取消 `latest` 折叠(一行 = 一个实例),行键 = `pid + wire()`;消息 `tid = wire()`、`nid = node`(明文不变);
-  `action_target` 改比较 `wire()`(选法不动);根查找结构化(`tid == "$"` 退回 `NodeId` 层面)——落点全表见设计 §3.1;
-- golden 重冻结(全部 pin 住 `tid == 节点 id` 的断言先列清单再逐条改:`shell/tests/mod.rs:5270`、`kernel_*` parity、行投影口径);
-- CHANGELOG 记 **BREAKING**(§5 风险表;C6 顺手把"`nid` 找节点"写进契约)。
+**前置/边界**:动的面 = `shell/mod.rs`(act payload / 根双发注释)、`shell/facts.rs`(node_kind_and_name)、
+`shell/message.rs`(映射测试)、`shell/tests/**`(消息断言)、§3.4/§10/CHANGELOG。**不碰**:身份(`TaskId`/wire)、
+行表取值(D3 已拍)、投递顺序(§2.1 已定)、`GenerationAdmissionPolicy`。
+**静默边界**:legacy 无事件 ⇒ 继续静默是**决策**,不是遗漏。
 
-**前置/边界**:动的面 = `core/model/task_graph.rs`(wire)、`durable/snapshot_codec.rs`(V3 + upcast)、`core/recovery/**`(键)、
-`shell/projection.rs`(行按实例)、`shell/message.rs` + `shell/mod.rs`/`shell/facts.rs`(tid 落点)、`shell/tests/**` + `durable/**` 测试(golden 重冻结)。
-**不碰**:行表 `prev/next/parent` 的**取值语义**(等 D3,若拍"保持 node id"则这些表达式不动)、`action_target` 的**选法**、
-`GenerationAdmissionPolicy` 语义、容器包物化路径(`materialize_container_acts` + `param_fanout_children` 是唯一入口,§10「Feature B 完成」)。
+**硬性做法**:
 
-**现状(C4 之后,已实测)**:`TaskId { node: NodeId, generation }`、`OperationId { process_id, task, sequence }` 成型;
-`TaskId::wire()` 是唯一派生入口且输出 node id(`Display` 走 wire);恢复条目键/codec V2/canonical/行键全部字节不变,
-golden 指纹与恢复条目键用例原样绿;`crates/acts/src` 内 `OperationId` 字面量的 `node:`/`generation:` 字段 0 处。
-
-**硬性做法**(沿用 C4 的口径):
-
-1. 动工前先把"所有 pin 住 `tid == 节点 id` 的断言/常量"列成清单(设计 §4 的 C5 前置检查:至少 `scheduler/shell/tests/mod.rs:5270`、
-   `kernel_*` parity、行投影口径),逐条决定"改写 vs 保留"并写进 §10。
-2. **golden 重冻结要有书面理由**(§5 风险表),与 D2 的选择一并写进 §10;
-   codec 版本/升级码、upcast 退化等价的证明(对每条 V2 记录)逐项列。
-3. 键长/存储字节:若选乙(定长 32),用 §10 P6-1 的探针形状量一次字节增量再提交(§5 风险表)。
-4. 恢复条目键格式变更 ⇒ 老库遗留键成孤儿:处理策略与 §11 L1(`ops` 孤儿)一起定,写进 §10。
-5. **一次提交只做一个切面**;不新增 `#[allow(...)]`;文件改写只用 `edit`/`ast_edit`;串行构建。
+1. 先全清单:`git grep -nE "node_kind_and_name|message_from_record|topic" crates/acts/src/scheduler/shell`,逐条决定"改/保留";
+   保留项写进 §10。
+2. 对外字符串(**消息 `type`/`state`/topic、行 `kind`、`$step` 词汇**)逐字节不变:改完做一次字面量多重集对照(办法同 §10「C5 完成」)。
+3. 测试只补"新增/明确"的部分:act 载荷 `kind`、每个终态的映射一条、`nid` 契约一条;不改既有断言口径(除刻意项)。
+4. 一次提交只做一个切面;不新增 `#[allow(...)]`;文件改写只用 `edit`/`ast_edit`;串行构建;WIP 旁置(见下)。
 
 **验收**:
 
-- `wire()` 输出 D2 选定形态且对 `(node, generation)` 单射、纯函数、稳定(设计 §3.1 四条不变量的测试逐条立起来)。
-- V3 codec:新写读往返;V2 文档 upcast 后行为等价(用既有 V2 golden 字节做夹具);恢复条目新键 + 孤儿口径有测试。
-- 行按实例化:同一节点两个 generation 产生两行;`prev/next/parent` 按 D3;行键 = `pid + wire()`。
-- golden 重冻结后全套件绿;`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt --all --check` 干净。
-- §10 追加「C5 完成」:D2/D3 拍板记录、重冻结理由、键字节前后对照、upcast 证明、`git diff -M --stat` 摘要、验收命令与结果。
+- act 消息载荷带 `kind=act`;`node_kind_and_name` 对 act 节点回答 `act`;行/消息对外字符串不变(多重集审计 + §10 逐条)。
+- 终态映射测试:9 主题全覆盖(或既有覆盖 + 新增终态的缺口被逐条列出)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` + `cargo fmt --all --check` 干净;
+  `cargo test -p acts --lib --tests` 与基线同数(两条已登记既有抖动:`a_run_cannot_seal_another_subjects_scope`、
+  `kernel_task_and_act_messages_are_emitted`;HEAD 上同红,§10「C5 完成」有归因)。
+- §10 追加「C6 完成」:载荷前后、映射测试清单、字面量审计、`git diff -M --stat`、验收结果。
 
 # 限制与约束
 
-- **先读**:`KERNEL_REFACTOR_DESIGN.md` §2.2(D2/D3)、§3.1(落点全表 + 持久化)、§4(C5 行 + C5 前置检查)、§5(四行风险);
-  §11 A 段;§10「C4 完成」+「C3 完成」+ §6(文件改写的两条事故口径)。
-- **一次提交只做一个切面**:只做 C5;不得夹带行为变更、结构重构、清理或顺手修 bug。
+- **先读**:设计 §3.4、§1.4(消息面事实表)、§2.1(投递已定);§11 A 段;§10「C5 完成」+「C4 完成」+ §6(文件改写的两条事故口径)。
+- **一次提交只做一个切面**:只做 C6;不得夹带行为变更、结构重构、清理或顺手修 bug。
 - **不新增 `#[allow(...)]`**;需要就写进 §10 申请并在属性处写理由。
-- **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故:把 `export/actions.rs` 截断为空);
-  串行构建(Defender 会锁 rlib/exe);批量改写后 `file` 复核行尾。
+- **文件改写只用 `edit`/`ast_edit`;不要用脚本先 `open(path,'w')` 再 write**(§10 §6 的事故);串行构建(Defender 会锁 rlib/exe)。
 - 全量套件翻用例时先 `git stash` 跑同命令对照基线再归因(§10 §4);读**投影行**之前 `runtime.flush_writer()`。
 - 测试环境:`acts-server`"全部 target 一条命令"本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
 - 容器包的内联 acts 已在导入期物化(`materialize_container_acts` + `param_fanout_children` 是唯一入口):改容器包、
-  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」,不要另开第二条展开路径,也不要为了绕开它们去改
-  `GenerationAdmissionPolicy` 的既有语义。
+  改模型导入或改 fan-out admission 时,先读 §10「Feature B 完成」,不要另开第二条展开路径。
 - 工作区有一笔未提交的性能探针 WIP(`shell::operation_trace` + `ApplyActionCommand`→`ActionCommand` + `mod perf_probe;`,
-  旁置副本在 `.git/c4-wip/`):动 `shell/mod.rs`/`shell/operation/*` 前先看 §10「C4 完成」的过程登记;提交状态 == 验证状态,
-  WIP 永不进提交。
+  旁置副本在 `.git/c4-wip/` 与 `.git/c5-full/`):动 `shell/mod.rs`/`shell/operation/*` 前先看 §10「C5 完成」的过程登记;
+  提交状态 == 验证状态,WIP 永不进提交(剥离/回填办法:临时提交提供 postimage → `git apply -R --3way` → `reset --soft`)。
 
 # 每阶段收口(必须全绿才算完成)
 
 cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
 cargo fmt
 cargo test -p acts --lib --tests
-…(C5 是格式笔:跑全量 per-crate 套件(§11 C 的门禁;动了 manifest 才跑 cargo deny check bans))
+…(C6 触达消息面:跑 §11 C 的全量 per-crate 套件;动了 manifest 才跑 cargo deny check bans)
 
 # 交付
 
-一笔提交(conventional 前缀 `feat`(BREAKING 格式笔)或 `refactor`,单行 imperative 主语)
-+ §10 追加「C5 完成」(D2/D3 拍板、重冻结理由、键字节对照、upcast 证明、`git diff -M --stat` 摘要、验收命令与结果)
-+ CHANGELOG 的 BREAKING 条目
-→ 把 §11 A 段 **C5** 的状态改成「已做(§10「C5 完成」)」+ **原地重写本节的「当前任务」(下一笔 C6)**
+一笔提交(conventional 前缀 `feat` 或 `fix`,单行 imperative 主语)
++ §10 追加「C6 完成」(载荷前后、映射测试清单、字面量审计、`git diff -M --stat`、验收命令与结果)
+→ 把 §11 A 段 **C6** 的状态改成「已做(§10「C6 完成」)」+ **原地重写本节的「当前任务」(下一笔 C7)**
 + 停下等用户确认。
 ```
 

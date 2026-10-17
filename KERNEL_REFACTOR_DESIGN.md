@@ -116,7 +116,7 @@
 - **第 ② 条的铁律**:实例 id 必须是 `(node, generation)` 的**纯函数**。理由见 §1.2 的 `AlreadyCommitted` 条目 —— 这不是风格问题,是"会不会多造一个实例"的问题。
 - **第 ③ 条**:不改"投影已存在"这件事,真实改动只有"一行一实例",且它**依赖第 ② 条**。
 
-### 2.2 待拍(D1 已拍,余 3 项)
+### 2.2 待拍(D1 已拍;D2/D3 已拍 2026-10-16,余 D4)
 
 **D1 —— 命名词汇:取 `{Process, Task, Operation}`(推荐),不取 `{Action, Task}`。
 → 已拍(2026-10-16,用户裁决):`{Process, Task, Operation}`。执行见 `KERNEL_CUTOVER_NOTES.md` §11 C2 / §10「C2 完成」
@@ -128,6 +128,9 @@
 - `*Command` 保持不动(它已经一致地表示 planner 输入,改成 `*Action` 语义是反的)。
 
 **D2 —— 实例 id 的派生与形态:`TaskId{node, generation}` + hex `wire()`。**
+→ **已拍(2026-10-16,用户裁决):乙 —— `sha256` 定长 32 hex 摘要**,C5 执行;同时确认**接受 golden 全量重冻结(BREAKING)**;
+恢复条目旧键成孤儿的处理口径:**先登记不实现,与 §11 L1(死掉的 `ops` 族孤儿)同批拍**。
+执行见 `KERNEL_CUTOVER_NOTES.md` §12(C5 提示词)与 §10 的「C5 完成」(落地后)。
 
 ```rust
 // 身份:实例 = 节点的第 generation 代(确定性派生,不是 nanoid)
@@ -151,6 +154,10 @@ impl TaskId {
 **⚠ 与旧建议的冲突(必须同时拍)**:一旦定了"tid 一律 hex",上一轮讨论里"gen==0 沿用裸 node id 以保证 golden 不变"就**作废** —— 同一字段混两种形态(`s2` 与 `9f3a…`)会让"前端靠猜"的问题原样回来。所以 D2 实际是:**接受全量重冻结 golden(BREAKING)** vs **保留 node id 可读性**。推荐前者(一次做完)。
 
 **D3 —— `data::Task.{prev,next,parent}` 的取值。**
+→ **已拍(2026-10-16,用户裁决):保持 node id**;用户追问"同一节点重复创建多次会不会乱"的澄清(记录在案):
+**不乱** —— 这三列说的是**模型链拓扑**(节点间"谁接谁"),与代数无关:同一节点创建多少次,`step1.next = step2` 都不变。
+"实例"维度由 C5 的行按实例承担:行键 = `pid + wire()`(每实例一行,不再 `latest` 折叠),`tid` 列区分同节点的各代,
+`nid`(= `node_data.id`)列保留模型节点。prev/next/parent 若改成实例 tid 反而丢信息(模型链没有"代"),还逼前端解 hex。
 
 推荐**保持 node id**(它们描述的是模型链,legacy 的 `parent` 指 step 的 tid 但读模型另有 `node_data.id`)。若改成实例 tid,前端要 join 就得解 hex,与"别让前端猜"的目标相反。
 

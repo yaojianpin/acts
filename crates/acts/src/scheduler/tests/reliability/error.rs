@@ -36,7 +36,11 @@ async fn waiting_run(engine: &Engine) -> (String, String) {
         announced, pid,
         "the message names the run it was created for"
     );
-    assert_eq!(tid, "s1", "the act of a `uses` step is the step's own node");
+    assert_eq!(
+        tid,
+        tid_of(&pid, "s1", 0),
+        "the act is addressed by its instance's wire"
+    );
     wait_waiting_task(engine, &pid, "s1").await;
     flush(engine).await;
     (pid, tid)
@@ -159,10 +163,11 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = super::node_of(&snapshot, &pid, &tid);
     let act = snapshot
         .tasks
         .iter()
-        .find(|(id, _)| id.node.as_str() == tid)
+        .find(|(id, _)| id.node.as_str() == node)
         .map(|(_, task)| task)
         .expect("the act's execution");
     assert!(
@@ -239,7 +244,7 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
     flush(&engine).await;
 
     let before = read_proc(&engine, &pid).await;
-    assert_eq!(tasks_of(&before, &tid).len(), 1, "one task for the act");
+    assert_eq!(tasks_of(&before, "s1").len(), 1, "one task for the act");
     assert_eq!(
         before.task(&tid).map(|t| t.state()),
         Some(LegacyTaskState::Error),
@@ -257,7 +262,7 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
     flush(&engine).await;
     let after = read_proc(&engine, &pid).await;
     assert_eq!(
-        tasks_of(&after, &tid).len(),
+        tasks_of(&after, "s1").len(),
         1,
         "no second task for the act"
     );
@@ -318,7 +323,7 @@ async fn fail_racing_complete_converges_on_one_terminal_decision_inner() {
             "round {round}: the act must hold one terminal state, got {state}"
         );
         assert_eq!(
-            tasks_of(&proc, &tid).len(),
+            tasks_of(&proc, "s1").len(),
             1,
             "round {round}: one task for the act"
         );
@@ -433,10 +438,11 @@ async fn engine_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState
         .await
         .unwrap()
         .and_then(|snapshot| {
+            let node = super::node_of(&snapshot, pid, tid);
             snapshot
                 .tasks
                 .iter()
-                .find(|(id, _)| id.node.as_str() == tid)
+                .find(|(id, _)| id.node.as_str() == node)
                 .map(|(_, task)| task.state)
         })
 }

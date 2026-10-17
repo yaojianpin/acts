@@ -555,7 +555,11 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
     let pid2 = start_run_with(&engine, &parent_flow(CHILD), vars).await;
     let (child_pid, tid) = expect_created(&child).await;
     assert_ne!(child_pid, pid2, "the child is a run of its own");
-    assert_eq!(tid, CHILD_NODE, "the child's act is its step's own node");
+    assert_eq!(
+        tid,
+        tid_of(&child_pid, CHILD_NODE, 0),
+        "the child's act is its step's own instance"
+    );
     wait_completed(&engine, &pid2).await;
     assert_eq!(
         legacy_task_state(&engine, &pid2, PARENT_NODE).await,
@@ -626,7 +630,11 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
     let pid = start_run(&engine, &parent_flow(CHILD)).await;
     let (child_pid, tid) = expect_created(&created).await;
     assert_ne!(child_pid, pid, "the child is a run of its own");
-    assert_eq!(tid, CHILD_NODE, "the child's act is its step's own node");
+    assert_eq!(
+        tid,
+        tid_of(&child_pid, CHILD_NODE, 0),
+        "the child's act is its step's own instance"
+    );
 
     // the handoff is where the parent ends: the child is in flight, waiting
     wait_completed(&engine, &pid).await;
@@ -854,8 +862,10 @@ async fn two_subflow_branches_start_two_children_and_the_parent_completes_once_i
         "neither child is the parent run: {started:?}"
     );
     assert!(
-        started.iter().all(|(_, tid)| tid.as_str() == CHILD_NODE),
-        "each child's act is its own step's node: {started:?}"
+        started
+            .iter()
+            .all(|(child_pid, tid)| *tid == tid_of(child_pid, CHILD_NODE, 0)),
+        "each child's act is its own step's instance: {started:?}"
     );
 
     // both children are in flight at the same time, and the parent is done

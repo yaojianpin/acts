@@ -53,10 +53,11 @@ async fn waiting_chain(engine: &Engine) -> (String, String) {
         "the message names the run it was created for"
     );
     assert_eq!(
-        step1, "step1",
-        "the act of a `uses` step is the step's own node"
+        step1,
+        tid_of(&pid, "step1", 0),
+        "the act of a `uses` step is the step's own instance"
     );
-    wait_waiting_task(engine, &pid, &step1).await;
+    wait_waiting_task(engine, &pid, "step1").await;
 
     let created = capture_created(engine, "act2");
     complete_act(engine, &pid, &step1).await.unwrap();
@@ -65,8 +66,8 @@ async fn waiting_chain(engine: &Engine) -> (String, String) {
         announced, pid,
         "the message names the run it was created for"
     );
-    assert_eq!(step2, "step2");
-    wait_waiting_task(engine, &pid, &step2).await;
+    assert_eq!(step2, tid_of(&pid, "step2", 0));
+    wait_waiting_task(engine, &pid, "step2").await;
     flush(engine).await;
     (pid, step1)
 }
@@ -95,7 +96,12 @@ async fn finish_by_hand(engine: &Engine, pid: &str) {
         let proc = read_proc(engine, pid).await;
         for node in ["step1", "step2"] {
             if waiting_task(&proc, node).is_some() {
-                let _ = complete_act(engine, pid, node).await;
+                // The waiting act may be a rewind's redo (generation 1), so
+                // both generations get the completion: the terminal one
+                // refuses it, the live one takes it.
+                for generation in 0..=1 {
+                    let _ = complete_act(engine, pid, &tid_of(pid, node, generation)).await;
+                }
             }
         }
         assert!(
@@ -117,10 +123,11 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = super::node_of(&snapshot, pid, tid);
     let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node.as_str() == tid)
+        .filter(|id| id.node.as_str() == node)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -141,10 +148,11 @@ async fn generation_state(
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = super::node_of(&snapshot, pid, tid);
     snapshot
         .tasks
         .iter()
-        .find(|(id, _)| id.node.as_str() == tid && id.generation == generation)
+        .find(|(id, _)| id.node.as_str() == node && id.generation == generation)
         .map(|(_, task)| task.state)
 }
 
@@ -158,10 +166,11 @@ async fn has_pending_operation(engine: &Engine, pid: &str, tid: &str) -> bool {
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = super::node_of(&snapshot, pid, tid);
     snapshot
         .operations
         .values()
-        .any(|operation| operation.id.task.node.as_str() == tid && !operation.is_terminal())
+        .any(|operation| operation.id.task.node.as_str() == node && !operation.is_terminal())
 }
 
 // ---------------------------------------------------------------------------
@@ -201,10 +210,11 @@ async fn a_duplicate_cancel_is_refused_and_the_rewind_runs_once_inner() {
     let (announced, redone) = expect_created(&rewind).await;
     assert_eq!(announced, pid, "the rewind names its own run");
     assert_eq!(
-        redone, step1,
+        redone,
+        tid_of(&pid, "step1", 1),
         "the rewind re-enters the node the client named"
     );
-    wait_waiting_task(&engine, &pid, &step1).await;
+    wait_waiting_task(&engine, &pid, "step1").await;
 
     // every later `Created` of the node is observed: the duplicate must not
     // announce one
@@ -304,7 +314,8 @@ async fn a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_on
     cancel_act(&engine, &pid, &step1).await.unwrap();
     let (_, redone) = expect_created(&rewind).await;
     assert_eq!(
-        redone, step1,
+        redone,
+        tid_of(&pid, "step1", 1),
         "the retry re-enters the node the client named"
     );
     assert_eq!(
@@ -357,8 +368,8 @@ async fn cancel_racing_next_converges_on_one_terminal_decision_inner() {
             announced, pid,
             "the message names the run it was created for"
         );
-        assert_eq!(step1, "step1");
-        wait_waiting_task(&engine, &pid, &step1).await;
+        assert_eq!(step1, tid_of(&pid, "step1", 0));
+        wait_waiting_task(&engine, &pid, "step1").await;
         flush(&engine).await;
 
         // the race: both deliveries target the waiting head node at once
@@ -381,7 +392,8 @@ async fn cancel_racing_next_converges_on_one_terminal_decision_inner() {
         if redone {
             let (_, tid) = expect_created(&rewind).await;
             assert_eq!(
-                tid, step1,
+                tid,
+                tid_of(&pid, "step1", 1),
                 "round {round}: a winning cancel re-enters the head node"
             );
         } else {
@@ -537,7 +549,7 @@ async fn a_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inne
     // the replayed rewind re-dispatches the head act, and the intent's
     // operation plus the `ReenterTask` it created are driven to completion —
     // not stranded pending
-    wait_waiting_task(&reloaded, &pid, &step1).await;
+    wait_waiting_task(&reloaded, &pid, "step1").await;
     assert!(
         poll_settle(
             || async { !has_pending_operation(&reloaded, &pid, &step1).await },

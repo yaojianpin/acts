@@ -75,10 +75,10 @@ impl ActPackage for ActionPackage {
         // this act belongs to (`Runtime::do_action` → the kernel's action
         // path), so the state it produces is exactly the one a client's
         // `act:next`/`act:error`/… produces and the rest of the run already
-        // understands. The headless scope's own task id is minted per
-        // evaluation, so the *node* id — which is the execution's task id —
-        // is what names the target.
-        let tid = task.node().id().to_string();
+        // understands. The headless scope names its task by the acting
+        // instance's wire (C5): that is the address `do_action` serves, not
+        // the node id (which no longer names an instance).
+        let tid = task.id.clone();
         let action = Action::new(
             &task.pid,
             &tid,

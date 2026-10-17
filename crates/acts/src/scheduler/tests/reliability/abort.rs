@@ -58,7 +58,11 @@ async fn waiting_act(engine: &Engine) -> (String, String) {
         announced, pid,
         "the message names the run it was created for"
     );
-    assert_eq!(tid, "s1", "the act of a `uses` step is the step's own node");
+    assert_eq!(
+        tid,
+        tid_of(&pid, "s1", 0),
+        "the act is addressed by its instance's wire"
+    );
     wait_waiting_task(engine, &pid, "s1").await;
     flush(engine).await;
     (pid, tid)
@@ -76,17 +80,20 @@ async fn waiting_first_step(engine: &Engine) -> (String, String) {
         "the message names the run it was created for"
     );
     assert_eq!(
-        tid, "step1",
-        "the act of a `uses` step is the step's own node"
+        tid,
+        tid_of(&pid, "step1", 0),
+        "the act is addressed by its instance's wire"
     );
     wait_waiting_task(engine, &pid, "step1").await;
     flush(engine).await;
     (pid, tid)
 }
 
-/// Every execution state the run's aggregate holds for node `tid`, one entry
-/// per generation: a decision re-applied would leave a second generation, and
-/// a decision the cascade invented would be an extra entry.
+/// Every execution state the run's aggregate holds for the act `tid` names,
+/// one entry per generation: a decision re-applied would leave a second
+/// generation, and a decision the cascade invented would be an extra entry.
+/// `tid` is the act's address — the wire since C5, or the node id in tests
+/// that name the node; either way the states are the node's generations.
 async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<TaskState> {
     let snapshot = engine
         .runtime()
@@ -95,10 +102,11 @@ async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<TaskState
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = act_node(&snapshot, pid, tid);
     let mut states: Vec<TaskState> = snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node.as_str() == tid)
+        .filter(|(id, _)| id.node.as_str() == node)
         .map(|(_, task)| task.state)
         .collect();
     // HashMap iteration order is not stable; the compared form is.
@@ -106,16 +114,32 @@ async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<TaskState
     states
 }
 
-/// The aggregate's execution state for node `tid` (the newest generation), if
-/// the aggregate still holds one.
+/// The aggregate's execution state for the act `tid` names (the newest
+/// generation), if the aggregate still holds one.
 async fn act_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     let snapshot = engine.runtime().kernel().snapshot(pid).await.unwrap()?;
+    let node = act_node(&snapshot, pid, tid);
     snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node.as_str() == tid)
+        .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
+}
+
+/// The model node the address names: a wire resolves through the instance it
+/// was derived from; anything else is taken as the node id itself.
+fn act_node(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    pid: &str,
+    tid: &str,
+) -> String {
+    snapshot
+        .tasks
+        .keys()
+        .find(|id| id.wire(pid) == tid)
+        .map(|id| id.node.as_str().to_owned())
+        .unwrap_or_else(|| tid.to_owned())
 }
 
 /// The aggregate's state for the run's root node.
@@ -378,7 +402,7 @@ async fn a_shutdown_decides_nothing_and_the_run_resumes_undecided_inner() {
         "a shutdown must not decide the waiting act: the aggregate keeps it Waiting"
     );
     let proc = read_proc(&reloaded, &pid).await;
-    let waiting = waiting_task(&proc, &tid).expect("the recovered run still holds the act waiting");
+    let waiting = waiting_task(&proc, "s1").expect("the recovered run still holds the act waiting");
     assert_eq!(waiting.state(), LegacyTaskState::Interrupt);
 
     // the recovered run is still the client's: the recorded action decides it
@@ -531,7 +555,7 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
 
     // the abort is served while the effect runs: the act is the node the client
     // names, and its execution is `Running` (an auto step)
-    let abort = abort_act(&engine, &pid, "step1").await;
+    let abort = abort_act(&engine, &pid, &tid_of(&pid, "step1", 0)).await;
     abort.expect("the abort must be admitted while the act's effect runs");
     assert_eq!(
         act_state(&engine, &pid, "step1").await,
@@ -577,7 +601,9 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
         "the run must read aborted, got {}",
         proc.state()
     );
-    let act = proc.task("step1").expect("the act's task");
+    let act = proc
+        .task(&tid_of(&pid, "step1", 0))
+        .expect("the act's task");
     assert_eq!(act.state(), LegacyTaskState::Aborted);
     assert!(
         act.err().is_none(),
@@ -641,7 +667,7 @@ async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(
     // the refusal consumed nothing: the act is still waiting and decidable
     let proc = read_proc(&engine, &pid).await;
     assert!(
-        waiting_task(&proc, &tid).is_some(),
+        waiting_task(&proc, "step1").is_some(),
         "a refused abort must leave the act waiting"
     );
     assert_eq!(
@@ -662,7 +688,7 @@ async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(
     assert_eq!(root_state(&engine, &pid).await, Some(TaskState::Aborted));
     let proc = wait_rows_terminal(&engine, &pid).await;
     assert!(
-        tasks_of(&proc, &tid).len() == 1,
+        tasks_of(&proc, "step1").len() == 1,
         "no duplicate task may survive the refused abort"
     );
     sweep_until_gone(&engine, &pid).await;
@@ -699,7 +725,7 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
     wait_completed(&engine, &pid).await;
 
     let before = wait_rows_terminal(&engine, &pid).await;
-    assert_eq!(tasks_of(&before, &tid).len(), 1, "one task for the act");
+    assert_eq!(tasks_of(&before, "step1").len(), 1, "one task for the act");
     assert_eq!(
         before.task(&tid).map(|t| t.state()),
         Some(LegacyTaskState::Aborted),
@@ -716,7 +742,7 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
     // run's outcome are exactly what the first delivery left
     let after = wait_rows_terminal(&engine, &pid).await;
     assert_eq!(
-        tasks_of(&after, &tid).len(),
+        tasks_of(&after, "step1").len(),
         1,
         "no second task for the act"
     );
@@ -810,7 +836,11 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
             .collect();
         assert_eq!(
             rows,
-            vec![format!("step2:{}", LegacyTaskState::Skipped)],
+            vec![format!(
+                "{}:{}",
+                tid_of(&pid, "step2", 0),
+                LegacyTaskState::Skipped
+            )],
             "round {round}: the downstream row must read the cascade's decision"
         );
 
@@ -920,7 +950,8 @@ async fn an_abort_racing_a_completion_converges_on_one_terminal_decision_inner()
             let (announced, scheduled) = expect_created(&created2).await;
             assert_eq!(announced, pid, "round {round}: the message names the run");
             assert_eq!(
-                scheduled, "step2",
+                scheduled,
+                tid_of(&pid, "step2", 0),
                 "round {round}: the completion schedules the next step"
             );
             wait_waiting_task(&engine, &pid, "step2").await;
@@ -949,7 +980,7 @@ async fn an_abort_racing_a_completion_converges_on_one_terminal_decision_inner()
             "round {round}: no task may be left non-terminal: {unfinished:?}"
         );
         assert_eq!(
-            tasks_of(&proc, &tid).len(),
+            tasks_of(&proc, "step1").len(),
             1,
             "round {round}: the race must not duplicate the act"
         );

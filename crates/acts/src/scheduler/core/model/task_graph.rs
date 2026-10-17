@@ -17,16 +17,24 @@ impl TaskId {
         Ok(Self { node, generation })
     }
 
-    /// The single derivation of the identity's wire form. Every boundary that
-    /// turns a [`TaskId`] into a string must go through here, so there is
-    /// exactly one place that decides what an instance looks like on the wire.
-    ///
-    /// Today that form *is* the node id (the kernel's `tid`), so every derived
-    /// byte — row keys, recovery-entry keys, codec fields — is unchanged. The
-    /// hex form is C5's switch (design §2.2 D2), and it will land in this one
-    /// function.
-    pub(crate) fn wire(&self) -> String {
-        self.node.as_str().to_owned()
+    /// The single derivation of the identity's wire form: the instance's
+    /// external id (`tid` — read-model row keys, message `tid`, the action
+    /// address). D2 (design §2.2): the irreversible fixed-length digest
+    /// `sha256(pid ‖ 0x00 ‖ node ‖ 0x00 ‖ gen_le)[..32]` — constant length
+    /// (row/index keys never grow with the node's name), injective over
+    /// `(node, generation)` within a process, a pure function of its parts
+    /// (idempotent whole-snapshot equality, the canonical digest and CAS
+    /// retries keep working), and not decodable back without the aggregate —
+    /// which is why every reader that needs the *node* holds a `TaskId` (or a
+    /// row's `nid`), never a reverse lookup.
+    pub(crate) fn wire(&self, process_id: &str) -> String {
+        let mut bytes = Vec::with_capacity(process_id.len() + self.node.as_str().len() + 9);
+        bytes.extend_from_slice(process_id.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(self.node.as_str().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&self.generation.to_le_bytes());
+        crate::scheduler::core::commit::aggregate::sha256_hex(&bytes)[..32].to_owned()
     }
 }
 
@@ -39,12 +47,6 @@ impl fmt::Debug for TaskId {
             .field("node", &self.node.as_str())
             .field("generation", &self.generation)
             .finish()
-    }
-}
-
-impl fmt::Display for TaskId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.wire())
     }
 }
 

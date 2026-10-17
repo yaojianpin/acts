@@ -117,7 +117,8 @@ fn capture_branch_acts(engine: &Engine) -> Arc<Mutex<Vec<(String, String)>>> {
 }
 
 /// Start the container and wait until both branches' acts are waiting, answering
-/// their node ids in ascending order (`("s1", "s2")`).
+/// their instance ids (the wires, in ascending order — the order is the wire's,
+/// not the node's) and their node ids in that same order.
 ///
 /// The wait is on the *messages* (that both acts were dispatched) and then on
 /// each act's own row (that it is `Interrupt`, so a client action lands on a
@@ -140,13 +141,14 @@ async fn wait_branches(
     .await;
     let mut tids = branch_tids(seen, pid);
     tids.dedup();
+    let mut expected_tids = vec![tid_of(pid, "s1", 0), tid_of(pid, "s2", 0)];
+    expected_tids.sort();
     assert_eq!(
-        tids,
-        vec!["s1".to_string(), "s2".to_string()],
+        tids, expected_tids,
         "the fan-out dispatches the two branch acts, one per branch"
     );
-    wait_waiting_task(engine, pid, &tids[0]).await;
-    wait_waiting_task(engine, pid, &tids[1]).await;
+    wait_waiting_task(engine, pid, "s1").await;
+    wait_waiting_task(engine, pid, "s2").await;
     flush(engine).await;
     (tids[0].clone(), tids[1].clone())
 }
@@ -192,11 +194,12 @@ async fn node_generations(engine: &Engine, pid: &str) -> Vec<(String, u64)> {
 /// times the node was instantiated. A second dispatch of a branch, or a rewind,
 /// adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node.as_str() == tid)
+        .filter(|id| id.node.as_str() == node)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -205,11 +208,12 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 
 /// The aggregate's state for the newest generation of one model node.
 async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
-    process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node.as_str() == tid)
+        .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -245,7 +249,10 @@ fn operation_records(pid: &str, tid: &str) -> (String, String) {
 /// state first wants the operation to have landed.
 async fn complete_act_settled(engine: &Engine, pid: &str, act: &str) {
     complete_act(engine, pid, act).await.unwrap();
-    let (_, propagate) = operation_records(pid, act);
+    // The outbox keys carry the model node and the generation (not the
+    // instance wire), so the prefixes resolve the act's node first.
+    let node = super::node_of(&process_snapshot(engine, pid).await, pid, act);
+    let (_, propagate) = operation_records(pid, &node);
     let what = format!("the completion of {act} of {pid} to settle with its operation");
     poll_until_dumped(
         &what,
@@ -424,7 +431,8 @@ async fn a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_sett
     let seen2 = capture_branch_acts(&reloaded);
 
     // the live branch is still the act the recovered engine holds waiting
-    wait_waiting_task(&reloaded, &pid, &second).await;
+    let live = super::node_of(&process_snapshot(&reloaded, &pid).await, &pid, &second);
+    wait_waiting_task(&reloaded, &pid, &live).await;
     // ... and the settled branch was never asked again (the recovered engine
     // re-delivers only the live branch's own still-open dispatch, if anything)
     no_created_for(&seen2, &first).await;
@@ -486,7 +494,10 @@ async fn a_duplicate_branch_completion_is_refused_without_a_second_generation_in
     // before the duplicate arrives, so the duplicate is a retry and not a race
     // with the decision or with the propagation it set off
     complete_act_settled(&engine, &pid, &first).await;
-    let (action, propagate) = operation_records(&pid, &first);
+    // The outbox keys carry the model node and the generation, so the
+    // prefixes resolve the settled branch's node first.
+    let node = super::node_of(&process_snapshot(&engine, &pid).await, &pid, &first);
+    let (action, propagate) = operation_records(&pid, &node);
     flush(&engine).await;
 
     let before = (

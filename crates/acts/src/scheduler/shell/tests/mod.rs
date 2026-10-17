@@ -21,6 +21,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// so a cell that loops on purpose is bounded exactly like a served run.
 const MAX_NODE_RUN_TIMES: u64 = 1000;
 
+/// The external id (`tid`) of one instance: the C5 wire of `node`'s
+/// `generation` under `pid` — row keys, row `tid` columns and message `tid`s
+/// all carry it; the model node stays on the row's `node_data.id` (`nid`).
+fn tid_of(pid: &str, node: &str, generation: u64) -> String {
+    crate::scheduler::core::model::task_graph::TaskId::new(node, generation)
+        .unwrap()
+        .wire(pid)
+}
+
 struct CountingTransport {
     delivered: Arc<parking_lot::Mutex<usize>>,
 }
@@ -518,7 +527,7 @@ async fn assert_parked(host: &KernelHost, cache: &Arc<crate::store::Store>, pid:
     );
     let root_row = store
         .tasks()
-        .find_opt(&crate::utils::Id::new(pid, crate::utils::consts::TASK_ROOT_TID).id())
+        .find_opt(&crate::utils::Id::new(pid, &tid_of(pid, "$", 0)).id())
         .await
         .unwrap()
         .expect("root task row");
@@ -884,12 +893,15 @@ async fn kernel_engine_projects_the_legacy_read_model() {
     assert_eq!(info.mid, "wf-rows");
     let mut tasks: Vec<String> = info.tasks.iter().map(|task| task.id.clone()).collect();
     tasks.sort();
-    assert_eq!(
-        tasks,
-        vec![crate::utils::consts::TASK_ROOT_TID.to_string(), "s1".into()]
-    );
+    let mut expected_tasks = vec![tid_of(&pid, "$", 0), tid_of(&pid, "s1", 0)];
+    expected_tasks.sort();
+    assert_eq!(tasks, expected_tasks);
     // The effect's output is the task scope's projected data.
-    let s1 = executor.task().get(&pid, "s1").await.expect("the task row");
+    let s1 = executor
+        .task()
+        .get(&pid, &tid_of(&pid, "s1", 0))
+        .await
+        .expect("the task row");
     assert_eq!(s1.state, "completed");
     assert_eq!(s1.r#type, "step");
     assert!(
@@ -934,7 +946,7 @@ async fn kernel_engine_projects_the_legacy_read_model() {
     let mut act_states: Vec<String> = messages
         .rows
         .iter()
-        .filter(|row| row.tid == "s1")
+        .filter(|row| row.tid == tid_of(&pid, "s1", 0))
         .map(|row| row.state.to_string())
         .collect();
     act_states.sort();
@@ -1890,7 +1902,7 @@ async fn kernel_cancel_refuses_a_step_whose_work_is_not_done() {
     let refused = runtime
         .do_action(&crate::event::Action::new(
             PID,
-            "s1",
+            &tid_of(PID, "s1", 0),
             crate::event::EventAction::Cancel,
             crate::Vars::new(),
         ))
@@ -2074,7 +2086,12 @@ async fn a_cancel_needs_a_finished_step_with_live_forward_work() {
     // `is_biz_success` refusal, consuming nothing.
     let before = host.snapshot("p-cancel-guard").await.unwrap().unwrap();
     let waiting = host
-        .apply_action("p-cancel-guard", "s1", ActionKind::Cancel, Vec::new())
+        .apply_action(
+            "p-cancel-guard",
+            &tid_of("p-cancel-guard", "s1", 0),
+            ActionKind::Cancel,
+            Vec::new(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2089,17 +2106,32 @@ async fn a_cancel_needs_a_finished_step_with_live_forward_work() {
 
     // Finished, but the chain forward of it settled: the legacy
     // duplicate-delivery guard ("not allowed to cancel").
-    host.apply_action("p-cancel-guard", "s1", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-guard",
+        &tid_of("p-cancel-guard", "s1", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
-    host.apply_action("p-cancel-guard", "s2", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-guard",
+        &tid_of("p-cancel-guard", "s2", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
     assert!(host.process_completed("p-cancel-guard").await.unwrap());
     let settled = host
-        .apply_action("p-cancel-guard", "s1", ActionKind::Cancel, Vec::new())
+        .apply_action(
+            "p-cancel-guard",
+            &tid_of("p-cancel-guard", "s1", 0),
+            ActionKind::Cancel,
+            Vec::new(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2120,12 +2152,22 @@ async fn a_cancel_needs_a_finished_step_with_live_forward_work() {
     let spec = ProcessSpec::from_workflow("p-cancel-lone", &lone, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
-    host.apply_action("p-cancel-lone", "s1", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-lone",
+        &tid_of("p-cancel-lone", "s1", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
     let empty = host
-        .apply_action("p-cancel-lone", "s1", ActionKind::Cancel, Vec::new())
+        .apply_action(
+            "p-cancel-lone",
+            &tid_of("p-cancel-lone", "s1", 0),
+            ActionKind::Cancel,
+            Vec::new(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -2387,39 +2429,46 @@ async fn kernel_back_read_model_serves_the_redone_generation() {
     }
 
     let kernel = run_back().await;
-    // The kernel's read model is the surviving generation per node: the
-    // redone s1 completed, the redone s2 waits again (the act's state, the
-    // one the legacy *act* row also shows), and no backed/completed
-    // history — the row is the instance the read API addresses.
+    // C5: the rows are the *instances*, history included — the redo backs s2
+    // gen 0 and re-runs it (gen 1 waits again), s1 runs to completion in both
+    // its generations, so a node's states are its generations' states.
     assert_eq!(
         states_of(&kernel, "s2"),
-        vec!["interrupted".to_string()],
-        "the row is the surviving generation, not the history"
+        vec!["backed".to_string(), "interrupted".to_string()],
+        "the rows are the instances, history included"
     );
     assert_eq!(states_of(&kernel, "s1"), vec!["completed".to_string()]);
     // The root diverges and is registered in the migration notes: the
     // kernel completes the workflow root at its own hop, so a redo leaves
     // it (and the projected process row) `completed` while the run is still
     // in flight, where the legacy root waits for every child instance.
-    // Asserting it here would pin that divergence, so this test stops at
-    // the nodes both engines agree on.
+    // C5: a row is one *instance* — the redo's generations are all here
+    // (s1 gen 0 backed + gen 1 completed, s2 gen 0 interrupted + gen 1
+    // waiting), the root ran once. The pid rides the rows.
+    let pid = kernel[0].pid.clone();
     assert_eq!(
         kernel
             .iter()
-            .filter(|row| row.tid == crate::utils::consts::TASK_ROOT_TID)
+            .filter(|row| row.tid == tid_of(&pid, "$", 0))
             .count(),
         1,
-        "one row per node: the root"
+        "one row per instance: the root"
     );
     assert_eq!(
-        kernel.iter().filter(|row| row.tid == "s1").count(),
-        1,
-        "one row per node: the redone s1"
+        kernel
+            .iter()
+            .filter(|row| row.tid == tid_of(&pid, "s1", 0) || row.tid == tid_of(&pid, "s1", 1))
+            .count(),
+        2,
+        "one row per instance: both s1 generations"
     );
     assert_eq!(
-        kernel.iter().filter(|row| row.tid == "s2").count(),
-        1,
-        "one row per node: the redone s2"
+        kernel
+            .iter()
+            .filter(|row| row.tid == tid_of(&pid, "s2", 0) || row.tid == tid_of(&pid, "s2", 1))
+            .count(),
+        2,
+        "one row per instance: both s2 generations"
     );
 }
 
@@ -2924,9 +2973,14 @@ async fn manual_task_waits_for_the_client_action() {
     );
 
     // The client completes the waiting task; the flow moves on.
-    host.apply_action("p4", "wait", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p4",
+        &tid_of("p4", "wait", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     assert!(host.process_completed("p4").await.unwrap());
 }
@@ -3047,7 +3101,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
 
     // The owner's act completing while its branch runs is only the act:
     // the step waits for the branch and the chain successor keeps waiting.
-    host.apply_action(PID, "s1", ActionKind::Complete, Vec::new())
+    host.apply_action(PID, &tid_of(PID, "s1", 0), ActionKind::Complete, Vec::new())
         .await
         .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
@@ -3064,7 +3118,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
 
     // The branch settles: the join completes the owner, the flow moves on,
     // and the next tick retires the timer.
-    host.apply_action(PID, "t1", ActionKind::Complete, Vec::new())
+    host.apply_action(PID, &tid_of(PID, "t1", 0), ActionKind::Complete, Vec::new())
         .await
         .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
@@ -3128,7 +3182,7 @@ async fn the_root_stays_running_until_its_seeded_chain_settled() {
     assert!(!host.process_completed(PID).await.unwrap());
 
     // The chain head's act completes: the step and then the root finish.
-    host.apply_action(PID, "a", ActionKind::Complete, Vec::new())
+    host.apply_action(PID, &tid_of(PID, "a", 0), ActionKind::Complete, Vec::new())
         .await
         .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -3175,7 +3229,7 @@ async fn a_handler_container_keeps_its_role_while_parked_for_children() {
     // dispatches its handler, which fans its own branch out.
     host.apply_action(
         PID,
-        "s1",
+        &tid_of(PID, "s1", 0),
         ActionKind::Fail {
             code: "E1".into(),
             message: "boom".into(),
@@ -3268,7 +3322,7 @@ async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
 
     // The act's completion: the step is not done (t1 is in flight) but its
     // branch child set comes alive.
-    host.apply_action(PID, "s1", ActionKind::Complete, Vec::new())
+    host.apply_action(PID, &tid_of(PID, "s1", 0), ActionKind::Complete, Vec::new())
         .await
         .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -3285,7 +3339,7 @@ async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
     );
 
     // The last child settles: the join completes the step.
-    host.apply_action(PID, "t1", ActionKind::Complete, Vec::new())
+    host.apply_action(PID, &tid_of(PID, "t1", 0), ActionKind::Complete, Vec::new())
         .await
         .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -3305,7 +3359,12 @@ async fn completing_a_terminal_task_is_rejected_without_consuming_state() {
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     assert!(host.process_completed("p5").await.unwrap());
     let err = host
-        .apply_action("p5", "$", ActionKind::Complete, Vec::new())
+        .apply_action(
+            "p5",
+            &tid_of("p5", "$", 0),
+            ActionKind::Complete,
+            Vec::new(),
+        )
         .await
         .unwrap_err();
     let before = host.snapshot("p5").await.unwrap().unwrap();
@@ -3336,16 +3395,26 @@ async fn cancelled_head_cascades_skip_through_the_chain() {
 
     // The head's own work first: a linear spec has no acts, so the client
     // action is the work itself.
-    host.apply_action("p6", "head", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p6",
+        &tid_of("p6", "head", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     // The rewind: head gen0 keeps the legacy act's `Backed` fact, the
     // chain forward of it is skipped, and a fresh head generation is
     // already parked waiting for its own action.
-    host.apply_action("p6", "head", ActionKind::Cancel, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p6",
+        &tid_of("p6", "head", 0),
+        ActionKind::Cancel,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
     let snapshot = host.snapshot("p6").await.unwrap().unwrap();
@@ -3374,13 +3443,23 @@ async fn cancelled_head_cascades_skip_through_the_chain() {
     );
 
     // The re-run answers its own action; the recreated downstream runs.
-    host.apply_action("p6", "head", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p6",
+        &tid_of("p6", "head", 1),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
-    host.apply_action("p6", "mid", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p6",
+        &tid_of("p6", "mid", 1),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
     assert!(host.process_completed("p6").await.unwrap());
     let snapshot = host.snapshot("p6").await.unwrap().unwrap();
@@ -3678,9 +3757,14 @@ async fn waiting_inner_step_resumes_on_the_client_action() {
         crate::scheduler::core::model::task_graph::TaskState::Running
     );
 
-    host.apply_action("p-wait", "s11", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-wait",
+        &tid_of("p-wait", "s11", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
     assert!(host.process_completed("p-wait").await.unwrap());
     let snapshot = host.snapshot("p-wait").await.unwrap().unwrap();
@@ -3719,7 +3803,7 @@ async fn waiting_branched_step_fans_out_on_the_client_completion() {
 
     host.apply_action(
         "p-manual",
-        "step1",
+        &tid_of("p-manual", "step1", 0),
         ActionKind::Complete,
         vec![("w".to_string(), "2".to_string())],
     )
@@ -3766,9 +3850,14 @@ async fn cancelling_a_finished_container_rewinds_its_branches() {
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
     // The step's own work first: its act, then the branches it dispatched.
-    host.apply_action("p-cancel-early", "step1", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-early",
+        &tid_of("p-cancel-early", "step1", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
     let snapshot = host.snapshot("p-cancel-early").await.unwrap().unwrap();
     assert_eq!(
@@ -3785,9 +3874,14 @@ async fn cancelling_a_finished_container_rewinds_its_branches() {
         crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 
-    host.apply_action("p-cancel-early", "step1", ActionKind::Cancel, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-early",
+        &tid_of("p-cancel-early", "step1", 0),
+        ActionKind::Cancel,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
     let snapshot = host.snapshot("p-cancel-early").await.unwrap().unwrap();
     let state_at = |task: &str, generation: u64| {
@@ -3810,13 +3904,23 @@ async fn cancelling_a_finished_container_rewinds_its_branches() {
 
     // The re-entered step waits again; completing it fans out its branches
     // as fresh generations.
-    host.apply_action("p-cancel-early", "step1", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-early",
+        &tid_of("p-cancel-early", "step1", 1),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
-    host.apply_action("p-cancel-early", "step2", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-early",
+        &tid_of("p-cancel-early", "step2", 1),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
     assert!(host.process_completed("p-cancel-early").await.unwrap());
 
@@ -3894,9 +3998,14 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
         state_of(&snapshot, "b2"),
         crate::scheduler::core::model::task_graph::TaskState::Skipped
     );
-    host.apply_action("p-cancel-mid", "s11", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-mid",
+        &tid_of("p-cancel-mid", "s11", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
     let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
     assert_eq!(
@@ -3905,9 +4014,14 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
         "the container settled once its branches did"
     );
 
-    host.apply_action("p-cancel-mid", "step1", ActionKind::Cancel, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-mid",
+        &tid_of("p-cancel-mid", "step1", 0),
+        ActionKind::Cancel,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
 
     // The gen0 subtree is closed by the cascade, and the rewind has already
@@ -3951,13 +4065,23 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
         crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
 
-    host.apply_action("p-cancel-mid", "s11", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-mid",
+        &tid_of("p-cancel-mid", "s11", 1),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
-    host.apply_action("p-cancel-mid", "step2", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-cancel-mid",
+        &tid_of("p-cancel-mid", "step2", 1),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
     assert!(host.process_completed("p-cancel-mid").await.unwrap());
     let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
@@ -4212,11 +4336,11 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
 
     // The step's own work first: the legacy guard (which the kernel
     // mirrors) refuses a cancel before it.
-    host.apply_action(PID, "s1", ActionKind::Complete, Vec::new())
+    host.apply_action(PID, &tid_of(PID, "s1", 0), ActionKind::Complete, Vec::new())
         .await
         .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
-    host.apply_action(PID, "s1", ActionKind::Cancel, Vec::new())
+    host.apply_action(PID, &tid_of(PID, "s1", 0), ActionKind::Cancel, Vec::new())
         .await
         .unwrap();
     // Durable before any hop ran: the decision closed the source, pinned
@@ -4307,9 +4431,14 @@ async fn abort_on_waiting_step_aborts_the_ancestor_chain() {
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
-    host.apply_action("p-abort", "s2", ActionKind::Abort, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-abort",
+        &tid_of("p-abort", "s2", 0),
+        ActionKind::Abort,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
 
     let snapshot = host.snapshot("p-abort").await.unwrap().unwrap();
@@ -4363,9 +4492,14 @@ async fn abort_inside_a_branch_aborts_the_container_chain() {
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
 
-    host.apply_action("p-abort-branch", "s11", ActionKind::Abort, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-abort-branch",
+        &tid_of("p-abort-branch", "s11", 0),
+        ActionKind::Abort,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
 
     let snapshot = host.snapshot("p-abort-branch").await.unwrap().unwrap();
@@ -4413,7 +4547,7 @@ async fn back_redo_reruns_the_named_step_and_its_downstream() {
 
     host.apply_action(
         "p-back",
-        "s2",
+        &tid_of("p-back", "s2", 0),
         ActionKind::Back,
         vec![("to".to_string(), "s1".to_string())],
     )
@@ -4448,9 +4582,14 @@ async fn back_redo_reruns_the_named_step_and_its_downstream() {
         crate::scheduler::core::model::task_graph::TaskState::Waiting
     );
 
-    host.apply_action("p-back", "s2", ActionKind::Complete, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "p-back",
+        &tid_of("p-back", "s2", 1),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
     assert!(host.process_completed("p-back").await.unwrap());
 }
@@ -4476,7 +4615,12 @@ async fn back_without_to_is_refused_without_consuming_state() {
     let before = host.snapshot("p-back-no-to").await.unwrap().unwrap();
 
     let error = host
-        .apply_action("p-back-no-to", "s1", ActionKind::Back, Vec::new())
+        .apply_action(
+            "p-back-no-to",
+            &tid_of("p-back-no-to", "s1", 0),
+            ActionKind::Back,
+            Vec::new(),
+        )
         .await
         .unwrap_err();
     assert!(format!("{error}").contains("'to'"));
@@ -4514,7 +4658,7 @@ async fn fail_on_waiting_step_skips_downstream_and_decides_ancestors() {
 
     host.apply_action(
         "p-fail",
-        "s2",
+        &tid_of("p-fail", "s2", 0),
         ActionKind::Fail {
             code: "E42".into(),
             message: "boom".into(),
@@ -4578,9 +4722,14 @@ async fn kernel_abort_walks_up_and_skips_downstream() {
     let spec = ProcessSpec::from_workflow("k-abort", &workflow(), &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
-    host.apply_action("k-abort", "s2", ActionKind::Abort, Vec::new())
-        .await
-        .unwrap();
+    host.apply_action(
+        "k-abort",
+        &tid_of("k-abort", "s2", 0),
+        ActionKind::Abort,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
 
     assert_all_terminal(&host, "k-abort").await;
@@ -4619,7 +4768,7 @@ async fn kernel_fail_decides_ancestors_and_skips_downstream() {
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
     host.apply_action(
         "k-fail",
-        "s2",
+        &tid_of("k-fail", "s2", 0),
         ActionKind::Fail {
             code: "E42".into(),
             message: "boom".into(),
@@ -5245,7 +5394,7 @@ async fn outbox_records_forward_as_engine_messages() {
         .find(|msg| msg.is_irq() && msg.state == crate::MessageState::Created)
         .expect("the Irq step's Created message must be forwarded");
     assert_eq!(created.pid, "p-msg-e2e");
-    assert_eq!(created.tid, "s2");
+    assert_eq!(created.tid, tid_of("p-msg-e2e", "s2", 0));
     assert_eq!(created.mid, "wf-msg-e2e");
     assert_eq!(
         created.inputs.get::<serde_json::Value>("params").unwrap()["key"],
@@ -5691,7 +5840,7 @@ async fn a_commit_delivers_its_records_without_waiting_for_a_tick() {
     .await
     .expect("the act's Created message must arrive without a tick");
     assert_eq!(created.pid, "p-immediate-delivery");
-    assert_eq!(created.tid, "s1");
+    assert_eq!(created.tid, tid_of("p-immediate-delivery", "s1", 0));
     assert_eq!(
         created.inputs.get::<serde_json::Value>("params").unwrap()["key"],
         "irq-1"

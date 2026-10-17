@@ -20,8 +20,12 @@ use std::sync::Arc;
 /// The variable space one headless scope sees.
 pub(crate) struct ScopeSpec {
     pub(crate) process_id: String,
-    /// The acting node id (the kernel execution's task id).
+    /// The acting node id (the model node the execution runs).
     pub(crate) node: String,
+    /// The acting execution's identity: `task_id.wire(process_id)` is the
+    /// external id (`tid`) a package's forwarded action addresses since C5 —
+    /// the node id no longer names an instance.
+    pub(crate) task_id: crate::scheduler::core::model::task_graph::TaskId,
     /// The declaring model, for the headless scope's tree.
     pub(crate) model: Workflow,
     /// The acting execution's scope chain (nearest wins) as JSON strings,
@@ -63,7 +67,16 @@ pub(crate) fn headless_scope(
         .node(&spec.node)
         .ok_or_else(|| crate::ActError::Runtime(format!("model has no node '{}'", spec.node)))?
         .clone();
-    let task = process.create_task(&node, None)?;
+    // The headless task is never durable or projected; its id is the acting
+    // instance's wire, so a package that forwards a client command
+    // (`Runtime::do_action`) addresses exactly the execution the scope was
+    // built for.
+    let task = Arc::new(Task::new(
+        &process,
+        &spec.task_id.wire(&spec.process_id),
+        node.clone(),
+        runtime,
+    ));
     if !spec.vars.is_empty() {
         let mut vars = Vars::new();
         for (name, raw) in &spec.vars {

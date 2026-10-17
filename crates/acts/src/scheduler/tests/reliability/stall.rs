@@ -82,7 +82,8 @@ async fn waiting_run(engine: &Engine) -> (String, String) {
     )
     .await;
     quiesce(engine).await;
-    (pid, "s1".to_string())
+    let wire = tid_of(&pid, "s1", 0);
+    (pid, wire)
 }
 
 /// [`waiting_run`] under the caller's own pid: the strand cells pin the
@@ -111,7 +112,8 @@ async fn waiting_run_named(engine: &Engine, pid: &str) -> (String, String) {
     )
     .await;
     quiesce(engine).await;
-    (started, "s1".to_string())
+    let wire = tid_of(&started, "s1", 0);
+    (started, wire)
 }
 
 /// Drain every due outbox record and the write-behind queue until a pass finds
@@ -162,11 +164,12 @@ async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
 /// The ascending generations the aggregate holds for one model node: how many
 /// times the node was instantiated. An operation applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node.as_str() == tid)
+        .filter(|id| id.node.as_str() == node)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -175,11 +178,12 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 
 /// The aggregate's state for the newest generation of one model node.
 async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
-    process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node.as_str() == tid)
+        .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -187,11 +191,12 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskStat
 /// The non-terminal operations the aggregate holds for one model node, in
 /// sequence order, as short names: the durable work a cut left for recovery.
 async fn open_shapes(engine: &Engine, pid: &str, tid: &str) -> Vec<&'static str> {
-    let mut open: Vec<(u64, &'static str)> = process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    let mut open: Vec<(u64, &'static str)> = snapshot
         .operations
         .values()
-        .filter(|operation| operation.id.task.node.as_str() == tid && !operation.is_terminal())
+        .filter(|operation| operation.id.task.node.as_str() == node && !operation.is_terminal())
         .map(|operation| (operation.id.sequence, shape(&operation.state)))
         .collect();
     open.sort_by_key(|(sequence, _)| *sequence);
@@ -250,7 +255,7 @@ async fn assert_finished_once(engine: &Engine, pid: &str, tid: &str) {
             "node {node} of {pid} must hold the completion"
         );
     }
-    let (action, propagate) = completion_records(pid, tid);
+    let (action, propagate) = completion_records(pid, "s1");
     assert_eq!(
         records_with_prefix(engine, pid, &action).await,
         1,
@@ -268,7 +273,7 @@ async fn assert_finished_once(engine: &Engine, pid: &str, tid: &str) {
 /// operation. A retry of a stranded operation that re-applied a decision would show
 /// up here as a second generation or a second record.
 async fn assert_still_finished_once(engine: &Engine, pid: &str, tid: &str) {
-    let (action, propagate) = completion_records(pid, tid);
+    let (action, propagate) = completion_records(pid, "s1");
     let what = format!("{pid} to stay finished exactly once");
     poll_until_dumped(
         &what,
@@ -435,7 +440,8 @@ async fn drive_to_end(engine: &Engine, pid: &str, tid: &str) {
                     let _ = kernel.recover(SystemClock.now_ms() + 120_000).await;
                     let _ = kernel.recover(SystemClock.now_ms()).await;
                 } else if let Some(proc) = proc_row(engine, pid).await
-                    && waiting_task(&proc, tid).is_some()
+                    && let Some(task) = proc.task(tid)
+                    && task.state().is_interrupted()
                 {
                     let _ = complete_act(engine, pid, tid).await;
                 }
@@ -872,7 +878,7 @@ async fn a_stalled_operation_is_redriven_by_the_recovery_pass() {
 
 async fn stalled_redriven_inner() {
     let (engine, kv, pid) = stranded_at_claim("strandedpass").await;
-    let tid = "s1".to_string();
+    let tid = tid_of(&pid, "s1", 0);
 
     // The store comes back; the engine keeps running and no client acts again.
     // One round of the engine's own pass — the same scan the driver tick runs —
@@ -931,7 +937,7 @@ async fn a_stalled_operation_is_redriven_by_the_timer() {
 
 async fn stalled_timer_inner() {
     let (engine, kv, pid) = stranded_at_claim("strandedtimer").await;
-    let tid = "s1".to_string();
+    let tid = tid_of(&pid, "s1", 0);
 
     // Heal and wait: the only driver left is the periodic tick, which re-drives
     // the stranded intent on its own.
@@ -981,7 +987,7 @@ async fn a_stalled_operation_survives_a_second_restart() {
 
 async fn second_restart_inner() {
     let (engine_a, kv, pid) = stranded_at_claim("strandedtwice").await;
-    let tid = "s1".to_string();
+    let tid = tid_of(&pid, "s1", 0);
     let store = kv.store();
 
     // The first crash: the completion's claim commit is refused, leaving the
@@ -1098,7 +1104,9 @@ async fn boot_slot_inner() {
 
     // Decide the admitted run's act: it settles and frees the slot, which then
     // admits the parked run that has waited longest — `__created` ascending.
-    complete_act(&engine2, &first, "s1").await.unwrap();
+    complete_act(&engine2, &first, &tid_of(&first, "s1", 0))
+        .await
+        .unwrap();
     wait_completed(&engine2, &first).await;
     let before = snapshot_map(&engine2, &waiting).await;
     let second = wait_admitted(&engine2, &waiting, &before).await;
@@ -1107,7 +1115,9 @@ async fn boot_slot_inner() {
         "a freed slot admits the run that has waited longest"
     );
     waiting.retain(|pid| *pid != second);
-    complete_act(&engine2, &second, "s1").await.unwrap();
+    complete_act(&engine2, &second, &tid_of(&second, "s1", 0))
+        .await
+        .unwrap();
     wait_completed(&engine2, &second).await;
 
     // The last parked run is admitted, and the head run is decided by its own
@@ -1115,7 +1125,9 @@ async fn boot_slot_inner() {
     let before = snapshot_map(&engine2, &waiting).await;
     let third = wait_admitted(&engine2, &waiting, &before).await;
     assert_eq!(third, waiting[0], "the last parked run takes the last seat");
-    complete_act(&engine2, &third, "s1").await.unwrap();
+    complete_act(&engine2, &third, &tid_of(&third, "s1", 0))
+        .await
+        .unwrap();
     wait_completed(&engine2, &third).await;
     complete_act(&engine2, &head, &head_tid).await.unwrap();
     wait_completed(&engine2, &head).await;

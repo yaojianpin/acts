@@ -25,25 +25,21 @@ impl RecoveryEntryDocument {
 }
 
 pub(crate) fn recovery_entry_key(id: &OperationId) -> String {
-    // Byte shape is load-bearing (`hex(pid).hex(node).gen.seq`): existing
-    // stores hold keys in exactly this form, so the typed identity feeds the
-    // same components — the node string and the generation — unchanged.
-    let node = id.task.node.as_str();
+    // C5 (design §3.1): the instance component is the identity's wire —
+    // `sha256(pid, node, gen)[..32]` — so the key is constant-length and the
+    // generation no longer appears as its own component (the wire already
+    // binds it). The wire is pure hex, so it rides the key unescaped between
+    // the two hex components. Keys written before C5 (`hex(pid).hex(node).gen
+    // .seq`) are orphans: the recovery scan reads only the new shape, and the
+    // orphan policy is registered with §11 L1.
+    let wire = id.task.wire(&id.process_id);
     let mut key = String::with_capacity(
-        RECOVERY_ENTRY_KEY_PREFIX.len()
-            + id.process_id.len() * 2
-            + node.len() * 2
-            + 2
-            + 16
-            + 1
-            + 16,
+        RECOVERY_ENTRY_KEY_PREFIX.len() + id.process_id.len() * 2 + 1 + wire.len() + 1 + 16,
     );
     key.push_str(RECOVERY_ENTRY_KEY_PREFIX);
     push_hex(&mut key, id.process_id.as_bytes());
     key.push(COMPONENT_SEPARATOR);
-    push_hex(&mut key, node.as_bytes());
-    key.push(COMPONENT_SEPARATOR);
-    key.push_str(&format_u64(id.task.generation));
+    key.push_str(&wire);
     key.push(COMPONENT_SEPARATOR);
     key.push_str(&format_u64(id.sequence));
     key
@@ -78,20 +74,34 @@ mod tests {
     }
 
     #[test]
-    fn key_order_matches_operation_order() {
-        let mut ids = vec![
+    fn keys_are_injective_and_stable_per_operation() {
+        // C5: the entry key sorts by the wire (a digest), not by the
+        // operation order any more — the property worth pinning is that the
+        // key still separates every (process, node, generation, sequence)
+        // and is stable, so a prefix scan finds each live operation exactly
+        // once.
+        let ids = [
             id("p", "b", 0, 0),
             id("p", "a", 2, 0),
             id("p", "a", 1, 9),
             id("p", "a", 1, 1),
             id("p2", "a", 0, 0),
         ];
-        let mut keys = ids
-            .iter()
-            .map(|id| (recovery_entry_key(id), id.clone()))
-            .collect::<Vec<_>>();
-        ids.sort_by(crate::scheduler::core::recovery::recovery_index::operation_order);
-        keys.sort_by(|left, right| left.0.cmp(&right.0));
-        assert_eq!(keys.into_iter().map(|(_, id)| id).collect::<Vec<_>>(), ids);
+        let keys = ids.iter().map(recovery_entry_key).collect::<Vec<_>>();
+        let mut unique = keys.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len(), "every operation owns its key");
+        for (id, key) in ids.iter().zip(&keys) {
+            assert_eq!(&recovery_entry_key(id), key, "the key is stable");
+        }
+        // The instance component is the constant-length wire (32 hex), so
+        // keys of one process differ only in the digest and sequence slots.
+        for key in &keys {
+            assert!(
+                key.starts_with(RECOVERY_ENTRY_KEY_PREFIX),
+                "{key} carries the recovery prefix"
+            );
+        }
     }
 }

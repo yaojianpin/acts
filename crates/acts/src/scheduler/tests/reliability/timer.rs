@@ -1066,7 +1066,11 @@ async fn a_delivery_stored_after_its_task_closed_is_born_settled_inner() {
     let pid = start_run(&engine, &workflow).await;
     let (named_pid, tid) = finished.recv().await;
     assert_eq!(named_pid, pid, "the message names the run it belongs to");
-    assert_eq!(tid, "s1", "the act of a `uses` step is the step's own node");
+    assert_eq!(
+        tid,
+        tid_of(&pid, "s1", 0),
+        "the act is addressed by its instance's wire"
+    );
 
     // s1's task row is closed before the straggler is emitted
     let what = format!("task {tid} of {pid} to read as closed");
@@ -1105,7 +1109,9 @@ async fn a_delivery_stored_after_its_task_closed_is_born_settled_inner() {
     // and it cannot hold the run out of the sweeper: finishing s2 lets the
     // whole run — this delivery included — be reclaimed
     wait_waiting_task(&engine, &pid, "s2").await;
-    complete_act(&engine, &pid, "s2").await.unwrap();
+    complete_act(&engine, &pid, &tid_of(&pid, "s2", 0))
+        .await
+        .unwrap();
     wait_completed(&engine, &pid).await;
     sweep_until_gone(&engine, &pid).await;
 

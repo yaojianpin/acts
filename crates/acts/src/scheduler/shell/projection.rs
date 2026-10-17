@@ -45,7 +45,6 @@ use crate::{
     utils::consts,
 };
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// The root-scope variable holding the process env a package wrote through
@@ -142,13 +141,15 @@ impl RowProjector {
         self.project_nodes(snapshot, None).await
     }
 
-    /// Project the proc row plus the named nodes' rows; `None` projects every
-    /// node. An operation only changes a handful of executions, so the driver passes
-    /// the ones the commit touched instead of rewriting every row of the run.
+    /// Project the proc row plus the named instances' rows; `None` projects
+    /// every instance. An operation only changes a handful of executions, so
+    /// the driver passes the ones the commit touched instead of rewriting
+    /// every row of the run. Since C5 a row is one *instance* (keyed by
+    /// `pid + wire`), so the touched set carries the instances' wires.
     pub(crate) async fn project_nodes(
         &self,
         snapshot: &ProcessSnapshot,
-        nodes: Option<&std::collections::BTreeSet<String>>,
+        instances: Option<&std::collections::BTreeSet<String>>,
     ) -> Result<()> {
         let Some(model) = model_of(snapshot)? else {
             // An aggregate seeded before the model fact existed: nothing to
@@ -158,42 +159,27 @@ impl RowProjector {
         let mut tree = NodeTree::new();
         tree.load(&model)?;
 
-        // The newest generation of every node is the row's task instance: the
-        // store keys a task by `pid + tid` and the kernel's tid is the model
-        // node id, so one surviving instance may be projected per node.
-        let mut latest: BTreeMap<String, TaskId> = BTreeMap::new();
-        for id in snapshot.tasks.keys() {
-            match latest.get(id.node.as_str()) {
-                Some(current) if current.generation >= id.generation => {}
-                _ => {
-                    latest.insert(id.node.as_str().to_owned(), id.clone());
-                }
-            }
-        }
-
         if self.claim(snapshot, "proc")
             && let Err(error) = self.project_proc(snapshot, &model).await
         {
             self.release(snapshot, "proc");
             return Err(error);
         }
-        for (node_id, task_id) in &latest {
-            if let Some(nodes) = nodes
-                && !nodes.contains(node_id)
+        for task_id in snapshot.tasks.keys() {
+            let wire = task_id.wire(&snapshot.process_id);
+            if let Some(instances) = instances
+                && !instances.contains(&wire)
             {
                 continue;
             }
-            if !self.claim(snapshot, node_id) {
+            if !self.claim(snapshot, &wire) {
                 continue;
             }
-            if let Err(error) = self
-                .project_task(snapshot, &tree, &latest, node_id, task_id)
-                .await
-            {
+            if let Err(error) = self.project_task(snapshot, &tree, task_id, &wire).await {
                 // The claim may not outlive a write that never landed — the
                 // next projection of this version (a retry, a later flush)
                 // must be allowed to write the row.
-                self.release(snapshot, node_id);
+                self.release(snapshot, &wire);
                 return Err(error);
             }
         }
@@ -309,17 +295,18 @@ impl RowProjector {
         &self,
         snapshot: &ProcessSnapshot,
         tree: &NodeTree,
-        latest: &BTreeMap<String, TaskId>,
-        node_id: &str,
         task_id: &TaskId,
+        wire: &str,
     ) -> Result<()> {
         let task = snapshot
             .tasks
             .get(task_id)
             .expect("projected execution must exist");
-        // The root task's tid is `$` while its node is the workflow node the
-        // tree is rooted at (the legacy root row has the same split: `tid =
-        // "$"`, `node_data.id = <model id>`).
+        // The row is one *instance* (C5): its `tid` is the instance's wire,
+        // while `node_data.id` (`nid`) stays the model node — the split the
+        // legacy row already had (`tid = "$"`, `node_data.id = <model id>`
+        // for the root).
+        let node_id = task_id.node.as_str();
         let node = if node_id == consts::TASK_ROOT_TID {
             tree.root()
         } else {
@@ -338,22 +325,24 @@ impl RowProjector {
             return Ok(());
         };
 
-        let row_id = crate::utils::Id::new(&snapshot.process_id, node_id).id();
+        let row_id = crate::utils::Id::new(&snapshot.process_id, wire).id();
         let collection = self.store().tasks();
         let existing = collection.find_opt(&row_id).await?;
         let now = crate::utils::time::time_millis();
         let row = data::Task {
             id: row_id.clone(),
             pid: snapshot.process_id.clone(),
-            tid: node_id.to_string(),
+            tid: wire.to_string(),
             node_data: node.to_string()?,
             kind: node.kind().to_string(),
+            // The model chain (D3): predecessor/successor/parent stay node
+            // ids — they say which *node* follows, not which instance.
             prev: task
                 .predecessors
                 .iter()
                 .max_by_key(|id| id.generation)
                 .map(|id| id.node.as_str().to_owned()),
-            next: successors(snapshot, latest, task_id),
+            next: successors(snapshot, task_id),
             parent: task.parent.as_ref().map(|id| id.node.as_str().to_owned()),
             name: node.name(),
             state: legacy_task_state(task.state).into(),
@@ -377,13 +366,14 @@ impl RowProjector {
         // the legacy writer's close. An un-acked delivery of a finished task
         // can never be acked into anything else, and a row left open would
         // keep the whole run (and its directory) out of the sweeper's reach.
+        // Deliveries key on the message `tid` — the wire since C5.
         let was_terminal = existing
             .as_ref()
             .map(|row| LegacyTaskState::from(row.state.as_str()).is_completed())
             .unwrap_or(false);
         if task.state.is_terminal() && !was_terminal {
             self.store()
-                .close_deliveries(&snapshot.process_id, node_id)
+                .close_deliveries(&snapshot.process_id, wire)
                 .await?;
         }
 
@@ -396,7 +386,7 @@ impl RowProjector {
         let row = data::TaskVars {
             id: row_id.clone(),
             pid: snapshot.process_id.clone(),
-            tid: node_id.to_string(),
+            tid: wire.to_string(),
             data: serde_json::Value::Object(data).to_string(),
             // The aggregate carries no sealed scope: a snapshot seal is a
             // per-effect resolution, not durable run state (see `effects`).
@@ -436,25 +426,19 @@ pub(crate) fn settled(snapshot: &ProcessSnapshot) -> bool {
         })
 }
 
-/// The successor task ids of one execution: every node (newest generation)
-/// that names it a predecessor. Deterministic (sorted).
-fn successors(
-    snapshot: &ProcessSnapshot,
-    latest: &BTreeMap<String, TaskId>,
-    task_id: &TaskId,
-) -> Vec<String> {
-    let mut next: Vec<String> = latest
-        .values()
-        .filter(|id| {
-            snapshot
-                .tasks
-                .get(*id)
-                .map(|task| task.predecessors.contains(task_id))
-                .unwrap_or(false)
-        })
-        .map(|id| id.node.as_str().to_owned())
+/// The model chain following one execution (D3: node ids, not instances):
+/// every instance that names it a predecessor contributes its own node, so a
+/// node with several live generations still names its successor once.
+/// Deterministic (sorted, deduplicated).
+fn successors(snapshot: &ProcessSnapshot, task_id: &TaskId) -> Vec<String> {
+    let mut next: Vec<String> = snapshot
+        .tasks
+        .iter()
+        .filter(|(_, task)| task.predecessors.contains(task_id))
+        .map(|(id, _)| id.node.as_str().to_owned())
         .collect();
     next.sort();
+    next.dedup();
     next
 }
 

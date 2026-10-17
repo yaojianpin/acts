@@ -103,10 +103,11 @@ async fn waiting_timed_run(
         "the message names the run it was created for"
     );
     assert_eq!(
-        step1, "step1",
-        "the act of a `uses` step is the step's own node"
+        step1,
+        tid_of(&pid, "step1", 0),
+        "the act of a `uses` step is the step's own instance"
     );
-    wait_waiting_task(engine, &pid, &step1).await;
+    wait_waiting_task(engine, &pid, "step1").await;
     flush(engine).await;
     (pid, step1, fired)
 }
@@ -490,8 +491,8 @@ async fn each_timeout_branch_fires_once_across_ticks_and_a_restart_inner() {
     let fired2 = created_count(&engine, "msg2");
     let created = capture_created(&engine, "act1");
     let pid = start_run(&engine, &two_timeout_workflow("true")).await;
-    let (_, step1) = expect_created(&created).await;
-    wait_waiting_task(&engine, &pid, &step1).await;
+    let (_, _step1) = expect_created(&created).await;
+    wait_waiting_task(&engine, &pid, "step1").await;
     flush(&engine).await;
 
     // the tick advances one branch per round: the second only after the first
@@ -649,7 +650,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
     // alive, so a stray pass would have something to fire if it looked too hard
     let pid = start_run(&engine, &one_timeout_workflow("$cost() >= 100000")).await;
     let (_, step1) = expect_created(&created).await;
-    wait_waiting_task(&engine, &pid, &step1).await;
+    wait_waiting_task(&engine, &pid, "step1").await;
     flush(&engine).await;
 
     complete_act(&engine, &pid, &step1).await.unwrap();

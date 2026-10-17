@@ -255,6 +255,23 @@ pub(crate) fn tasks_of(proc: &Arc<Process>, nid: &str) -> Vec<Arc<Task>> {
     proc.task_by_nid(nid)
 }
 
+/// The model node an address names: a wire (the C5 instance id) resolves
+/// through the instance it was derived from; anything else is taken as the
+/// node id itself. Aggregate-side helpers use this so a test may pass either
+/// form.
+pub(crate) fn node_of(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    pid: &str,
+    address: &str,
+) -> String {
+    snapshot
+        .tasks
+        .keys()
+        .find(|id| id.wire(pid) == address)
+        .map(|id| id.node.as_str().to_owned())
+        .unwrap_or_else(|| address.to_owned())
+}
+
 /// The waiting task of the node `nid` (`Interrupt`), if it is waiting.
 pub(crate) fn waiting_task(proc: &Arc<Process>, nid: &str) -> Option<Arc<Task>> {
     tasks_of(proc, nid)
@@ -531,6 +548,15 @@ pub(crate) fn capture_complete(engine: &Engine) -> Signal<String> {
 /// fold fails the test instead of hanging the suite (and long enough for the
 /// outbox pass that carries the message under a loaded machine).
 pub(crate) const EXPECT_WAIT: Duration = Duration::from_secs(60);
+
+/// The external id (`tid`) of one instance: the C5 wire of `node`'s
+/// `generation` under `pid` — what messages carry and client actions address
+/// (the node itself is the message's `nid`, unchanged by C5).
+pub(crate) fn tid_of(pid: &str, node: &str, generation: u64) -> String {
+    crate::scheduler::core::model::task_graph::TaskId::new(node, generation)
+        .unwrap()
+        .wire(pid)
+}
 
 /// The `(pid, tid)` a flow must dispatch, failing (never hanging) if it wedges
 /// before it does. Registered *before* the action that triggers the act.

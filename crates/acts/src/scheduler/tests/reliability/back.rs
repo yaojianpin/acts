@@ -61,10 +61,11 @@ async fn waiting_chain(engine: &Engine) -> (String, String) {
         "the message names the run it was created for"
     );
     assert_eq!(
-        step1, "step1",
-        "the act of a `uses` step is the step's own node"
+        step1,
+        tid_of(&pid, "step1", 0),
+        "the act of a `uses` step is the step's own instance"
     );
-    wait_waiting_task(engine, &pid, &step1).await;
+    wait_waiting_task(engine, &pid, "step1").await;
 
     let created = capture_created(engine, "act2");
     complete_act(engine, &pid, &step1).await.unwrap();
@@ -74,10 +75,11 @@ async fn waiting_chain(engine: &Engine) -> (String, String) {
         "the message names the run it was created for"
     );
     assert_eq!(
-        step2, "step2",
-        "the second act is the second step's own node"
+        step2,
+        tid_of(&pid, "step2", 0),
+        "the second act is the second step's own instance"
     );
-    wait_waiting_task(engine, &pid, &step2).await;
+    wait_waiting_task(engine, &pid, "step2").await;
     flush(engine).await;
     (pid, step1)
 }
@@ -106,7 +108,12 @@ async fn finish_by_hand(engine: &Engine, pid: &str) {
         let proc = read_proc(engine, pid).await;
         for node in ["step1", "step2"] {
             if waiting_task(&proc, node).is_some() {
-                let _ = complete_act(engine, pid, node).await;
+                // The waiting act may be a rewind's redo (generation 1), so
+                // both generations get the completion: the terminal one
+                // refuses it, the live one takes it.
+                for generation in 0..=1 {
+                    let _ = complete_act(engine, pid, &tid_of(pid, node, generation)).await;
+                }
             }
         }
         assert!(
@@ -128,10 +135,11 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = super::node_of(&snapshot, pid, tid);
     let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node.as_str() == tid)
+        .filter(|id| id.node.as_str() == node)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -152,10 +160,11 @@ async fn generation_state(
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = super::node_of(&snapshot, pid, tid);
     snapshot
         .tasks
         .iter()
-        .find(|(id, _)| id.node.as_str() == tid && id.generation == generation)
+        .find(|(id, _)| id.node.as_str() == node && id.generation == generation)
         .map(|(_, task)| task.state)
 }
 
@@ -169,10 +178,11 @@ async fn has_unsettled_operation(engine: &Engine, pid: &str, tid: &str) -> bool 
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = super::node_of(&snapshot, pid, tid);
     snapshot
         .operations
         .values()
-        .any(|operation| operation.id.task.node.as_str() == tid && !operation.is_terminal())
+        .any(|operation| operation.id.task.node.as_str() == node && !operation.is_terminal())
 }
 
 /// How many `ReenterTask` operations the aggregate holds for one node: the
@@ -186,11 +196,12 @@ async fn rewind_operations(engine: &Engine, pid: &str, tid: &str) -> usize {
         .await
         .unwrap()
         .expect("the aggregate exists");
+    let node = super::node_of(&snapshot, pid, tid);
     snapshot
         .operations
         .values()
         .filter(|operation| {
-            operation.kind == OperationKind::ReenterTask && operation.id.task.node.as_str() == tid
+            operation.kind == OperationKind::ReenterTask && operation.id.task.node.as_str() == node
         })
         .count()
 }
@@ -246,7 +257,7 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
     // never commits and the source act keeps waiting
     let before = kv.writes();
     kv.cut_at(before + 2);
-    let lost = back_act(&engine, &pid, "step2", &step1).await;
+    let lost = back_act(&engine, &pid, &tid_of(&pid, "step2", 0), "step1").await;
     assert!(
         lost.is_err(),
         "a cut writer must reach the client, got {lost:?}"
@@ -297,11 +308,12 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
     .await;
     // the redone act is dispatched to the client exactly once: it waits, and
     // its announcement is the node's second `Created`
-    wait_waiting_task(&reloaded, &pid, &step1).await;
+    wait_waiting_task(&reloaded, &pid, "step1").await;
     let (announced, redone) = expect_created(&rewind).await;
     assert_eq!(announced, pid, "the replay names its own run");
     assert_eq!(
-        redone, step1,
+        redone,
+        tid_of(&pid, "step1", 1),
         "the replay re-enters the node the client named"
     );
 
@@ -374,7 +386,7 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
     // commit (and the operation that carries it) is the next write of it
     let process = process_key(&pid);
     kv.arm_key(&process);
-    let refused = back_act(&engine, &pid, "step2", &step1).await;
+    let refused = back_act(&engine, &pid, &tid_of(&pid, "step2", 0), "step1").await;
     match &refused {
         Err(ActError::Store(_)) => {}
         other => panic!("the refused durable commit must reach the client, got {other:?}"),
@@ -409,11 +421,14 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
 
     // the healed retry lands one rewind, observed on the redo's own `Created`
     let rewind = capture_created(&engine, "act1");
-    back_act(&engine, &pid, "step2", &step1).await.unwrap();
+    back_act(&engine, &pid, &tid_of(&pid, "step2", 0), "step1")
+        .await
+        .unwrap();
     assert_eq!(kv.fired(), 1, "the one-shot fault must not fire twice");
     let (_, redone) = expect_created(&rewind).await;
     assert_eq!(
-        redone, step1,
+        redone,
+        tid_of(&pid, "step1", 1),
         "the retry re-enters the node the client named"
     );
     assert_eq!(
@@ -472,14 +487,17 @@ async fn a_duplicate_back_is_refused_without_a_second_rewind_inner() {
 
     // the rewind's own `Created`, registered before the back that asks for it
     let rewind = capture_created(&engine, "act1");
-    back_act(&engine, &pid, "step2", &step1).await.unwrap();
+    back_act(&engine, &pid, &tid_of(&pid, "step2", 0), "step1")
+        .await
+        .unwrap();
     let (announced, redone) = expect_created(&rewind).await;
     assert_eq!(announced, pid, "the rewind names its own run");
     assert_eq!(
-        redone, step1,
+        redone,
+        tid_of(&pid, "step1", 1),
         "the rewind re-enters the node the client named"
     );
-    wait_waiting_task(&engine, &pid, &step1).await;
+    wait_waiting_task(&engine, &pid, "step1").await;
 
     // the redo's forward act exists but has not run: this is what the
     // duplicate will be resolved against
@@ -492,7 +510,7 @@ async fn a_duplicate_back_is_refused_without_a_second_rewind_inner() {
     // every later `Created` of the node is observed: the duplicate must not
     // announce one
     let extra = capture_created(&engine, "act1");
-    let duplicate = back_act(&engine, &pid, "step2", &step1).await;
+    let duplicate = back_act(&engine, &pid, &tid_of(&pid, "step2", 0), "step1").await;
     assert!(
         duplicate.is_err(),
         "a duplicate back must be refused, got {duplicate:?}"
@@ -561,9 +579,10 @@ async fn back_racing_complete_converges_on_one_terminal_decision_inner() {
 
         // the race: both deliveries target the same waiting act at once
         let rewind = capture_created(&engine, "act1");
+        let step2 = tid_of(&pid, "step2", 0);
         let (back, next) = tokio::join!(
-            back_act(&engine, &pid, "step2", &step1),
-            complete_act(&engine, &pid, "step2"),
+            back_act(&engine, &pid, &step2, "step1"),
+            complete_act(&engine, &pid, &step2),
         );
         assert!(
             back.is_ok() ^ next.is_ok(),
@@ -576,7 +595,8 @@ async fn back_racing_complete_converges_on_one_terminal_decision_inner() {
         if rewound {
             let (_, tid) = expect_created(&rewind).await;
             assert_eq!(
-                tid, step1,
+                tid,
+                tid_of(&pid, "step1", 1),
                 "round {round}: a winning back re-enters the named step"
             );
         } else {

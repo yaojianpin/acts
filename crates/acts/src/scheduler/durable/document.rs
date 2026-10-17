@@ -2,7 +2,7 @@ use crate::scheduler::{
     core::commit::aggregate::ProcessSnapshot,
     durable::{
         envelope::{EnvelopeError, ProcessEnvelope},
-        snapshot_codec::{SnapshotCodecError, SnapshotCodecV2},
+        snapshot_codec::{SnapshotCodecError, SnapshotCodecV2, SnapshotCodecV3},
     },
 };
 
@@ -11,6 +11,12 @@ use std::fmt;
 /// The only supported conversion between a domain aggregate and persisted
 /// document bytes. Repositories must not compose envelope and payload codecs
 /// themselves because doing so would allow validation steps to drift.
+///
+/// Writes are V3 (the versioned identity: every instance carries its wire).
+/// Reads accept V2 as well — the C5 upcast: a V2 document holds the same
+/// node strings and generations, so its instances derive the identical wire
+/// (`instance id := 该代 node 的 wire`, degenerate equivalence, behavior
+/// unchanged), and nothing else in the layout moved.
 pub(crate) struct ProcessDocumentCodec;
 
 impl ProcessDocumentCodec {
@@ -18,14 +24,17 @@ impl ProcessDocumentCodec {
         snapshot
             .validate()
             .map_err(SnapshotCodecError::InvalidProcess)?;
-        let payload = SnapshotCodecV2::encode(snapshot)?;
+        let payload = SnapshotCodecV3::encode(snapshot)?;
         let sealed = ProcessEnvelope::seal(payload).encode()?;
         Ok(sealed)
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<ProcessSnapshot, ProcessDocumentError> {
         let envelope = ProcessEnvelope::decode(bytes)?;
-        let snapshot = SnapshotCodecV2::decode(&envelope.payload)?;
+        let snapshot = match SnapshotCodecV3::decode(&envelope.payload) {
+            Err(SnapshotCodecError::InvalidMagic) => SnapshotCodecV2::decode(&envelope.payload)?,
+            other => other?,
+        };
         snapshot
             .validate()
             .map_err(SnapshotCodecError::InvalidProcess)?;
@@ -144,5 +153,19 @@ mod tests {
                 SnapshotCodecError::InvalidMagic
             )),
         );
+    }
+
+    /// The C5 upcast, at the boundary production loads through: a document an
+    /// earlier kernel wrote (V2 payload — node string + generation, no wire)
+    /// still decodes, and its instances derive the identical wire, so the
+    /// loaded aggregate is value-equal to what a V3 write would produce.
+    #[test]
+    fn v2_documents_upcast_to_the_loaded_snapshot() {
+        use crate::scheduler::durable::snapshot_codec::SnapshotCodecV2;
+        let source = snapshot();
+        let v2 = ProcessEnvelope::seal(SnapshotCodecV2::encode(&source).unwrap())
+            .encode()
+            .unwrap();
+        assert_eq!(ProcessDocumentCodec::decode(&v2).unwrap(), source);
     }
 }

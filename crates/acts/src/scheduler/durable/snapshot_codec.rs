@@ -14,15 +14,31 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 const PAYLOAD_MAGIC: &[u8; 8] = b"ACTSPV2\0";
+const PAYLOAD_MAGIC_V3: &[u8; 8] = b"ACTSPV3\0";
 const MIN_EXECUTION_BYTES: usize = 4 + 8 + 4 + 1 + 4 + 1 + 8;
 const MIN_EXECUTION_ID_BYTES: usize = 4 + 8;
 const MIN_VARIABLE_BYTES: usize = MIN_EXECUTION_ID_BYTES + 4 + 4;
 const MIN_OPERATION_BYTES: usize = 4 + 4 + 8 + 8 + 1 + 1 + 8;
 const MIN_OUTBOX_FIELD_BYTES: usize = 4;
 
+// V3 (C5, design §3.1): every identity carries its wire — the rendered
+// instance id `sha256(pid, node, gen)[..32]` — next to the node string and
+// the generation, so a document states the external id its instances were
+// written under instead of leaving it to a derivation. One extra length
+// prefix per id-bearing minimum.
+const MIN_EXECUTION_BYTES_V3: usize = MIN_EXECUTION_BYTES + 4;
+const MIN_EXECUTION_ID_BYTES_V3: usize = 4 + 4 + 8;
+const MIN_VARIABLE_BYTES_V3: usize = MIN_EXECUTION_ID_BYTES_V3 + 4 + 4;
+const MIN_OPERATION_BYTES_V3: usize = MIN_OPERATION_BYTES + 4;
+
 pub(crate) struct SnapshotCodecV2;
 
 impl SnapshotCodecV2 {
+    /// The V2 writer. Production writes V3 (the versioned identity); this
+    /// writer survives only as the test fixture builder for the upcast — V2
+    /// documents an earlier kernel wrote must keep loading through
+    /// [`SnapshotCodecV2::decode`].
+    #[cfg(test)]
     pub(crate) fn encode(snapshot: &ProcessSnapshot) -> Result<Vec<u8>, SnapshotCodecError> {
         snapshot
             .validate()
@@ -173,6 +189,165 @@ impl SnapshotCodecV2 {
     }
 }
 
+/// The C5 document format: V2's layout plus the identity's wire on every
+/// `TaskId` and `OperationId.task` (design §3.1). The stored wire is the
+/// instance id as rendered at write time; the `TaskId` itself still rebuilds
+/// from the node string and the generation, and the derivation is pure, so
+/// the two agree by construction — decode never recomputes the digest (the
+/// read path stays one string parse per id).
+pub(crate) struct SnapshotCodecV3;
+
+impl SnapshotCodecV3 {
+    pub(crate) fn encode(snapshot: &ProcessSnapshot) -> Result<Vec<u8>, SnapshotCodecError> {
+        snapshot
+            .validate()
+            .map_err(SnapshotCodecError::InvalidProcess)?;
+        let mut writer = Writer::default();
+        writer.raw(PAYLOAD_MAGIC_V3);
+        writer.string(&snapshot.process_id)?;
+        writer.u64(snapshot.version.graph);
+        writer.u64(snapshot.version.process);
+        writer.u64(snapshot.version.operations);
+
+        let mut tasks = snapshot.tasks.iter().collect::<Vec<_>>();
+        tasks.sort_by_key(|(id, _)| *id);
+        writer.count(tasks.len())?;
+        for (id, value) in tasks {
+            writer.wire_task_id(id, &snapshot.process_id)?;
+            writer.string(value.model_node.as_str())?;
+            writer.wire_optional_task(value.parent.as_ref(), &snapshot.process_id)?;
+            let mut predecessors = value.predecessors.clone();
+            predecessors.sort();
+            writer.count(predecessors.len())?;
+            for predecessor in &predecessors {
+                writer.wire_task_id(predecessor, &snapshot.process_id)?;
+            }
+            writer.u8(task_state_tag(value.state));
+            writer.u64(value.revision);
+        }
+
+        writer.count(snapshot.variables.len())?;
+        for ((scope, name), value) in &snapshot.variables {
+            writer.wire_task_id(scope, &snapshot.process_id)?;
+            writer.string(name)?;
+            writer.string(value)?;
+        }
+
+        let mut operations = snapshot.operations.values().collect::<Vec<_>>();
+        operations.sort_by(|left, right| operation_id_order(&left.id, &right.id));
+        writer.count(operations.len())?;
+        for operation in operations {
+            writer.wire_operation(operation)?;
+        }
+
+        let mut outbox = snapshot.outbox.values().collect::<Vec<_>>();
+        outbox.sort_by(|left, right| left.id.cmp(&right.id));
+        writer.count(outbox.len())?;
+        for record in outbox {
+            let bytes = crate::scheduler::core::outbox::outbox_codec::OutboxCodec::encode(record)
+                .map_err(|error| SnapshotCodecError::InvalidOutbox(error.to_string()))?;
+            writer.bytes(&bytes)?;
+        }
+        Ok(writer.bytes)
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Result<ProcessSnapshot, SnapshotCodecError> {
+        let mut reader = Reader::new(bytes);
+        if reader.raw(PAYLOAD_MAGIC_V3.len())? != PAYLOAD_MAGIC_V3 {
+            return Err(SnapshotCodecError::InvalidMagic);
+        }
+        let process_id = reader.string()?;
+        let version = ProcessVersion {
+            graph: reader.u64()?,
+            process: reader.u64()?,
+            operations: reader.u64()?,
+        };
+
+        let task_count = reader.count_bounded(MIN_EXECUTION_BYTES_V3)?;
+        let mut tasks = HashMap::with_capacity(task_count);
+        for _ in 0..task_count {
+            let id = reader.wire_task_id()?;
+            let model_node =
+                NodeId::parse(reader.string()?).map_err(|_| SnapshotCodecError::InvalidNodeId)?;
+            let parent = reader.wire_optional_task()?;
+            let predecessor_count = reader.count_bounded(MIN_EXECUTION_ID_BYTES_V3)?;
+            let mut predecessors = Vec::with_capacity(predecessor_count);
+            for _ in 0..predecessor_count {
+                predecessors.push(reader.wire_task_id()?);
+            }
+            let state = decode_task_state(reader.u8()?)?;
+            let revision = reader.u64()?;
+            if tasks
+                .insert(
+                    id.clone(),
+                    TaskSnapshot {
+                        model_node,
+                        parent,
+                        predecessors,
+                        state,
+                        revision,
+                    },
+                )
+                .is_some()
+            {
+                return Err(SnapshotCodecError::DuplicateTask(id));
+            }
+        }
+
+        let variable_count = reader.count_bounded(MIN_VARIABLE_BYTES_V3)?;
+        let mut variables = BTreeMap::new();
+        for _ in 0..variable_count {
+            let scope = reader.wire_task_id()?;
+            let name = reader.string()?;
+            let value = reader.string()?;
+            if variables
+                .insert((scope.clone(), name.clone()), value)
+                .is_some()
+            {
+                return Err(SnapshotCodecError::DuplicateVariable(scope, name));
+            }
+        }
+
+        let operation_count = reader.count_bounded(MIN_OPERATION_BYTES_V3)?;
+        let mut operations = HashMap::with_capacity(operation_count);
+        for _ in 0..operation_count {
+            let operation = reader.wire_operation()?;
+            if operations
+                .insert(operation.id.clone(), operation.clone())
+                .is_some()
+            {
+                return Err(SnapshotCodecError::DuplicateOperation(operation.id));
+            }
+        }
+
+        let outbox_count = reader.count_bounded(MIN_OUTBOX_FIELD_BYTES)?;
+        let mut outbox = HashMap::with_capacity(outbox_count);
+        for _ in 0..outbox_count {
+            let record =
+                crate::scheduler::core::outbox::outbox_codec::OutboxCodec::decode(reader.bytes()?)
+                    .map_err(|error| SnapshotCodecError::InvalidOutbox(error.to_string()))?;
+            if outbox.insert(record.id.clone(), record.clone()).is_some() {
+                return Err(SnapshotCodecError::DuplicateOutboxKey(record.id.key));
+            }
+        }
+        if !reader.is_finished() {
+            return Err(SnapshotCodecError::TrailingBytes);
+        }
+        let snapshot = ProcessSnapshot {
+            process_id,
+            version,
+            tasks,
+            variables,
+            operations,
+            outbox,
+        };
+        snapshot
+            .validate()
+            .map_err(SnapshotCodecError::InvalidProcess)?;
+        Ok(snapshot)
+    }
+}
+
 #[derive(Default)]
 struct Writer {
     bytes: Vec<u8>,
@@ -207,11 +382,15 @@ impl Writer {
         self.raw(value.as_bytes());
         Ok(())
     }
+    /// The V2 id shapes — the fixture writer's vocabulary only ([`SnapshotCodecV2::encode`]
+    /// is `cfg(test)`); production writes the wire-shaped ids below.
+    #[cfg(test)]
     fn task_id(&mut self, id: &TaskId) -> Result<(), SnapshotCodecError> {
         self.string(id.node.as_str())?;
         self.u64(id.generation);
         Ok(())
     }
+    #[cfg(test)]
     fn optional_task(&mut self, id: Option<&TaskId>) -> Result<(), SnapshotCodecError> {
         match id {
             Some(id) => {
@@ -222,8 +401,37 @@ impl Writer {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn operation_id(&mut self, id: &OperationId) -> Result<(), SnapshotCodecError> {
         self.string(&id.process_id)?;
+        self.string(id.task.node.as_str())?;
+        self.u64(id.task.generation);
+        self.u64(id.sequence);
+        Ok(())
+    }
+    fn wire_task_id(&mut self, id: &TaskId, process_id: &str) -> Result<(), SnapshotCodecError> {
+        self.string(&id.wire(process_id))?;
+        self.string(id.node.as_str())?;
+        self.u64(id.generation);
+        Ok(())
+    }
+    fn wire_optional_task(
+        &mut self,
+        id: Option<&TaskId>,
+        process_id: &str,
+    ) -> Result<(), SnapshotCodecError> {
+        match id {
+            Some(id) => {
+                self.u8(1);
+                self.wire_task_id(id, process_id)?;
+            }
+            None => self.u8(0),
+        }
+        Ok(())
+    }
+    fn wire_operation_id(&mut self, id: &OperationId) -> Result<(), SnapshotCodecError> {
+        self.string(&id.process_id)?;
+        self.string(&id.task.wire(&id.process_id))?;
         self.string(id.task.node.as_str())?;
         self.u64(id.task.generation);
         self.u64(id.sequence);
@@ -240,11 +448,24 @@ impl Writer {
         self.u64(commit.process_version);
         self.string(&commit.digest)
     }
+    #[cfg(test)]
     fn operation(&mut self, operation: &OperationRecord) -> Result<(), SnapshotCodecError> {
         self.operation_id(&operation.id)?;
         self.u8(operation_kind_tag(operation.kind));
         self.u64(operation.revision);
-        match &operation.state {
+        self.operation_state(&operation.state)
+    }
+
+    fn wire_operation(&mut self, operation: &OperationRecord) -> Result<(), SnapshotCodecError> {
+        self.wire_operation_id(&operation.id)?;
+        self.u8(operation_kind_tag(operation.kind));
+        self.u64(operation.revision);
+        self.operation_state(&operation.state)
+    }
+
+    /// The lifecycle state both document versions encode identically.
+    fn operation_state(&mut self, state: &OperationState) -> Result<(), SnapshotCodecError> {
+        match state {
             OperationState::Pending => self.u8(0),
             OperationState::Claimed(claim) => {
                 self.u8(1);
@@ -366,6 +587,31 @@ impl<'a> Reader<'a> {
             sequence: self.u64()?,
         })
     }
+    /// The V3 identity: the wire string rides along (the instance id as
+    /// rendered at write time) but the `TaskId` rebuilds from the node string
+    /// and the generation — the derivation is pure, so the two agree by
+    /// construction, and the read path never recomputes the digest.
+    fn wire_task_id(&mut self) -> Result<TaskId, SnapshotCodecError> {
+        let _wire = self.string()?;
+        TaskId::new(self.string()?, self.u64()?).map_err(|_| SnapshotCodecError::InvalidTaskId)
+    }
+    fn wire_optional_task(&mut self) -> Result<Option<TaskId>, SnapshotCodecError> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.wire_task_id()?)),
+            value => Err(SnapshotCodecError::InvalidTag(value)),
+        }
+    }
+    fn wire_operation_id(&mut self) -> Result<OperationId, SnapshotCodecError> {
+        let process_id = self.string()?;
+        let _wire = self.string()?;
+        Ok(OperationId {
+            process_id,
+            task: TaskId::new(self.string()?, self.u64()?)
+                .map_err(|_| SnapshotCodecError::InvalidTaskId)?,
+            sequence: self.u64()?,
+        })
+    }
     fn claim(&mut self) -> Result<ClaimToken, SnapshotCodecError> {
         Ok(ClaimToken {
             owner: self.string()?,
@@ -384,7 +630,29 @@ impl<'a> Reader<'a> {
         let id = self.operation_id()?;
         let kind = decode_operation_kind(self.u8()?)?;
         let revision = self.u64()?;
-        let state = match self.u8()? {
+        Ok(OperationRecord {
+            id,
+            kind,
+            state: self.operation_state()?,
+            revision,
+        })
+    }
+
+    fn wire_operation(&mut self) -> Result<OperationRecord, SnapshotCodecError> {
+        let id = self.wire_operation_id()?;
+        let kind = decode_operation_kind(self.u8()?)?;
+        let revision = self.u64()?;
+        Ok(OperationRecord {
+            id,
+            kind,
+            state: self.operation_state()?,
+            revision,
+        })
+    }
+
+    /// The lifecycle state both document versions encode identically.
+    fn operation_state(&mut self) -> Result<OperationState, SnapshotCodecError> {
+        Ok(match self.u8()? {
             0 => OperationState::Pending,
             1 => OperationState::Claimed(self.claim()?),
             2 => OperationState::CommitPrepared(self.claim()?),
@@ -403,12 +671,6 @@ impl<'a> Reader<'a> {
             },
             8 => OperationState::Completed(self.commit()?),
             value => return Err(SnapshotCodecError::InvalidTag(value)),
-        };
-        Ok(OperationRecord {
-            id,
-            kind,
-            state,
-            revision,
         })
     }
     fn is_finished(&self) -> bool {
@@ -590,8 +852,8 @@ mod tests {
     #[test]
     fn round_trip_preserves_complete_domain_snapshot() {
         let source = snapshot();
-        let encoded = SnapshotCodecV2::encode(&source).unwrap();
-        assert_eq!(SnapshotCodecV2::decode(&encoded).unwrap(), source);
+        let encoded = SnapshotCodecV3::encode(&source).unwrap();
+        assert_eq!(SnapshotCodecV3::decode(&encoded).unwrap(), source);
     }
 
     #[test]
@@ -612,21 +874,21 @@ mod tests {
         reordered.variables = source.variables.clone();
         reordered.outbox = source.outbox.clone();
         assert_eq!(
-            SnapshotCodecV2::encode(&source).unwrap(),
-            SnapshotCodecV2::encode(&reordered).unwrap()
+            SnapshotCodecV3::encode(&source).unwrap(),
+            SnapshotCodecV3::encode(&reordered).unwrap()
         );
     }
 
     #[test]
     fn truncated_and_trailing_payloads_are_rejected() {
-        let encoded = SnapshotCodecV2::encode(&snapshot()).unwrap();
+        let encoded = SnapshotCodecV3::encode(&snapshot()).unwrap();
         for length in 0..encoded.len() {
-            assert!(SnapshotCodecV2::decode(&encoded[..length]).is_err());
+            assert!(SnapshotCodecV3::decode(&encoded[..length]).is_err());
         }
         let mut trailing = encoded;
         trailing.push(0);
         assert_eq!(
-            SnapshotCodecV2::decode(&trailing),
+            SnapshotCodecV3::decode(&trailing),
             Err(SnapshotCodecError::TrailingBytes)
         );
     }
@@ -634,29 +896,52 @@ mod tests {
     #[test]
     fn decoded_snapshot_passes_repository_validation_boundary() {
         let decoded =
-            SnapshotCodecV2::decode(&SnapshotCodecV2::encode(&snapshot()).unwrap()).unwrap();
+            SnapshotCodecV3::decode(&SnapshotCodecV3::encode(&snapshot()).unwrap()).unwrap();
         let mut repository = MemoryProcessRepository::default();
         repository.insert_for_test(decoded).unwrap();
         assert!(repository.load("p").unwrap().is_some());
     }
     #[test]
     fn impossible_task_count_is_rejected_before_allocation() {
-        let mut encoded = SnapshotCodecV2::encode(&snapshot()).unwrap();
+        let mut encoded = SnapshotCodecV3::encode(&snapshot()).unwrap();
         let process_length = usize::try_from(encoded_u32(&encoded, 8)).unwrap();
         let task_count_offset = 12 + process_length + 24;
         encoded[task_count_offset..task_count_offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(
-            SnapshotCodecV2::decode(&encoded),
+            SnapshotCodecV3::decode(&encoded),
             Err(SnapshotCodecError::Truncated)
         );
     }
+    /// The V3 golden (C5): the frozen wire format once the identity carries
+    /// its wire. The V2 golden this test replaced (286 bytes,
+    /// `26dc1279e7f4eddd825ee0c655877f26236ad360ba3ae62adcfac54168b7e693`)
+    /// is preserved one test down as the upcast anchor.
     #[test]
     fn snapshot_wire_format_matches_golden_fingerprint() {
-        let encoded = SnapshotCodecV2::encode(&snapshot()).unwrap();
+        let encoded = SnapshotCodecV3::encode(&snapshot()).unwrap();
+        assert_eq!(encoded.len(), 502);
+        assert_eq!(
+            crate::scheduler::core::commit::aggregate::sha256_hex(&encoded),
+            "4887924dd93a41c07aa4518a2da3a19f85e48073ec243d299cae3d66219ff83a"
+        );
+    }
+    /// The upcast anchor: the V2 bytes are exactly what the pre-C5 kernel
+    /// wrote (the old golden, unchanged), the V2 reader still loads them, and
+    /// the V3 reader refuses them only by magic — which is what
+    /// `ProcessDocumentCodec::decode` falls back on (document.rs).
+    #[test]
+    fn v2_documents_still_decode() {
+        let source = snapshot();
+        let encoded = SnapshotCodecV2::encode(&source).unwrap();
         assert_eq!(encoded.len(), 286);
         assert_eq!(
             crate::scheduler::core::commit::aggregate::sha256_hex(&encoded),
             "26dc1279e7f4eddd825ee0c655877f26236ad360ba3ae62adcfac54168b7e693"
+        );
+        assert_eq!(SnapshotCodecV2::decode(&encoded).unwrap(), source);
+        assert_eq!(
+            SnapshotCodecV3::decode(&encoded),
+            Err(SnapshotCodecError::InvalidMagic)
         );
     }
 }

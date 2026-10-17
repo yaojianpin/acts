@@ -278,7 +278,9 @@ pub(super) fn process_message(
         .unwrap_or(crate::MessageState::None);
     crate::Message {
         id: crate::utils::longid(),
-        tid: crate::utils::consts::TASK_ROOT_TID.to_string(),
+        // `tid` is the root instance's wire (C5); `nid` stays the model root
+        // node (`$`), the split every other message carries.
+        tid: root.wire(&snapshot.process_id),
         r#type: "workflow".to_string(),
         state,
         pid: snapshot.process_id.clone(),

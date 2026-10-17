@@ -1098,15 +1098,11 @@ impl KernelHost {
                 operation: intent.operation.clone(),
             });
         }
-        let task_id = Self::action_target(snapshot, node, action)?;
+        let task_id = Self::action_target(snapshot, process_id, node, action)?;
         let mut sequence = snapshot
             .operations
             .keys()
-            .filter(|id| {
-                id.process_id == process_id
-                    && id.task.node.as_str() == node
-                    && id.task.generation == task_id.generation
-            })
+            .filter(|id| id.process_id == process_id && id.task == task_id)
             .map(|id| id.sequence)
             .max()
             .unwrap_or(0)
@@ -1116,11 +1112,7 @@ impl KernelHost {
                 task: task_id.clone(),
                 operation: OperationId {
                     process_id: process_id.into(),
-                    task: crate::scheduler::core::model::task_graph::TaskId::new(
-                        node,
-                        task_id.generation,
-                    )
-                    .map_err(runtime)?,
+                    task: task_id.clone(),
                     sequence,
                 },
             };
@@ -1137,34 +1129,31 @@ impl KernelHost {
 
     /// The execution one client action on `task_id` names.
     ///
-    /// The kernel's action surface is *node*-addressed — a message carries the
-    /// model node id (`tid`), never an execution instance — so the node's
-    /// newest generation is what the action means, and a node with a single
-    /// live generation behaves exactly as it always has.
-    ///
-    /// A run may hold several generations of one node at once, though: a
-    /// `uses`-param container instantiates its template — and so the same act
-    /// node — once per `in` item, and a chained `sequence` admits item `i+1`
-    /// as `Created` while item `i` waits. The action therefore takes the
-    /// **newest generation that can accept it**: the client is asked once per
-    /// item (one `Created` message each, and one process's handlers run in
-    /// emission order), so answering each message decides the next instance
-    /// rather than being refused by a sibling that is not there yet. The
-    /// legacy engine's per-item act carried a fresh id instead, and the
-    /// kernel's node identity cannot tell the instances apart — see the
-    /// registered boundary on node-addressed actions in
-    /// `KERNEL_CUTOVER_NOTES.md`.
-    ///
-    /// With no generation that can take it, the newest is named anyway, so the
-    /// preflight answers the refusal the caller earned (a duplicate delivery, a
-    /// decision on a settled node) rather than a missing execution.
+    /// The action surface is addressed by the `tid` a message carried — since
+    /// C5 that is the instance's wire (`sha256(pid, node, gen)[..32]`), so a
+    /// client answering one instance's message decides *that* instance, not
+    /// whatever sibling happens to be the node's newest generation. The
+    /// selection itself is untouched (§11 C4/C5): the newest generation that
+    /// can accept the action wins, and with no generation that can take it,
+    /// the newest is named anyway so the preflight answers the refusal the
+    /// caller earned (a duplicate delivery, a decision on a settled node)
+    /// rather than a missing execution. The legacy engine's per-item act
+    /// carried a fresh id, and the kernel's pre-C5 node identity could not
+    /// tell the instances apart — see the registered boundary on
+    /// node-addressed actions in `KERNEL_CUTOVER_NOTES.md`.
     fn action_target(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        process_id: &str,
         node: &str,
         action: &crate::scheduler::core::commit::command::ActionKind,
     ) -> Result<crate::scheduler::core::model::task_graph::TaskId> {
         use crate::scheduler::core::commit::command::action_allowed;
-        let generations = || snapshot.tasks.keys().filter(|id| id.node.as_str() == node);
+        let generations = || {
+            snapshot
+                .tasks
+                .keys()
+                .filter(|id| id.wire(process_id) == node)
+        };
         generations()
             .filter(|id| action_allowed(snapshot.tasks[*id].state, action))
             .max_by_key(|id| id.generation)
@@ -1552,7 +1541,9 @@ impl KernelHost {
             serde_json::json!({
                 crate::utils::consts::STEP_NODE_ID: node_id,
                 crate::utils::consts::STEP_NODE_NAME: name,
-                crate::utils::consts::STEP_TASK_ID: node_id,
+                // The instance's external id — the wire since C5 (the legacy
+                // `$step.task_id` was the legacy task's own id, not the node).
+                crate::utils::consts::STEP_TASK_ID: task_id.wire(&snapshot.process_id),
             }),
         );
         if let Some(model) = model_of(snapshot)? {
@@ -1569,6 +1560,7 @@ impl KernelHost {
         inputs.insert(crate::utils::consts::ACT_OPTIONS_KEY.to_string(), options);
 
         let mut payload = serde_json::json!({
+            "tid": task_id.wire(&snapshot.process_id),
             "nid": node_id,
             "name": name,
             "uses": uses,
@@ -1619,6 +1611,7 @@ impl KernelHost {
             }),
         );
         let mut payload = serde_json::json!({
+            "tid": task_id.wire(&snapshot.process_id),
             "nid": node,
             "name": name,
             "kind": kind,
@@ -1664,6 +1657,7 @@ impl KernelHost {
         Ok(scope::ScopeSpec {
             process_id: snapshot.process_id.clone(),
             node: task_id.node.as_str().to_owned(),
+            task_id: task_id.clone(),
             model,
             vars: scope_vars(snapshot, task_id),
             env: projection::env_map(snapshot)?,

@@ -45,7 +45,11 @@ async fn waiting_run(engine: &Engine) -> (String, String) {
         announced, pid,
         "the message names the run it was created for"
     );
-    assert_eq!(tid, "s1", "the act of a `uses` step is the step's own node");
+    assert_eq!(
+        tid,
+        tid_of(&pid, "s1", 0),
+        "the act is addressed by its instance's wire"
+    );
     wait_waiting_task(engine, &pid, "s1").await;
     flush(engine).await;
     (pid, tid)
@@ -62,7 +66,7 @@ async fn waiting_head(engine: &Engine) -> (String, String) {
         announced, pid,
         "the message names the run it was created for"
     );
-    wait_waiting_task(engine, &pid, &step1).await;
+    wait_waiting_task(engine, &pid, "step1").await;
     flush(engine).await;
     (pid, step1)
 }
@@ -79,12 +83,12 @@ async fn waiting_chain(engine: &Engine) -> (String, String) {
         announced, pid,
         "the message names the run it was created for"
     );
-    wait_waiting_task(engine, &pid, &step1).await;
+    wait_waiting_task(engine, &pid, "step1").await;
 
     let created = capture_created(engine, "act2");
     complete_act(engine, &pid, &step1).await.unwrap();
-    let (_, step2) = expect_created(&created).await;
-    wait_waiting_task(engine, &pid, &step2).await;
+    let (_, _step2) = expect_created(&created).await;
+    wait_waiting_task(engine, &pid, "step2").await;
     flush(engine).await;
     (pid, step1)
 }
@@ -111,7 +115,7 @@ async fn finish_chain(engine: &Engine, pid: &str) {
             };
             for node in ["step1", "step2"] {
                 if waiting_task(&proc, node).is_some() {
-                    let _ = complete_act(engine, pid, node).await;
+                    let _ = complete_act(engine, pid, &tid_of(pid, node, 0)).await;
                 }
             }
             false
@@ -143,11 +147,12 @@ async fn process_snapshot(
 /// The ascending generations the aggregate holds for one model node: how many
 /// times the node was instantiated. An operation applied twice adds one.
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
-    let mut generations: Vec<u64> = process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node.as_str() == tid)
+        .filter(|id| id.node.as_str() == node)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -156,11 +161,12 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
 
 /// The aggregate's state for the newest generation of one model node.
 async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
-    process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    snapshot
         .tasks
         .iter()
-        .filter(|(id, _)| id.node.as_str() == tid)
+        .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
 }
@@ -168,11 +174,12 @@ async fn decided_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskStat
 /// The non-terminal operations the aggregate holds for one model node, in
 /// sequence order: the durable intent a crash left for recovery to drive.
 async fn open_operations(engine: &Engine, pid: &str, tid: &str) -> Vec<OperationState> {
-    let mut open: Vec<(u64, OperationState)> = process_snapshot(engine, pid)
-        .await
+    let snapshot = process_snapshot(engine, pid).await;
+    let node = super::node_of(&snapshot, pid, tid);
+    let mut open: Vec<(u64, OperationState)> = snapshot
         .operations
         .values()
-        .filter(|operation| operation.id.task.node.as_str() == tid && !operation.is_terminal())
+        .filter(|operation| operation.id.task.node.as_str() == node && !operation.is_terminal())
         .map(|operation| (operation.id.sequence, operation.state.clone()))
         .collect();
     open.sort_by_key(|(sequence, _)| *sequence);
@@ -211,17 +218,20 @@ async fn records_with_prefix(engine: &Engine, pid: &str, prefix: &str) -> usize 
 
 /// The completion operation's key family for one act: one `action` record for the
 /// decision and one `propagate` record for the operation it set off.
-fn completion_records(pid: &str, tid: &str) -> (String, String) {
+fn completion_records(pid: &str, node: &str) -> (String, String) {
+    // The outbox keys carry the model node and the generation (not the
+    // instance wire), so the prefixes are built from the node.
     (
-        format!("action:{pid}:{tid}:"),
-        format!("propagate:{pid}:{tid}:"),
+        format!("action:{pid}:{node}:"),
+        format!("propagate:{pid}:{node}:"),
     )
 }
 
 /// The completion landed exactly once: one execution for the act, and exactly
 /// one record per operation of the decision.
 async fn assert_completion_once(engine: &Engine, pid: &str, tid: &str) {
-    let (action_prefix, propagate_prefix) = completion_records(pid, tid);
+    let node = super::node_of(&process_snapshot(engine, pid).await, pid, tid);
+    let (action_prefix, propagate_prefix) = completion_records(pid, &node);
     assert_eq!(
         generations(engine, pid, tid).await,
         vec![0],
@@ -345,9 +355,10 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
         .map(|(tid, _)| tid)
         .collect();
     tids.sort();
+    let mut expected_tids = vec![tid_of(&pid, "$", 0), tid.clone()];
+    expected_tids.sort();
     assert_eq!(
-        tids,
-        vec![utils::consts::TASK_ROOT_TID.to_string(), tid.clone()],
+        tids, expected_tids,
         "the run's projection must hold exactly one row per node"
     );
 
@@ -380,7 +391,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
     );
     if let Some(proc) = proc_row(&reloaded, &pid).await {
         assert!(
-            waiting_task(&proc, &tid).is_none(),
+            waiting_task(&proc, "s1").is_none(),
             "a reload must never resurrect the completed act as waiting"
         );
     }
@@ -478,9 +489,10 @@ async fn racing_completes_converge_on_one_decision_and_one_effect_inner() {
             .map(|(tid, _)| tid)
             .collect();
         tids.sort();
+        let mut expected_tids = vec![tid_of(&pid, "$", 0), tid.clone()];
+        expected_tids.sort();
         assert_eq!(
-            tids,
-            vec![utils::consts::TASK_ROOT_TID.to_string(), tid.clone()],
+            tids, expected_tids,
             "round {round}: one row per node, no duplicate from a racer"
         );
 
@@ -677,7 +689,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                     "the act must still wait for a decision that never landed"
                 );
                 assert_eq!(
-                    records_with_prefix(&recovered, &pid, &completion_records(&pid, &step1).0)
+                    records_with_prefix(&recovered, &pid, &completion_records(&pid, "step1").0)
                         .await,
                     0,
                     "nothing of the refused operation may be durable"
@@ -716,7 +728,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                     shifted
                         .reconciliation_required
                         .iter()
-                        .any(|operation| operation.task.node.as_str() == step1),
+                        .any(|operation| operation.task.node.as_str() == "step1"),
                     "the effect boundary must be surfaced for reconciliation: {shifted:?}"
                 );
                 assert_eq!(
@@ -725,7 +737,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                     "the engine may not decide across the effect boundary"
                 );
                 assert_eq!(
-                    records_with_prefix(&recovered, &pid, &completion_records(&pid, &step1).0)
+                    records_with_prefix(&recovered, &pid, &completion_records(&pid, "step1").0)
                         .await,
                     0,
                     "no effect may be committed from the ambiguous boundary"
@@ -820,7 +832,7 @@ async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner() {
         "the propagation created exactly one child"
     );
     assert_eq!(
-        records_with_prefix(&engine, &pid, &completion_records(&pid, &step1).1).await,
+        records_with_prefix(&engine, &pid, &completion_records(&pid, "step1").1).await,
         1,
         "the applied propagation owns exactly one record"
     );
@@ -829,7 +841,7 @@ async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner() {
     // durable remainder the fresh engine resumes from
     let base = kv.writes();
     kv.cut_at(base + INTENT_LANDS_AT_CLAIM);
-    let refused = complete_act(&engine, &pid, "step2").await;
+    let refused = complete_act(&engine, &pid, &tid_of(&pid, "step2", 0)).await;
     assert!(
         refused.is_err(),
         "a cut writer must reach the client, got {refused:?}"
@@ -886,7 +898,7 @@ async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner() {
     }
     assert_completion_once(&recovered, &pid, "step2").await;
     assert_eq!(
-        records_with_prefix(&recovered, &pid, &completion_records(&pid, &step1).1).await,
+        records_with_prefix(&recovered, &pid, &completion_records(&pid, "step1").1).await,
         1,
         "the applied propagation must stay one record"
     );

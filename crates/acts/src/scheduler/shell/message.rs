@@ -41,6 +41,14 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
     };
     let payload: serde_json::Value = serde_json::from_str(&record.payload).ok()?;
     let nid = payload.get("nid")?.as_str()?.to_string();
+    // The instance's wire (`tid`) rides the payload since C5; records an
+    // earlier kernel wrote predate it and keep the node id as the tid (the
+    // V2 degeneration — same split the row model's `nid` always had).
+    let tid = payload
+        .get("tid")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&nid)
+        .to_string();
     let uses = payload.get("uses").and_then(|value| value.as_str());
     let name = payload
         .get("name")
@@ -90,7 +98,7 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
     Some(Message {
         id: crate::utils::longid(),
         delivery_id: None,
-        tid: nid.clone(),
+        tid,
         name,
         state,
         r#type: kind,

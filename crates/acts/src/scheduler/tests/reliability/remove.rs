@@ -53,10 +53,11 @@ async fn waiting_head(engine: &Engine) -> (String, String) {
         "the message names the run it was created for"
     );
     assert_eq!(
-        step1, "step1",
-        "the act of a `uses` step is the step's own node"
+        step1,
+        tid_of(&pid, "step1", 0),
+        "the act of a `uses` step is the step's own instance"
     );
-    wait_waiting_task(engine, &pid, &step1).await;
+    wait_waiting_task(engine, &pid, "step1").await;
     flush(engine).await;
     (pid, step1)
 }
@@ -171,10 +172,11 @@ async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
         .await
         .unwrap()
         .expect("the aggregate of a live run exists");
+    let node = super::node_of(&snapshot, pid, tid);
     let mut generations: Vec<u64> = snapshot
         .tasks
         .keys()
-        .filter(|id| id.node.as_str() == tid)
+        .filter(|id| id.node.as_str() == node)
         .map(|id| id.generation)
         .collect();
     generations.sort_unstable();
@@ -192,8 +194,12 @@ async fn drive_to_settled(engine: &Engine, pid: &str, step1: &str) {
     complete_act(engine, pid, step1).await.unwrap();
     let (announced, step2) = expect_created(&created).await;
     assert_eq!(announced, pid, "the propagated act names its own run");
-    assert_eq!(step2, "step2", "the completion propagates the next node");
-    wait_waiting_task(engine, pid, &step2).await;
+    assert_eq!(
+        step2,
+        tid_of(pid, "step2", 0),
+        "the completion propagates the next node"
+    );
+    wait_waiting_task(engine, pid, "step2").await;
     complete_act(engine, pid, &step2).await.unwrap();
     wait_completed(engine, pid).await;
 }
@@ -287,7 +293,7 @@ async fn a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload_inner()
     // the crash and the reload: the refusal was never recorded, so the fresh
     // boot has nothing to replay
     let reloaded = restart(&engine, store.clone()).await;
-    wait_waiting_task(&reloaded, &pid, &step1).await;
+    wait_waiting_task(&reloaded, &pid, "step1").await;
     assert_eq!(
         generations(&reloaded, &pid, &step1).await,
         vec![0],
@@ -401,7 +407,7 @@ async fn a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_on
     );
 
     // healed: the same two-step run completes exactly once
-    wait_waiting_task(&engine, &pid, &step1).await;
+    wait_waiting_task(&engine, &pid, "step1").await;
     drive_to_settled(&engine, &pid, &step1).await;
     assert_settled(&engine, &pid).await;
     assert_eq!(
@@ -496,7 +502,7 @@ async fn a_duplicate_remove_delivery_is_refused_without_effect_inner() {
     // forward act was never dispatched by either refusal
     let proc = read_proc(&engine, &pid).await;
     assert!(
-        waiting_task(&proc, &step1).is_some(),
+        waiting_task(&proc, "step1").is_some(),
         "the refusals must leave the head act waiting, got {:?}",
         task_snapshot(&proc)
     );
@@ -574,8 +580,12 @@ async fn a_completed_run_is_swept_with_its_message_and_delivery_rows_inner() {
         announced, pid,
         "the message names the run it was created for"
     );
-    assert_eq!(tid, "s1", "the act of a `uses` step is the step's own node");
-    wait_waiting_task(&engine, &pid, &tid).await;
+    assert_eq!(
+        tid,
+        tid_of(&pid, "s1", 0),
+        "the act is addressed by its instance's wire"
+    );
+    wait_waiting_task(&engine, &pid, "s1").await;
 
     // the running act's message is stored, and its delivery is still open
     flush(&engine).await;
