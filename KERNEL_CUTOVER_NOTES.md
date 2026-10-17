@@ -2789,6 +2789,102 @@ cargo clippy --all-targets --all-features --workspace --locked -- -D warnings ->
 cargo fmt --check -> OK
 ```
 
+### A2 完成(2026-10-17):durable ready queue + recovery 收缩/分页
+
+**任务**:§11 D 的 A2(P0)。正常 operation 的活性移出 recovery 扫描;recovery 只处理异常兜底;
+修掉 recovery 每页全扫索引的 $O(N^2)$ 分页。
+
+**事实与契约**
+
+- 新增 `core/ready.rs`:`ReadyIndex`/`ReadyEntry`/`ReadyIndexCodec`(magic `ACTRDY`,schema 1)。
+  每个进程一个文档 `kernel/indexes/ready/{hex pid}`,entry 含 `operation_id`、`ready_at_ms`、
+  `source_aggregate_revision`,按 `(ready_at, operation_order)` 排序;可空的索引不写文档。
+- ready 文档与 aggregate 同属一个 `DocumentTransaction`:create 写入首条根 operation;claim
+  (`ClaimAndPrepare`) 删除;`ScheduleRetry`/`ReleaseExpiredClaim` 写回;plan commit 在同一 batch 替
+  换。`LoadedProcess` 现在加载/守卫四个文档(aggregate、recovery、outbox、ready),`load` 的
+  `read_many` 是四键。旧库没有 ready 文档仍能加载。
+- `OperationIntent` 新增 `ready_at_ms: Option<i64>`:普通 operation 为 `None`(提交即到期);
+  `DispatchTimeout` 由 shell 写 `now + timer_poll_ms`。parked 根 operation 提交即到期,由 driver
+  在一次无可驱动后把记录推迟一个 poll,而不是允许它忙轮询。
+
+**驱动**
+
+- `KernelHost::drive_ready(now, budget)`:按位置游标从 ready index 取 **due** 记录并直接驱动
+  (wake 通道仍是快路径)。一个 operation 的 plan commit 即使稍晚于本轮 `now`,下一轮也会重新读钟,
+  因此丢 wake/队列满不会等到 tick。
+- `serve` 的 select 增加 `ready` 通知;tick 顺序为 `recover` → `drive_ready` → outbox。`wake` 现在
+  返回是否入队;失败计数并通知 due pass。
+- `ReadyMetrics`:backlog、due、最老 ready 年龄、scanned、deferred、wake_failures、repaired;
+  每次 tick 以 `tracing::debug!` 输出非零积压。
+- parked 准入:释放 slot 时 `place_run` 返回 admission operation,`admit_run` 把它的 ready 记录
+  提前到 now 再 wake;重建/准入都不依赖 tick。
+
+**Recovery 收缩与分页**
+
+- `OperationRecord::needs_recovery()`:只有 `Claimed`/`CommitPrepared`/`Committed`/`EffectUnknown`/
+  `Quarantined` 进入 recovery index;`Pending`/`RetryScheduled` 只属于 ready index。
+  `RecoveryIndex::project_legacy` 保留旧全量投影用于加载兼容;boot repair 会把旧文档归一化。
+- `recover` 不再 wake 普通操作。dispositions:`RepairReady`(缺 ready 记录)、`AwaitOwner`、
+  `ReclaimExpired`(后写 ready + wake)、`FinalizeCommit`、`ManualReconciliation`、`IgnoreTerminal`。
+  `RecoveryReport` 以 `reclaimed`/`ready_repaired` 取代 `woken`。
+- 首次 `recover` 做一次 boot reconcile:扫描 aggregate 前缀,逐进程 `repair_ready` 重算归一化
+  recovery index 与缺失 ready 记录(保留已有 `ready_at`,deferred timer 不会因重启变热)。修复
+  transaction 只带四个文档的 exact guard,不重写 aggregate。
+- `load_recovery_page` 改为 `AsyncDocumentStore::scan_range` + 位置游标
+  `RecoveryCursor{process_key, operation}`:单页最多检查 `limit+1` 个 index entry,不重扫前面的文档;
+  `RecoveryPage.next` 由最后一个被检查的 entry 生成,保证稳定、非重叠、必有进展。ready 分页用
+  `ReadyCursor{process_key, ready_at_ms, operation}`。
+
+**测试**
+
+- 新增 `a_full_wake_queue_does_not_delay_the_ready_record`:填满 wake channel 后仅靠 ready 记录
+  把 run 驱动到完成,`wake_failures > 0`。
+- `wake_loss_is_recovered_by_the_ready_queue`:create 后不 wake,`run_until_quiescent` 直接完成。
+- durable:ready 记录随 create/claim/retry 移动;timer 在 poll 前不 due 且不在 recovery index;
+  删除 ready 文档后 `repair_ready` 从 aggregate 重建且幂等;三进程 recovery 游标分页无重复。
+- boot/cap 测试改为由 ready 队列准入;stall 的写边界计数改为同时观察 recovery 与 ready index,
+  保留异常 claim reclaim 用例。
+
+**验证**
+
+```text
+cargo test -p acts --lib -> 885 passed, 0 failed, 1 ignored (final, 159.56s)
+cargo test -p acts --lib --tests -> 884 passed, 0 failed, 1 ignored (earlier run; a later identical
+  run hit the registered C2/C5/C6/C8b flake export::actions::tests::a_run_cannot_seal_another_subjects_scope,
+  whose --exact rerun is 1 passed)
+cargo test -p acts --lib a_full_wake_queue_does_not_delay_the_ready_record -> 1 passed
+cargo test -p acts --lib the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it -> 1 passed
+cargo test -p acts --lib reliability::stall:: -> 5 passed
+cargo test -p acts --lib reliability:: -> 65 passed
+cargo test -p acts --lib recovery_ -> 13 passed
+cargo test -p acts --lib recovery_does_not_wake_a_parked_run -> 1 passed
+cargo test -p acts --lib pure_modules_have_no_infrastructure_dependencies -> 1 passed
+cargo test -p acts-acl -p acts-expr --all-features -p acts-channel -> green
+cargo test -p acts-store --features sled,sqlite,postgres -> green(末个测试二进制 97 passed)
+cargo test -p acts-cli -> green
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all --check -> OK
+```
+
+`acts-server` 在本机未能编译/运行:链接期 `os error 1455`(页面文件太小,无法 mmap `libacts*.rlib`),
+属环境资源限制;未据此改写代码。`acts-plugin-*`/`acts-package-*` 的组合运行到
+`acts-package-shell --test vars` 的已知非本笔失败为止,其余先跑的二进制为绿。
+
+**已知非本笔回归**:`cargo test -p acts-package-shell --test vars` 的
+`the_inputs_of_the_act_embed_in_the_script` 在 base `f262862`(干净 worktree)上同样失败
+(`$inputs().data` 为 null;H1/H2 的 headless scope 未携带 predecessor 输出),
+与本笔无关,已按原样登记,不在 A2 内修。
+
+**边界/剩余**
+
+- outbox 仍是提交前发送,顺序与 payload 未改;A1b(批量 confirm)仍是下一项 P0,排在 A11 之后。
+- recovery 分页已不是每页全扫;ready 扫描是逐进程文档的位置游标,单页成本有界,但 boot reconcile
+  本身是启动时的一次全 aggregate 扫描(非 tick 路径)。
+- timer 的 “own due time” 落地为 `commit_at + timer_poll_ms`(legacy 无 timer round 先于首个进程
+  tick);不是从任意 guard 表达式反解绝对到期时间。idle timer/parked run 只占一条 future ready
+  记录,不属于 recovery,也不会在热路径自旋。
+- A11 必须把 `kernel/indexes/ready/` 与 aggregate/recovery/outbox 一起原子回收。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2805,8 +2901,9 @@ cargo fmt --check -> OK
 > 再做其他工作(**第二波 = P1 性能画像 + L\* 遗留,可与彼此交错**)。
 >
 > **2026-10-17 用户裁决(架构优先)**:在第一波之后、第二波之前插入**第三波 = A1→A11 架构修正**。
-> A1a 已完成;A1b 的 per-record claim/confirm 试点因写放大回退(需批量 confirm/独立 outbox 后再做);
-> A2 是当前 P0;A11(终态回收 + PID 复用)紧随 A2。第二波 P1/L* **暂缓,不删除**。
+> A1a 已完成;A2(durable ready queue)已完成(§10);A1b 的 per-record claim/confirm 试点因写放大回退
+> (需批量 confirm/独立 outbox 后再做)。当前执行项是 **A11**(终态回收 + PID 复用;§11 D 标 P1),
+> 其后为 A1b(批量 confirm;虽标 P0,按用户顺序排在 A11 之后)。第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -2852,7 +2949,7 @@ cargo fmt --check -> OK
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:未做(§12 当前项)。**
+**状态:暂缓(§11 D 第三波优先;A2 完成后 §12 指向 A11,不在本轮执行)。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
@@ -2893,7 +2990,7 @@ cargo fmt --check -> OK
 | **A1a** | effect 边界分类:包 effect 后丢失 CAS/`next` 失败 → `MarkEffectUnknown`,不释放 claim 自动重试;客户端动作路径同处理 | #2 | **P0** | — | **已做(§10「A1a 完成」)**。验收:effect 后冲突为 `EffectUnknown`,recovery 只报 `ManualReconciliation`,不 wake |
 | **A1b** | outbox 提交后发送:plan 先写 `Pending`;**批量确认本 operation 的新记录**(或把 outbox 状态移出 aggregate);投影先于外部消息;删除前置直发快路径。**per-record claim/confirm 变体已回退,不得原样重试** | #2 | **P0** | A1a;批量确认设计 | **试点回退(2026-10-17,§10)**。验收:消息不在 aggregate commit 前可见;每 operation 最多一笔确认提交;loop/吞吐不退化;at-least-once 不变 |
 | **A1c** | effect 幂等协议:稳定 idempotency key + 可查询 observation;非幂等 effect 只走 manual reconciliation;补齐人工处理闭环 | #2 | P1 | A1b(批量) | 未做。验收:可证明幂等的 effect 才允许自动重试;恢复不重复外部副作用 |
-| **A2** | durable ready queue:业务提交内写 ready 索引;`try_send` 只做加速;driver 从 ready 取到期操作;recovery 只做异常兜底;修 recovery 分页每页全扫的 $O(N^2)$ | #1 | **P0** | —(与 A1b 的 store schema 改动需协调) | 未做。验收:队列满不导致下一跳等 tick;recovery 扫描量与异常操作数相关;idle timer/parked run 不进热 ready 集合 |
+| **A2** | durable ready queue:业务提交内写 ready 索引;`try_send` 只做加速;driver 从 ready 取到期操作;recovery 只做异常兜底;修 recovery 分页每页全扫的 $O(N^2)$ | #1 | **P0** | —(与 A1b 的 store schema 改动需协调) | **已做(§10「A2 完成」)**。验收:队列满不导致下一跳等 tick;recovery 扫描量与异常操作数相关;idle timer/parked run 不进热 ready 集合;冷启动/缺 ready 记录可从 aggregate 修复 |
 | **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | 未做。验收:线性 3 节点不再产生 9 次 claim/commit;行为、消息、行投影逐字不变 |
 | **A4** | 每 Process 单写者 command lane:正常/客户端动作/恢复 command 串行决定状态;effect 可并发;observation 回 lane;CAS 只做恢复/fencing | #4 | P1 | A2 | 未做。验收:同一 pid 无并行 plan 竞争;正常路径不触发 `ACTION_ATTEMPTS`;不同 pid 仍并行 |
 | **A5** | projection 正式协议:每行持久化 `source_aggregate_revision`;store-level 条件写;启动增量补投影;repair queue;API lag/强读 aggregate;lifecycle 后置或显式契约 | #5 | P1 | — | 未做。验收:旧投影不能覆盖新投影;重启不丢版本;消息/完成事件消费者能看到对应行 |
@@ -2902,14 +2999,16 @@ cargo fmt --check -> OK
 | **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | 未做。验收:manual run 不阻塞新 run;cancel 后 slot 立即可用;parked 准入不依赖 tick |
 | **A9** | durable run handle:`start()` 返回可 `wait()` 的 handle;先查终态→订阅→复查;event channel 只做通知;示例改先注册或 `wait()` | #9 | P2 | A1/A5 | 未做。验收:check-subscribe race 不存在;重启后仍可等待 |
 | **A10** | 拆分控制面调度器:timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair 独立 interval/backoff/budget/指标;禁止用统一缩短 tick 解决延迟 | #10 | P2 | A2 | 未做。验收:调整 recovery 频率不影响 timer/outbox;各循环有独立健康/积压指标 |
-| **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | 未做。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删 |
+| **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index + ready index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | 未做。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删 |
 
 **A1/A2/A11 的边界**:A1a 只关闭“effect 已执行后自动重试”的重复路径;A1b(批量确认)才关闭 outbox 的提交前可见性,
 **per-record claim/confirm 试点已回退**(写放大不可接受)。A1c 才提供可自动重试的幂等协议。
-A2 只把正常活性从 recovery 扫描移开,不改变 recovery 的异常兜底职责。
+A2 只把正常活性从 recovery 扫描移开,不改变 recovery 的异常兜底职责;**A2 已落地,新增的 `ready` index
+必须由 A11 与 aggregate/recovery/outbox 一起原子回收**。
 A11 只回收**已完成且投递结算完毕**的 run;`EffectUnknown`、`Quarantined`、未 ack 消息、未决 operation 一律保留。
 A11 的存储语义是“恢复所需的最小状态”,不是历史归档;PID 复用只在回收完成后放行,旧 pid 迟到消息由业务去重。
-**不要把 P1 的“缩短 tick”当作 A2 的替代** —— 当前 recovery 分页是每页全扫,缩短 tick 会放大扫描压力。
+**不要把“缩短 tick”当作活性手段** —— 正常活性来自 durable ready 记录;tick 只决定 ready 轮询、定时器
+cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,单页不再全扫索引。
 
 ## 12. 下一步提示词(只含**当前任务**与限制约束;每轮**原地更新**,不追加)
 
@@ -2918,66 +3017,67 @@ A11 的存储语义是“恢复所需的最小状态”,不是历史归档;PID �
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A2 —— durable ready queue(§11 D;P0)
+# 当前任务:A11 —— 终态回收 + PID 复用(§11 D)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A2 行、§10「A1b 试点回退」;
-`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A2。A1a 已完成;A1b 的 per-record claim/confirm 变体已回退,
-批量版排在 A2 之后。A2 是当前正常路径活性的主任务。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A11 行、§10「A2 完成」;
+`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A11。A2 已完成:正常活性来自 durable ready index,
+recovery 只做异常兜底。A11 是当前执行项(§11 D 标 P1);A1b(批量 confirm)按其后的顺序执行。
 
-**目标**:正常 operation 的活性来自 durable ready queue,不再依赖 recovery tick;recovery 只处理
-崩溃、lease 过期、claim 失效等异常。同时修掉 `recover()` 每页全扫 `RECOVERY_INDEX_KEY_PREFIX` 的
-$O(N^2)$ 分页。
+**目标**:存储只保留“恢复所需的最小状态”。一个 run 进入终态、所有消息投递并结算、且没有未决
+operation 之后,原子回收 aggregate + 全部派生索引,再幂等回收行/messages/deliveries/workdir;
+回收完成后同一个 pid 可以再次启动。不做历史归档。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 先画清 operation 创建/提交、recovery index、outbox index、wake/`try_send`、`serve`/`recover` 的现有路径。
-   - ready 记录必须与业务提交同一原子 batch:至少包含 `operation_id`、`ready_at`、`process_id`、
-     `source_aggregate_revision`。终态 operation 的 ready 记录在同一提交里删除。
-2. **写入**
-   - `advance_transition` 为 `plan.operations` 写 ready 记录(或由 repository 在同一 batch 派生)。
-   - `try_send` 保持为加速;失败/队列满不再意味着“等 tick”:ready 记录就是活性来源。
-   - 保证提交与 ready 写入的原子性;崩溃后要么两者都在,要么都不在。
-3. **驱动**
-   - driver 增加 due-ready 取用路径(独立 tick/通知均可),按 `ready_at` 取操作并 wake;处理必须幂等。
-   - 同一 operation 的重复 ready/wake 必须安全;全局顺序不要求,但每 pid 的 claim/CAS 语义保持。
-   - ready 积压、最老 ready 年龄、丢弃/wake 失败要有指标。
-4. **Recovery 收缩**
-   - `recover` 不再 wake 普通 `Pending`/`RetryScheduled`;只做:过期 claim 的 reclaim、`Committed` 的 finalize、
-     `EffectUnknown`/`Quarantined` 的 manual reconciliation、缺失 ready 记录的修复。
-   - idle `DispatchTimeout` 和 parked run 不进入热 ready 集合;timer 仍按自己的到期时间驱动。
-5. **分页**
-   - `load_recovery_page` 不得每页 `scan_prefix` 全部 recovery index;改成有序索引/游标,单页成本有界。
-   - 保持 `RecoveryPage`/`RecoveryCursor` 的稳定性与非重叠性。
-6. **测试**
-   - 队列满/丢 wake:正常下一跳不等待 tick。
-   - recovery 扫描不 wake idle timer / parked run;异常 claim 仍能被 reclaim。
-   - 崩溃恢复:ready 记录与 aggregate 原子;缺失/重复 ready 幂等。
-   - 保留 A1a 的 effect-conflict、wake-loss、linear、catch 用例绿。
+   - 先画清 `sweep_removable`、投影 `removable`、`Runtime::start` 的存在性检查、outbox/recovery 扫描、
+     `ready` index 的现有路径。
+   - 可回收判定必须同时满足:所有 task 终态;所有 outbox record `Delivered`;所有 channel delivery 已结算;
+     没有 `Pending`/`Claimed`/`CommitPrepared`/`EffectUnknown`/`Quarantined` operation;没有在飞 effect、
+     parked 准入或未完成的 recovery 动作。
+   - `EffectUnknown`、`Quarantined`、`DeliveryUnknown`、未 ack 消息的 run **不得**回收。
+2. **原子切割**
+   - 权威切割点是一个带 aggregate version guard 的 batch:删除 aggregate + recovery index +
+     outbox index + **ready index**(A2 新增),四者原子删除;禁止先删索引后删 aggregate。
+   - 删除顺序:先确认 `removable` → 四文档原子删除 → 行/messages/deliveries/workdir 幂等删除。
+   - 任一步崩溃后必须可重试:aggregate 已删而索引/行残留时,recovery/outbox/ready 扫描跳过 missing aggregate;
+     索引先删而 aggregate 残留不可接受。清理后不留墓碑。
+3. **PID 复用**
+   - 只要 aggregate、投影行、未决 operation、未结算消息任一仍存在,同一 pid 继续拒绝启动;
+   - 全部回收后允许复用;旧 run 的迟到消息/动作由业务系统按业务键去重,acts 不保留旧 generation 映射。
+     `CHANGELOG` 写明该契约边界。
+4. **调度与指标**
+   - cleanup 独立预算/interval,不与正常 operation 热路径或 recovery 扫描共用 loop;
+   - 指标:cleanup backlog、最老 removable 年龄、删除字节数、删除失败、孤儿索引数。
+5. **测试**
+   - 完整投递并结算的 run sweep 后:aggregate、recovery/outbox/ready 索引、行、workdir 全消失;
+   - 清理前同 pid `start` 被拒,清理后允许;
+   - 在删除 batch 前后各注入一次崩溃:恢复后要么可重试删除,要么已删除,不出现不可恢复半状态;
+   - `EffectUnknown`/`Quarantined`/未 ack 消息的 run 不被误删;
+   - 现有 `sweep_removable`、投影、outbox/recovery 套件保持绿。
 
 **边界**
 
-- 不改 outbox 投递顺序(那是 A1b 批量版);不改 per-process lane(A4);不缩短 tick。
-- 不破坏现有 recovery/outbox index 的持久化 tag;新索引必须可从旧库重建/修复。
-- ready 只服务“正常可运行”的操作,不把 recovery 的异常状态塞进热队列。
+- 不改 outbox 投递顺序/消息 payload;不缩短 tick;不改 per-process lane(A4)。
+- 不做历史归档、不保留终态 aggregate/索引;不提供跨 run 去重。
+- 新索引(A2 的 `ready`)必须与 aggregate 同批回收;不得留下孤儿索引。
 
 **验收**
 
-- `try_send` 失败后,正常操作仍能在 tick 之前被驱动;
-- recovery 扫描量与异常 operation 数相关,不随 idle timer/parked run 线性增长;
-- 冷启动/崩溃恢复不漏 operation;
+- 回收后聚合/索引/行/workdir 全消失;回收前拒绝复用、回收后允许;
+- 崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删;
 - `cargo test -p acts --lib --tests` 与 reliability 套件绿;
-- 写 §10「A2 完成」,§11 D 状态更新,§12 原地指向 A11。
+- 写 §10「A11 完成」,§11 D 状态更新,§12 原地指向 A1b(批量 confirm)。
 
 # 限制与约束
 
-- **先读**:§11 D、§10「A1a 完成」「A1b 试点回退」、设计 §3.10 A2、`core/recovery/**`、
-  `durable/async_document_store.rs` 的 recovery page、`shell/mod.rs` 的 wake/serve/recover。
-- 不改业务流程/消息 payload/outbox 顺序;新索引必须与 aggregate 同一 batch。
+- **先读**:§11 D、§10「A2 完成」、设计 §3.10 A11、`shell/mod.rs` 的 `sweep_removable`/projection、
+  `runtime.rs` 的 start 存在性检查、`document_store.rs` 的四个文档键与事务构造。
+- 不改业务流程/消息 payload/outbox 顺序;删除 batch 必须带 aggregate version guard。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-ready queue 实现 + recovery 收缩/分页修复 + 活性/崩溃测试 → 更新 §10/§11/§12。
+终态回收实现 + 崩溃安全/幂等测试 + PID 复用边界 → 更新 §10/§11/§12。
 ```
 

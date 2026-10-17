@@ -494,6 +494,14 @@ Command
 **验收**:队列满不导致正常下一跳等 tick;recovery 扫描量与“异常操作数”相关,而非全部 pending;
 同一负载下不再需要靠缩短 tick 降低延迟。
 
+**落地(2026-10-17,详见 notes §10「A2 完成」)**:ready 记录是每进程一个
+`kernel/indexes/ready/{hex pid}` 文档,与 aggregate 同批写/删;driver 的 `drive_ready` 按
+`(ready_at, operation_id)` 位置游标取 due 记录。`RecoveryIndex` 收缩为异常状态专属
+(`Claimed`/`CommitPrepared`/`Committed`/`EffectUnknown`/`Quarantined`),`recover` 只做
+`RepairReady`/reclaim/finalize/manual reconciliation;boot 时一次全 aggregate reconcile 修复旧库/缺失
+ready。timer 的 ready_at 取 `commit_at + timer_poll_ms`(legacy 无 timer round 先于首个进程 tick),
+parked run 由 driver 在准入检查失败后把 ready 记录推迟一个 poll。
+
 #### A3 — 折叠纯内部 hop
 
 **现状**:线性 3 节点流程产生 9 个 operation(每个节点 `ExecuteTask + ApplyAction + PropagateTask`),
@@ -632,6 +640,7 @@ operation 之后,`ProcessSnapshot` 及其投影/索引/工作目录都应被回�
 - aggregate document(`ProcessSnapshot` 本体);
 - recovery index(`RECOVERY_INDEX_KEY_PREFIX` 下该 pid 的文档);
 - outbox index(`OUTBOX_INDEX_KEY_PREFIX` 下该 pid 的文档);
+- ready index(`READY_INDEX_KEY_PREFIX` 下该 pid 的文档;A2 新增,正常路径的活性来源);
 - `procs`/`tasks`/`vars` 行;
 - `messages`/`deliveries` 行(通道结算后的投递状态);
 - run 的 workdir;
@@ -645,13 +654,13 @@ operation 之后,`ProcessSnapshot` 及其投影/索引/工作目录都应被回�
 4. 没有 `Pending`/`Claimed`/`CommitPrepared`/`EffectUnknown`/`Quarantined` operation;
 5. 没有在飞 effect、parked 准入或未完成的 recovery 动作。
 
-现有 `sweep_removable` 已覆盖行与 workdir;**A11 把它扩展到 aggregate + 两个索引**,并保持幂等。
+现有 `sweep_removable` 已覆盖行与 workdir;**A11 把它扩展到 aggregate + recovery/outbox/ready 三个索引**,并保持幂等。
 
 **删除顺序与崩溃安全**:
 
 1. 先写/确认 `removable` 标记(已有投影字段);
-2. 用一个带 aggregate version guard 的 batch 删除 **aggregate + recovery index + outbox index** ——
-   这是权威切割点,三者必须原子删除;
+2. 用一个带 aggregate version guard 的 batch 删除 **aggregate + recovery index + outbox index + ready index** ——
+   这是权威切割点,四者必须原子删除;
 3. 再删除行、messages/deliveries、workdir(可重试、幂等);
 4. 任一步崩溃:若 aggregate 已删而索引/行残留,recovery/outbox 扫描要跳过 missing aggregate,
    清理任务下一轮重试;若索引先删而 aggregate 残留,则不可恢复 —— **禁止**;
