@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ApplyActionCommand {
+pub(crate) struct ActionCommand {
     pub(crate) process_id: String,
     pub(crate) task: TaskId,
     pub(crate) action: ActionKind,
@@ -15,7 +15,7 @@ impl ActionPlanner {
     /// Validate invariants that depend only on the command envelope. This runs
     /// before durable ownership is acquired, so caller-correctable failures do
     /// not consume or quarantine an operation.
-    pub(crate) fn validate_command(command: &ApplyActionCommand) -> Result<(), CommandError> {
+    pub(crate) fn validate_command(command: &ActionCommand) -> Result<(), CommandError> {
         variable_writes(command)?;
         command
             .source_operation
@@ -28,7 +28,7 @@ impl ActionPlanner {
 
     pub(crate) fn plan(
         snapshot: &ProcessSnapshot,
-        command: &ApplyActionCommand,
+        command: &ActionCommand,
     ) -> Result<TransitionPlan, CommandError> {
         Self::validate_command(command)?;
         validate_envelope(snapshot, command)?;
@@ -90,7 +90,7 @@ impl ActionPlanner {
 
 fn validate_envelope(
     snapshot: &ProcessSnapshot,
-    command: &ApplyActionCommand,
+    command: &ActionCommand,
 ) -> Result<(), CommandError> {
     if snapshot.process_id != command.process_id {
         return Err(CommandError::WrongProcess {
@@ -108,7 +108,7 @@ fn validate_envelope(
     Ok(())
 }
 
-fn variable_writes(command: &ApplyActionCommand) -> Result<Vec<VariableWrite>, CommandError> {
+fn variable_writes(command: &ActionCommand) -> Result<Vec<VariableWrite>, CommandError> {
     let mut names = HashSet::new();
     let mut writes = Vec::with_capacity(command.inputs.len() + 2);
     for (name, value) in &command.inputs {

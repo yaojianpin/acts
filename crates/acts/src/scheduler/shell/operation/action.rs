@@ -11,7 +11,10 @@
 //! act's error walk, or the rewind a `Cancel`/`Back` leaves behind.
 
 use super::*;
-use crate::scheduler::shell::*;
+use crate::scheduler::{
+    core::{commit::aggregate::TaskSnapshot, model::task_graph::TaskId},
+    shell::*,
+};
 
 impl KernelHost {
     /// Phase 3 of one completion: the durable plan a decided outcome implies.
@@ -127,12 +130,10 @@ impl KernelHost {
                 // instead of completing it (the legacy `Next` on a running
                 // step) — the step declaring `catches` included: the completion
                 // is its *act* completing, which then runs into its handlers.
-                if matches!(
-                    kind,
-                    crate::scheduler::core::commit::command::ActionKind::Complete
-                ) && let Some(command) = self
-                    .fanout_command(snapshot, task_id, claim, &task.model_node, &inputs)
-                    .await?
+                if matches!(kind, ActionKind::Complete)
+                    && let Some(command) = self
+                        .fanout_command(snapshot, task_id, claim, &task.model_node, &inputs)
+                        .await?
                 {
                     return self.container_fanout_plan(snapshot, &command);
                 }
@@ -165,26 +166,16 @@ impl KernelHost {
                 {
                     return Ok(plan);
                 }
-                let rewinds = matches!(
-                    kind,
-                    crate::scheduler::core::commit::command::ActionKind::Cancel
-                        | crate::scheduler::core::commit::command::ActionKind::Back
-                );
-                let back = matches!(
-                    kind,
-                    crate::scheduler::core::commit::command::ActionKind::Back
-                );
-                let command = crate::scheduler::core::commit::command::ApplyActionCommand {
+                let rewinds = matches!(kind, ActionKind::Cancel | ActionKind::Back);
+                let back = matches!(kind, ActionKind::Back);
+                let command = ActionCommand {
                     process_id: id.process_id.clone(),
                     task: task_id.clone(),
                     action: kind,
                     inputs,
                     source_operation: claim.clone(),
                 };
-                let mut plan = crate::scheduler::core::commit::command::ActionPlanner::plan(
-                    snapshot, &command,
-                )
-                .map_err(runtime)?;
+                let mut plan = ActionPlanner::plan(snapshot, &command).map_err(runtime)?;
                 // A `Cancel`/`Back` rewinds: the decision closes the source
                 // generation and the re-entry that follows is a durable
                 // operation created in this same commit, so the rewind can be
@@ -237,9 +228,9 @@ impl KernelHost {
     /// already parked) and the container join finishes it.
     fn waits_for_timeouts(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-        task_id: &crate::scheduler::core::model::task_graph::TaskId,
-        task: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
+        snapshot: &ProcessSnapshot,
+        task_id: &TaskId,
+        task: &TaskSnapshot,
     ) -> Result<bool> {
         let branches = self.timeout_branches(snapshot, &task.model_node)?;
         Ok(!branches.is_empty()

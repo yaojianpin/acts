@@ -1,4 +1,5 @@
 mod health;
+mod perf_probe;
 mod state;
 mod tree;
 
@@ -151,7 +152,10 @@ async fn wake_loss_is_recovered_by_the_scan() {
 struct ConflictKv {
     inner: MemoryStore,
     process_key: String,
-    operation: OperationId,
+    /// The operation whose plan commit should park. Tests that know the id up
+    /// front arm it at construction; a test that discovers the operation after
+    /// the chain starts arms it through [`Self::arm`].
+    operation: parking_lot::Mutex<Option<OperationId>>,
     armed: AtomicBool,
     parks: AtomicUsize,
     parked: tokio::sync::Notify,
@@ -160,15 +164,14 @@ struct ConflictKv {
 }
 
 impl ConflictKv {
-    /// A store ready to park `operation`'s plan commit in `process_id`'s
-    /// aggregate — armed from construction, so no hop can slip past before the
-    /// owning test has driven it.
-    fn new(process_id: &str, operation: OperationId) -> Arc<Self> {
+    /// A store ready to park one operation's plan commit in `process_id`'s
+    /// aggregate. The operation is armed by [`Self::arm`].
+    fn new(process_id: &str) -> Arc<Self> {
         Arc::new(Self {
             inner: MemoryStore::new(),
             process_key: crate::scheduler::durable::document_store::process_key(process_id)
                 .expect("a process id the aggregate key derives from"),
-            operation,
+            operation: parking_lot::Mutex::new(None),
             armed: AtomicBool::new(true),
             parks: AtomicUsize::new(0),
             parked: tokio::sync::Notify::new(),
@@ -177,10 +180,19 @@ impl ConflictKv {
         })
     }
 
+    /// Arm the plan commit of `operation`. Must be called before that
+    /// operation's claim lands.
+    fn arm(&self, operation: OperationId) {
+        *self.operation.lock() = Some(operation);
+    }
+
     /// Whether this batch is the hop's plan commit: it writes the aggregate
     /// while the hop's own operation already stands `CommitPrepared`, i.e. the
     /// claim landed and the plan is about to.
     async fn is_plan_commit(&self, ops: &[crate::StoreBatchOp]) -> bool {
+        let Some(operation) = self.operation.lock().clone() else {
+            return false;
+        };
         let writes_process = ops.iter().any(|op| match op {
             crate::StoreBatchOp::Put { key, .. } => key == &self.process_key,
             crate::StoreBatchOp::Delete { .. } => false,
@@ -199,7 +211,7 @@ impl ConflictKv {
         matches!(
             snapshot
                 .operations
-                .get(&self.operation)
+                .get(&operation)
                 .map(|record| &record.state),
             Some(OperationState::CommitPrepared(_))
         )
@@ -321,7 +333,8 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
         task: crate::scheduler::core::model::task_graph::TaskId::new("root", 0).unwrap(),
         sequence: 0,
     };
-    let stored = ConflictKv::new(PID, root.clone());
+    let stored = ConflictKv::new(PID);
+    stored.arm(root.clone());
     let kv: Arc<dyn KvStore> = stored.clone();
     let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES);
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
@@ -406,6 +419,107 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
         host.process_completed(PID).await.unwrap(),
         "the re-driven hop must settle the run"
     );
+}
+
+/// A package effect is an external boundary: once it has run, a lost plan
+/// compare-and-swap must not release the claim for an automatic retry. The
+/// operation goes to `EffectUnknown`, and recovery surfaces it for manual
+/// reconciliation instead of re-driving it.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_package_effect_that_loses_its_commit_is_marked_unknown() {
+    const PID: &str = "p-effect-conflict";
+    let stored = ConflictKv::new(PID);
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES);
+    let engine = crate::Engine::builder().start().await.unwrap();
+    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+        engine.runtime().clone(),
+    )));
+    let package = engine.runtime().package().clone();
+    let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-effect-conflict")
+        .with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_SET,
+                crate::Vars::new().with("n", 2),
+            )
+        });
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &run_as).unwrap();
+    host.start_process(&spec).await.unwrap();
+
+    // Drive the chain until the package's `ApplyAction` is the next wake:
+    // that is the operation whose plan commit crosses the effect boundary.
+    let apply = loop {
+        let id = wake_rx
+            .try_recv()
+            .expect("the chain must expose the package's ApplyAction operation");
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        let is_package_operation = id.task.node.as_str() == "s1"
+            && snapshot.operations.get(&id).map(|record| record.kind)
+                == Some(crate::scheduler::core::model::operation::OperationKind::ApplyAction);
+        if is_package_operation {
+            break id;
+        }
+        host.execute_one(&id).await.unwrap();
+    };
+
+    stored.arm(apply.clone());
+    let hop_host = host.clone();
+    let hop_operation = apply.clone();
+    let hop = tokio::spawn(async move { hop_host.execute_one(&hop_operation).await });
+    stored.wait_parked().await;
+
+    // The package effect has already run. Advance the aggregate so the hop's
+    // plan commit loses its guard.
+    let current = host.snapshot(PID).await.unwrap().unwrap();
+    let rival = TransitionPlan {
+        process_id: PID.into(),
+        expected: current.version.clone(),
+        task_creates: Vec::new(),
+        state_changes: Vec::new(),
+        variable_writes: vec![VariableWrite {
+            scope: crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap(),
+            name: "rival.marker".into(),
+            value: "1".into(),
+        }],
+        source_operation: None,
+        operations: Vec::new(),
+        outbox: Vec::new(),
+    };
+    host.processes.commit_transition(&rival).await.unwrap();
+    stored.release();
+
+    let error = hop
+        .await
+        .unwrap()
+        .expect_err("the lost plan commit must surface");
+    assert!(
+        error.to_string().contains("conflict"),
+        "the hop reports the lost compare-and-swap: {error}"
+    );
+
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[&apply].state,
+            OperationState::EffectUnknown { .. }
+        ),
+        "an effect that may have run must not be retried automatically: {:?}",
+        snapshot.operations[&apply].state
+    );
+    let report = host.recover(SystemClock.now_ms()).await.unwrap();
+    assert!(
+        report.reconciliation_required.contains(&apply),
+        "the unknown effect must be surfaced for manual reconciliation: {report:?}"
+    );
+    assert!(
+        !report.woken.contains(&apply),
+        "automatic recovery must not wake an unknown effect: {report:?}"
+    );
+    engine.close().await;
 }
 
 /// The slot cap (`Config::cache_cap`): with one slot the first run owns it, the
@@ -1358,9 +1472,15 @@ async fn kernel_task_and_act_messages_are_emitted() {
         runtime.kernel().dispatch_outbox().await.unwrap();
         // The rows are a write-behind projection: they lag the completion
         // event by a queue turn, and a projection landing after `close` is
-        // refused (the rows would then read the state before it). Wait for the
-        // run's own row to read terminal before collecting the set.
+        // refused (the rows would then read the state before it). Wait for
+        // both the proc row and the root task row it summarizes: the proc row
+        // can be projected from a later commit than the root task row, so
+        // checking only the proc row can read a still-running root.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let query = crate::store::query::Query::new().filter(
+            crate::store::query::Filter::and()
+                .expr(crate::store::query::Expr::eq("pid", pid.clone())),
+        );
         loop {
             runtime.flush_writer().await.unwrap();
             let state = runtime
@@ -1370,15 +1490,24 @@ async fn kernel_task_and_act_messages_are_emitted() {
                 .await
                 .unwrap()
                 .map(|row| row.state);
+            let root_terminal = runtime
+                .store()
+                .tasks()
+                .query_all(&query)
+                .await
+                .unwrap()
+                .iter()
+                .any(|row| row.kind == "workflow" && row.state != "running" && row.state != "none");
             if state
                 .as_deref()
                 .is_some_and(|state| state != "running" && state != "none")
+                && root_terminal
             {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the run's row never read terminal: {state:?}"
+                "the run's rows never read terminal: proc={state:?} root={root_terminal}"
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -2737,11 +2866,21 @@ async fn wait_kernel_settled(host: &Arc<KernelHost>, pid: &str) -> Snapshot {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the kernel run never settled: {:?}",
+            "the kernel run never settled: {:?}; operations: {:?}",
             snapshot
                 .tasks
                 .iter()
                 .map(|(id, task)| format!("{}:{:?}", id.node.as_str(), task.state))
+                .collect::<Vec<_>>(),
+            snapshot
+                .operations
+                .iter()
+                .map(|(id, operation)| format!(
+                    "{}:{}:{:?}",
+                    id.task.node.as_str(),
+                    id.sequence,
+                    operation.state
+                ))
                 .collect::<Vec<_>>()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -5800,13 +5939,13 @@ async fn effect_denies_a_snapshot_scope_the_owner_lacks() {
     engine.close().await;
 }
 
-/// A commit that writes outbox records delivers them at once: the driver's
-/// delivery pass is woken by the commit itself instead of waiting for the tick.
+/// A commit that writes outbox records delivers them at once: the operation's
+/// dispatch runs the targeted post-commit pass instead of waiting for the tick.
 ///
 /// The tick here is an hour away, so a message can only have come from that
-/// wake — and a client's next action waits for exactly this message, which is
-/// why the tick cadence (15 s by default) turned every client-driven step into
-/// a tick-long stall. The tick stays the retry net.
+/// targeted pass — and a client's next action waits for exactly this message,
+/// which is why the tick cadence (15 s by default) turned every client-driven
+/// step into a tick-long stall. The tick stays the retry net.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn a_commit_delivers_its_records_without_waiting_for_a_tick() {

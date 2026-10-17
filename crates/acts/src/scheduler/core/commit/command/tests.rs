@@ -46,8 +46,8 @@ fn snapshot(state: TaskState) -> ProcessSnapshot {
         outbox: HashMap::new(),
     }
 }
-fn command(action: ActionKind) -> ApplyActionCommand {
-    ApplyActionCommand {
+fn command(action: ActionKind) -> ActionCommand {
+    ActionCommand {
         process_id: "p1".into(),
         task: task(),
         action,

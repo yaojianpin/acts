@@ -2710,6 +2710,85 @@ L10 换 headless scope;L11 删 `NodeTree`/`Node`(粗算 `view` 只剩 `NodeData`
 **单跑 `--exact` 绿**(0.07 s);本轮无新增失败名。其余 `--tests` 目标未报失败。
 **过程**:WIP(性能探针)按 C8b 口径旁置/回填;`git diff` 哈希与动手前一致;提交不含 `.wip/`、`perf_probe.rs` 或探针改动。
 
+### A1a 完成(2026-10-17):effect 后的 CAS 冲突不再自动重试
+
+**任务**:§11 D 的 A1a(审计 #2 的第一刀)。目标不是完成 effect 协议,而是先关闭“包 effect 已执行、plan commit 丢失
+后被释放 claim 自动重试”的重复副作用路径。
+
+**改动**:
+
+- `shell/operation/mod.rs`:`Outcome::ran_external_effect()`。只有 `Effect::Completed(Some(_))` 与 `Effect::Failed(_)`
+  算跨过外部 effect 边界;client decision、timer round、纯计划不算。
+- `shell/operation/dispatch.rs`:`dispatch` 增加 `effect_started`;CAS `Conflict` 时,
+  effect 已执行的 operation 走 `MarkEffectUnknown` 并返回 conflict,不再 `release_claim`;
+  effect-free operation 保持原来的释放 + recovery 重试。新增 `KernelHost::mark_effect_unknown`。
+- `shell/operation/mod.rs`:`driver.next` 在 effect 之后失败时也 `MarkEffectUnknown`,不再让 operation 停在
+  `CommitPrepared` 等 lease 过期。
+- `shell/mod.rs`:`apply_action_once` 同样分类;`next` 失败且 effect 已执行时 `MarkEffectUnknown`,
+  否则维持 `release_claim`。
+- `shell/tests/mod.rs`:`ConflictKv` 改为可按 operation 动态 arm;新增
+  `a_package_effect_that_loses_its_commit_is_marked_unknown`,用真实 `PackageEffectRunner` + `USES_SET` 钉住:
+  effect 后丢失 CAS ⇒ `EffectUnknown`;`recover` 只报 `ManualReconciliation`,不 wake。
+- 既有 `a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery` 继续通过,证明 effect-free 的内部 hop
+  仍走原来的可重试路径。
+
+**验证**:
+
+```text
+cargo test -p acts --lib a_package_effect_that_loses_its_commit_is_marked_unknown  -> 1 passed
+cargo test -p acts --lib a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery -> 1 passed
+cargo test -p acts --lib linear_process_runs_to_completion_and_delivers_outbox -> 1 passed
+cargo test -p acts --lib --tests -> 875 passed, 1 ignored (151.53s)
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --check -> OK
+```
+
+**剩余**:
+
+- **A1b**:outbox 仍在 plan commit 之前发送;需要提交后批量确认 dispatcher。per-record 试点已回退,
+  见下一条「A1b 试点回退」。设计见 `KERNEL_REFACTOR_DESIGN.md` §3.10。
+- **A1c**:可自动重试的幂等 effect 协议尚未实现;当前非幂等 effect 冲突一律人工协调。
+- A1a 不改变 `ClaimAndPrepare` 先落盘的现有顺序;它只保证 effect 后不再自动重放。
+- **A1a 不修复 outbox 的提交前窗口**:`dispatch` 仍在 plan commit 前调用 `deliver_plan`,
+  因此一个随后冲突的 plan 仍可能已经发出了本 plan 的 outbox 消息。该窗口由 A1b(提交后发送)关闭;
+  在 A1b 落地前,不能把 A1a 当作完整的 effect/outbox 协议。
+
+### A1b 试点回退(2026-10-17):per-record claim/confirm 写放大不可接受
+
+**尝试**:按 A1b 目标把 outbox 改成提交后发送——plan commit 只写 `Pending`,提交后对每条新记录执行
+`claim -> deliver -> confirm`,并删除 `deliver_plan` 与 `OutboxIntent.receipt` 的前置直发快路径。
+
+**结果**:
+
+- 每条 outbox 记录多出 **2 笔 aggregate commit**(claim + confirm),每次提交都重写整包聚合与两个索引。
+- `examples/simple` 的 11 次循环用例在 debug 下超过 20s;测试超时后驱动仍在继续推进,证明是吞吐退化而非死锁。
+- 全量 `acts` 套件明显变慢,并暴露了额外 CAS 冲突路径;这与“高性能流程执行引擎”的目标相反。
+- 该变体还让 A1b 依赖更成熟的单写者/批量提交协议,不适合作为 A1a 之后的直接切法。
+
+**结论**:
+
+- **回退** per-record claim/confirm 实现;恢复 `deliver_plan`、`OutboxIntent.receipt` 与既有 at-least-once 窗口。
+- 保留本轮的有益修正:
+  - A1a 的 effect 边界与 `EffectUnknown`;
+  - `release_claim` 对 CAS 冲突做有界重试,成功后立即 `wake`,避免 operation 停在 `CommitPrepared` 等 lease;
+  - 投影一致性:proc 行总是连同 root task 行一起投影,且 proc 行最后写;
+  - `sweep_removable` 的 proc 行修复先 `forget_proc` 再投影,允许同一 aggregate version 重算 `removable`,
+    同时保持 task 行的严格版本守卫。
+- A1b 必须改为:**每个 operation 至多一笔批量确认提交**(把所有新记录的 `Pending -> Delivered` 一次提交),
+  或把 outbox 状态移出 aggregate 的独立日志。**不得原样重试 per-record claim/confirm。**
+- A1b 仍是 P0,但排在 A2(ready queue)之后;A1c 依赖批量版 A1b。
+
+**验证(回退后)**:
+
+```text
+cargo test -p acts --lib a_package_effect_that_loses_its_commit_is_marked_unknown -> 1 passed
+cargo test -p acts --lib tests::a_backward_next_re_enters_the_node_it_names -> 1 passed
+cargo test -p acts --lib kernel_catch -- --test-threads=1 -> 3 passed
+cargo test -p acts --lib --tests -> 875 passed, 1 ignored (150.38s)
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --check -> OK
+```
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2725,8 +2804,12 @@ L10 换 headless scope;L11 删 `NodeTree`/`Node`(粗算 `view` 只剩 `NodeData`
 > **执行顺序(2026-10-15 用户裁决)**:先按 `KERNEL_REFACTOR_DESIGN.md` 重构 scheduler(**第一波 = C1→C8c,严格按序**),
 > 再做其他工作(**第二波 = P1 性能画像 + L\* 遗留,可与彼此交错**)。
 >
+> **2026-10-17 用户裁决(架构优先)**:在第一波之后、第二波之前插入**第三波 = A1→A11 架构修正**。
+> A1a 已完成;A1b 的 per-record claim/confirm 试点因写放大回退(需批量 confirm/独立 outbox 后再做);
+> A2 是当前 P0;A11(终态回收 + PID 复用)紧随 A2。第二波 P1/L* **暂缓,不删除**。
+>
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
-> `P*` = 性能项、`L*` = 其他遗留项(属第二波)。
+> `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
 
 ### A. 第一波:重构主线(设计 C1-C8c,按序)
 
@@ -2774,7 +2857,7 @@ L10 换 headless scope;L11 删 `NodeTree`/`Node`(粗算 `view` 只剩 `NodeData`
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
 | **L1** | 删死掉的 `ops` 族(**BREAKING**):`Store::ops()`/`StoreIden::Ops`/`store/data/op.rs` + `remove_proc_rows` 家族清单那一行;先决定老库 `ops-*` 孤儿行的处理(接受 / 保留只删不建 / 一次性清理) | 原 §5 | 未做。验收:生产侧 `grep` 为 0 + 全量门禁绿 + CHANGELOG BREAKING |
-| **L2** | 聚合文档回收/归档:先定三件事(保留策略 / pid 复用语义 / 历史取舍),再实现 `AsyncAggregateRepository::remove(pid, expected_version)`(守卫批删聚合 + 两索引;GC 只取"`settled` 且 `operations` 为空 且 行已回收"的 run,崩溃幂等) | 原 §6 | 未做。验收见 §10「可靠性矩阵回归」§6 T2 |
+| **L2** | 聚合文档回收/归档:~~先定保留策略 / pid 复用语义 / 历史取舍~~ **已由 A11 取代**。A11 明确:存储只服务恢复,终态且消息全部投递/结算后回收;不做历史归档;回收后 PID 可复用,旧 pid 重复执行由业务系统负责 | 原 §6;2026-10-17 用户裁决 | **被 A11 取代**(设计见 `KERNEL_REFACTOR_DESIGN.md` §3.10);不再单独执行 |
 | **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | 未做(现状 = 写成边界) |
 | **L4** | 逐项绑定 `index`/`value` 的上浮:给一个不参与折叠的载体,或写成永久边界 | 原 §7b | 未做(证据见 §10「Feature B 完成」§4) |
 | **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | 未做,**低优先**:§10「P6-1」已证与 hop 吞吐无关(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义 |
@@ -2796,6 +2879,38 @@ L10 换 headless scope;L11 删 `NodeTree`/`Node`(粗算 `view` 只剩 `NodeData`
 `-p acts-store --features sled,sqlite,postgres`、`-p acts-cli`、`-p acts-server`);不动 manifest 就不必跑 `cargo deny check bans`。
 `acts-server` 若只有"全部 target 一条命令"会红,逐 target 跑并在 §10 记录该环境现象。C5/L1/L8 另需 CHANGELOG BREAKING;C5 另需 golden 重冻结的书面理由。
 
+### D. 第三波:架构修正(A1-A11;2026-10-17 审计,优先于第二波)
+
+> 设计见 `KERNEL_REFACTOR_DESIGN.md` §3.10。审计结论:分层方向保留,问题集中在
+> **effect/commit 顺序、正常路径的活性来源、同一 Process 的写者模型、投影协议、Shell 仍承担状态机语义、
+> 以及终态 ProcessSnapshot/投影/索引的回收与 PID 复用**。
+> 执行顺序:**A1a → A2 → A11 → A1b(批量 confirm) → A1c → A3/A4/A5 → A6 → A7/A8/A9/A10**。
+> A1a 已完成并单独记录在 §10;A1b 的 per-record 试点已回退(见 §10「A1b 试点回退」),**不得原样重试**。
+> 第二波 P1/L* 暂缓,不删除。
+
+| 编号 | 任务 | 审计条目 | 优先级 | 依赖 | 状态 / 验收 |
+|---|---|---|---|---|---|
+| **A1a** | effect 边界分类:包 effect 后丢失 CAS/`next` 失败 → `MarkEffectUnknown`,不释放 claim 自动重试;客户端动作路径同处理 | #2 | **P0** | — | **已做(§10「A1a 完成」)**。验收:effect 后冲突为 `EffectUnknown`,recovery 只报 `ManualReconciliation`,不 wake |
+| **A1b** | outbox 提交后发送:plan 先写 `Pending`;**批量确认本 operation 的新记录**(或把 outbox 状态移出 aggregate);投影先于外部消息;删除前置直发快路径。**per-record claim/confirm 变体已回退,不得原样重试** | #2 | **P0** | A1a;批量确认设计 | **试点回退(2026-10-17,§10)**。验收:消息不在 aggregate commit 前可见;每 operation 最多一笔确认提交;loop/吞吐不退化;at-least-once 不变 |
+| **A1c** | effect 幂等协议:稳定 idempotency key + 可查询 observation;非幂等 effect 只走 manual reconciliation;补齐人工处理闭环 | #2 | P1 | A1b(批量) | 未做。验收:可证明幂等的 effect 才允许自动重试;恢复不重复外部副作用 |
+| **A2** | durable ready queue:业务提交内写 ready 索引;`try_send` 只做加速;driver 从 ready 取到期操作;recovery 只做异常兜底;修 recovery 分页每页全扫的 $O(N^2)$ | #1 | **P0** | —(与 A1b 的 store schema 改动需协调) | 未做。验收:队列满不导致下一跳等 tick;recovery 扫描量与异常操作数相关;idle timer/parked run 不进热 ready 集合 |
+| **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | 未做。验收:线性 3 节点不再产生 9 次 claim/commit;行为、消息、行投影逐字不变 |
+| **A4** | 每 Process 单写者 command lane:正常/客户端动作/恢复 command 串行决定状态;effect 可并发;observation 回 lane;CAS 只做恢复/fencing | #4 | P1 | A2 | 未做。验收:同一 pid 无并行 plan 竞争;正常路径不触发 `ACTION_ATTEMPTS`;不同 pid 仍并行 |
+| **A5** | projection 正式协议:每行持久化 `source_aggregate_revision`;store-level 条件写;启动增量补投影;repair queue;API lag/强读 aggregate;lifecycle 后置或显式契约 | #5 | P1 | — | 未做。验收:旧投影不能覆盖新投影;重启不丢版本;消息/完成事件消费者能看到对应行 |
+| **A6** | Shell 变薄:Core 输出完整 `Decision`(aggregate changes/operations/effect intents/outbox/timers/process status/admission directives);Shell 只做 IO/commit/execute | #6 | P1 | A3/A4/A5 | 未做。验收:settle/lifecycle/admission 规则进入 Core 或 policy;新增 operation 不再改四处 |
+| **A7** | Recovery 统一成 `RecoverOperation(observed) -> Decision`:恢复层只收集 observed;正常/恢复共用 transition/commit 与 per-pid lane | #7 | P1 | A2/A4 | 未做。验收:恢复不再自行决定 wake/reclaim/finalize;正常/恢复同状态同 Decision |
+| **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | 未做。验收:manual run 不阻塞新 run;cancel 后 slot 立即可用;parked 准入不依赖 tick |
+| **A9** | durable run handle:`start()` 返回可 `wait()` 的 handle;先查终态→订阅→复查;event channel 只做通知;示例改先注册或 `wait()` | #9 | P2 | A1/A5 | 未做。验收:check-subscribe race 不存在;重启后仍可等待 |
+| **A10** | 拆分控制面调度器:timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair 独立 interval/backoff/budget/指标;禁止用统一缩短 tick 解决延迟 | #10 | P2 | A2 | 未做。验收:调整 recovery 频率不影响 timer/outbox;各循环有独立健康/积压指标 |
+| **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | 未做。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删 |
+
+**A1/A2/A11 的边界**:A1a 只关闭“effect 已执行后自动重试”的重复路径;A1b(批量确认)才关闭 outbox 的提交前可见性,
+**per-record claim/confirm 试点已回退**(写放大不可接受)。A1c 才提供可自动重试的幂等协议。
+A2 只把正常活性从 recovery 扫描移开,不改变 recovery 的异常兜底职责。
+A11 只回收**已完成且投递结算完毕**的 run;`EffectUnknown`、`Quarantined`、未 ack 消息、未决 operation 一律保留。
+A11 的存储语义是“恢复所需的最小状态”,不是历史归档;PID 复用只在回收完成后放行,旧 pid 迟到消息由业务去重。
+**不要把 P1 的“缩短 tick”当作 A2 的替代** —— 当前 recovery 分页是每页全扫,缩短 tick 会放大扫描压力。
+
 ## 12. 下一步提示词(只含**当前任务**与限制约束;每轮**原地更新**,不追加)
 
 > 任务清单在 §11;这里只有"现在做哪一项"和约束。**每执行完一项:重写本节的「当前任务」,并把 §11 的状态标记改掉。**
@@ -2803,60 +2918,66 @@ L10 换 headless scope;L11 删 `NodeTree`/`Node`(粗算 `view` 只剩 `NodeData`
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:P1 —— engine 形状的 hop CPU 分阶段画像(§11 B,P1;只量不改代码)
+# 当前任务:A2 —— durable ready queue(§11 D;P0)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 B 的 P1 行、§10「P6-1 性能收口」的探针形状与 §10 §5n 的 release 口径;
-`KERNEL_REFACTOR_DESIGN.md` §3.7(d) 的后续项。第一波 C1-C8c 已完成(C8c = 零代码,D4 暂不挪)。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A2 行、§10「A1b 试点回退」;
+`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A2。A1a 已完成;A1b 的 per-record claim/confirm 变体已回退,
+批量版排在 A2 之后。A2 是当前正常路径活性的主任务。
 
-**目标**:把 engine 形状每 hop 那 ~1 ms 既非 codec、也非 store 的 plan/记账 CPU 分解到具体块
-(计划构造、消息 payload、`place_run`/`deliver_plan`、行投影、wake/lifecycle/slot),据此给出下一块动谁;
-本轮**只量不改生产代码**,探针不提交。
-
-**基准与口径**
-
-- **release**,内存 store,30 步线性 workflow(93 operations);`--test-threads=1`;per-call 微基准与 run 内计时都标环境比。
-- 参考:§10 §5n 的 **7.4 ms/hop(136 hop/s)** 与 §10「P6-1」的 engine 形状 **4.163 ms/hop(240 hop/s)**;
-  debug 的 11.2 hop/s 已作废,**不得再用 debug 数字**。
-- 工作区已有未提交的 engine 探针:`.wip/c8b-perf-probe.patch`(8 文件,含 `shell::operation_trace` 计时)
-  与 `.wip/perf_probe.rs`(经 `shell/tests/mod.rs` 的 `mod perf_probe;` 挂载)。先核对工作区 = patch
-  (`git apply --check -R .wip/c8b-perf-probe.patch`),再在它上面扩展;探针代码最终不提交。
+**目标**:正常 operation 的活性来自 durable ready queue,不再依赖 recovery tick;recovery 只处理
+崩溃、lease 过期、claim 失效等异常。同时修掉 `recover()` 每页全扫 `RECOVERY_INDEX_KEY_PREFIX` 的
+$O(N^2)$ 分页。
 
 **本笔内容**
 
-1. 跑 `cargo test --release -p acts --lib perf_probe -- --ignored --nocapture --test-threads=1`,
-   记录 3 轮的 operations/wall/ms-per-operation、各阶段占比与聚合字节。
-2. 若阶段粒度不够,在同一 `#[cfg(test)]` 探针里细分:计划构造、消息 payload、`place_run`/`deliver_plan`、
-   行投影、wake/lifecycle/slot。只动 `#[cfg(test)]` 探针,不改业务路径,不引入 `#[allow(...)]`。
-3. 把 ~1 ms 分解成有序的块(每块 ms/hop + 占 run 百分比),与 §10「P6-1」的 codec/store 数字对照,
-   明确下一块动谁、为什么不是别的;若结论是“先拆文档/append-only”,引用 §9.3.4 并说明它是独立格式项。
-4. 写 §10「P1 完成」记录;§11 B 的 P1 状态改为已做;§12 原地改成下一项(下一块的具体改动)。
+1. **事实与契约**
+   - 先画清 operation 创建/提交、recovery index、outbox index、wake/`try_send`、`serve`/`recover` 的现有路径。
+   - ready 记录必须与业务提交同一原子 batch:至少包含 `operation_id`、`ready_at`、`process_id`、
+     `source_aggregate_revision`。终态 operation 的 ready 记录在同一提交里删除。
+2. **写入**
+   - `advance_transition` 为 `plan.operations` 写 ready 记录(或由 repository 在同一 batch 派生)。
+   - `try_send` 保持为加速;失败/队列满不再意味着“等 tick”:ready 记录就是活性来源。
+   - 保证提交与 ready 写入的原子性;崩溃后要么两者都在,要么都不在。
+3. **驱动**
+   - driver 增加 due-ready 取用路径(独立 tick/通知均可),按 `ready_at` 取操作并 wake;处理必须幂等。
+   - 同一 operation 的重复 ready/wake 必须安全;全局顺序不要求,但每 pid 的 claim/CAS 语义保持。
+   - ready 积压、最老 ready 年龄、丢弃/wake 失败要有指标。
+4. **Recovery 收缩**
+   - `recover` 不再 wake 普通 `Pending`/`RetryScheduled`;只做:过期 claim 的 reclaim、`Committed` 的 finalize、
+     `EffectUnknown`/`Quarantined` 的 manual reconciliation、缺失 ready 记录的修复。
+   - idle `DispatchTimeout` 和 parked run 不进入热 ready 集合;timer 仍按自己的到期时间驱动。
+5. **分页**
+   - `load_recovery_page` 不得每页 `scan_prefix` 全部 recovery index;改成有序索引/游标,单页成本有界。
+   - 保持 `RecoveryPage`/`RecoveryCursor` 的稳定性与非重叠性。
+6. **测试**
+   - 队列满/丢 wake:正常下一跳不等待 tick。
+   - recovery 扫描不 wake idle timer / parked run;异常 claim 仍能被 reclaim。
+   - 崩溃恢复:ready 记录与 aggregate 原子;缺失/重复 ready 幂等。
+   - 保留 A1a 的 effect-conflict、wake-loss、linear、catch 用例绿。
 
 **边界**
 
-- 只动 `#[cfg(test)]` 探针与文档;不提交探针、不改持久化格式/列/业务行为、不加 `#[allow]`。
-- WIP 旁置口径同 C8b:先 `git apply -R --check` 再 direct `git apply -R`;提交状态 == 验证状态;
-  回填后确认 `git diff` 与动手前一致。P1 只提交文档(§10/§11/§12),不含探针。
-- 串行构建;`acts-server` 若需跑全量,按 §10 §5k 用 `-j 2` 逐 target。
+- 不改 outbox 投递顺序(那是 A1b 批量版);不改 per-process lane(A4);不缩短 tick。
+- 不破坏现有 recovery/outbox index 的持久化 tag;新索引必须可从旧库重建/修复。
+- ready 只服务“正常可运行”的操作,不把 recovery 的异常状态塞进热队列。
 
 **验收**
 
-- 阶段表(每块 ms/hop + 占比)+ 与 P6-1 对照 + 明确的下一块结论;
-- 文档提交前 `cargo fmt --check`、clippy(无生产代码改动时也应绿);§11 B P1 标为已做、§12 指向下一项。
+- `try_send` 失败后,正常操作仍能在 tick 之前被驱动;
+- recovery 扫描量与异常 operation 数相关,不随 idle timer/parked run 线性增长;
+- 冷启动/崩溃恢复不漏 operation;
+- `cargo test -p acts --lib --tests` 与 reliability 套件绿;
+- 写 §10「A2 完成」,§11 D 状态更新,§12 原地指向 A11。
 
 # 限制与约束
 
-- **先读**:§11 B P1、§10「P6-1」与 §10 §5n、§10「C8c 完成」、§6/§10 的 WIP 事故口径。
-- 不改 `NodeData`/列格式/`model:deploy` 校验/业务行为;性能结论一律 release;全量套件翻用例先对照基线(§10 §4)。
-- 测试环境:`acts-server`“全部 target 一条命令”本机报 `页面文件太小 (os error 1455)`,`-j 2` 即全绿(§10 §5k)。
-
-# 每阶段收口
-
-探针阶段只跑 `cargo test --release -p acts --lib perf_probe -- --ignored --nocapture --test-threads=1`;
-文档提交前跑 `cargo fmt --check` + `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`;
-若 P1 结论引出了代码改动,按 §11.C 的 `-p acts --lib --tests` 与 per-crate 规则执行,动 manifest 才跑 `cargo deny check bans`。
+- **先读**:§11 D、§10「A1a 完成」「A1b 试点回退」、设计 §3.10 A2、`core/recovery/**`、
+  `durable/async_document_store.rs` 的 recovery page、`shell/mod.rs` 的 wake/serve/recover。
+- 不改业务流程/消息 payload/outbox 顺序;新索引必须与 aggregate 同一 batch。
+- WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-阶段画像 + 与 P6-1 对照 + 下一块结论 → 写 §10/§11/§12 并提交**文档**一笔(探针与 `.wip/` 不进提交)。
+ready queue 实现 + recovery 收缩/分页修复 + 活性/崩溃测试 → 更新 §10/§11/§12。
 ```
 

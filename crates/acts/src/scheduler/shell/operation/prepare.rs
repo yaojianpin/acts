@@ -18,7 +18,7 @@ impl KernelHost {
     /// `slot` says whether the run's slot policy applies ([`Slot::Policy`], the
     /// driver's own operations) or the operation is claimed directly
     /// ([`Slot::Direct`], the client action path — see [`Slot`]).
-    pub(in crate::scheduler::shell) async fn prepare_operation(
+    pub(in crate::scheduler::shell) async fn prepare(
         &self,
         id: &OperationId,
         slot: Slot,
@@ -30,11 +30,13 @@ impl KernelHost {
             return Ok(None);
         }
         let now = SystemClock.now_ms();
+        let phase = operation_trace::start();
         let snapshot = self
             .load(&id.process_id)
             .await?
             .ok_or_else(|| ActError::Runtime(format!("aggregate {} not found", id.process_id)))?
             .snapshot;
+        operation_trace::end(operation_trace::LOAD, phase);
         // The slot policy for this run, before it is driven: a parked run
         // waits, a run this driver never admitted (one already in flight when
         // it booted) takes a slot or parks, and a run that settled already —
@@ -43,7 +45,9 @@ impl KernelHost {
         // longest. The recovery scan re-wakes every pending operation each
         // tick, so this is also the hot path of a parked run.
         if slot == Slot::Policy {
+            let phase = operation_trace::start();
             let placed = self.place_run(&snapshot);
+            operation_trace::end(operation_trace::PLACE1, phase);
             if !placed {
                 return Ok(None);
             }
@@ -94,6 +98,7 @@ impl KernelHost {
             lease_until_ms: now + LEASE_MS,
             heartbeat_revision: 0,
         };
+        let phase = operation_trace::start();
         let (prepared, snapshot) = self
             .operation_event(
                 id,
@@ -101,6 +106,7 @@ impl KernelHost {
                 OperationEvent::ClaimAndPrepare(claim.clone()),
             )
             .await?;
+        operation_trace::end(operation_trace::CLAIM, phase);
         debug_assert!(matches!(prepared.state, OperationState::CommitPrepared(_)));
 
         Ok(Some(Claimed {
@@ -118,20 +124,39 @@ impl KernelHost {
 
     /// Give a claimed-but-unused operation back: its claim is released for the
     /// next tick — the same `RetryScheduled` state a lease expiry produces.
+    ///
+    /// A release can itself lose the aggregate compare-and-swap: a client
+    /// action or an outbox claim/confirm may be committing the same process
+    /// between this operation's load and its release. Retrying the operation
+    /// event is safe — the operation revision is unchanged and the event is
+    /// the same — and keeps a merely-conflicted operation from sitting
+    /// `CommitPrepared` until its lease expires.
     pub(in crate::scheduler::shell) async fn release_claim(
         &self,
         claimed: &Claimed,
         attempt: u32,
     ) -> Result<()> {
-        self.operation_event(
-            &claimed.id,
-            claimed.revision,
-            OperationEvent::ScheduleRetry {
-                claim: claimed.claim.claim.clone(),
-                attempt,
-            },
-        )
-        .await?;
-        Ok(())
+        let mut last_error = None;
+        for _ in 0..8 {
+            match self
+                .operation_event(
+                    &claimed.id,
+                    claimed.revision,
+                    OperationEvent::ScheduleRetry {
+                        claim: claimed.claim.claim.clone(),
+                        attempt,
+                    },
+                )
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(error) if is_conflict(&error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error.expect("a release retry loop always records its conflict"))
     }
 }

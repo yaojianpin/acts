@@ -142,6 +142,22 @@ pub(super) enum Outcome {
     Nothing,
 }
 
+impl Outcome {
+    /// Whether phase 2 crossed the external-effect boundary.
+    ///
+    /// A package that returned success *or failure* may already have touched
+    /// the outside world; an internal plan, a client decision and an idle
+    /// timer round did not. The distinction is what lets dispatch decide
+    /// whether a lost compare-and-swap may retry the operation or must surface
+    /// it as an unknown effect.
+    pub(super) fn ran_external_effect(&self) -> bool {
+        matches!(
+            self,
+            Outcome::Effect(action::Effect::Completed(Some(_)) | action::Effect::Failed(_))
+        )
+    }
+}
+
 /// One operation kind's execution: the kind-specific half of driving one.
 ///
 /// The host runs the four phases above; only the pre-claim policy and the
@@ -191,9 +207,10 @@ impl KernelHost {
     /// operation needed nothing — a wake redelivered for an already-terminal
     /// operation, a run parked by the slot cap, or a timer with nothing due.
     pub(in crate::scheduler::shell) async fn execute_one(&self, id: &OperationId) -> Result<bool> {
+        operation_trace::operation();
         // Phase 1 — prepare: the slot policy, the kind's pre-claim check, the
         // claim. `None` is "nothing to drive", never an error.
-        let Some(claimed) = self.prepare_operation(id, Slot::Policy).await? else {
+        let Some(claimed) = self.prepare(id, Slot::Policy).await? else {
             return Ok(false);
         };
         let driver = driver(claimed.kind).ok_or_else(|| {
@@ -204,9 +221,13 @@ impl KernelHost {
         })?;
         let operation = claimed.operation();
         // Phases 2 and 3 — perform and plan: the kind's own work and the
-        // transition that work implies.
+        // transition that work implies. One timer covers both, exactly the
+        // span the pre-split `PLAN` stage measured.
+        let phase = operation_trace::start();
         let outcome = driver.run(self, &operation).await?;
+        let effect_started = outcome.ran_external_effect();
         if matches!(outcome, Outcome::Nothing) {
+            operation_trace::end(operation_trace::PLAN, phase);
             // The work turned out to be nothing after all: the claim goes back
             // so the next recovery tick re-derives the operation. The release
             // is best-effort — recovery's lease expiry decides it either way,
@@ -220,9 +241,26 @@ impl KernelHost {
             }
             return Ok(false);
         }
-        let plan = driver.next(self, &operation, outcome).await?;
+        let plan = match driver.next(self, &operation, outcome).await {
+            Ok(plan) => {
+                operation_trace::end(operation_trace::PLAN, phase);
+                plan
+            }
+            Err(error) => {
+                operation_trace::end(operation_trace::PLAN, phase);
+                if effect_started && let Err(mark_error) = self.mark_effect_unknown(&claimed).await
+                {
+                    tracing::warn!(
+                        id = ?claimed.id,
+                        error = %mark_error,
+                        "marking an effect-unknown operation failed; its lease expiry will decide it"
+                    );
+                }
+                return Err(error);
+            }
+        };
         // Phase 4 — dispatch: deliver, commit, wake, settle.
-        self.dispatch_operation(&claimed, plan, Projection::Touched)
+        self.dispatch(&claimed, plan, Projection::Touched, effect_started)
             .await?;
         Ok(true)
     }

@@ -40,14 +40,22 @@ use crate::{
     ActError, NodeKind, Result,
     scheduler::{
         core::{
+            commit::{
+                aggregate::{ProcessSnapshot, TaskSnapshot},
+                command::{ActionCommand, ActionKind, ActionPlanner},
+            },
             model::{
                 clock::{Clock, SystemClock},
-                operation::{OperationEvent, OperationId, OperationKind, OperationState},
+                model_graph::NodeId,
+                operation::{
+                    ClaimToken, OperationEvent, OperationId, OperationKind, OperationState,
+                },
+                task_graph::TaskId,
                 transition_plan::{
                     OperationCommit, OperationIntent, StateChange, TransitionPlan, VariableWrite,
                 },
             },
-            outbox::records::{DeliveryClaim, OutboxEvent},
+            outbox::records::{DeliveryClaim, OutboxEvent, OutboxRecord},
             plan::{
                 ActPlan,
                 branch::{
@@ -69,6 +77,7 @@ use crate::{
         },
         durable::async_document_store::{
             AsyncProcessRepository, AsyncRecoveryRepository, KvDocumentStore,
+            TransitionCommitOutcome,
         },
     },
     store::KvStore,
@@ -162,11 +171,7 @@ pub(crate) struct KernelHost {
     >,
     /// Immediate delivery: a commit that wrote outbox records notifies the
     /// driver, whose delivery pass then runs at once instead of waiting for the
-    /// next tick. The tick stays the *retry* net — a record that could not be
-    /// delivered (a retryable outcome, a lease the pass backed off) is retried
-    /// by the same pass on its own schedule; what must never wait for a tick is
-    /// the first attempt, whose latency a client's next action sits behind (the
-    /// default 15 s cadence turned every client-driven step into a tick long).
+    /// next tick. The tick stays the *retry* net.
     deliver: Arc<tokio::sync::Notify>,
     /// The process-lifecycle seam: when attached, a run's start and terminal
     /// are reported as engine events — the driver's mirror of the legacy
@@ -510,7 +515,7 @@ impl KernelHost {
     /// is attached. The rows are a derived read model: a store failure is
     /// reported and dropped, never propagated into the operation — the next commit
     /// re-derives them from the aggregate.
-    async fn project(&self, snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot) {
+    async fn project(&self, snapshot: &ProcessSnapshot) {
         let projector = self.projection.read().clone();
         let Some(projector) = projector else {
             return;
@@ -528,7 +533,7 @@ impl KernelHost {
     /// read model's rows for the rest of the run cannot have changed.
     async fn project_touched(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        snapshot: &ProcessSnapshot,
         touched: &std::collections::BTreeSet<String>,
     ) {
         let projector = self.projection.read().clone();
@@ -544,15 +549,28 @@ impl KernelHost {
         }
     }
 
-    /// Re-project one process from its durable aggregate (the action path, and
-    /// the outbox settling pass: a run whose last operation committed before its
+    /// Re-project one process's proc row from its durable aggregate (the
+    /// sweeper's repair pass: a run whose last operation committed before its
     /// records were delivered only becomes `removable` once they are).
+    ///
+    /// The proc row may re-run at the same aggregate version: `removable`
+    /// also depends on channel delivery rows, which are outside that version.
     pub(crate) async fn refresh_projection(&self, process_id: &str) {
-        if self.projection.read().is_none() {
+        let projector = self.projection.read().clone();
+        let Some(projector) = projector else {
             return;
-        }
+        };
         match self.load(process_id).await {
-            Ok(Some(loaded)) => self.project(&loaded.snapshot).await,
+            Ok(Some(loaded)) => {
+                projector.forget_proc(process_id);
+                if let Err(error) = projector.project_proc_row(&loaded.snapshot).await {
+                    tracing::warn!(
+                        pid = %process_id,
+                        error = %error,
+                        "row projection refresh failed; the next commit re-derives the rows"
+                    );
+                }
+            }
             Ok(None) => {}
             Err(error) => tracing::warn!(
                 pid = %process_id,
@@ -812,11 +830,6 @@ impl KernelHost {
     /// The at-least-once window is the same one the effect seam documents: a
     /// crash between the delivery and the commit re-runs the operation, and the
     /// message goes out again (the channel is at-least-once by construction).
-    ///
-    /// Called immediately before the commit that records the plan: the commit
-    /// is the visibility barrier, so a consumer that reacts to the delivered
-    /// message can only act on a run whose rows that commit (and every earlier
-    /// one) already wrote.
     fn deliver_plan(
         &self,
         process_id: &str,
@@ -850,8 +863,6 @@ impl KernelHost {
                     receipt,
                 } => intent.receipt = Some(receipt),
                 other => {
-                    // A retryable (or unconfirmed) outcome: the record commits
-                    // `Pending` and the driver's pass owns it from here.
                     tracing::debug!(key = %intent.key, outcome = ?other, "outbox record not confirmed in the operation");
                     unconfirmed = true;
                 }
@@ -1310,14 +1321,14 @@ impl KernelHost {
         // envelope is the envelope's own; the operation takes its claim in phase 1,
         // fenced by the operation's own attempt, which is what the state
         // machine checks.
-        let command = crate::scheduler::core::commit::command::ApplyActionCommand {
+        let command = ActionCommand {
             process_id: process_id.into(),
             task: task_id.clone(),
             action,
             inputs,
             source_operation: OperationCommit {
                 id: operation_id.clone(),
-                claim: crate::scheduler::core::model::operation::ClaimToken {
+                claim: ClaimToken {
                     owner: OWNER.into(),
                     fence: 1,
                     lease_until_ms: now + LEASE_MS,
@@ -1328,18 +1339,15 @@ impl KernelHost {
 
         // Preflight against the current snapshot: a caller-correctable
         // rejection (terminal task, unknown execution) consumes nothing.
-        crate::scheduler::core::commit::command::ActionPlanner::plan(&snapshot, &command)
-            .map_err(runtime)?;
+        ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
         // A `Back` without the step it names is the legacy refusal, checked
         // before the durable intent: the rewind target is the client's own
         // input, not something the kernel can invent.
-        if matches!(
-            command.action,
-            crate::scheduler::core::commit::command::ActionKind::Back
-        ) && !command
-            .inputs
-            .iter()
-            .any(|(name, _)| name == crate::utils::consts::ACT_TO)
+        if matches!(command.action, ActionKind::Back)
+            && !command
+                .inputs
+                .iter()
+                .any(|(name, _)| name == crate::utils::consts::ACT_TO)
         {
             return Err(ActError::Runtime(
                 "cannot find 'to' value in options".to_string(),
@@ -1348,10 +1356,7 @@ impl KernelHost {
         // A cancel rewinds the work *forward* of the step the client names:
         // the legacy handler refuses when there is no package step ahead to
         // undo, and when that forward work already settled.
-        if matches!(
-            command.action,
-            crate::scheduler::core::commit::command::ActionKind::Cancel
-        ) {
+        if matches!(command.action, ActionKind::Cancel) {
             self.validate_cancel_forward_work(&snapshot, &task_id)?;
         }
         // A step declaring `catches` is not a client target once it is deciding
@@ -1398,9 +1403,9 @@ impl KernelHost {
                 .await
                 .map_err(repository_error)?
             {
-                crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Committed { .. }
-                | crate::scheduler::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { .. } => {}
-                crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
+                TransitionCommitOutcome::Committed { .. }
+                | TransitionCommitOutcome::AlreadyCommitted { .. } => {}
+                TransitionCommitOutcome::Conflict { .. } => {
                     return Err(conflict(format!(
                         "action intent conflict on {process_id}/{node}"
                     )));
@@ -1412,10 +1417,7 @@ impl KernelHost {
         // path carries no claim, commit, wake, projection or slot code of its
         // own (see [`operation`]). The slot policy does not apply here: the decision
         // is already durable, the intent was committed above.
-        let Some(claimed) = self
-            .prepare_operation(&operation_id, operation::Slot::Direct)
-            .await?
-        else {
+        let Some(claimed) = self.prepare(&operation_id, operation::Slot::Direct).await? else {
             return Err(conflict(format!(
                 "action intent {operation_id:?} is not claimable"
             )));
@@ -1423,9 +1425,15 @@ impl KernelHost {
         let driver = operation::driver(OperationKind::ApplyAction)
             .expect("ApplyAction is a driven operation kind");
         let claimed_operation = claimed.operation();
-        let plan = match driver.run(self, &claimed_operation).await {
-            Ok(outcome) => driver.next(self, &claimed_operation, outcome).await,
-            Err(error) => Err(error),
+        let (plan, effect_started) = match driver.run(self, &claimed_operation).await {
+            Ok(outcome) => {
+                let effect_started = outcome.ran_external_effect();
+                (
+                    driver.next(self, &claimed_operation, outcome).await,
+                    effect_started,
+                )
+            }
+            Err(error) => (Err(error), false),
         };
         match plan {
             // The action's own commit, never a fresh load: the read model and
@@ -1433,13 +1441,24 @@ impl KernelHost {
             // every other operation's. The run's rows whole — an action is decided
             // against the aggregate as a whole, not as one operation's effect.
             Ok(plan) => {
-                self.dispatch_operation(&claimed, plan, operation::Projection::Whole)
+                self.dispatch(&claimed, plan, operation::Projection::Whole, effect_started)
                     .await
             }
             Err(error) => {
-                // The state moved between intent and ownership: park the
-                // operation for recovery instead of consuming it.
-                let _ = self.release_claim(&claimed, 1).await;
+                // An effect that may already have run cannot be retried
+                // automatically. Effect-free plans (the state moved between
+                // intent and ownership) are safe to hand back for recovery.
+                if effect_started {
+                    if let Err(mark_error) = self.mark_effect_unknown(&claimed).await {
+                        tracing::warn!(
+                            id = ?claimed.id,
+                            error = %mark_error,
+                            "marking an effect-unknown operation failed; its lease expiry will decide it"
+                        );
+                    }
+                } else {
+                    let _ = self.release_claim(&claimed, 1).await;
+                }
                 Err(ActError::Runtime(format!("action re-plan failed: {error}")))
             }
         }
@@ -1450,10 +1469,10 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     fn task_operation_plan(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        snapshot: &ProcessSnapshot,
         id: &OperationId,
-        task_id: &crate::scheduler::core::model::task_graph::TaskId,
-        task: Option<&crate::scheduler::core::commit::aggregate::TaskSnapshot>,
+        task_id: &TaskId,
+        task: Option<&TaskSnapshot>,
         claim: &OperationCommit,
         note: &str,
         topic: &str,
@@ -1488,7 +1507,7 @@ impl KernelHost {
     /// package facts.
     fn step_uses(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        snapshot: &ProcessSnapshot,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<(String, serde_json::Value, String, String)>> {
         let Some(model) = model_of(snapshot)? else {
@@ -1520,15 +1539,14 @@ impl KernelHost {
     #[allow(clippy::too_many_arguments)]
     fn act_message_payload(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        snapshot: &ProcessSnapshot,
+        task_id: &TaskId,
         node_id: &str,
         facts: Option<&ActFacts>,
         outputs: Option<&[VariableWrite]>,
         error: Option<(&str, &str)>,
     ) -> Result<Option<serde_json::Value>> {
-        let node =
-            crate::scheduler::core::model::model_graph::NodeId::parse(node_id).map_err(runtime)?;
+        let node = NodeId::parse(node_id).map_err(runtime)?;
         let Some((uses, raw_params, name, mid)) = self.step_uses(snapshot, &node)? else {
             return Ok(None);
         };
@@ -1871,12 +1889,84 @@ impl KernelHost {
         Ok(report)
     }
 
+    /// Deliver one already-loaded record: claim it with a fenced claim, hand
+    /// it to the transport, then persist the reported outcome. After the
+    /// transport ran, only its explicit `RetryAt` proves no external effect —
+    /// everything else the transport cannot classify stays `DeliveryUnknown`.
+    /// The transport lock is taken only for the synchronous `deliver` call,
+    /// never across an await.
+    ///
+    /// `Ok(true)` means the transport confirmed delivery; `Ok(false)` means the
+    /// claim was lost or the record was no longer dispatchable.
+    async fn dispatch_outbox_record(&self, record: OutboxRecord, now: i64) -> Result<bool> {
+        let claim = DeliveryClaim {
+            owner: OWNER.into(),
+            fence: record.last_fence + 1,
+            lease_until_ms: now + DELIVERY_LEASE_MS,
+            heartbeat_revision: 0,
+        };
+        let claimed = match self
+            .processes
+            .evolve_outbox(
+                &record.id,
+                record.revision,
+                OutboxEvent::Claim {
+                    claim: claim.clone(),
+                    now_ms: now,
+                },
+            )
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                // A concurrent worker claimed it first; skip without failing
+                // the pass.
+                tracing::debug!(record = ?record.id, error = %error, "delivery claim lost");
+                return Ok(false);
+            }
+        };
+        let event = {
+            let outcome = self.transport.write().deliver(&claimed);
+            match outcome {
+                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Delivered {
+                    receipt,
+                } => OutboxEvent::ConfirmDelivered {
+                    claim: claim.clone(),
+                    receipt,
+                    now_ms: now,
+                },
+                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::RetryAt {
+                    available_at_ms,
+                    error,
+                } => OutboxEvent::Reschedule {
+                    claim: claim.clone(),
+                    available_at_ms,
+                    error,
+                    now_ms: now,
+                },
+                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::OutcomeUnknown {
+                    reason,
+                } => OutboxEvent::MarkDeliveryUnknown {
+                    claim: claim.clone(),
+                    reason,
+                    now_ms: now,
+                },
+                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Quarantine {
+                    reason,
+                } => OutboxEvent::Quarantine { reason },
+            }
+        };
+        let delivered = matches!(&event, OutboxEvent::ConfirmDelivered { .. });
+        self.processes
+            .evolve_outbox(&record.id, claimed.revision, event)
+            .await
+            .map_err(runtime)?;
+        Ok(delivered)
+    }
+
     /// One outbox delivery pass over the attached transport: claim every due
     /// record with a fenced claim, hand it to the transport, then persist the
-    /// reported outcome. After the transport ran, only its explicit `RetryAt`
-    /// proves no external effect — everything else the transport cannot
-    /// classify stays `DeliveryUnknown`. The transport lock is taken only for
-    /// the synchronous `deliver` call, never across an await.
+    /// reported outcome.
     pub(crate) async fn dispatch_outbox(&self) -> Result<usize> {
         let now = SystemClock.now_ms();
         let mut delivered = 0usize;
@@ -1892,69 +1982,11 @@ impl KernelHost {
                 break;
             }
             for record in page.records {
-                let claim = DeliveryClaim {
-                    owner: OWNER.into(),
-                    fence: record.last_fence + 1,
-                    lease_until_ms: now + DELIVERY_LEASE_MS,
-                    heartbeat_revision: 0,
-                };
-                let claimed = match self
-                    .processes
-                    .evolve_outbox(
-                        &record.id,
-                        record.revision,
-                        OutboxEvent::Claim {
-                            claim: claim.clone(),
-                            now_ms: now,
-                        },
-                    )
-                    .await
-                {
-                    Ok(claimed) => claimed,
-                    Err(error) => {
-                        // A concurrent worker claimed it first; skip without
-                        // failing the pass.
-                        tracing::debug!(record = ?record.id, error = %error, "delivery claim lost");
-                        continue;
-                    }
-                };
-                let event = {
-                    let outcome = self.transport.write().deliver(&claimed);
-                    match outcome {
-                        crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Delivered { receipt } => {
-                            delivered += 1;
-                            settled.insert(claimed.id.process_id.clone());
-                            OutboxEvent::ConfirmDelivered {
-                                claim: claim.clone(),
-                                receipt,
-                                now_ms: now,
-                            }
-                        }
-                        crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::RetryAt {
-                            available_at_ms,
-                            error,
-                        } => OutboxEvent::Reschedule {
-                            claim: claim.clone(),
-                            available_at_ms,
-                            error,
-                            now_ms: now,
-                        },
-                        crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::OutcomeUnknown { reason } => {
-                            OutboxEvent::MarkDeliveryUnknown {
-                                claim: claim.clone(),
-                                reason,
-                                now_ms: now,
-                            }
-                        }
-                        crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Quarantine { reason } => {
-                            OutboxEvent::Quarantine { reason }
-                        }
-                    }
-                };
-                self.processes
-                    .evolve_outbox(&record.id, claimed.revision, event)
-                    .await
-                    .map_err(runtime)?;
+                let process_id = record.id.process_id.clone();
+                if self.dispatch_outbox_record(record, now).await? {
+                    delivered += 1;
+                    settled.insert(process_id);
+                }
             }
             cursor = page.next;
             if cursor.is_none() {
@@ -1973,3 +2005,88 @@ impl KernelHost {
 
 #[cfg(test)]
 mod tests;
+
+// TEMPORARY (P7 task 1a): the per-phase operation timers the profile probe reads.
+// Deleted together with the probe and the §10 record they feed.
+#[cfg(test)]
+pub(crate) mod operation_trace {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    pub(crate) const OPERATIONS: usize = 0;
+    pub(crate) const LOAD: usize = 1;
+    pub(crate) const PLACE1: usize = 2;
+    pub(crate) const CLAIM: usize = 3;
+    pub(crate) const PLAN: usize = 4;
+    pub(crate) const DELIVER: usize = 5;
+    pub(crate) const COMMIT: usize = 6;
+    pub(crate) const WAKE: usize = 7;
+    pub(crate) const LIFECYCLE: usize = 8;
+    pub(crate) const PROJECT: usize = 9;
+    pub(crate) const PLACE2: usize = 10;
+    pub(crate) const STAGES: usize = 11;
+    pub(crate) const NAMES: [&str; STAGES] = [
+        "operations",
+        "load",
+        "place1",
+        "claim",
+        "plan",
+        "deliver",
+        "commit",
+        "wake",
+        "lifecycle",
+        "project",
+        "place2",
+    ];
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    static TOTALS: parking_lot::Mutex<[u64; STAGES]> = parking_lot::Mutex::new([0; STAGES]);
+
+    pub(crate) fn enable() {
+        *TOTALS.lock() = [0; STAGES];
+        ENABLED.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn disable() -> [u64; STAGES] {
+        ENABLED.store(false, Ordering::SeqCst);
+        *TOTALS.lock()
+    }
+
+    pub(crate) fn operation() {
+        if ENABLED.load(Ordering::Relaxed) {
+            TOTALS.lock()[OPERATIONS] += 1;
+        }
+    }
+
+    pub(crate) fn start() -> Option<Instant> {
+        ENABLED.load(Ordering::Relaxed).then(Instant::now)
+    }
+
+    pub(crate) fn end(stage: usize, started: Option<Instant>) {
+        if let Some(started) = started {
+            TOTALS.lock()[stage] += started.elapsed().as_nanos() as u64;
+        }
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) mod operation_trace {
+    use std::time::Instant;
+
+    pub(crate) const LOAD: usize = 1;
+    pub(crate) const PLACE1: usize = 2;
+    pub(crate) const CLAIM: usize = 3;
+    pub(crate) const PLAN: usize = 4;
+    pub(crate) const DELIVER: usize = 5;
+    pub(crate) const COMMIT: usize = 6;
+    pub(crate) const WAKE: usize = 7;
+    pub(crate) const LIFECYCLE: usize = 8;
+    pub(crate) const PROJECT: usize = 9;
+    pub(crate) const PLACE2: usize = 10;
+
+    pub(crate) fn operation() {}
+    pub(crate) fn start() -> Option<Instant> {
+        None
+    }
+    pub(crate) fn end(_stage: usize, _started: Option<Instant>) {}
+}

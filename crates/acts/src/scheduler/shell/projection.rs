@@ -81,11 +81,13 @@ pub(crate) struct RowProjector {
     /// action it just committed, and the write-behind queue applies them in
     /// arrival order — which is not the commit order. An older commit's
     /// projection must therefore never write over a newer one's rows, so each
-    /// projection claims its run's version first and a version that is not
-    /// newer is dropped. Committed versions are totally ordered (one commit
-    /// wins the CAS and the losing writer re-plans from the winner's version),
-    /// which makes the check sound; the map is in-process, and after a restart
-    /// the first projection of a run writes (the rows are re-derived anyway).
+    /// projection claims its run's version first and an older version is
+    /// dropped. The sweeper can forget the proc row's claim before repairing
+    /// `removable`, which also depends on channel delivery rows outside the
+    /// aggregate version. Committed versions are totally ordered (one commit
+    /// wins the CAS and the losing writer re-plans from the winner's version);
+    /// the map is in-process, and after a restart the first projection of a
+    /// run writes (the rows are re-derived anyway).
     projected: Arc<parking_lot::Mutex<std::collections::HashMap<String, ProcessVersion>>>,
 }
 
@@ -130,6 +132,14 @@ impl RowProjector {
         }
     }
 
+    /// Drop the proc row's version claim so the sweeper can re-evaluate
+    /// `removable` at the same aggregate version. A newer projection that
+    /// already ran keeps its claim, so the repair cannot move the row back.
+    pub(crate) fn forget_proc(&self, process_id: &str) {
+        let key = format!("{process_id}\u{1f}proc");
+        self.projected.lock().remove(&key);
+    }
+
     fn store(&self) -> Arc<Store> {
         self.store.clone()
     }
@@ -159,16 +169,21 @@ impl RowProjector {
         let mut tree = NodeTree::new();
         tree.load(&model)?;
 
-        if self.claim(snapshot, "proc")
-            && let Err(error) = self.project_proc(snapshot, &model).await
-        {
-            self.release(snapshot, "proc");
-            return Err(error);
-        }
+        // The proc row is derived from the root task's state. Whenever it is
+        // projected, project the root task row too: otherwise a commit that
+        // touches only variables/outbox can advance the proc row to a terminal
+        // state while the root task row still reads `running`.
+        let root = snapshot
+            .tasks
+            .keys()
+            .filter(|id| id.node.as_str() == consts::TASK_ROOT_TID)
+            .min_by_key(|id| id.generation);
         for task_id in snapshot.tasks.keys() {
             let wire = task_id.wire(&snapshot.process_id);
+            let is_root = root.is_some_and(|root| root == task_id);
             if let Some(instances) = instances
                 && !instances.contains(&wire)
+                && !is_root
             {
                 continue;
             }
@@ -182,6 +197,14 @@ impl RowProjector {
                 self.release(snapshot, &wire);
                 return Err(error);
             }
+        }
+        // The proc row is the summary row: write it last so a reader that sees
+        // the terminal proc state can also see the task rows it summarizes.
+        if self.claim(snapshot, "proc")
+            && let Err(error) = self.project_proc(snapshot, &model).await
+        {
+            self.release(snapshot, "proc");
+            return Err(error);
         }
         Ok(())
     }

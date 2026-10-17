@@ -65,11 +65,8 @@ pub(crate) struct OutboxIntent {
     pub(crate) topic: String,
     pub(crate) payload: String,
     /// The receipt the operation's own transport returned for this record, when it
-    /// delivered it *before* committing (the effect seam's ordering: the work
-    /// runs, then one commit records it). The commit creates the record
-    /// already `Delivered` — no claim, no confirm pass, no second commit — and
-    /// `None` leaves it `Pending` for the driver's retry pass (a transport that
-    /// refused, or a plan no operation has offered the transport yet).
+    /// delivered it *before* committing. The commit creates the record already
+    /// `Delivered`; `None` leaves it `Pending` for the outbox retry pass.
     pub(crate) receipt: Option<String>,
 }
 

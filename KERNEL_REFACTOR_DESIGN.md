@@ -1,9 +1,11 @@
 # scheduler(内核)重构设计笔记(2026-10-15)
 
-> **状态:D1-D4 已全部拍定(C1-C8c 已落地;D4 = 暂不挪,2026-10-17)。** 决策记录见 §2.2;第二波(P1/L*)见 `KERNEL_CUTOVER_NOTES.md` §11 B。
+> **状态:D1-D4 已全部拍定(C1-C8c 已落地;D4 = 暂不挪,2026-10-17)。** 决策记录见 §2.2;
+> **2026-10-17 架构审计新增 A1-A11 修正波(§3.10),优先于第二波 P1/L*;A1a 已落地,
+> A1b 的 per-record 试点已回退(批量版待做),当前 A2。** 任务状态见 `KERNEL_CUTOVER_NOTES.md` §11 D。
 > **范围**:用户提出的 7 条 scheduler 重构思路 —— ①聚合命名 ②task 身份 ③投影出行 ④outbox 消息 ⑤立即投递 ⑥`core/plan/` 模块拆分 ⑦`core/model/view/` 的去留。
 > **关系**:本文档落实 `KERNEL_CUTOVER_NOTES.md` §11 C4/C5(「先写设计再动手」),并把 §11 L1 (删 `ops`)、§10「读模型行表 `procs`/`tasks`/`vars` 的去留」两个待决项的影响面写清。
-> **性质**:第 ⑤ 条是**决策**(已定,见 §2.1),第 ③ 条**已经实现**(真实改动只是"一行一实例",依赖第 ② 条),第 ② 条是唯一动持久化格式的改动,第 ①/⑥ 条是命名与搬运。
+> **性质**:第 ⑤ 条原决策已被 A1b 取代(见 §2.1/§3.10),第 ③ 条**已经实现**(真实改动只是"一行一实例",依赖第 ② 条),第 ② 条是唯一动持久化格式的改动,第 ①/⑥ 条是命名与搬运。
 
 ---
 
@@ -111,10 +113,14 @@
 
 ### 2.1 已定
 
-- **第 ⑤ 条(投递)**:保留「发在提交前」(现状)。理由:延迟最低、与 effect seam 同序;代价是 at-least-once 重复窗口 —— 写进文档即可,不改代码。
+- **第 ⑤ 条(投递)**:**已被 2026-10-17 架构审计的 A1b 取代**。C7 当时的「发在提交前」不再是目标;目标改为「先提交 outbox 记录为 Pending,再由 outbox dispatcher 发送并**批量确认**」。A1b 落地前代码仍是旧顺序,但不得再把旧顺序当契约(见 §3.5、§3.10)。
+  per-record claim/confirm 试点已回退(写放大不可接受),实现必须批量确认或把 outbox 状态移出 aggregate。
 - **第 ① 条的前提**:legacy `Process`/`Task`/`Action` 不参与命名决策(迁移后移除),因此终态名字**现在就按终态取**;临时并存(`ProcessSnapshot` vs shell `Process`)可接受,层不同且守卫已在挡越层。
 - **第 ② 条的铁律**:实例 id 必须是 `(node, generation)` 的**纯函数**。理由见 §1.2 的 `AlreadyCommitted` 条目 —— 这不是风格问题,是"会不会多造一个实例"的问题。
 - **第 ③ 条**:不改"投影已存在"这件事,真实改动只有"一行一实例",且它**依赖第 ② 条**。
+- **存储与 PID 复用(2026-10-17 追加)**:存储只服务于崩溃/停止/异常后的恢复,不做历史归档或长期查看;
+  run 终态、所有消息投递/结算、且无未决 operation 后,回收 `ProcessSnapshot`、投影行、recovery/outbox 索引和 workdir;
+  回收后同一 pid 可再次启动,旧 pid 的重复执行/迟到消息由业务系统按业务键去重。设计见 A11。
 
 ### 2.2 决策记录(D1/D2/D3/D4 均已拍)
 
@@ -270,7 +276,12 @@ pub(crate) struct OperationId {                              // task_id 换类�
 4. **每终态恰一条(已做)**:`message_from_record` 的 9 项 topic→state 表仍是唯一真值源;测试补两处 —— 9 主题的完整映射表,以及
    `TaskState` 每个终态必须命名一个主题(穷尽 match:新增状态在编译期就迫使决定),并钉住 `tid` = 实例 wire / `nid` = 模型节点的契约(C5 的 BREAKING 承接)。
 
-### 3.5 投递(第 ⑤ 条;2026-10-17 C7 定稿)
+### 3.5 投递(第 ⑤ 条;2026-10-17 C7 定稿,**同日被 A1b 取代**)
+
+> **2026-10-17 更新**:下面的第 1 条是 C7 时点的现状,不再是终态。A1b(§3.10)把投递移到提交之后:
+> 记录先提交为 `Pending`,再由 outbox dispatcher 发送并**批量确认**;投影先于外部消息。
+> per-record claim/confirm 试点已回退(写放大不可接受),不得原样重试。
+> 保留本节是为了记录当时的 at-least-once 决策与“无 handler 不留行”边界;实现以 A1b 的批量版为准。
 
 两条边界都是**契约**,不是实现细节;本笔零代码,以下引用均以 C7 提交状态为准:
 
@@ -427,10 +438,280 @@ pub(crate) fn infallible<T>(planned: Result<T, std::convert::Infallible>) -> T;
 
 ---
 
+### 3.10 架构修正 A1-A11(2026-10-17 审计)
+
+> 审计结论:分层方向(`Core / Durable / Shell`)保留,不需要推翻重写。问题集中在六处:
+> **外部 effect 与提交的顺序、正常路径的活性来源、同一 Process 的写者模型、投影的版本协议、Shell 仍承担的状态机语义、
+> 以及终态 ProcessSnapshot/投影/索引的回收与 PID 复用。**
+> 任务编号 `A1…A11` 与审计条目对应;状态、依赖和验收只在 `KERNEL_CUTOVER_NOTES.md` §11 D 维护,本节只写设计。
+
+#### A1 — effect/commit 边界(最高优先级)
+
+**现状(§1.5、§3.5)**:`ClaimAndPrepare` 在 effect 之前落盘,方向正确;但 effect 之后的 plan commit 若丢失 CAS,
+`dispatch` 会释放 claim 让 recovery 自动重试,`apply_action_once` 的 `next` 失败也会释放 claim。此时包 effect 可能已经执行,
+重试会重复外部副作用。outbox 记录仍在本 plan 提交**之前**发送,注释里的 at-least-once 窗口是同一问题。
+
+**目标协议**:
+
+```text
+Command
+  -> Commit { aggregate changes, effect intent, outbox Pending }
+  -> Effect executor
+  -> EffectObservation
+  -> Commit result
+```
+
+- **A1a(已实现,2026-10-17)**:`Outcome::ran_external_effect()` 区分包 effect 与纯内部计划;effect 后丢失 CAS
+  或 `next` 失败时调用 `MarkEffectUnknown`,不再释放 claim 自动重试。恢复扫描只把它列入
+  `reconciliation_required`。客户端动作路径同样处理。
+- **A1b**:outbox 改为提交后发送。plan 提交把记录写成 `Pending`;dispatcher **批量确认本 operation 的新记录**
+  (每个 operation 至多一笔确认提交),投影先于外部消息;删除 `OutboxIntent.receipt` 的“提交前直发”快路径。
+  消息仍是 at-least-once,但消费者不会再在提交前看到消息。
+  **per-record claim/confirm 试点已回退(2026-10-17)**:每条记录两笔 aggregate commit,11 次循环 >20s,
+  写放大不可接受。不得原样重试;批量确认或独立 outbox log 是前置设计。
+- **A1c**:为可自动重试的 effect 引入稳定 idempotency key 与可查询的 effect observation;
+  不能证明幂等的 effect 只走 `EffectUnknown -> ManualReconciliation`,并补齐人工处理闭环。
+  自动重试只允许用于已证明幂等的 effect。
+
+**验收**:effect 后的 CAS 冲突不产生第二次包执行;`EffectUnknown` 的 run 不会自动推进;
+消息发送发生在对应 aggregate commit 之后;at-least-once 语义与现有 channel 契约不变。
+
+#### A2 — 可靠 ready queue(正常路径的活性来源)
+
+**现状**:`QueueWake::wake` 是 `try_send`,满/关闭即丢;正常路径靠 `recover()` 每 tick 兜底。
+`recover` 的 `load_recovery_page` 每取一页都全扫 `RECOVERY_INDEX_KEY_PREFIX`,再全局排序取最小 128 条;
+`recover()` 又循环取页 —— 可恢复操作为 $N$ 时约 $O(N^2/128)$。所有 `Pending` timer 和 parked run 也在索引里,
+每 tick 被重新 wake、重新 load。缩短 tick 会把这个问题放大,不能作为修法。
+
+**目标**:
+
+- 增加 durable ready index/table:`ready_at`, `operation_id`, `process_id`, `source_revision`, `state`;
+- 正常创建操作时,在业务提交内同时写 ready 记录;`try_send` 只做加速,失败不影响活性;
+- driver 从 ready queue 取到期操作;recovery 只处理崩溃、lease 过期、节点失联、claim 失效;
+- recovery 使用有序游标/索引分页,禁止每页全扫;idle timer 与 parked run 不进入热 ready 集合,由到期索引或显式唤醒驱动;
+- ready queue 的积压、延迟、丢弃、recovery 补发都要有指标。
+
+**验收**:队列满不导致正常下一跳等 tick;recovery 扫描量与“异常操作数”相关,而非全部 pending;
+同一负载下不再需要靠缩短 tick 降低延迟。
+
+#### A3 — 折叠纯内部 hop
+
+**现状**:线性 3 节点流程产生 9 个 operation(每个节点 `ExecuteTask + ApplyAction + PropagateTask`),
+每个 operation 独立 claim/commit。纯内部传播、join、branch 选择、终态推导被放大成“创建 -> 提交 -> wake -> 出队 -> claim -> load -> plan -> commit -> close”。
+
+**目标**:Planner 在一次调用中运行到**下一个外部边界**;以下不创建独立 durable operation:
+
+- branch/if 选择、内部变量变换、next 计算、join/catch-join 计算、终态推导;
+- 纯传播、纯级联(skip/abort 的后续传播)在完成/失败的同一提交内折叠。
+
+保留 durable operation 的边界:external action、timer、message、subflow、human task、跨进程 command、不能原子化的 effect。
+`ApplyAction` 只在它承载外部 effect 时保留;没有 effect 的 client decision 可以与后续内部传播合并。
+
+**验收**:线性 3 节点不再产生 9 次 claim/commit;现有行为、消息、行投影逐字不变;失败原子性与恢复语义不退。
+
+#### A4 — 每 Process 单写者 command lane
+
+**现状**:driver 的 `serve` 串行执行 operation,但客户端动作路径在独立任务上并发提交;同一 aggregate 的
+`apply_action` 与 driver、以及多个 client action 之间靠 revision/CAS + `ACTION_ATTEMPTS=8` 重规划。
+effect 已执行而提交冲突的窗口因此存在。
+
+**目标**:每个 pid 一个 command lane。正常 operation、client action、recovery command 都作为 command 进入该 lane;
+lane 串行决定状态变更;外部 effect 可并发执行,observation 再入 lane。revision/CAS 保留,但只用于崩溃恢复、
+lease 接管和跨实例 fencing,不再是正常并发控制的主要手段。
+
+**验收**:同一 pid 不再出现两个 plan 同时基于同一 revision 竞争;`ACTION_ATTEMPTS` 重试循环在正常路径不再触发;
+不同 pid 仍可并行;effect 执行不被 lane 串行化。
+
+#### A5 — Projection 版本协议
+
+**现状**:`RowProjector::claim` 已有按行 `ProcessVersion` 守卫,但它是**进程内 map**,只在写前检查,
+写后不复核,也没有 store-level CAS/持久化 `projection_revision`;重启后 map 清空。一个先 claim 的旧投影
+可以在 await 之后覆盖新投影。lifecycle 还在 projection 之前上报,`on_complete` 订阅者可能读到旧行。
+
+**目标**:
+
+- 每行持久化 `source_aggregate_revision`(或等价的 projection offset);
+- 写入必须是 store-level 条件写:`incoming_revision > stored_revision` 才应用;
+- 启动时按持久化 revision 增量补投影;失败进入 durable repair queue;
+- Core/Recovery 永不读取投影做权威判断;查询 API 在 lag 时强读 aggregate 或显式返回 lag;
+- `report_lifecycle`/外部消息在 projection 之后(或明确声明“事件先于读模型”的契约);
+- `run_settled` 与投影 `settled` 的两套语义合并成一个明确策略,或分别命名并写清用途。
+
+**已落地的临时修正(2026-10-17,不替代 A5)**:
+
+- proc 行总是连同 root task 行一起投影,且 **proc 行最后写**:看到 terminal proc 行的读者也能看到
+  它所汇总的 root task 行;
+- `sweep_removable` 修复 `removable` 前先 `forget_proc`,允许同一 aggregate version 重扫 proc 行,
+  同时 task 行仍用严格 `>=` 守卫;
+- 这解决的是“proc 行领先 root task 行”的读模型不一致;**旧投影在 await 后覆盖新投影**的根因
+  (无 store-level CAS/持久化 revision)仍由 A5 解决。
+
+**验收**:旧投影不能覆盖新投影;重启不丢版本;完成事件/消息的消费者能看到对应提交的行;
+projection lag、失败、修复有指标。
+
+#### A6 — Shell 变薄,Core 输出完整 Decision
+
+**现状**:`shell/mod.rs` 2059 行、`operation/action.rs` 1245 行、`model.rs` 1315 行;admission、wake、
+recovery、projection、lifecycle、outbox、settle 都在 shell。`run_settled`(只看 task terminal)与
+`projection::settled`(还看 outbox)是两套终态语义。
+
+**目标**:Core 输出:
+
+```rust
+Decision {
+    aggregate_changes,
+    operations_to_create,
+    operations_to_close,
+    effect_intents,
+    outbox_records,
+    timers,
+    process_status,
+    admission_directives,
+}
+```
+
+Shell 只做:load -> call Core -> commit Decision -> execute committed EffectIntent -> feed Observation back。
+`settled`、lifecycle、admission 规则进入 Core 或显式 policy 模块;Shell 不再用调用顺序补业务判断。
+
+**验收**:删除 shell 中重复的 completion/settle/admission 判定;Core 单测覆盖终态与 admission;
+新增一种 operation 不再同时改 Core/Shell/Recovery/Projection 四处。
+
+#### A7 — Recovery 变成统一 Command
+
+**现状**:`RecoveryPlanner::classify` 是 core 纯函数,但 `recover()` 的编排、wake/reclaim/finalize 分支在 shell;
+正常路径与恢复路径共享 `OperationEvent`,但没有统一的 `Command -> Decision` 入口。
+
+**目标**:恢复层只收集 `Observed { operation_id, persisted_phase, lease, claim, aggregate_revision, effect_receipt, now }`,
+交给 Core 的 `RecoverOperation(observed) -> Decision`;正常与恢复使用同一个 transition/commit 协议和同一个 per-pid lane。
+
+**验收**:恢复不再自己决定 wake/reclaim/finalize 的业务语义;同一状态在正常/恢复路径得到同一 Decision;
+恢复测试只断言 Observed 与 Decision,不依赖 shell 调用顺序。
+
+#### A8 — Admission 与异常生命周期分离
+
+**现状**:slot 释放依赖 `run_settled`(task terminal);parked 的准入操作就是根 `ExecuteTask`;丢 wake 要等 recovery tick;
+`EffectUnknown` 的 run 可能长期占用 execution slot。
+
+**目标**:至少拆成 execution admission、effect concurrency、recovery concurrency、reconciliation quarantine、
+projection concurrency。`ManualReconciliation` 不占正常 execution slot;cancel 立即释放;
+管理类操作不与普通业务争同一额度。
+
+**验收**:manual reconciliation 不阻塞新 run;cancel 后 slot 立即可用;parked 准入不依赖 recovery tick;
+各类并发额度有独立配置与指标。
+
+#### A9 — Durable run handle
+
+**现状**:`ProcessExecutor::start` 返回 `String`(pid);示例先 `start` 再注册 `on_complete`/`on_error`;
+channel 是进程内事件路由。足够快的工作流可能在订阅前完成。
+
+**目标**:`start()` 返回 durable handle;`wait()` 先查持久化终态,未完成则订阅,订阅后再次复查;
+事件 channel 只做通知,不是正确性来源。示例改为先注册再 start,或直接用 `run.wait()`。
+
+**验收**:check-subscribe race 不存在;事件先发生也不会丢;等待 API 在重启后仍可恢复。
+
+#### A10 — 拆分控制面调度器
+
+**现状**:同一个 `tick_interval` 驱动 driver 的 recovery+outbox、retry timer、trigger timer、snapshot TTL;
+timer 的 `DispatchTimeout` 也靠 recovery 每 tick 唤醒。不同任务的延迟/负载特征被绑死。
+
+**目标**:timer scheduler、outbox retry、recovery scanner、lease renewal、settled sweeper、projection repair
+各自独立 interval/backoff/budget/指标。timer 使用到期索引,不再依赖全量 recovery 扫描。
+**不要**用统一缩短 tick 来解决延迟。
+
+**验收**:调整 recovery 频率不影响 timer/outbox 延迟;调整 timer 精度不增加 recovery 扫描压力;
+每个循环有独立的健康状态与积压指标。
+
+#### A11 — 终态回收与 PID 复用(2026-10-17 追加)
+
+**目标定位**:acts 的存储是**恢复状态**,不是历史归档。一个 run 进入终态、所有消息投递并结算、且没有未决
+operation 之后,`ProcessSnapshot` 及其投影/索引/工作目录都应被回收;回收完成后同一个 pid 可以再次启动。
+“pid 重复执行”在消息全部投递后由业务系统负责,acts 不保留历史唯一性。
+
+**清理对象**:
+
+- aggregate document(`ProcessSnapshot` 本体);
+- recovery index(`RECOVERY_INDEX_KEY_PREFIX` 下该 pid 的文档);
+- outbox index(`OUTBOX_INDEX_KEY_PREFIX` 下该 pid 的文档);
+- `procs`/`tasks`/`vars` 行;
+- `messages`/`deliveries` 行(通道结算后的投递状态);
+- run 的 workdir;
+- 以 pid 为键的进程内缓存/snapshot 注册项。
+
+**可回收判定**(必须全部满足):
+
+1. 所有 task 终态;
+2. 所有 outbox record `Delivered`(存在 `DeliveryUnknown`/`Quarantined` 则保留,交人工协调);
+3. 所有 channel delivery 已结算(沿用现有 `removable` 的 ack/error 口径);
+4. 没有 `Pending`/`Claimed`/`CommitPrepared`/`EffectUnknown`/`Quarantined` operation;
+5. 没有在飞 effect、parked 准入或未完成的 recovery 动作。
+
+现有 `sweep_removable` 已覆盖行与 workdir;**A11 把它扩展到 aggregate + 两个索引**,并保持幂等。
+
+**删除顺序与崩溃安全**:
+
+1. 先写/确认 `removable` 标记(已有投影字段);
+2. 用一个带 aggregate version guard 的 batch 删除 **aggregate + recovery index + outbox index** ——
+   这是权威切割点,三者必须原子删除;
+3. 再删除行、messages/deliveries、workdir(可重试、幂等);
+4. 任一步崩溃:若 aggregate 已删而索引/行残留,recovery/outbox 扫描要跳过 missing aggregate,
+   清理任务下一轮重试;若索引先删而 aggregate 残留,则不可恢复 —— **禁止**;
+5. 删除完成后,`Runtime::start` 的“aggregate 或 proc 行存在”检查自然放行同一 pid;不需要墓碑。
+
+**PID 复用边界**:
+
+- 只要 aggregate、投影行、未决 operation、未结算消息任一仍存在,同一 pid 仍拒绝启动;
+- 全部回收后允许复用;acts 不提供历史 run 查询、审计或跨 run 去重;
+- 旧 run 的迟到消息/动作在回收后到达时,业务系统必须按业务键去重;acts 不保留旧 generation 的历史映射。
+  这是明确的契约边界,写入 `CHANGELOG`/文档,不做隐式兼容。
+
+**性能与指标**:
+
+- cleanup 必须有独立预算,不能与正常 operation / recovery 扫描争同一 loop;
+- 指标:cleanup backlog、最老 removable 年龄、删除字节数、删除失败、孤儿索引数;
+- 目标是“恢复所需的最小状态”,不是“保留所有历史”。L2 的归档/保留策略由 A11 取代:
+  默认删除,不实现长期归档。
+
+**验收**:
+
+- 完整投递并结算的 run 在 sweep 后:aggregate、两个索引、行、workdir 全部消失;
+- 同一 pid 在清理前拒绝启动、清理后允许启动;
+- 在删除 batch 前后各注入一次崩溃,恢复后要么可重试删除,要么已删除,不出现不可恢复的半状态;
+- `EffectUnknown`/`Quarantined`/未 ack 消息的 run 不被误删;
+- cleanup 指标可观察,且不进入正常 operation 的热路径。
+
+#### 依赖关系
+
+```mermaid
+graph LR
+  A1["A1 effect/commit<br/>P0"] --> A3["A3 折叠内部 hop"]
+  A1 --> A9["A9 durable wait"]
+  A2["A2 ready queue<br/>P0"] --> A3
+  A2 --> A4["A4 per-process lane"]
+  A2 --> A7["A7 recovery command"]
+  A2 --> A10["A10 调度器拆分"]
+  A3 --> A6["A6 thin shell"]
+  A4 --> A6
+  A5["A5 projection 协议"] --> A6
+  A5 --> A9
+  A4 --> A7
+  A8["A8 admission 分离"] --> A6
+  A1 --> A11["A11 终态回收<br/>PID 复用"]
+  A2 --> A11
+  A5 --> A11
+```
+
+**实施原则**:每笔 A 任务独立可回;先 A1/A2(正确性与活性),再 A11(存储回收)/A3/A4/A5;A6-A10 在协议稳定后收敛。
+不做 big-bang 重写;不删除 `Core / Durable / Shell` 三层;不把缩短 tick 当作 A2 的替代。
+A11 的存储目标是“恢复所需的最小状态”,不是历史归档;终态且全部投递/结算后回收,回收后 PID 可复用,
+旧 pid 的迟到消息/重复执行由业务系统去重。
+
+---
+
 ## 4. 实施计划(提交切分)
 
 > **任务清单的唯一真值在 `KERNEL_CUTOVER_NOTES.md` §11**(已完成项已从那里删除;编号 `C1…C8c` 与本节一致)。
 > 本节保留**为什么这样切**(依赖关系、每笔内容、行为变更、回滚),不重复状态标记。
+> **2026-10-17 架构修正 A1-A11 的设计与依赖见 §3.10;执行顺序以 notes §11 D 为准,优先于本节旧的第一/第二波。**
 
 ```mermaid
 graph LR
@@ -479,7 +760,7 @@ graph LR
 **明确不做(本轮 out of scope)**
 
 - 不改 `action_target` 的选法(§11 C4/C5 的告诫)。
-- 不做聚合文档回收/归档(§11 L2)。
+- ~~不做聚合文档回收/归档(§11 L2)~~ **已撤销**:A11 明确终态且消息全部投递/结算后回收 aggregate/索引/行/workdir,不做历史归档;回收后 PID 可复用(§3.10)。
 - 不删 `ops`、不删读模型行表(§11 L1 、§10「读模型行表去留」)。
 - 不动 `timeout` 的 `__timeouts` 分支 node id(那是模型语义,且走变量值不走键)。
-- 不改投递顺序(§2.1)。
+- ~~不改投递顺序(§2.1)~~ **已撤销**:A1b 明确把 outbox 投递移到提交之后(§2.1、§3.5、§3.10)。
