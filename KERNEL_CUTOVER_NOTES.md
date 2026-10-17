@@ -2682,7 +2682,7 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 | **C7** | 投递边界写进 `KERNEL_REFACTOR_DESIGN.md` §3.5 + CHANGELOG(零代码) | — | **已做(§10「C7 完成」)** |
 | **C8a** | `view` 删死件(`visit.rs` 全簇、`Node::from_str`、`NodeTree::build`/`build_workflow`、注释掉的 `build_act`、`Workflow::print`)+ `tree_output` 改自递归 | — | **已做(§10「C8a 完成」)** |
 | **C8b** | `view` 去重(§3.7 b:id 分配合一、`node_facts` 统一 name/kind、`NodeKind` 对齐) | C8a | **已做(§10「C8b 完成」)**。policy 侧 enum 已删,`NodeDefinition.kind` 直接用 `crate::NodeKind`;两份图未合并(§3.7) |
-| **C8c** | `view` 挪位(§3.7 c)+ §3.7(d) 的登记项 —— **先验证 effect seam 是否丢弃 `Context::build_acts` 的结果**(若成立即"每 hop 跑了但不生效"的白付开销) | C8b;**D4 需先拍** | 未做(登记待验证) |
+| **C8c** | `view` 挪位(§3.7 c);D4 材料里引用 §11 B 的 L9-L12 取代关系 —— effect seam **已验证成立**(`build_acts` 产物被丢弃),退役另立 L9-L12 | C8b;**D4 需先拍** | 未做 |
 
 **与第二波的关系**:C1/C8a/C8b 是纯搬移/删死件,与性能项零冲突;从 C4 起动的是 `core/model` + `commit/aggregate` + `shell/mod.rs`,
 与性能探针同一批文件 ⇒ **性能项一律排在 C8c 之后**(第二波),不在第一波中途插入。
@@ -2718,6 +2718,12 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 | **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
 | **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
 | **L8** | **减字节:整包聚合 → 拆分文档 / append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**,必须单独立项(迁移 + golden fingerprint 更新);与 C5 的 codec V3 **是同一批格式工作** ⇒ 建议与 C5 合并排期 | 原 §1.b③ / §1.b(i)② / §1.b(iii) | 未做。现状:每 hop 整包工作量 = 3 decode + 2 encode 一个随 run 增长的聚合 |
+| **L9** | **退役 Phase 0:删动态 act 死簇与 legacy 事件面** —— `Context::build_acts`/`dyn_build_act`/`NodeTree::append_node`、`package/core/{block,parallel,sequence}.rs` 的三个调用点;`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;确认零调用的 `Process`/`Task` 方法(`create_task`/`print`/`into_data`/`task_by_*`、`unique_id`/`into_data_vars`/`is_vars_dirty` 等) | 设计 §3.7(d)⑤ + 2026-10-17 评估 | 未做。**零行为变更**(headless tree 的产物本来就被 `effects::run` 丢弃,`projection` 从 durable model 重建);验收:生产侧 `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` = 0,`-p acts` 全绿,行/消息/`tree_output` 不变 |
+| **L10** | **退役 Phase 1:headless scope 去 `Process`/`Task`** —— `ScopeSpec` 已是完整输入,换成 `ScopeTask`(node content + data + sealed + cancel)+ `Scope`(pid/env/owner/workdir);替换 `scope.rs:47-87`,保留包实际用到的 `task.{pid,id,options,node,data}` 与 `proc.{id,owner_scope,env,workdir,set_data}` | 设计 §3.7(d)① | 未做;前置 L9。验收:effect/predicate/package 套件全绿;每 hop 不再建 `Process`+`NodeTree`(收益按 P1 口径量);`Context` 的包 API 名字不变或按 BREAKING 记录 |
+| **L11** | **退役 Phase 2:model 直出 view** —— `Workflow::valid`/`tree_output` 与投影 `node_data` 直接走 `Workflow`/`Step`/`Branch`(逐字保持行与树输出);删 `NodeTree`/`Node`;`NodeData`/`NodeContent` 持久化形状保留 | 设计 §3.7(d)③ | 未做;前置 L10。验收:`sch_tree_output_is_byte_stable` 563-byte、`model:get fmt=tree`、`node_data` 逐字、投影行格式不变 |
+| **L12** | **退役 Phase 3:读 API 改行查询并删类型** —— `proc:get` 用 task 行 + `TaskInfo::from(&data::Task)` + vars join;删 `Runtime::proc`/`Store::load_proc`/`store/process_rows`/`Process`/`Task`/`TaskTree`;`Executor::proc().get_process` 删除或改读模型 DTO(**BREAKING**) | 设计 §3.7(d)④ | 未做;前置 L11。验收:`proc:get` 字段不变、reliability 测试改读行/快照后全绿、`git grep "struct Process\|struct Task\|struct NodeTree"` = 0、CHANGELOG BREAKING |
+
+> **L9-L12 的关系**:四笔按序、每笔独立可回;`NodeData`/`NodeContent` 是持久化形状,必须保留。若 D4 先按 (c1)/(c2) 挪了 `view`,挪位对象会在 L11/L12 被删 —— **拍 D4 时一并决定是否让 L9-L12 取代 (c) 档的挪位**,避免先搬后删的白工。
 
 ### C. 每笔的收口门禁(原 §3;不是"一项",是每笔都要过的闸)
 
@@ -2736,8 +2742,8 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 
 # 当前任务:C8c —— `view` 挪位 + §3.7(d) 的前置验证(§11 A 段第十笔)
 
-**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.7(c)/(d)、§4 的 C8c 行、§11 A 段 C8c 行、§10「C8b 完成」与
-「C1b 完成」的顺带核实。**基准**:C8b 提交之后的 HEAD。**D4 未拍** ⇒ 本轮先取证,不先改路径、不挪代码。
+**设计**:`KERNEL_REFACTOR_DESIGN.md` §3.7(c)/(d)、§4 的 C8c 行、§11 A 段 C8c 行与 §11 B 的 L9-L12、
+§10「C8b 完成」。**基准**:C8b 提交之后的 HEAD。**D4 未拍** ⇒ 本轮先取证,不先改路径、不挪代码。
 
 **本笔的内容(按序,第 1/2 项只读)**
 
@@ -2746,11 +2752,9 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
    `shell/projection.rs` 的 `NodeTree` 来自 durable model(`NodeTree::load`),以及三个调用方
    `package/core/{block,parallel,sequence}.rs` 与 kernel `materialize_container_acts` 的关系。
    给出可复核的调用链 + 一条证明"结果被丢弃"的测试证据,结论写"成立/不成立"。
-2. **删除边界评估(用户 2026-10-17 追问;只登记,不动代码)**:`Process`/`Task`/`NodeTree` 的剩余用途逐条列
-   file:line 与替代 —— headless scope(`scope.rs`/`effects.rs`)→ `ScopeSpec` + 轻量 `ScopeTask`;
-   `proc:get`/`Runtime::proc`/`store/process_rows` → task 行 + `TaskInfo::from(&data::Task)` + vars join;
-   `Workflow::valid`/`tree_output` → 直接走 model;legacy `on_proc`/`on_task`/`emit_*`/`TaskExtra` → 无发射点;
-   `NodeData` 持久化列必须保留,`Node` 可随树一起走。每项写清"简单替代 / 需新抽象 / 只能登记"。
+2. **删除边界已登记,不重复评估**:`Process`/`Task`/`NodeTree` 的退役已收敛为 **§11 L9-L12**
+   (Phase 0 死件 → headless `ScopeTask` → model 直出 view → 读 API 改行查询并删类型);
+   本笔只在 D4 材料里引用:**若 L9-L12 先行,D4 的挪位对象会在 L11/L12 被删**。
 3. **D4 拍板材料**:c1 挪 `scheduler/shell`、c2 挪 `crate::model::view`、不挪+写边界 三案的改动面、
    `core/architecture.rs` 守卫改动、风险与回滚面;列完**停下等用户拍 D4**。拍定后才动代码。
 
@@ -2762,7 +2766,7 @@ s1/s2 各 2 行、`states_of` 收全代历史);`kernel_engine_projects_the_legac
 
 **验收**:
 
-- 第 1 项:调用链 + 测试证据 + "成立/不成立";第 2 项:file:line 清单 + 每项替代/工作量;第 3 项:三案对照表。
+- 第 1 项:调用链 + 测试证据 + "成立/不成立";第 2 项:确认 §11 L9-L12 与 D4 的取代关系(不重复逐方法评估);第 3 项:三案对照表。
 - 若用户在本轮指令里已拍 D4:按 §11.C 跑门禁、提交一笔,并更新 §10/§11/§12;否则只交评估报告,不改代码。
 
 # 限制与约束
