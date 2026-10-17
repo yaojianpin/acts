@@ -414,7 +414,7 @@ async fn drive_to_end(engine: &Engine, pid: &str, tid: &str) {
     let runtime = engine.runtime();
     let kernel = runtime.kernel();
     // Wake whatever is drivable now (a fresh boot holds nothing in flight).
-    let _ = kernel.recover(SystemClock.now_ms()).await;
+    let _ = kernel.tick(SystemClock.now_ms()).await;
 
     let started = Instant::now();
     let last_nudge = Cell::new(None::<Instant>);
@@ -437,8 +437,8 @@ async fn drive_to_end(engine: &Engine, pid: &str, tid: &str) {
                     last_nudge.set(Some(Instant::now()));
                     let runtime = engine.runtime();
                     let kernel = runtime.kernel();
-                    let _ = kernel.recover(SystemClock.now_ms() + 120_000).await;
-                    let _ = kernel.recover(SystemClock.now_ms()).await;
+                    let _ = kernel.tick(SystemClock.now_ms() + 120_000).await;
+                    let _ = kernel.tick(SystemClock.now_ms()).await;
                 } else if let Some(proc) = proc_row(engine, pid).await
                     && let Some(task) = proc.task(tid)
                     && task.state().is_interrupted()
@@ -572,6 +572,7 @@ struct DocCutKv {
     key: String,
     /// The derived index that only an operation commit changes.
     recovery_key: String,
+    ready_key: String,
     budget: AtomicUsize,
     armed: AtomicBool,
     commits: AtomicUsize,
@@ -584,6 +585,8 @@ impl DocCutKv {
             inner: MemoryStore::new(),
             key: process_key(pid),
             recovery_key: crate::scheduler::durable::document_store::recovery_index_key(pid)
+                .expect("a pid encodes as an index key"),
+            ready_key: crate::scheduler::durable::document_store::ready_index_key(pid)
                 .expect("a pid encodes as an index key"),
             budget: AtomicUsize::new(0),
             armed: AtomicBool::new(false),
@@ -624,7 +627,7 @@ impl DocCutKv {
         let touches_document = ops.iter().any(|op| match op {
             StoreBatchOp::Put { key, .. } | StoreBatchOp::Delete { key } => key == &self.key,
         });
-        if !touches_document || !self.changes_recovery_index(ops).await {
+        if !touches_document || !self.changes_operation_index(ops).await {
             return false;
         }
         self.commits.fetch_add(1, Ordering::SeqCst);
@@ -641,19 +644,30 @@ impl DocCutKv {
         }
     }
 
-    /// Whether this write set changes the run's recovery index — what an operation
-    /// commit does and an outbox delivery does not.
-    async fn changes_recovery_index(&self, ops: &[StoreBatchOp]) -> bool {
-        let stored = self.inner.one(&self.recovery_key).await.ok().flatten();
-        for op in ops {
-            match op {
-                StoreBatchOp::Put { key, value } if key == &self.recovery_key => {
-                    return stored.as_deref() != Some(value.as_slice());
+    /// Whether this write set changes one of the run's operation-derived
+    /// indexes — what an operation commit does and an outbox delivery does not.
+    /// The ready index covers creation and retry; the recovery index covers
+    /// claims and exceptional closes.
+    async fn changes_operation_index(&self, ops: &[StoreBatchOp]) -> bool {
+        for key in [&self.recovery_key, &self.ready_key] {
+            let stored = self.inner.one(key).await.ok().flatten();
+            for op in ops {
+                match op {
+                    StoreBatchOp::Put {
+                        key: candidate,
+                        value,
+                    } if candidate == key => {
+                        if stored.as_deref() != Some(value.as_slice()) {
+                            return true;
+                        }
+                    }
+                    StoreBatchOp::Delete { key: candidate }
+                        if candidate == key && stored.is_some() =>
+                    {
+                        return true;
+                    }
+                    _ => {}
                 }
-                StoreBatchOp::Delete { key } if key == &self.recovery_key => {
-                    return stored.is_some();
-                }
-                _ => {}
             }
         }
         false
@@ -769,7 +783,7 @@ async fn cut_sweep_inner() {
         let _ = recovered
             .runtime()
             .kernel()
-            .recover(SystemClock.now_ms() + 120_000)
+            .tick(SystemClock.now_ms() + 120_000)
             .await;
         assert_still_finished_once(&recovered, &pid, &tid).await;
 
@@ -836,11 +850,7 @@ async fn boot_with_recovery_cut(store: Arc<dyn KvStore>, kv: &Arc<DocCutKv>, pid
         quiesce(&engine).await;
         let refused_before = kv.refused();
         kv.arm(0);
-        let _ = engine
-            .runtime()
-            .kernel()
-            .recover(SystemClock.now_ms())
-            .await;
+        let _ = engine.runtime().kernel().tick(SystemClock.now_ms()).await;
         let fired = poll_settle(|| async { kv.refused() > refused_before }, 150).await;
         let shapes = open_shapes(&engine, pid, "s1").await;
         if fired && matches!(shapes.as_slice(), ["pending"] | ["prepared"]) {
@@ -888,14 +898,11 @@ async fn stalled_redriven_inner() {
     let scan = {
         let runtime = engine.runtime();
         let kernel = runtime.kernel();
-        kernel
-            .recover(SystemClock.now_ms())
-            .await
-            .unwrap_or_default()
+        kernel.tick(SystemClock.now_ms()).await.unwrap_or_default()
     };
     assert!(
-        scan.woken.iter().any(|op| op.process_id == pid),
-        "the pass must re-derive the stranded intent: {scan:?}"
+        scan.reclaimed.is_empty() && scan.ready_repaired.is_empty(),
+        "the strand already owns a ready record; recovery has nothing to wake: {scan:?}"
     );
     // The driver carries the wakes from there; the cell only reads — except for
     // the retry a *transient* needs (see `drive_to_end`): a re-driven operation whose

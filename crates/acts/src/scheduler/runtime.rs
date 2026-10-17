@@ -497,19 +497,20 @@ impl Runtime {
         // task over the same key-value store, woken per operation, ticked for
         // recovery and outbox delivery, and it serves (starts, actions,
         // effects, messages).
+        let tick = Self::tick_interval(config);
         let (kernel, wake_rx) = crate::scheduler::shell::KernelHost::new(
             store.kv(),
             config.cache_cap() as usize,
             config.max_node_run_times() as u64,
+            tick.as_millis() as i64,
         );
         {
             let driver = kernel.clone();
             let driver_shutdown = shutdown.clone();
             // One rule for the driver's cadence and the periodic timers (see
-            // [`Self::tick_interval`]): the outbox delivery pass and the
-            // recovery scan run on it, so a test that waits for a message does
-            // not have to wait the production 15 s.
-            let tick = Self::tick_interval(config);
+            // [`Self::tick_interval`]): the outbox delivery pass, the ready
+            // queue and the recovery scan run on it, so a test that waits for
+            // a message does not have to wait the production 15 s.
             tokio::spawn(async move {
                 driver.serve(wake_rx, driver_shutdown, tick).await;
             });

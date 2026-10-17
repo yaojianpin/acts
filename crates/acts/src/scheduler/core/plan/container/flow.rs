@@ -36,8 +36,8 @@ pub(crate) const SIGN_CATCH: &str = "catch";
 /// to the act's own flow (it fires while the act executes or waits), so a
 /// single-valued flow key could not hold it without losing the act flow; the
 /// accurate expression of "a timeout is pending" is the timer operation itself
-/// ([`crate::scheduler::core::model::operation::OperationKind::DispatchTimeout`]), which holds the cadence and is
-/// re-woken by the recovery index.
+/// ([`crate::scheduler::core::model::operation::OperationKind::DispatchTimeout`]), which holds the cadence and
+/// owns a deferred ready record.
 pub(crate) const FLOW_VAR: &str = "__flow";
 /// The value of [`FLOW_VAR`] on an execution waiting for the children it
 /// admitted.

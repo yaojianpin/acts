@@ -23,9 +23,9 @@ impl KernelHost {
         id: &OperationId,
         slot: Slot,
     ) -> Result<Option<Claimed>> {
-        // A parked run's operations are re-woken by the recovery scan every
-        // tick, so the parked answer comes from the set — a store read would
-        // be pure waste on that path.
+        // A parked run's ready record is deferred by the driver until a slot
+        // frees, so the parked answer comes from the set — a store read would
+        // be pure waste on the retry path.
         if slot == Slot::Policy && self.admissions.lock().is_parked(&id.process_id) {
             return Ok(None);
         }
@@ -42,12 +42,15 @@ impl KernelHost {
         // it booted) takes a slot or parks, and a run that settled already —
         // its last operation committed, a client action closed it, or a crash left
         // its timer open — frees its slot for the parked run that has waited
-        // longest. The recovery scan re-wakes every pending operation each
-        // tick, so this is also the hot path of a parked run.
+        // longest. A parked run's ready record is deferred by the driver, so
+        // this remains the cold path it was.
         if slot == Slot::Policy {
             let phase = operation_trace::start();
-            let placed = self.place_run(&snapshot);
+            let (placed, admission) = self.place_run(&snapshot);
             operation_trace::end(operation_trace::PLACE1, phase);
+            if let Some(admission) = admission {
+                self.admit_run(&admission).await?;
+            }
             if !placed {
                 return Ok(None);
             }
@@ -63,12 +66,12 @@ impl KernelHost {
         }
 
         // The kind's own pre-claim policy. Today only the timer has one: its
-        // operation wakes once per tick and usually has nothing to do, and
+        // operation is due once per poll and usually has nothing to do, and
         // evaluating its branches before the claim keeps an idle round from
-        // consuming the operation (it stays `Pending`, so the next recovery
-        // scan re-wakes it — the kernel's tick cadence) and from writing
-        // anything. Only the *idle* verdict short-circuits here; the round is
-        // decided again after the claim, against the authoritative snapshot.
+        // consuming the operation (it stays `Pending`; the driver defers its
+        // ready record one poll interval) and from writing anything. Only the
+        // *idle* verdict short-circuits here; the round is decided again after
+        // the claim, against the authoritative snapshot.
         if let Some(driver) = driver(record.kind) {
             let pending = Pending {
                 id,

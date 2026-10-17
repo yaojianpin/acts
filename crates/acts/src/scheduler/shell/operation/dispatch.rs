@@ -3,9 +3,10 @@
 //! One commit is the operation's whole durable effect: the plan's outbox records are
 //! delivered first (the at-least-once window the effect seam documents), the
 //! transition is committed with the operation's own claim as its source operation —
-//! which closes the operation *inside* the same atomic batch — and only then
-//! do the operations the commit created get woken, the run's lifecycle
-//! reported, the read model re-materialized and the slot bookkeeping settled.
+//! which closes the operation *inside* the same atomic batch and writes the
+//! ready records of its successors — and only then do the operations the commit
+//! created get woken, the run's lifecycle reported, the read model re-materialized
+//! and the slot bookkeeping settled.
 
 use super::*;
 use crate::scheduler::shell::*;
@@ -64,7 +65,7 @@ impl KernelHost {
         let phase = operation_trace::start();
         let (receipt, loaded) = match self
             .processes
-            .commit_transition(&plan)
+            .commit_transition(&plan, SystemClock.now_ms(), self.timer_poll_ms)
             .await
             .map_err(repository_error)?
         {
@@ -117,18 +118,14 @@ impl KernelHost {
         // The commit closed the operation inside its batch (see
         // `advance_transition`): there is no second, close-only commit to run.
         let phase = operation_trace::start();
-        let wake = QueueWake {
-            tx: self.wake_tx.clone(),
-        };
         for operation in &receipt.new_operations {
-            // A timer armed by an execution's *start* operation waits for the tick:
-            // the legacy engine had no round before its first process tick, so
-            // waking it here would let an already-open window fire up to one
-            // tick early. Waking it is the recovery scan's job (it re-wakes
-            // every pending operation on each tick). A timer a *round* re-armed
-            // (the branch chain of a timed-out execution) is woken at once:
-            // that is the legacy `Step::next` handing the turn to the branch
-            // declared after the one that just ran.
+            // A timer armed by an execution's *start* operation waits for its
+            // first tick: the legacy engine had no round before its first
+            // process tick, and the timer's ready record names that poll.
+            // A timer a *round* re-armed (the branch chain of a timed-out
+            // execution) is woken at once: that is the legacy `Step::next`
+            // handing the turn to the branch declared after the one that just
+            // ran.
             if claimed.kind == OperationKind::ExecuteTask
                 && loaded
                     .operations
@@ -137,7 +134,7 @@ impl KernelHost {
             {
                 continue;
             }
-            wake.wake(operation);
+            self.wake(operation);
         }
         operation_trace::end(operation_trace::WAKE, phase);
         // The run's lifecycle, from the freshly committed state: a start while
@@ -179,7 +176,10 @@ impl KernelHost {
         // instead of on the driver's next tick. The run is the one this operation
         // just drove, so it either holds its slot or needs none — never parked.
         let phase = operation_trace::start();
-        self.place_run(&loaded);
+        let (_, admission) = self.place_run(&loaded);
+        if let Some(admission) = admission {
+            self.admit_run(&admission).await?;
+        }
         operation_trace::end(operation_trace::PLACE2, phase);
         Ok(())
     }

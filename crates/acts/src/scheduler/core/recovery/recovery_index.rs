@@ -22,11 +22,29 @@ pub(crate) struct RecoveryIndex {
 }
 
 impl RecoveryIndex {
+    /// The recovery-owned operations: an owner that may be gone, a prepared
+    /// commit, a commit waiting to be finalized, or a reconciliation state.
+    /// Normal `Pending`/`RetryScheduled` work is in the ready index instead, so
+    /// recovery cost tracks exceptional work rather than every parked timer.
     pub(crate) fn project(snapshot: &ProcessSnapshot) -> Option<Self> {
+        Self::project_with(snapshot, |operation| operation.needs_recovery())
+    }
+
+    /// The pre-A2 projection (every non-terminal operation). A document an
+    /// older writer left behind still loads: its aggregate is intact, and the
+    /// boot repair rewrites it to [`Self::project`]'s shape.
+    pub(crate) fn project_legacy(snapshot: &ProcessSnapshot) -> Option<Self> {
+        Self::project_with(snapshot, |operation| !operation.is_terminal())
+    }
+
+    fn project_with(
+        snapshot: &ProcessSnapshot,
+        keep: impl Fn(&crate::scheduler::core::model::operation::OperationRecord) -> bool,
+    ) -> Option<Self> {
         let mut entries = snapshot
             .operations
             .values()
-            .filter(|operation| !operation.is_terminal())
+            .filter(|operation| keep(operation))
             .map(|operation| RecoveryIndexEntry {
                 operation_id: operation.id.clone(),
                 revision: operation.revision,

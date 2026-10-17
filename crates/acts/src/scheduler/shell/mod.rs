@@ -5,10 +5,13 @@
 //! and the composition root; this module is what that entry point *runs*.
 //!
 //! The shell owns no state of its own — every fact lives in the aggregate
-//! documents over the engine's [`KvStore`]. Wakes are a channel and strictly an
-//! optimization: losing one is safe because `recover` re-derives the same
-//! work from the recovery index. It takes each durable operation from claim to
-//! commit, one operation kind per drive:
+//! documents over the engine's [`KvStore`]. Normal-path liveness is the durable
+//! ready index, written in the same atomic batch as the operation it describes;
+//! a wake is only its accelerator. Losing a wake is safe — the driver's due pass
+//! reads the same record — and `recover` handles only exceptional work (expired
+//! claims, commits to finalize, effect-unknown reconciliation, missing ready
+//! records). It takes each durable operation from claim to commit, one
+//! operation kind per drive:
 //!
 //! - `ExecuteTask` commits `Ready → Running` (the task started) and seeds the
 //!   `ApplyAction` operation whose effect performs the task's work: the
@@ -127,18 +130,31 @@ const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
 
 /// Best-effort wake delivery into the host's queue. Losing a wake is safe:
-/// the recovery scan re-derives the same pending operations.
+/// the operation also owns a durable ready record, and the driver's due pass
+/// picks it up. A failed send is counted and wakes the due-pass notification.
 #[derive(Clone)]
 struct QueueWake {
     tx: Sender<OperationId>,
 }
 
 impl QueueWake {
-    fn wake(&self, operation: &OperationId) {
-        // A full or closed queue loses the wake by design; the recovery scan
-        // is the durable net.
-        let _ = self.tx.try_send(operation.clone());
+    fn wake(&self, operation: &OperationId) -> bool {
+        self.tx.try_send(operation.clone()).is_ok()
     }
+}
+
+/// What the driver's ready-queue passes observed. A gauge, not a history: the
+/// last pass wins for backlog/age; the counters accumulate for the host's
+/// lifetime.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ReadyMetrics {
+    pub(crate) backlog: usize,
+    pub(crate) due: usize,
+    pub(crate) oldest_ready_age_ms: Option<i64>,
+    pub(crate) scanned: u64,
+    pub(crate) deferred: u64,
+    pub(crate) wake_failures: u64,
+    pub(crate) repaired: u64,
 }
 
 /// What one quiescence pass did.
@@ -201,6 +217,15 @@ pub(crate) struct KernelHost {
     /// reserves here and the driver settles here, so one lock owns the answer
     /// to "may this run operation".
     admissions: Arc<parking_lot::Mutex<Admissions>>,
+    /// The tick cadence. A timer's ready record is deferred by one interval —
+    /// the legacy engine has no timer round before its first process tick.
+    timer_poll_ms: i64,
+    /// The durable ready index changed (or a wake was lost): run a due pass
+    /// now instead of waiting for the tick.
+    ready: Arc<tokio::sync::Notify>,
+    /// The first recovery pass repairs derived indexes from the aggregates.
+    boot_reconciled: Arc<std::sync::atomic::AtomicBool>,
+    ready_metrics: Arc<parking_lot::Mutex<ReadyMetrics>>,
 }
 
 /// Which engine event a run's lifecycle report is: the driver's mirror of the
@@ -241,10 +266,10 @@ struct ReportedRuns {
 /// The legacy resident set answered the same question through `Cache`; here
 /// the only two writers are [`KernelHost::start_process`] (which reserves) and
 /// the driver's operations (which settle), so this set is the single answer to "may
-/// this run operation". Like that set it is in-memory: a restart starts it empty,
-/// and the runs still in flight take their slots again through
-/// [`KernelHost::place_run`] when the recovery scan hands them their first
-/// wake. The first `cap` of them are admitted in the order the scan returns
+/// this run operation". Like that set it is in-memory: a restart starts it
+/// empty, and the runs still in flight take their slots again through
+/// [`KernelHost::place_run`] when the ready queue hands them their first turn.
+/// The first `cap` of them are admitted in the order the ready index returns
 /// them rather than by `__created` (the store keeps no boot index to sort by),
 /// while every later admission is by stamp, exactly like the legacy parked
 /// queue.
@@ -346,8 +371,8 @@ impl Admissions {
 /// The operation that admits a run the driver did not seed itself — one
 /// already in flight when it booted: the seed's root `ExecuteTask` (sequence 0
 /// of the root execution), which is the operation that starts a `Created` root. A run
-/// whose root operation already ran has no such operation left, so waking it is a
-/// no-op and the recovery scan re-wakes the run's real work on the next tick.
+/// whose root operation already ran has no such operation left, so admitting it is a
+/// no-op; its real work already owns a ready record.
 fn resume_operation(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> OperationId {
@@ -397,6 +422,7 @@ impl KernelHost {
         kv: Arc<dyn KvStore>,
         cache_cap: usize,
         max_node_run_times: u64,
+        timer_poll_ms: i64,
     ) -> (Arc<Self>, Receiver<OperationId>) {
         let store = Arc::new(KvDocumentStore::new(kv));
         let processes = Arc::new(AsyncProcessRepository::new(store));
@@ -416,6 +442,10 @@ impl KernelHost {
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
                 max_node_run_times,
                 admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(cache_cap))),
+                timer_poll_ms: timer_poll_ms.max(1),
+                ready: Arc::new(tokio::sync::Notify::new()),
+                boot_reconciled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ready_metrics: Arc::new(parking_lot::Mutex::new(ReadyMetrics::default())),
             }),
             wake_rx,
         )
@@ -436,7 +466,12 @@ impl KernelHost {
             Arc::new(crate::store::MemoryStore::new()),
             cache_cap,
             crate::Config::default().max_node_run_times() as u64,
+            800,
         )
+    }
+
+    pub(crate) fn timer_poll_ms(&self) -> i64 {
+        self.timer_poll_ms
     }
 
     /// Attach the effect runner: from then on a Func package's work runs
@@ -666,10 +701,11 @@ impl KernelHost {
         }
     }
 
-    /// The background driver: executes woken operations as they arrive, runs one
-    /// outbox delivery pass the moment a commit writes records, and on every
-    /// tick re-derives recovery work (the durable net) and runs another
-    /// delivery pass (the retry net). Exits when `shutdown` fires.
+    /// The background driver: executes woken operations as they arrive, drains
+    /// the durable ready index on the tick and whenever a wake was lost, runs
+    /// one outbox delivery pass the moment a commit writes records, and on
+    /// every tick scans recovery's exceptional work. Exits when `shutdown`
+    /// fires.
     pub(crate) async fn serve(
         self: Arc<Self>,
         mut wake_rx: Receiver<OperationId>,
@@ -681,6 +717,15 @@ impl KernelHost {
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
+                _ = self.ready.notified() => {
+                    // A commit created ready work whose wake did not fit the
+                    // channel, or the boot repair rebuilt the index: drive it
+                    // now, not on the next tick.
+                    let now = SystemClock.now_ms();
+                    if let Err(error) = self.drive_ready(now, PAGE_SIZE).await {
+                        tracing::warn!(error = %error, "kernel ready pass failed");
+                    }
+                }
                 _ = self.deliver.notified() => {
                     // Bumped by the commit that wrote the records: the pass
                     // runs while the write is still fresh. A notification
@@ -708,6 +753,21 @@ impl KernelHost {
                         Ok(_) => {}
                         Err(error) => tracing::warn!(error = %error, "kernel recovery scan failed"),
                     }
+                    if let Err(error) = self.drive_ready(now, PAGE_SIZE).await {
+                        tracing::warn!(error = %error, "kernel ready pass failed");
+                    }
+                    let metrics = self.ready_metrics();
+                    if metrics.backlog > 0 {
+                        tracing::debug!(
+                            backlog = metrics.backlog,
+                            due = metrics.due,
+                            oldest_ready_age_ms = metrics.oldest_ready_age_ms,
+                            deferred = metrics.deferred,
+                            wake_failures = metrics.wake_failures,
+                            repaired = metrics.repaired,
+                            "kernel ready queue"
+                        );
+                    }
                     if let Err(error) = self.dispatch_outbox().await {
                         tracing::warn!(error = %error, "kernel outbox pass failed");
                     }
@@ -720,7 +780,7 @@ impl KernelHost {
                     // package's `execute`) has already turned a package panic
                     // into an ordinary failure, so what reaches here is an
                     // engine panic — reported, and the operation is left open
-                    // for the next recovery tick.
+                    // for recovery.
                     let run = match CatchPanic::new(self.execute_one(&id)).await {
                         Ok(run) => run,
                         Err(payload) => {
@@ -730,8 +790,9 @@ impl KernelHost {
                         }
                     };
                     if let Err(error) = run {
-                        // The operation stays open; the next recovery tick
-                        // re-derives it.
+                        // The operation stays open; its durable ready record
+                        // was removed by the claim, so recovery's lease expiry
+                        // is the next owner.
                         #[cfg(test)]
                         eprintln!("operation {id:?} failed: {error}");
                         tracing::debug!(operation = ?id, error = %error, "kernel operation failed; left open for recovery");
@@ -739,6 +800,97 @@ impl KernelHost {
                 }
             }
         }
+    }
+
+    /// Drive the due records of the durable ready index, up to `budget`
+    /// operations. This is normal-path liveness: the wake channel above is only
+    /// the fast path.
+    ///
+    /// A record the driver cannot run now — a parked run, or a timer whose
+    /// round is still idle — is deferred one poll interval; it never spins
+    /// and never has to be recovered.
+    pub(crate) async fn drive_ready(&self, now_ms: i64, budget: usize) -> Result<usize> {
+        let mut executed = 0usize;
+        let mut cursor = None;
+        let mut round_executed = 0usize;
+        let mut observed_peak = 0usize;
+        let mut oldest: Option<i64> = None;
+        loop {
+            // A commit made by an operation in this pass stamps its successors
+            // with the wall clock. Re-read it so a full wake queue does not
+            // leave them waiting for the next tick; test callers that pass a
+            // future instant still select it.
+            let due_now = now_ms.max(SystemClock.now_ms());
+            let page = self
+                .processes
+                .due_ready_page(cursor.as_ref(), due_now, PAGE_SIZE)
+                .await
+                .map_err(runtime)?;
+            observed_peak = observed_peak.max(page.observed);
+            oldest = match (oldest, page.oldest_ready_at_ms) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (left, right) => left.or(right),
+            };
+            if page.operations.is_empty() {
+                break;
+            }
+            let due = page.operations.len();
+            {
+                let mut metrics = self.ready_metrics.lock();
+                metrics.backlog = observed_peak;
+                metrics.due = due;
+                metrics.oldest_ready_age_ms =
+                    oldest.map(|ready_at| due_now.saturating_sub(ready_at).max(0));
+                metrics.scanned += observed_peak as u64;
+            }
+            for id in page.operations {
+                if executed >= budget {
+                    self.ready.notify_one();
+                    return Ok(executed);
+                }
+                match CatchPanic::new(self.execute_one(&id)).await {
+                    Ok(Ok(true)) => {
+                        executed += 1;
+                        round_executed += 1;
+                    }
+                    Ok(Ok(false)) => {
+                        // Nothing to do now: defer instead of spinning. The
+                        // operation stays durable and the next poll re-checks
+                        // it (a parked run's admission, an idle timer round).
+                        let until = SystemClock.now_ms().saturating_add(self.timer_poll_ms);
+                        if self
+                            .processes
+                            .set_ready_at(&id, until)
+                            .await
+                            .map_err(runtime)?
+                        {
+                            self.ready_metrics.lock().deferred += 1;
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        tracing::debug!(operation = ?id, error = %error, "ready operation failed; left open for recovery");
+                    }
+                    Err(payload) => {
+                        let message = panic_message(&payload);
+                        tracing::error!(operation = ?id, panic = %message, "ready operation panicked; left open for recovery");
+                    }
+                }
+            }
+            cursor = page.next;
+            if cursor.is_none() {
+                // One walk reached the end of the index. Execution may have
+                // inserted records behind the walk's start (new successors),
+                // so a productive walk restarts once — the durable queue, not
+                // the wake channel, must drain itself. A walk that ran nothing
+                // means the remaining due rows could not be driven (a parked
+                // run, an owner that moved); stop instead of spinning.
+                if round_executed == 0 {
+                    break;
+                }
+                round_executed = 0;
+            }
+        }
+        Ok(executed)
     }
 
     /// Create the process atomically and wake its root operation — or park it,
@@ -765,7 +917,7 @@ impl KernelHost {
         };
         if let Err(error) = self
             .processes
-            .create(&snapshot)
+            .create(&snapshot, SystemClock.now_ms(), self.timer_poll_ms)
             .await
             .map_err(repository_error)
         {
@@ -786,7 +938,9 @@ impl KernelHost {
             sequence: 0,
         };
         match admission {
-            Admission::Admit => self.wake(&root),
+            Admission::Admit => {
+                self.wake(&root);
+            }
             Admission::Park => {
                 let created = created_stamp(&snapshot);
                 let admitted = {
@@ -810,13 +964,23 @@ impl KernelHost {
         Ok(spec.process_id.clone())
     }
 
-    /// Wake one operation. A wake is an optimization over the recovery scan:
-    /// losing it (a full queue) is safe.
-    fn wake(&self, operation: &OperationId) {
-        QueueWake {
+    /// Wake one operation. A wake is an optimization over the durable ready
+    /// index: a full queue drops it, the ready record remains, and the due pass
+    /// is notified to pick it up before the next tick.
+    fn wake(&self, operation: &OperationId) -> bool {
+        let sent = QueueWake {
             tx: self.wake_tx.clone(),
         }
         .wake(operation);
+        if !sent {
+            self.ready_metrics.lock().wake_failures += 1;
+            self.ready.notify_one();
+        }
+        sent
+    }
+
+    pub(crate) fn ready_metrics(&self) -> ReadyMetrics {
+        *self.ready_metrics.lock()
     }
 
     /// Deliver a plan's own records *before* it commits — the effect seam's
@@ -878,21 +1042,18 @@ impl KernelHost {
     /// whether the operation that asked may run.
     ///
     /// - a run this driver admitted and whose executions all settled frees its
-    ///   slot, and the parked run that takes it is woken here;
+    ///   slot, and the parked run that takes it is returned for admission;
     /// - a parked run keeps waiting: its operations stay pending and undriven
     ///   until a slot frees;
     /// - a run this driver never admitted — one already in flight when it
     ///   booted, since every start reserves through [`Self::start_process`] —
     ///   takes a slot here, or parks exactly like a start that found every
-    ///   slot taken. This is the boot pass: the recovery scan hands every
-    ///   unfinished run its first wake, and this is where the cap meets it.
-    ///   A parked pid waking that way is admitted by its seed's root
-    ///   operation; a run whose root operation has already run may be woken by a
-    ///   no-op, and the next recovery tick re-wakes its real work.
+    ///   slot taken. This is the boot pass: the ready queue hands every
+    ///   unfinished run its first turn, and this is where the cap meets it.
     fn place_run(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-    ) -> bool {
+    ) -> (bool, Option<OperationId>) {
         let mut admissions = self.admissions.lock();
         let mut freed = None;
         let drive = if admissions.is_parked(&snapshot.process_id) {
@@ -928,10 +1089,19 @@ impl KernelHost {
             }
         };
         drop(admissions);
-        if let Some(admission) = freed {
-            self.wake(&admission);
-        }
-        drive
+        (drive, freed)
+    }
+
+    /// Make a parked run's ready record due now, then wake it. Used when a
+    /// freed slot admits it: its record was deferred while it waited, and the
+    /// wake is only the accelerator over that durable record.
+    async fn admit_run(&self, operation: &OperationId) -> Result<()> {
+        self.processes
+            .set_ready_at(operation, SystemClock.now_ms())
+            .await
+            .map_err(runtime)?;
+        self.wake(operation);
+        Ok(())
     }
 
     /// Drive woken operations until the queue drains or `max_steps` operations ran.
@@ -944,27 +1114,44 @@ impl KernelHost {
         max_steps: usize,
     ) -> Result<RunReport> {
         let mut report = RunReport::default();
-        for _ in 0..max_steps {
-            let id = match wake_rx.try_recv() {
-                Ok(id) => id,
-                Err(_) => break,
-            };
-            match CatchPanic::new(self.execute_one(&id)).await {
-                Ok(Ok(true)) => report.executed += 1,
-                Ok(Ok(false)) => report.ignored += 1,
-                Ok(Err(error)) => {
-                    report.retried += 1;
-                    #[cfg(test)]
-                    eprintln!("operation {id:?} failed: {error}");
-                    tracing::debug!(operation = ?id, error = %error, "operation failed; operation stays open for recovery");
+        let mut steps = 0usize;
+        while steps < max_steps {
+            let mut progressed = false;
+            while steps < max_steps {
+                let id = match wake_rx.try_recv() {
+                    Ok(id) => id,
+                    Err(_) => break,
+                };
+                steps += 1;
+                progressed = true;
+                match CatchPanic::new(self.execute_one(&id)).await {
+                    Ok(Ok(true)) => report.executed += 1,
+                    Ok(Ok(false)) => report.ignored += 1,
+                    Ok(Err(error)) => {
+                        report.retried += 1;
+                        #[cfg(test)]
+                        eprintln!("operation {id:?} failed: {error}");
+                        tracing::debug!(operation = ?id, error = %error, "operation failed; operation stays open for recovery");
+                    }
+                    Err(payload) => {
+                        report.retried += 1;
+                        let message = panic_message(&payload);
+                        #[cfg(test)]
+                        eprintln!("operation {id:?} panicked: {message}");
+                        tracing::error!(operation = ?id, panic = %message, "operation panicked; operation stays open for recovery");
+                    }
                 }
-                Err(payload) => {
-                    report.retried += 1;
-                    let message = panic_message(&payload);
-                    #[cfg(test)]
-                    eprintln!("operation {id:?} panicked: {message}");
-                    tracing::error!(operation = ?id, panic = %message, "operation panicked; operation stays open for recovery");
-                }
+            }
+            if steps < max_steps {
+                let executed = self
+                    .drive_ready(SystemClock.now_ms(), max_steps - steps)
+                    .await?;
+                steps += executed;
+                report.executed += executed;
+                progressed |= executed > 0;
+            }
+            if !progressed {
+                break;
             }
         }
         Ok(report)
@@ -1227,6 +1414,7 @@ impl KernelHost {
             operations: vec![OperationIntent {
                 id: operation.clone(),
                 kind: OperationKind::ApplyAction,
+                ready_at_ms: None,
             }],
             outbox: Vec::new(),
         }
@@ -1399,7 +1587,7 @@ impl KernelHost {
             );
             match self
                 .processes
-                .commit_transition(&plan)
+                .commit_transition(&plan, SystemClock.now_ms(), self.timer_poll_ms)
                 .await
                 .map_err(repository_error)?
             {
@@ -1754,7 +1942,13 @@ impl KernelHost {
     )> {
         match self
             .processes
-            .commit_operation_event(id, expected_revision, event)
+            .commit_operation_event(
+                id,
+                expected_revision,
+                event,
+                SystemClock.now_ms(),
+                self.timer_poll_ms,
+            )
             .await
             .map_err(runtime)?
         {
@@ -1801,31 +1995,67 @@ impl KernelHost {
             .is_some_and(|snapshot| run_settled(&snapshot)))
     }
 
-    /// Re-derive pending work from the recovery index — the single source of
-    /// truth after a crash. Wake and reclaim dispositions re-enter the queue;
-    /// committed-but-unfinalized operations are completed; effect-unknown
-    /// operations are surfaced for manual reconciliation.
+    /// One driver tick for the test suites: the ready queue first, then
+    /// recovery's exceptional pass. The serving loop runs exactly this pair on
+    /// its interval, so a test that calls it observes the production cadence.
+    #[cfg(test)]
+    pub(crate) async fn tick(&self, now_ms: i64) -> Result<RecoveryReport> {
+        self.drive_ready(now_ms, PAGE_SIZE).await?;
+        self.recover(now_ms).await
+    }
+
+    /// Re-derive exceptional work from the recovery index. Normal
+    /// `Pending`/`RetryScheduled` operations are not woken here: they own a
+    /// durable ready record and the driver's due pass is their liveness source.
+    /// Recovery handles what that path cannot: an expired claim is reclaimed,
+    /// a committed-but-unfinalized operation is completed, effect-unknown and
+    /// quarantined operations are surfaced for manual reconciliation, and a
+    /// missing ready record (an older database, a damaged index) is repaired.
     pub(crate) async fn recover(&self, now_ms: i64) -> Result<RecoveryReport> {
         let mut report = RecoveryReport::default();
+        // One boot pass: rebuild the derived indexes from the authoritative
+        // aggregates. This is linear in the aggregate set once per host, not
+        // in the tick count, and it is the old-database migration path.
+        if !self
+            .boot_reconciled
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let repaired = self
+                .processes
+                .repair_all_ready(now_ms, self.timer_poll_ms)
+                .await
+                .map_err(runtime)?;
+            self.boot_reconciled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if repaired > 0 {
+                self.ready_metrics.lock().repaired += repaired as u64;
+                self.ready.notify_one();
+            }
+        }
         let mut cursor = None;
-        let wake = QueueWake {
-            tx: self.wake_tx.clone(),
-        };
         loop {
             let page = self
                 .recovery
                 .recoverable_page(cursor.as_ref(), PAGE_SIZE)
                 .await
                 .map_err(runtime)?;
-            if page.operations.is_empty() {
+            if page.operations.is_empty() && page.next.is_none() {
                 break;
             }
             for operation in page.operations {
                 report.scanned += 1;
                 match RecoveryPlanner::classify(&operation, now_ms) {
-                    RecoveryDisposition::Wake => {
-                        wake.wake(&operation.id);
-                        report.woken.push(operation.id);
+                    RecoveryDisposition::RepairReady => {
+                        if self
+                            .processes
+                            .repair_ready(&operation.id.process_id, now_ms, self.timer_poll_ms)
+                            .await
+                            .map_err(runtime)?
+                        {
+                            self.ready_metrics.lock().repaired += 1;
+                            report.ready_repaired.push(operation.id);
+                            self.ready.notify_one();
+                        }
                     }
                     RecoveryDisposition::AwaitOwner => {
                         report.awaiting_owner.push(operation.id);
@@ -1841,8 +2071,8 @@ impl KernelHost {
                         {
                             Ok((reclaimed, _)) => match reclaimed.state {
                                 OperationState::RetryScheduled { .. } => {
-                                    wake.wake(&reclaimed.id);
-                                    report.woken.push(reclaimed.id);
+                                    report.reclaimed.push(reclaimed.id.clone());
+                                    self.wake(&reclaimed.id);
                                 }
                                 OperationState::EffectUnknown { .. } => {
                                     report.reconciliation_required.push(reclaimed.id);

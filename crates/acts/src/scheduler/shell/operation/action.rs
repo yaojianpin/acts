@@ -121,6 +121,7 @@ impl KernelHost {
                     plan.operations.push(OperationIntent {
                         id: propagate_id,
                         kind: OperationKind::PropagateTask,
+                        ready_at_ms: None,
                     });
                 }
                 Ok(plan)
@@ -209,6 +210,7 @@ impl KernelHost {
                         plan.operations.push(OperationIntent {
                             id: reenter_id,
                             kind: OperationKind::ReenterTask,
+                            ready_at_ms: None,
                         });
                     }
                     plan.validate().map_err(runtime)?;
@@ -466,6 +468,7 @@ impl KernelHost {
             plan.operations.push(OperationIntent {
                 id: propagate_id,
                 kind: OperationKind::PropagateTask,
+                ready_at_ms: None,
             });
         }
         if let Some(payload) = self.operation_message_payload(

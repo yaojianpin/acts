@@ -414,8 +414,9 @@ async fn a_completion_racing_the_timeout_tick_converges_exactly_once_inner() {
         let (pid, step1, fired) = waiting_timed_run(&engine, &one_timeout_workflow("true")).await;
 
         let now = SystemClock.now_ms();
+        let due = now + engine.runtime().kernel().timer_poll_ms();
         let (completed, recovered) = tokio::join!(complete_act(&engine, &pid, &step1), async {
-            engine.runtime().kernel().recover(now).await
+            engine.runtime().kernel().tick(due).await
         },);
         completed.unwrap();
         recovered.unwrap();

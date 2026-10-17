@@ -110,6 +110,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                                     .next_operation_sequence(task.node.as_str(), generation),
                             },
                             kind: OperationKind::ExecuteTask,
+                            ready_at_ms: None,
                         });
                     }
                     // The re-entered generation's own scope carries what every
@@ -213,6 +214,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                             ),
                         },
                         kind,
+                        ready_at_ms: None,
                     });
                     tracing::debug!(
                         successor = ?successor,
@@ -242,6 +244,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                             ),
                         },
                         kind: OperationKind::ExecuteTask,
+                        ready_at_ms: None,
                     });
                 }
                 JoinReadiness::Waiting => {}
@@ -266,6 +269,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                             ),
                         },
                         kind: OperationKind::SkipTask,
+                        ready_at_ms: None,
                     });
                     tracing::debug!(
                         successor = ?successor,

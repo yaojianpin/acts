@@ -220,6 +220,7 @@ impl ActOperation for ExecuteTask {
                         plan.operations.push(OperationIntent {
                             id: action_id,
                             kind: OperationKind::ApplyAction,
+                            ready_at_ms: None,
                         });
                     }
                 }
@@ -283,6 +284,7 @@ impl ActOperation for ExecuteTask {
                     plan.operations.push(OperationIntent {
                         id: action_id,
                         kind: OperationKind::ApplyAction,
+                        ready_at_ms: None,
                     });
                 }
                 if let Some(starting) = task.filter(|starting| startable(starting.state)) {
@@ -326,6 +328,7 @@ impl ActOperation for ExecuteTask {
                                 sequence,
                             },
                             kind: OperationKind::DispatchTimeout,
+                            ready_at_ms: Some(now_ms.saturating_add(host.timer_poll_ms())),
                         });
                     }
                 }
@@ -464,6 +467,7 @@ impl KernelHost {
             plan.operations.push(OperationIntent {
                 id: propagate_id,
                 kind: OperationKind::PropagateTask,
+                ready_at_ms: None,
             });
         }
         plan.validate().map_err(runtime)?;

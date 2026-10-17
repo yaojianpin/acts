@@ -54,6 +54,7 @@ fn plan() -> TransitionPlan {
                 sequence: 1,
             },
             kind: OperationKind::PropagateTask,
+            ready_at_ms: None,
         }],
         outbox: vec![OutboxIntent {
             key: "complete:p1:t1:0".into(),

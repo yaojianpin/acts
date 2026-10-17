@@ -251,6 +251,7 @@ impl Fanout {
             operations.push(OperationIntent {
                 id: propagate_id,
                 kind: OperationKind::PropagateTask,
+                ready_at_ms: None,
             });
         }
         let plan = TransitionPlan {
@@ -355,6 +356,7 @@ fn child_operation(
             sequence: 0,
         },
         kind,
+        ready_at_ms: None,
     }))
 }
 

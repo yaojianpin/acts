@@ -673,7 +673,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
         let scan = recovered
             .runtime()
             .kernel()
-            .recover(SystemClock.now_ms())
+            .tick(SystemClock.now_ms())
             .await
             .unwrap();
 
@@ -721,7 +721,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                 let shifted = recovered
                     .runtime()
                     .kernel()
-                    .recover(SystemClock.now_ms() + 120_000)
+                    .tick(SystemClock.now_ms() + 120_000)
                     .await
                     .unwrap();
                 assert!(
@@ -867,11 +867,11 @@ async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner() {
     let scan = recovered
         .runtime()
         .kernel()
-        .recover(SystemClock.now_ms())
+        .tick(SystemClock.now_ms())
         .await
         .unwrap();
     for (what, operations) in [
-        ("woken", &scan.woken),
+        ("reclaimed", &scan.reclaimed),
         ("awaited from an owner", &scan.awaiting_owner),
         ("finalized", &scan.finalized),
         ("surfaced for reconciliation", &scan.reconciliation_required),

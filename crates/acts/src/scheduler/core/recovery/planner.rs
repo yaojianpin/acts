@@ -5,7 +5,10 @@ use crate::scheduler::core::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RecoveryDisposition {
-    Wake,
+    /// A normal operation without a ready record: the repair path. This is
+    /// unreachable for newly written aggregates (the ready index is written in
+    /// the same batch), but an old database or a damaged index converges here.
+    RepairReady,
     AwaitOwner,
     ReclaimExpired,
     FinalizeCommit,
@@ -19,7 +22,7 @@ impl RecoveryPlanner {
     pub(crate) fn classify(operation: &OperationRecord, now_ms: i64) -> RecoveryDisposition {
         match &operation.state {
             OperationState::Pending | OperationState::RetryScheduled { .. } => {
-                RecoveryDisposition::Wake
+                RecoveryDisposition::RepairReady
             }
             OperationState::Claimed(claim) | OperationState::CommitPrepared(claim) => {
                 if claim.is_expired(now_ms) {
@@ -29,10 +32,12 @@ impl RecoveryPlanner {
                 }
             }
             OperationState::Committed(_) => RecoveryDisposition::FinalizeCommit,
-            OperationState::EffectUnknown { .. } => RecoveryDisposition::ManualReconciliation,
-            OperationState::Quarantined { .. }
-            | OperationState::Superseded { .. }
-            | OperationState::Completed(_) => RecoveryDisposition::IgnoreTerminal,
+            OperationState::EffectUnknown { .. } | OperationState::Quarantined { .. } => {
+                RecoveryDisposition::ManualReconciliation
+            }
+            OperationState::Superseded { .. } | OperationState::Completed(_) => {
+                RecoveryDisposition::IgnoreTerminal
+            }
         }
     }
 }
@@ -41,9 +46,12 @@ impl RecoveryPlanner {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RecoveryReport {
     pub(crate) scanned: usize,
-    pub(crate) woken: Vec<OperationId>,
-    pub(crate) wake_failures: Vec<(OperationId, WakeError)>,
+    /// Operations whose expired claim was reclaimed.
+    pub(crate) reclaimed: Vec<OperationId>,
+    /// Normal operations whose durable ready record was missing and repaired.
+    pub(crate) ready_repaired: Vec<OperationId>,
     pub(crate) awaiting_owner: Vec<OperationId>,
     pub(crate) finalized: Vec<OperationId>,
     pub(crate) reconciliation_required: Vec<OperationId>,
+    pub(crate) wake_failures: Vec<(OperationId, WakeError)>,
 }

@@ -2,6 +2,7 @@ use crate::scheduler::{
     core::{
         commit::aggregate::ProcessSnapshot,
         outbox::outbox_index::{OutboxIndex, OutboxIndexCodec},
+        ready::{ReadyIndex, ReadyIndexCodec},
         recovery::{
             recovery_entry::RecoveryEntryDocument,
             recovery_index::{RecoveryIndex, RecoveryIndexCodec},
@@ -13,9 +14,10 @@ use crate::scheduler::{
 use std::collections::BTreeMap;
 use std::fmt;
 
-const PROCESS_KEY_PREFIX: &str = "kernel/aggregates/";
+pub(crate) const PROCESS_KEY_PREFIX: &str = "kernel/aggregates/";
 pub(crate) const RECOVERY_INDEX_KEY_PREFIX: &str = "kernel/indexes/recovery/";
 pub(crate) const OUTBOX_INDEX_KEY_PREFIX: &str = "kernel/indexes/outbox/";
+pub(crate) const READY_INDEX_KEY_PREFIX: &str = "kernel/indexes/ready/";
 
 /// A loaded aggregate and the exact bytes observed from storage. The raw bytes
 /// are the CAS token. Re-encoding the snapshot is forbidden because a future
@@ -26,6 +28,7 @@ pub(crate) struct LoadedProcess {
     original_document: Vec<u8>,
     original_recovery_index: Option<Vec<u8>>,
     original_outbox_index: Option<Vec<u8>>,
+    original_ready_index: Option<Vec<u8>>,
 }
 
 impl LoadedProcess {
@@ -37,6 +40,9 @@ impl LoadedProcess {
     }
     pub(crate) fn original_outbox_index(&self) -> Option<&[u8]> {
         self.original_outbox_index.as_deref()
+    }
+    pub(crate) fn original_ready_index(&self) -> Option<&[u8]> {
+        self.original_ready_index.as_deref()
     }
 }
 
@@ -188,13 +194,41 @@ pub(crate) fn recovery_index_key(process_id: &str) -> Result<String, DocumentRep
     encoded_process_key(RECOVERY_INDEX_KEY_PREFIX, process_id)
 }
 
-fn recovery_index_document(
+pub(crate) fn recovery_index_document(
     snapshot: &ProcessSnapshot,
 ) -> Result<Option<Vec<u8>>, DocumentRepositoryError> {
     RecoveryIndex::project(snapshot)
         .map(|index| {
             RecoveryIndexCodec::encode(&index)
                 .map_err(|error| DocumentRepositoryError::RecoveryIndex(error.to_string()))
+        })
+        .transpose()
+}
+
+fn legacy_recovery_index_document(
+    snapshot: &ProcessSnapshot,
+) -> Result<Option<Vec<u8>>, DocumentRepositoryError> {
+    RecoveryIndex::project_legacy(snapshot)
+        .map(|index| {
+            RecoveryIndexCodec::encode(&index)
+                .map_err(|error| DocumentRepositoryError::RecoveryIndex(error.to_string()))
+        })
+        .transpose()
+}
+
+pub(crate) fn ready_index_key(process_id: &str) -> Result<String, DocumentRepositoryError> {
+    encoded_process_key(READY_INDEX_KEY_PREFIX, process_id)
+}
+
+fn ready_index_document(
+    snapshot: &ProcessSnapshot,
+    now_ms: i64,
+    poll_ms: i64,
+) -> Result<Option<Vec<u8>>, DocumentRepositoryError> {
+    ReadyIndex::project(snapshot, now_ms, poll_ms)
+        .map(|index| {
+            ReadyIndexCodec::encode(&index)
+                .map_err(|error| DocumentRepositoryError::ReadyIndex(error.to_string()))
         })
         .transpose()
 }
@@ -221,13 +255,14 @@ fn encoded_process_key(prefix: &str, process_id: &str) -> Result<String, Documen
         .map_err(|_| DocumentRepositoryError::KeyEncoding("encoded key is not UTF-8".into()))
 }
 
-/// The three documents one atomic install writes: the aggregate snapshot
-/// bytes plus the expected/replacement recovery-index and outbox-index
-/// documents. Shared by the replace and create transaction builders.
+/// The documents one atomic install writes: the aggregate snapshot bytes plus
+/// the replacement recovery-index, outbox-index and ready-index documents.
+/// Shared by the replace and create transaction builders.
 pub(crate) type TransactionParts = Result<
     (
         DocumentTransaction,
         Vec<u8>,
+        Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
     ),
@@ -247,6 +282,7 @@ pub(crate) fn build_replace_transaction(
     loaded: &LoadedProcess,
     replacement_snapshot: &ProcessSnapshot,
     current_recovery_entries: &BTreeMap<String, Vec<u8>>,
+    replacement_ready: Option<&[u8]>,
 ) -> TransactionParts {
     if loaded.snapshot.process_id != replacement_snapshot.process_id {
         return Err(DocumentRepositoryError::ProcessIdentityMismatch {
@@ -258,6 +294,7 @@ pub(crate) fn build_replace_transaction(
     let key = process_key(process_id)?;
     let recovery_key = recovery_index_key(process_id)?;
     let outbox_key = outbox_index_key(process_id)?;
+    let ready_key = ready_index_key(process_id)?;
     let document = ProcessDocumentCodec::encode(replacement_snapshot)?;
     let recovery_index = recovery_index_document(replacement_snapshot)?;
     let outbox_index = outbox_index_document(replacement_snapshot)?;
@@ -271,6 +308,10 @@ pub(crate) fn build_replace_transaction(
         Some(index) => transaction.require_exact(&outbox_key, index.to_vec())?,
         None => transaction.require_absent(&outbox_key)?,
     };
+    transaction = match loaded.original_ready_index() {
+        Some(index) => transaction.require_exact(&ready_key, index.to_vec())?,
+        None => transaction.require_absent(&ready_key)?,
+    };
     transaction = transaction.put(&key, document.clone())?;
     transaction = match &recovery_index {
         Some(index) => transaction.put(&recovery_key, index.clone())?,
@@ -280,10 +321,20 @@ pub(crate) fn build_replace_transaction(
         Some(index) => transaction.put(&outbox_key, index.clone())?,
         None => transaction.delete(&outbox_key)?,
     };
+    transaction = match replacement_ready {
+        Some(index) => transaction.put(&ready_key, index.to_vec())?,
+        None => transaction.delete(&ready_key)?,
+    };
     transaction =
         replace_recovery_entries(transaction, current_recovery_entries, replacement_snapshot)?;
     transaction.validate()?;
-    Ok((transaction, document, recovery_index, outbox_index))
+    Ok((
+        transaction,
+        document,
+        recovery_index,
+        outbox_index,
+        replacement_ready.map(ToOwned::to_owned),
+    ))
 }
 
 fn replace_recovery_entries(
@@ -311,17 +362,24 @@ fn replace_recovery_entries(
     Ok(transaction)
 }
 
-pub(crate) fn build_create_transaction(snapshot: &ProcessSnapshot) -> TransactionParts {
+pub(crate) fn build_create_transaction(
+    snapshot: &ProcessSnapshot,
+    now_ms: i64,
+    poll_ms: i64,
+) -> TransactionParts {
     let key = process_key(&snapshot.process_id)?;
     let recovery_key = recovery_index_key(&snapshot.process_id)?;
     let outbox_key = outbox_index_key(&snapshot.process_id)?;
+    let ready_key = ready_index_key(&snapshot.process_id)?;
     let document = ProcessDocumentCodec::encode(snapshot)?;
     let recovery_index = recovery_index_document(snapshot)?;
     let outbox_index = outbox_index_document(snapshot)?;
+    let ready_index = ready_index_document(snapshot, now_ms, poll_ms)?;
     let mut transaction = DocumentTransaction::new()
         .require_absent(&key)?
         .require_absent(&recovery_key)?
         .require_absent(&outbox_key)?
+        .require_absent(&ready_key)?
         .put(&key, document.clone())?;
     transaction = match &recovery_index {
         Some(index) => transaction.put(&recovery_key, index.clone())?,
@@ -331,13 +389,72 @@ pub(crate) fn build_create_transaction(snapshot: &ProcessSnapshot) -> Transactio
         Some(index) => transaction.put(&outbox_key, index.clone())?,
         None => transaction.delete(&outbox_key)?,
     };
+    transaction = match &ready_index {
+        Some(index) => transaction.put(&ready_key, index.clone())?,
+        None => transaction.delete(&ready_key)?,
+    };
     for (entry_key, entry_value) in RecoveryEntryDocument::project(snapshot) {
         transaction = transaction
             .require_absent(entry_key.as_str())?
             .put(entry_key, entry_value)?;
     }
     transaction.validate()?;
-    Ok((transaction, document, recovery_index, outbox_index))
+    Ok((
+        transaction,
+        document,
+        recovery_index,
+        outbox_index,
+        ready_index,
+    ))
+}
+
+/// The derived-index repair of one loaded aggregate: the normalized recovery
+/// index and ready index, guarded by the exact documents the repair read.
+/// `None` means both already match and nothing must be written.
+pub(crate) fn build_repair_transaction(
+    loaded: &LoadedProcess,
+    recovery_index: Option<&[u8]>,
+    ready_index: Option<&[u8]>,
+) -> Result<Option<DocumentTransaction>, DocumentRepositoryError> {
+    let process_id = &loaded.snapshot.process_id;
+    let key = process_key(process_id)?;
+    let recovery_key = recovery_index_key(process_id)?;
+    let outbox_key = outbox_index_key(process_id)?;
+    let ready_key = ready_index_key(process_id)?;
+    let mut transaction =
+        DocumentTransaction::new().require_exact(&key, loaded.original_document().to_vec())?;
+    transaction = match loaded.original_recovery_index() {
+        Some(index) => transaction.require_exact(&recovery_key, index.to_vec())?,
+        None => transaction.require_absent(&recovery_key)?,
+    };
+    transaction = match loaded.original_outbox_index() {
+        Some(index) => transaction.require_exact(&outbox_key, index.to_vec())?,
+        None => transaction.require_absent(&outbox_key)?,
+    };
+    transaction = match loaded.original_ready_index() {
+        Some(index) => transaction.require_exact(&ready_key, index.to_vec())?,
+        None => transaction.require_absent(&ready_key)?,
+    };
+    let mut changed = false;
+    if recovery_index != loaded.original_recovery_index() {
+        transaction = match recovery_index {
+            Some(index) => transaction.put(&recovery_key, index.to_vec())?,
+            None => transaction.delete(&recovery_key)?,
+        };
+        changed = true;
+    }
+    if ready_index != loaded.original_ready_index() {
+        transaction = match ready_index {
+            Some(index) => transaction.put(&ready_key, index.to_vec())?,
+            None => transaction.delete(&ready_key)?,
+        };
+        changed = true;
+    }
+    if !changed {
+        return Ok(None);
+    }
+    transaction.validate()?;
+    Ok(Some(transaction))
 }
 
 pub(crate) fn loaded_after_write(
@@ -345,12 +462,14 @@ pub(crate) fn loaded_after_write(
     document: Vec<u8>,
     recovery_index: Option<Vec<u8>>,
     outbox_index: Option<Vec<u8>>,
+    ready_index: Option<Vec<u8>>,
 ) -> LoadedProcess {
     LoadedProcess {
         snapshot: snapshot.clone(),
         original_document: document,
         original_recovery_index: recovery_index,
         original_outbox_index: outbox_index,
+        original_ready_index: ready_index,
     }
 }
 
@@ -359,6 +478,7 @@ pub(crate) fn decode_loaded_process(
     original_document: Vec<u8>,
     original_recovery_index: Option<Vec<u8>>,
     original_outbox_index: Option<Vec<u8>>,
+    original_ready_index: Option<Vec<u8>>,
 ) -> Result<LoadedProcess, DocumentRepositoryError> {
     let snapshot = ProcessDocumentCodec::decode(&original_document).map_err(|source| {
         DocumentRepositoryError::CorruptProcess {
@@ -373,7 +493,10 @@ pub(crate) fn decode_loaded_process(
         });
     }
     let expected_recovery_index = recovery_index_document(&snapshot)?;
-    if original_recovery_index.as_deref() != expected_recovery_index.as_deref() {
+    let legacy_recovery_index = legacy_recovery_index_document(&snapshot)?;
+    if original_recovery_index.as_deref() != expected_recovery_index.as_deref()
+        && original_recovery_index.as_deref() != legacy_recovery_index.as_deref()
+    {
         return Err(DocumentRepositoryError::RecoveryIndexMismatch {
             process_id: process_id.into(),
         });
@@ -389,11 +512,45 @@ pub(crate) fn decode_loaded_process(
         original_document,
         original_recovery_index,
         original_outbox_index,
+        original_ready_index,
     })
 }
 
 pub(crate) fn process_key(process_id: &str) -> Result<String, DocumentRepositoryError> {
     encoded_process_key(PROCESS_KEY_PREFIX, process_id)
+}
+
+/// The process id behind one encoded aggregate key.
+pub(crate) fn decode_process_key(key: &str) -> Result<String, DocumentRepositoryError> {
+    let encoded = key
+        .strip_prefix(PROCESS_KEY_PREFIX)
+        .ok_or_else(|| DocumentRepositoryError::KeyEncoding(format!("foreign key {key:?}")))?;
+    if encoded.len() % 2 != 0 {
+        return Err(DocumentRepositoryError::KeyEncoding(format!(
+            "odd-length process key {key:?}"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    let (pairs, _) = encoded.as_bytes().as_chunks::<2>();
+    for pair in pairs {
+        let high = hex_value(pair[0]).ok_or_else(|| {
+            DocumentRepositoryError::KeyEncoding(format!("non-hex process key {key:?}"))
+        })?;
+        let low = hex_value(pair[1]).ok_or_else(|| {
+            DocumentRepositoryError::KeyEncoding(format!("non-hex process key {key:?}"))
+        })?;
+        bytes.push((high << 4) | low);
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| DocumentRepositoryError::KeyEncoding(format!("non-utf8 process key {key:?}")))
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -413,6 +570,7 @@ pub(crate) enum DocumentRepositoryError {
     RecoveryIndexMismatch {
         process_id: String,
     },
+    ReadyIndex(String),
     OutboxIndex(String),
     OutboxIndexMismatch {
         process_id: String,

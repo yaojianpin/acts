@@ -3,8 +3,8 @@
 //!
 //! The deciding commit closed the source generation and created this operation
 //! in the *same* atomic batch, so the re-entry can be lost neither to a crash
-//! nor to a lost compare-and-swap: its operation plans the fresh generations and the
-//! recovery scan re-drives it until that plan commits.
+//! nor to a lost compare-and-swap: its operation plans the fresh generations and
+//! its durable ready record keeps it driven until that plan commits.
 
 use super::*;
 use crate::scheduler::shell::*;
@@ -39,8 +39,8 @@ impl ActOperation for ReenterTask {
             // generation and wrote the target it names (`Back` an earlier
             // step, `Cancel` the closed execution itself). Planning here —
             // not in the deciding call — is what makes the rewind survive
-            // a lost compare-and-swap or a crash: this operation is re-driven by
-            // the recovery scan until its commit lands.
+            // a lost compare-and-swap or a crash: its ready record keeps it
+            // driven until its commit lands.
             let target = snapshot
                 .variables
                 .get(&(task_id.clone(), REENTER_TARGET_VAR.to_string()))

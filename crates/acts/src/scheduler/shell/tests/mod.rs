@@ -115,22 +115,22 @@ async fn linear_process_runs_to_completion_and_delivers_outbox() {
 }
 
 #[tokio::test]
-async fn wake_loss_is_recovered_by_the_scan() {
+async fn wake_loss_is_recovered_by_the_ready_queue() {
     let (host, mut wake_rx) = KernelHost::in_memory();
     let spec = ProcessSpec::linear("p2", "root", &["only"]);
-    // Create without waking: everything now rides on the recovery scan,
-    // exactly like after a crash that lost the in-memory queue.
+    // Create without waking: everything now rides on the durable ready
+    // record, exactly like after a crash that lost the in-memory queue.
     let snapshot = spec.seed_snapshot().unwrap();
     host.processes
-        .create(&snapshot)
+        .create(&snapshot, SystemClock.now_ms(), host.timer_poll_ms())
         .await
         .map_err(runtime)
         .unwrap();
     let now = SystemClock.now_ms();
-    let report = host.recover(now).await.unwrap();
+    let report = host.tick(now).await.unwrap();
     assert!(
-        !report.woken.is_empty(),
-        "the pending root operation must be re-derived: {report:?}"
+        report.reclaimed.is_empty() && report.ready_repaired.is_empty(),
+        "the ready record was written with the aggregate: {report:?}"
     );
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     assert!(host.process_completed("p2").await.unwrap());
@@ -290,6 +290,61 @@ impl KvStore for ConflictKv {
     }
 }
 
+#[tokio::test]
+async fn a_full_wake_queue_does_not_delay_the_ready_record() {
+    let (host, _wake_rx) = KernelHost::in_memory();
+    let dummy = OperationId {
+        process_id: "queued-placeholder".into(),
+        task: crate::scheduler::core::model::task_graph::TaskId::new("root", 0).unwrap(),
+        sequence: 0,
+    };
+    while host.wake_tx.try_send(dummy.clone()).is_ok() {}
+    let spec = ProcessSpec::linear("p-full", "root", &["only"]);
+    host.start_process(&spec).await.unwrap();
+    assert!(
+        host.ready_metrics().wake_failures >= 1,
+        "the start's wake must have been dropped by the full queue"
+    );
+    // No tick, no channel message: the durable record alone drives the run.
+    let executed = host.drive_ready(SystemClock.now_ms(), 100).await.unwrap();
+    assert!(executed > 0, "the due record must run without a wake");
+    assert!(
+        host.process_completed("p-full").await.unwrap(),
+        "the ready queue carries the run to completion with a full wake channel"
+    );
+}
+
+#[tokio::test]
+async fn recovery_does_not_wake_a_parked_run() {
+    let (host, _wake_rx) = KernelHost::in_memory_with_cap(0);
+    let spec = ProcessSpec::linear("p-parked", "root", &["only"]);
+    host.start_process(&spec).await.unwrap();
+    let report = host.recover(SystemClock.now_ms()).await.unwrap();
+    assert_eq!(
+        report.scanned, 0,
+        "a parked run is normal pending work, not recovery work: {report:?}"
+    );
+    assert!(report.reclaimed.is_empty() && report.ready_repaired.is_empty());
+    assert_eq!(
+        host.drive_ready(SystemClock.now_ms(), 8).await.unwrap(),
+        0,
+        "a zero-slot host may not drive the parked root"
+    );
+    let snapshot = host.snapshot("p-parked").await.unwrap().unwrap();
+    assert_eq!(
+        state_of(&snapshot, "root"),
+        TaskState::Created,
+        "the parked root stays undriven"
+    );
+    assert!(
+        snapshot
+            .operations
+            .values()
+            .all(|operation| matches!(operation.state, OperationState::Pending)),
+        "the parked work keeps its durable ready record for admission"
+    );
+}
+
 /// A hop whose *plan* commit loses its compare-and-swap must hand its claim
 /// back to recovery — and recovery must be able to claim it again.
 ///
@@ -336,7 +391,7 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
     let stored = ConflictKv::new(PID);
     stored.arm(root.clone());
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES);
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
     host.start_process(&spec).await.unwrap();
 
@@ -369,7 +424,10 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
             operations: Vec::new(),
             outbox: Vec::new(),
         };
-        host.processes.commit_transition(&plan).await.unwrap();
+        host.processes
+            .commit_transition(&plan, SystemClock.now_ms(), host.timer_poll_ms())
+            .await
+            .unwrap();
         stored.release();
     };
     let (outcome, ()) = tokio::join!(hop, rival);
@@ -391,10 +449,10 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
         snapshot.operations[&root].state
     );
 
-    let report = host.recover(SystemClock.now_ms()).await.unwrap();
+    let report = host.tick(SystemClock.now_ms()).await.unwrap();
     assert!(
-        report.woken.contains(&root),
-        "the released hop must be re-derived by the recovery scan: {report:?}"
+        !report.reclaimed.contains(&root),
+        "the released hop is already in the ready index, not a recovery reclaim: {report:?}"
     );
     assert!(
         !report.reconciliation_required.contains(&root),
@@ -431,7 +489,7 @@ async fn a_package_effect_that_loses_its_commit_is_marked_unknown() {
     const PID: &str = "p-effect-conflict";
     let stored = ConflictKv::new(PID);
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES);
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let engine = crate::Engine::builder().start().await.unwrap();
     host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
         engine.runtime().clone(),
@@ -489,7 +547,10 @@ async fn a_package_effect_that_loses_its_commit_is_marked_unknown() {
         operations: Vec::new(),
         outbox: Vec::new(),
     };
-    host.processes.commit_transition(&rival).await.unwrap();
+    host.processes
+        .commit_transition(&rival, SystemClock.now_ms(), host.timer_poll_ms())
+        .await
+        .unwrap();
     stored.release();
 
     let error = hop
@@ -510,14 +571,14 @@ async fn a_package_effect_that_loses_its_commit_is_marked_unknown() {
         "an effect that may have run must not be retried automatically: {:?}",
         snapshot.operations[&apply].state
     );
-    let report = host.recover(SystemClock.now_ms()).await.unwrap();
+    let report = host.tick(SystemClock.now_ms()).await.unwrap();
     assert!(
         report.reconciliation_required.contains(&apply),
         "the unknown effect must be surfaced for manual reconciliation: {report:?}"
     );
     assert!(
-        !report.woken.contains(&apply),
-        "automatic recovery must not wake an unknown effect: {report:?}"
+        !report.reclaimed.contains(&apply),
+        "an unknown effect is never re-queued as normal work: {report:?}"
     );
     engine.close().await;
 }
@@ -534,7 +595,7 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
         .with_id("wf-cap")
         .with_step(|step| step.with_id("s1"));
     let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES);
+    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     // The read model is what a parked run is *visible* through, so this test
     // carries the projector the serving host attaches.
     let store = Arc::new(crate::store::Store::new(kv));
@@ -668,32 +729,38 @@ async fn a_run_already_in_flight_at_boot_waits_for_a_slot() {
         // workflow node (`$`), which is what the shell's root facts key on.
         let spec = ProcessSpec::linear(pid, crate::utils::consts::TASK_ROOT_TID, &["only"]);
         let snapshot = spec.seed_snapshot().unwrap();
-        host.processes.create(&snapshot).await.unwrap();
+        host.processes
+            .create(&snapshot, SystemClock.now_ms(), host.timer_poll_ms())
+            .await
+            .unwrap();
         seeds.push((pid.to_string(), snapshot));
     }
     let report = host.recover(SystemClock.now_ms()).await.unwrap();
-    assert_eq!(report.woken.len(), 2, "{report:?}");
-    let first = report.woken[0].process_id.clone();
-    let second = report.woken[1].process_id.clone();
-
-    // The scan wakes both runs: the one woken first takes the only slot, the
-    // one behind it is offered work and waits.
-    let report = host.run_until_quiescent(&mut wake_rx, 4).await.unwrap();
     assert!(
-        report.ignored >= 1,
-        "the run over the cap must be offered work and wait: {report:?}"
+        report.reclaimed.is_empty() && report.ready_repaired.is_empty(),
+        "a created run already owns its ready record: {report:?}"
     );
+    // The ready index is the boot driver: it hands the first run its slot and
+    // leaves the one behind the cap parked (with the record deferred).
+    let now = SystemClock.now_ms();
+    assert_eq!(host.drive_ready(now, 1).await.unwrap(), 1);
+    let first = seeds[0].0.clone();
+    let second = seeds[1].0.clone();
+
+    // The run over the cap is offered work and waits.
+    host.run_until_quiescent(&mut wake_rx, 2).await.unwrap();
     assert!(!host.process_completed(&first).await.unwrap());
     let waiting = host.snapshot(&second).await.unwrap().expect("aggregate");
     let seeded = &seeds
         .iter()
         .find(|(pid, _)| pid == &second)
-        .expect("the second wake belongs to a seeded run")
+        .expect("the second ready record belongs to a seeded run")
         .1;
     assert_eq!(
         waiting, *seeded,
         "a run waiting for a slot has not hopped: its aggregate is still its seed"
     );
+    let _ = report;
 
     // The rest: the first run settles, and the slot it frees admits the one
     // that had been waiting.
@@ -3193,7 +3260,9 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
 
     // One tick: the open window dispatches, the closed one stays armed.
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    host.recover(SystemClock.now_ms()).await.unwrap();
+    host.tick(SystemClock.now_ms() + host.timer_poll_ms())
+        .await
+        .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
@@ -3239,7 +3308,9 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
 
     // A later tick re-evaluates (the timer stays armed) without ever
     // dispatching a branch that already fired.
-    host.recover(SystemClock.now_ms()).await.unwrap();
+    host.tick(SystemClock.now_ms() + host.timer_poll_ms())
+        .await
+        .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
@@ -3272,7 +3343,9 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
         .await
         .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
-    host.recover(SystemClock.now_ms()).await.unwrap();
+    host.tick(SystemClock.now_ms() + host.timer_poll_ms())
+        .await
+        .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(
@@ -3452,7 +3525,9 @@ async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
     // The timer evaluates from the first tick on: the start hop that armed
     // it does not wake it.
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    host.recover(SystemClock.now_ms()).await.unwrap();
+    host.tick(SystemClock.now_ms() + host.timer_poll_ms())
+        .await
+        .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
@@ -4365,14 +4440,17 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
         &[],
         snapshot.version.clone(),
     );
-    host.processes.commit_transition(&intent).await.unwrap();
+    host.processes
+        .commit_transition(&intent, SystemClock.now_ms(), host.timer_poll_ms())
+        .await
+        .unwrap();
     assert_eq!(
         state_of(&host.snapshot(PID).await.unwrap().unwrap(), "s1"),
         crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the intent alone decides nothing"
     );
 
-    host.recover(SystemClock.now_ms()).await.unwrap();
+    host.tick(SystemClock.now_ms()).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
 
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
@@ -4427,11 +4505,16 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
                     + 1,
             },
             kind: OperationKind::ApplyAction,
+            ready_at_ms: None,
         }],
         outbox: Vec::new(),
     };
-    bare_host.processes.commit_transition(&bare).await.unwrap();
-    bare_host.recover(SystemClock.now_ms()).await.unwrap();
+    bare_host
+        .processes
+        .commit_transition(&bare, SystemClock.now_ms(), bare_host.timer_poll_ms())
+        .await
+        .unwrap();
+    bare_host.tick(SystemClock.now_ms()).await.unwrap();
     bare_host
         .run_until_quiescent(&mut bare_wake, 300)
         .await
@@ -4530,7 +4613,7 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
     // by the recovery scan, exactly like a rewind whose deciding call died
     // before it could dispatch anything.
     while wake_rx.try_recv().is_ok() {}
-    host.recover(SystemClock.now_ms()).await.unwrap();
+    host.tick(SystemClock.now_ms()).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
 
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();

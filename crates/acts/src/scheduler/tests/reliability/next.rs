@@ -548,11 +548,11 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
     let scan = recovered
         .runtime()
         .kernel()
-        .recover(SystemClock.now_ms())
+        .tick(SystemClock.now_ms())
         .await
         .unwrap();
     for (what, operations) in [
-        ("woken", &scan.woken),
+        ("reclaimed", &scan.reclaimed),
         ("awaited from an owner", &scan.awaiting_owner),
         ("finalized", &scan.finalized),
         ("surfaced for reconciliation", &scan.reconciliation_required),
@@ -765,11 +765,11 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
     let scan = recovered
         .runtime()
         .kernel()
-        .recover(SystemClock.now_ms())
+        .tick(SystemClock.now_ms())
         .await
         .unwrap();
     for (what, operations) in [
-        ("woken", &scan.woken),
+        ("reclaimed", &scan.reclaimed),
         ("awaited from an owner", &scan.awaiting_owner),
         ("finalized", &scan.finalized),
         ("surfaced for reconciliation", &scan.reconciliation_required),
@@ -800,12 +800,12 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
     let again = recovered
         .runtime()
         .kernel()
-        .recover(SystemClock.now_ms())
+        .tick(SystemClock.now_ms())
         .await
         .unwrap();
     assert!(
         !again
-            .woken
+            .reclaimed
             .iter()
             .any(|operation| operation.task.node.as_str() == step1),
         "the applied propagation may not be re-woken by a repeated scan: {again:?}"
@@ -985,7 +985,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
                 let shifted = recovered
                     .runtime()
                     .kernel()
-                    .recover(SystemClock.now_ms() + 120_000)
+                    .tick(SystemClock.now_ms() + 120_000)
                     .await
                     .unwrap();
                 assert!(

@@ -45,16 +45,16 @@ pub(crate) enum OperationKind {
     /// branches in declaration order (the one-shot `__timeouts` marker, the
     /// in-flight check) and admits the first due one. The operation re-arms
     /// itself with a fresh intent after every dispatch and stays `Pending`
-    /// while nothing is due, so the recovery scan re-wakes it once per tick —
-    /// the kernel's dispatch cadence, the legacy process tick's equivalent —
-    /// and retires once the execution is decided or every branch fired.
+    /// while nothing is due; its ready record is deferred by one poll interval,
+    /// the kernel's dispatch cadence (the legacy process tick's equivalent), and
+    /// it retires once the execution is decided or every branch fired.
     DispatchTimeout,
     /// The durable rewind a `Cancel`/`Back` decision leaves behind: the
     /// deciding commit closes the source generation (`Backed`) and creates
     /// this operation in the *same* atomic batch, so the re-entry cannot be
     /// lost to a crash or a lost compare-and-swap — its operation plans the fresh
-    /// generations ([`crate::scheduler::core::plan::generation::Reenter`]) and the
-    /// recovery scan re-drives it if that operation fails. The target task id is
+    /// generations ([`crate::scheduler::core::plan::generation::Reenter`]) and its
+    /// ready record re-drives it if that operation fails. The target task id is
     /// the durable fact `__reenter_target` the deciding commit writes (`Back`
     /// names an earlier step, `Cancel` the closed execution itself).
     ReenterTask,
@@ -335,6 +335,33 @@ impl OperationRecord {
             OperationState::Completed(_)
                 | OperationState::Quarantined { .. }
                 | OperationState::Superseded { .. }
+        )
+    }
+
+    /// Whether this record belongs to the recovery scan.
+    ///
+    /// Normal runnable work (`Pending`, `RetryScheduled`) has its own durable
+    /// ready index and is never re-woken by recovery. Recovery's index carries
+    /// only the states that need an external decision: an owner that may have
+    /// died, a commit waiting to be finalized, or an operation whose effect
+    /// outcome must be reconciled by a human. `Quarantined` is terminal for
+    /// execution but stays here precisely so it keeps being surfaced.
+    pub(crate) fn needs_recovery(&self) -> bool {
+        matches!(
+            self.state,
+            OperationState::Claimed(_)
+                | OperationState::CommitPrepared(_)
+                | OperationState::Committed(_)
+                | OperationState::EffectUnknown { .. }
+                | OperationState::Quarantined { .. }
+        )
+    }
+
+    /// Whether execution has permanently moved past this record.
+    pub(crate) fn is_retired(&self) -> bool {
+        matches!(
+            self.state,
+            OperationState::Completed(_) | OperationState::Superseded { .. }
         )
     }
 }

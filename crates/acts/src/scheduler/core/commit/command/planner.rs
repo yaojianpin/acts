@@ -68,6 +68,7 @@ impl ActionPlanner {
                     sequence: next_sequence,
                 },
                 kind: operation_kind,
+                ready_at_ms: None,
             }],
             outbox: vec![OutboxIntent {
                 key: format!(

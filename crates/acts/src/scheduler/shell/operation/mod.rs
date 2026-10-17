@@ -2,9 +2,9 @@
 //!
 //! An operation ([`OperationId`]) is the aggregate's durable unit of work;
 //! taking a claimed one to its next commit is what this module does, and the
-//! driver's woken operation, the recovery scan's re-drive and a client action's
-//! own operation all take the same four phases. Only the middle two depend on
-//! the operation's kind:
+//! driver's ready-queue turn, a lost wake recovered by the due pass, and a
+//! client action's own operation all take the same four phases. Only the middle
+//! two depend on the operation's kind:
 //!
 //! 1. **Prepare** ([`prepare`]): the parked fast path, the slot policy
 //!    ([`KernelHost::place_run`]), the kind's own pre-claim policy
@@ -229,9 +229,9 @@ impl KernelHost {
         if matches!(outcome, Outcome::Nothing) {
             operation_trace::end(operation_trace::PLAN, phase);
             // The work turned out to be nothing after all: the claim goes back
-            // so the next recovery tick re-derives the operation. The release
-            // is best-effort — recovery's lease expiry decides it either way,
-            // and that answer is the same "nothing happened".
+            // and the release writes the ready record the driver defers to the
+            // next poll. The release is best-effort — recovery's lease expiry
+            // leads to the same record and the same "nothing happened" answer.
             if let Err(error) = self.release_claim(&claimed, 1).await {
                 tracing::debug!(
                     id = ?claimed.id,

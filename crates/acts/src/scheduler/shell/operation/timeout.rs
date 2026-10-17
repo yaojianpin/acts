@@ -3,8 +3,8 @@
 //!
 //! Phase 1's pre-claim policy for this kind is the *idle* round: evaluating
 //! the branches before the claim keeps a timer with nothing due from consuming
-//! its own operation (it stays `Pending`, so the recovery scan re-wakes it —
-//! the kernel's tick cadence). Phase 2 decides the round again, against the
+//! its own operation (it stays `Pending`; the driver defers its ready record by
+//! one poll interval). Phase 2 decides the round again, against the
 //! authoritative post-claim snapshot, and phase 3 turns that verdict into the
 //! one atomic commit that admits the due branch (or retires the timer).
 
@@ -184,6 +184,7 @@ impl KernelHost {
         guard: TimeoutGuard,
         cost_ms: i64,
         declared: usize,
+        now_ms: i64,
     ) -> Result<TransitionPlan> {
         task.ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
         let mut pinned = Vec::new();
@@ -222,6 +223,7 @@ impl KernelHost {
                     sequence,
                 },
                 kind: OperationKind::DispatchTimeout,
+                ready_at_ms: Some(now_ms.saturating_add(self.timer_poll_ms())),
             });
         }
         plan.validate().map_err(runtime)?;
@@ -317,7 +319,16 @@ impl ActOperation for DispatchTimeout {
                 cost_ms,
                 declared,
             } => host.timeout_plan(
-                snapshot, id, task_id, task, claim, branch, guard, cost_ms, declared,
+                snapshot,
+                id,
+                task_id,
+                task,
+                claim,
+                branch,
+                guard,
+                cost_ms,
+                declared,
+                operation.now_ms,
             )?,
             // Nothing can fire any more: the owner is decided or its node
             // declares no timeouts. The operation's own commit is its whole

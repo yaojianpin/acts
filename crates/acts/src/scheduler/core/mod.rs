@@ -10,4 +10,5 @@ pub(crate) mod coverage;
 pub(crate) mod model;
 pub(crate) mod outbox;
 pub(crate) mod plan;
+pub(crate) mod ready;
 pub(crate) mod recovery;

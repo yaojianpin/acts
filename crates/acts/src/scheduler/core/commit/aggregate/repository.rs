@@ -12,13 +12,41 @@ pub(crate) trait ProcessRepository {
 /// Durable ownership boundary. Claiming and preparing are repository
 /// transitions, not process-local bookkeeping. Recovery therefore observes
 /// the same state as normal execution and never guesses from a local registry.
+///
+/// The cursor is positional in the *recovery document* order — process key,
+/// then the operation order inside that document — so a page resumes at the
+/// next unread index entry instead of rescanning every recovery document.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecoveryCursor(pub(crate) crate::scheduler::core::model::operation::OperationId);
+pub(crate) struct RecoveryCursor {
+    pub(crate) process_key: String,
+    pub(crate) operation: Option<crate::scheduler::core::model::operation::OperationId>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecoveryPage {
     pub(crate) operations: Vec<OperationRecord>,
     pub(crate) next: Option<RecoveryCursor>,
+}
+
+/// The positional cursor of the durable ready index: process document, then
+/// the `(ready_at_ms, operation)` position inside it. Entries are sorted by
+/// exactly that pair, so a page resumes at the next unread due record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReadyCursor {
+    pub(crate) process_key: String,
+    pub(crate) ready_at_ms: i64,
+    pub(crate) operation: crate::scheduler::core::model::operation::OperationId,
+}
+
+/// One due-ready page. `observed` and `oldest_ready_at_ms` describe the index
+/// entries the page walked (including future ones) so the driver can report
+/// backlog and age without a second pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReadyPage {
+    pub(crate) operations: Vec<crate::scheduler::core::model::operation::OperationId>,
+    pub(crate) next: Option<ReadyCursor>,
+    pub(crate) observed: usize,
+    pub(crate) oldest_ready_at_ms: Option<i64>,
 }
 
 #[cfg(test)]
@@ -94,11 +122,23 @@ impl RecoveryRepository for MemoryProcessRepository {
             .processes
             .values()
             .flat_map(|snapshot| snapshot.operations.values().cloned())
-            .filter(|operation| !operation.is_terminal())
+            .filter(|operation| !operation.is_retired())
             .collect::<Vec<_>>();
-        operations.sort_by(|left, right| operation_order(&left.id, &right.id));
+        operations.sort_by(|left, right| {
+            left.id
+                .process_id
+                .cmp(&right.id.process_id)
+                .then_with(|| operation_order(&left.id, &right.id))
+        });
         if let Some(cursor) = after {
-            operations.retain(|operation| operation_order(&operation.id, &cursor.0).is_gt());
+            operations.retain(|operation| {
+                operation.id.process_id > cursor.process_key
+                    || (operation.id.process_id == cursor.process_key
+                        && cursor
+                            .operation
+                            .as_ref()
+                            .is_none_or(|after| operation_order(&operation.id, after).is_gt()))
+            });
         }
         let has_more = operations.len() > limit;
         operations.truncate(limit);
@@ -108,7 +148,10 @@ impl RecoveryRepository for MemoryProcessRepository {
                     "recovery pagination reported more rows for an empty page".into(),
                 )
             })?;
-            Some(RecoveryCursor(last.id.clone()))
+            Some(RecoveryCursor {
+                process_key: last.id.process_id.clone(),
+                operation: Some(last.id.clone()),
+            })
         } else {
             None
         };

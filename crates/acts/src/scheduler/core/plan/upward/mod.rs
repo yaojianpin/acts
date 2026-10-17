@@ -94,6 +94,7 @@ impl crate::scheduler::core::plan::ActPlan for Upward {
                             .next_operation_sequence(ancestor.node.as_str(), ancestor.generation),
                     },
                     kind: OperationKind::PropagateTask,
+                    ready_at_ms: None,
                 });
             }
             cursor = task.parent.clone();

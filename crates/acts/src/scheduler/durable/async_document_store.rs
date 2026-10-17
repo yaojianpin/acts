@@ -10,21 +10,24 @@ use crate::{
     scheduler::{
         core::{
             commit::aggregate::{
-                CommitError, CommitReceipt, RecoveryCursor, RecoveryPage, advance_operation_event,
-                advance_transition,
+                CommitError, CommitReceipt, ReadyCursor, ReadyPage, RecoveryCursor, RecoveryPage,
+                advance_operation_event, advance_transition,
             },
             outbox::{
                 outbox_index::{OutboxIndexCodec, OutboxIndexState},
                 outbox_repository::{OutboxCursor, OutboxPage, OutboxRepositoryError},
                 records::{OutboxEvent, OutboxId, OutboxRecord},
             },
-            recovery::recovery_index::{RecoveryIndexCodec, operation_order},
+            ready::{ReadyIndex, ReadyIndexCodec},
+            recovery::recovery_index::RecoveryIndexCodec,
         },
         durable::document_store::{
             DocumentGuard, DocumentMutation, DocumentRepositoryError, LoadedProcess,
-            OUTBOX_INDEX_KEY_PREFIX, RECOVERY_INDEX_KEY_PREFIX, build_create_transaction,
-            build_replace_transaction, decode_loaded_process, loaded_after_write, outbox_index_key,
-            process_key, recovery_entries, recovery_index_key,
+            OUTBOX_INDEX_KEY_PREFIX, PROCESS_KEY_PREFIX, READY_INDEX_KEY_PREFIX,
+            RECOVERY_INDEX_KEY_PREFIX, build_create_transaction, build_repair_transaction,
+            build_replace_transaction, decode_loaded_process, decode_process_key,
+            loaded_after_write, outbox_index_key, process_key, ready_index_key, recovery_entries,
+            recovery_index_document, recovery_index_key,
         },
     },
     store::{KvStore, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard},
@@ -46,6 +49,17 @@ pub(crate) trait AsyncDocumentStore: Send + Sync {
 
     /// Return a stable key-ordered snapshot under `prefix`.
     async fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError>;
+
+    /// Return the key-ordered entries under `prefix` inside the half-open
+    /// range `[lower, upper)`. An absent bound is unrestricted on that side.
+    /// Paging uses this so a page resumes at its cursor instead of rescanning
+    /// the documents before it.
+    async fn scan_range(
+        &self,
+        prefix: &str,
+        lower: Option<&str>,
+        upper: Option<&str>,
+    ) -> Result<Vec<(String, Vec<u8>)>, ActError>;
 
     /// Apply every mutation atomically if and only if all guards still match.
     /// `Ok(false)` means no mutation became visible.
@@ -80,6 +94,30 @@ impl AsyncDocumentStore for KvDocumentStore {
             .scan_prefix(
                 prefix,
                 ScanOptions::new(ScanOperation::Eq, prefix.to_owned(), false),
+            )
+            .await?;
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries)
+    }
+
+    async fn scan_range(
+        &self,
+        prefix: &str,
+        lower: Option<&str>,
+        upper: Option<&str>,
+    ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+        let mut entries = self
+            .inner
+            .scan_prefix(
+                prefix,
+                ScanOptions::new(
+                    ScanOperation::Range {
+                        lower: lower.map(str::to_owned),
+                        upper: upper.map(str::to_owned),
+                    },
+                    prefix.to_owned(),
+                    false,
+                ),
             )
             .await?;
         entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -127,9 +165,11 @@ impl AsyncProcessRepository {
     pub(crate) async fn create(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        now_ms: i64,
+        poll_ms: i64,
     ) -> Result<LoadedProcess, AsyncRepositoryError> {
-        let (transaction, document, recovery_index, outbox_index) =
-            build_create_transaction(snapshot)?;
+        let (transaction, document, recovery_index, outbox_index, ready_index) =
+            build_create_transaction(snapshot, now_ms, poll_ms)?;
         if !self
             .store
             .atomic_batch(transaction.guards(), transaction.mutations())
@@ -142,11 +182,18 @@ impl AsyncProcessRepository {
             document,
             recovery_index,
             outbox_index,
+            ready_index,
         ))
     }
 
     /// Read a stable page from the compact recovery projection, then validate
     /// every selected row against its authoritative aggregate before exposing it.
+    ///
+    /// The cursor is positional: a page starts at the recovery document it
+    /// stopped in and continues after the last index entry it examined. No
+    /// document is scanned twice for one pagination walk, so the cost of a
+    /// page is bounded by `limit` index entries plus the aggregates it loads —
+    /// never by the whole recovery index.
     async fn load_recovery_page(
         &self,
         after: Option<&RecoveryCursor>,
@@ -155,32 +202,49 @@ impl AsyncProcessRepository {
         if limit == 0 || limit > MAX_RECOVERY_PAGE_SIZE {
             return Err(AsyncRepositoryError::Domain(CommitError::InvalidPageLimit));
         }
-        // Keep only the smallest `limit + 1` entries after the cursor. This
-        // bounds memory independently of the number of recoverable operations
-        // while preserving deterministic global OperationId ordering.
-        let candidate_limit = limit + 1;
-        let mut entries = Vec::with_capacity(candidate_limit);
-        for (key, bytes) in self.store.scan_prefix(RECOVERY_INDEX_KEY_PREFIX).await? {
+        let lower = after.map(|cursor| cursor.process_key.as_str());
+        let documents = self
+            .store
+            .scan_range(RECOVERY_INDEX_KEY_PREFIX, lower, None)
+            .await?;
+        let mut candidates = Vec::with_capacity(limit + 1);
+        'documents: for (key, bytes) in documents {
             let index = RecoveryIndexCodec::decode(&bytes).map_err(|source| {
                 AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
                     "recovery index {key:?}: {source}",
                 )))
             })?;
             for entry in index.entries {
-                if after
-                    .is_some_and(|cursor| !operation_order(&entry.operation_id, &cursor.0).is_gt())
+                if let Some(cursor) = after
+                    && key == cursor.process_key
+                    && let Some(operation) = &cursor.operation
+                    && !crate::scheduler::core::recovery::recovery_index::operation_order(
+                        &entry.operation_id,
+                        operation,
+                    )
+                    .is_gt()
                 {
                     continue;
                 }
-                insert_recovery_candidate(&mut entries, entry, candidate_limit);
+                candidates.push((key.clone(), entry));
+                if candidates.len() > limit {
+                    break 'documents;
+                }
             }
         }
-        let has_more = entries.len() > limit;
-        entries.truncate(limit);
+        let has_more = candidates.len() > limit;
+        candidates.truncate(limit);
+        let next = has_more.then(|| {
+            let (process_key, entry) = candidates.last().expect("has_more implies a candidate");
+            RecoveryCursor {
+                process_key: process_key.clone(),
+                operation: Some(entry.operation_id.clone()),
+            }
+        });
 
         let mut processes = HashMap::new();
-        let mut operations = Vec::with_capacity(entries.len());
-        for entry in entries {
+        let mut operations = Vec::with_capacity(candidates.len());
+        for (_, entry) in candidates {
             let process_id = entry.operation_id.process_id.clone();
             if !processes.contains_key(&process_id) {
                 // The aggregates are loaded at a later instant than the index
@@ -208,19 +272,12 @@ impl AsyncProcessRepository {
                 // the index doc was scanned: stale, not damage.
                 continue;
             };
-            if operation.revision != entry.revision || operation.is_terminal() {
+            if operation.revision != entry.revision || operation.is_retired() {
                 // Same: the operation moved on after the index was scanned.
                 continue;
             }
             operations.push(operation.clone());
         }
-        let next = if has_more {
-            operations
-                .last()
-                .map(|operation| RecoveryCursor(operation.id.clone()))
-        } else {
-            None
-        };
         Ok(RecoveryPage { operations, next })
     }
 
@@ -231,6 +288,8 @@ impl AsyncProcessRepository {
         id: &crate::scheduler::core::model::operation::OperationId,
         expected_revision: u64,
         event: crate::scheduler::core::model::operation::OperationEvent,
+        now_ms: i64,
+        poll_ms: i64,
     ) -> Result<OperationCommitOutcome, AsyncRepositoryError> {
         let mut loaded = self.load(&id.process_id).await?.ok_or_else(|| {
             AsyncRepositoryError::Domain(CommitError::ProcessNotFound(id.process_id.clone()))
@@ -241,7 +300,10 @@ impl AsyncProcessRepository {
         let entries = recovery_entries(&loaded.snapshot);
         let operation = advance_operation_event(&mut loaded.snapshot, id, expected_revision, event)
             .map_err(AsyncRepositoryError::Domain)?;
-        let outcome = self.replace(&loaded, &loaded.snapshot, &entries).await?;
+        let ready = self.ready_document(&loaded, now_ms, poll_ms, &HashMap::new())?;
+        let outcome = self
+            .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
+            .await?;
         match outcome {
             ReplaceOutcome::Committed => Ok(OperationCommitOutcome::Committed {
                 operation,
@@ -263,15 +325,29 @@ impl AsyncProcessRepository {
     pub(crate) async fn commit_transition(
         &self,
         plan: &crate::scheduler::core::model::transition_plan::TransitionPlan,
+        now_ms: i64,
+        poll_ms: i64,
     ) -> Result<TransitionCommitOutcome, AsyncRepositoryError> {
         let mut loaded = self.load(&plan.process_id).await?.ok_or_else(|| {
             AsyncRepositoryError::Domain(CommitError::ProcessNotFound(plan.process_id.clone()))
         })?;
         // In place, like the operation event above.
         let entries = recovery_entries(&loaded.snapshot);
+        let ready_at = plan
+            .operations
+            .iter()
+            .filter_map(|intent| {
+                intent
+                    .ready_at_ms
+                    .map(|ready_at| (intent.id.clone(), ready_at))
+            })
+            .collect::<HashMap<_, _>>();
         let receipt =
             advance_transition(&mut loaded.snapshot, plan).map_err(AsyncRepositoryError::Domain)?;
-        let outcome = self.replace(&loaded, &loaded.snapshot, &entries).await?;
+        let ready = self.ready_document(&loaded, now_ms, poll_ms, &ready_at)?;
+        let outcome = self
+            .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
+            .await?;
         match outcome {
             ReplaceOutcome::Committed => Ok(TransitionCommitOutcome::Committed {
                 receipt,
@@ -285,6 +361,254 @@ impl AsyncProcessRepository {
             }
             ReplaceOutcome::Conflict => Ok(TransitionCommitOutcome::Conflict {}),
         }
+    }
+
+    /// Read the due records of the durable ready index, in
+    /// `(process document, ready_at, operation)` order. The cursor is
+    /// positional, so each call resumes after the last examined entry and a
+    /// paged walk never rescans a document. `observed` and
+    /// `oldest_ready_at_ms` describe every entry the page walked, due or not,
+    /// for the backlog metrics.
+    pub(crate) async fn due_ready_page(
+        &self,
+        after: Option<&ReadyCursor>,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<ReadyPage, AsyncRepositoryError> {
+        if limit == 0 || limit > MAX_RECOVERY_PAGE_SIZE {
+            return Err(AsyncRepositoryError::Domain(CommitError::InvalidPageLimit));
+        }
+        let lower = after.map(|cursor| cursor.process_key.as_str());
+        let documents = self
+            .store
+            .scan_range(READY_INDEX_KEY_PREFIX, lower, None)
+            .await?;
+        let mut observed = 0usize;
+        let mut oldest: Option<i64> = None;
+        let mut due: Vec<(
+            String,
+            crate::scheduler::core::model::operation::OperationId,
+            i64,
+        )> = Vec::with_capacity(limit + 1);
+        'documents: for (key, bytes) in documents {
+            let index = ReadyIndexCodec::decode(&bytes).map_err(|source| {
+                AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
+                    "ready index {key:?}: {source}"
+                )))
+            })?;
+            for entry in index.entries {
+                if let Some(cursor) = after
+                    && key == cursor.process_key
+                    && (entry.ready_at_ms < cursor.ready_at_ms
+                        || (entry.ready_at_ms == cursor.ready_at_ms
+                            && !crate::scheduler::core::recovery::recovery_index::operation_order(
+                                &entry.operation_id,
+                                &cursor.operation,
+                            )
+                            .is_gt()))
+                {
+                    continue;
+                }
+                observed += 1;
+                oldest =
+                    Some(oldest.map_or(entry.ready_at_ms, |value| value.min(entry.ready_at_ms)));
+                if entry.ready_at_ms <= now_ms {
+                    due.push((key.clone(), entry.operation_id, entry.ready_at_ms));
+                    if due.len() > limit {
+                        break 'documents;
+                    }
+                }
+            }
+        }
+        let has_more = due.len() > limit;
+        due.truncate(limit);
+        let next = has_more.then(|| {
+            let (process_key, operation, ready_at_ms) =
+                due.last().expect("has_more implies a due entry");
+            ReadyCursor {
+                process_key: process_key.clone(),
+                ready_at_ms: *ready_at_ms,
+                operation: operation.clone(),
+            }
+        });
+        Ok(ReadyPage {
+            operations: due.into_iter().map(|(_, operation, _)| operation).collect(),
+            next,
+            observed,
+            oldest_ready_at_ms: oldest,
+        })
+    }
+
+    /// Set one ready record's due time, if it is still present.
+    ///
+    /// This never adds a record: a missing entry means the operation was
+    /// claimed, completed or removed, and re-adding it would resurrect work.
+    /// The write is guarded by the ready document's bytes, so a concurrent
+    /// aggregate commit wins and this call simply retries against the new
+    /// document (or finds the entry gone). `until_ms` may move in either
+    /// direction: admission makes a parked record due now, an idle round
+    /// defers it.
+    pub(crate) async fn set_ready_at(
+        &self,
+        id: &crate::scheduler::core::model::operation::OperationId,
+        until_ms: i64,
+    ) -> Result<bool, AsyncRepositoryError> {
+        let key = ready_index_key(&id.process_id)?;
+        for _ in 0..8 {
+            let Some(bytes) = self
+                .store
+                .read_many(std::slice::from_ref(&key))
+                .await?
+                .pop()
+                .flatten()
+            else {
+                return Ok(false);
+            };
+            let mut index = ReadyIndexCodec::decode(&bytes).map_err(|source| {
+                AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
+                    "ready index {key:?}: {source}"
+                )))
+            })?;
+            let Some(entry) = index
+                .entries
+                .iter_mut()
+                .find(|entry| &entry.operation_id == id)
+            else {
+                return Ok(false);
+            };
+            if entry.ready_at_ms == until_ms {
+                return Ok(false);
+            }
+            entry.ready_at_ms = until_ms;
+            index.entries.sort_by(|left, right| {
+                left.ready_at_ms.cmp(&right.ready_at_ms).then_with(|| {
+                    crate::scheduler::core::recovery::recovery_index::operation_order(
+                        &left.operation_id,
+                        &right.operation_id,
+                    )
+                })
+            });
+            let replacement = ReadyIndexCodec::encode(&index).map_err(|source| {
+                AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
+                    "ready index {key:?}: {source}"
+                )))
+            })?;
+            let batch = [DocumentMutation::Put {
+                key: key.clone(),
+                value: replacement,
+            }];
+            let guards = [DocumentGuard {
+                key: key.clone(),
+                expected: Some(bytes),
+            }];
+            if self.store.atomic_batch(&guards, &batch).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Rebuild one process's derived indexes from its authoritative aggregate:
+    /// the normalized recovery projection and a ready record for every
+    /// schedulable operation. Called once at boot; a normal commit keeps both
+    /// exact, so this is the repair path for an older database or a damaged
+    /// index. Existing ready times are preserved, so a deferred timer is not
+    /// made hot by a restart.
+    pub(crate) async fn repair_ready(
+        &self,
+        process_id: &str,
+        now_ms: i64,
+        poll_ms: i64,
+    ) -> Result<bool, AsyncRepositoryError> {
+        for _ in 0..LOAD_ATTEMPTS {
+            let Some(loaded) = self.load(process_id).await? else {
+                return Ok(false);
+            };
+            let recovery = recovery_index_document(&loaded.snapshot)?;
+            let previous = loaded
+                .original_ready_index()
+                .and_then(|bytes| ReadyIndexCodec::decode(bytes).ok());
+            let ready = ReadyIndex::reconcile(
+                previous.as_ref(),
+                &loaded.snapshot,
+                now_ms,
+                poll_ms,
+                &HashMap::new(),
+            )
+            .map(|index| {
+                ReadyIndexCodec::encode(&index).map_err(|source| {
+                    AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
+                        "ready index for {process_id:?}: {source}"
+                    )))
+                })
+            })
+            .transpose()?;
+            let Some(transaction) =
+                build_repair_transaction(&loaded, recovery.as_deref(), ready.as_deref())?
+            else {
+                return Ok(false);
+            };
+            if self
+                .store
+                .atomic_batch(transaction.guards(), transaction.mutations())
+                .await?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Repair every aggregate's derived indexes. One boot pass: the scan is
+    /// linear in the aggregate set, never in the number of ticks.
+    pub(crate) async fn repair_all_ready(
+        &self,
+        now_ms: i64,
+        poll_ms: i64,
+    ) -> Result<usize, AsyncRepositoryError> {
+        let mut repaired = 0usize;
+        for (key, _) in self.store.scan_prefix(PROCESS_KEY_PREFIX).await? {
+            let process_id = decode_process_key(&key)?;
+            if self.repair_ready(&process_id, now_ms, poll_ms).await? {
+                repaired += 1;
+            }
+        }
+        Ok(repaired)
+    }
+
+    fn ready_document(
+        &self,
+        loaded: &LoadedProcess,
+        now_ms: i64,
+        poll_ms: i64,
+        ready_at: &HashMap<crate::scheduler::core::model::operation::OperationId, i64>,
+    ) -> Result<Option<Vec<u8>>, AsyncRepositoryError> {
+        let previous = loaded
+            .original_ready_index()
+            .map(ReadyIndexCodec::decode)
+            .transpose()
+            .map_err(|source| {
+                AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
+                    "ready index for {:?}: {source}",
+                    loaded.snapshot.process_id
+                )))
+            })?;
+        ReadyIndex::reconcile(
+            previous.as_ref(),
+            &loaded.snapshot,
+            now_ms,
+            poll_ms,
+            ready_at,
+        )
+        .map(|index| {
+            ReadyIndexCodec::encode(&index).map_err(|source| {
+                AsyncRepositoryError::Domain(CommitError::CorruptProcess(format!(
+                    "ready index for {:?}: {source}",
+                    loaded.snapshot.process_id
+                )))
+            })
+        })
+        .transpose()
     }
 
     /// Mirror of the synchronous repository's outbox paging: scan the derived
@@ -400,7 +724,11 @@ impl AsyncProcessRepository {
             .map_err(OutboxRepositoryError::InvalidRecord)?;
         let entries = recovery_entries(&loaded.snapshot);
         loaded.snapshot.outbox.insert(id.clone(), evolved.clone());
-        match self.replace(&loaded, &loaded.snapshot, &entries).await {
+        let ready = loaded.original_ready_index().map(ToOwned::to_owned);
+        match self
+            .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
+            .await
+        {
             Ok(ReplaceOutcome::Committed | ReplaceOutcome::AlreadyCommitted(_)) => Ok(evolved),
             Ok(ReplaceOutcome::Conflict) => {
                 Err(OutboxRepositoryError::ConcurrentModification(id.clone()))
@@ -414,9 +742,14 @@ impl AsyncProcessRepository {
         loaded: &LoadedProcess,
         replacement_snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         current_recovery_entries: &std::collections::BTreeMap<String, Vec<u8>>,
+        replacement_ready: Option<&[u8]>,
     ) -> Result<ReplaceOutcome, AsyncRepositoryError> {
-        let (transaction, ..) =
-            build_replace_transaction(loaded, replacement_snapshot, current_recovery_entries)?;
+        let (transaction, ..) = build_replace_transaction(
+            loaded,
+            replacement_snapshot,
+            current_recovery_entries,
+            replacement_ready,
+        )?;
         if self
             .store
             .atomic_batch(transaction.guards(), transaction.mutations())
@@ -450,16 +783,24 @@ impl AsyncProcessRepository {
             process_key(process_id)?,
             recovery_index_key(process_id)?,
             outbox_index_key(process_id)?,
+            ready_index_key(process_id)?,
         ];
         for attempt in 0..LOAD_ATTEMPTS {
             let mut documents = self.store.read_many(&keys).await?.into_iter();
             let process = documents.next().flatten();
             let recovery_index = documents.next().flatten();
             let outbox_index = documents.next().flatten();
+            let ready_index = documents.next().flatten();
             let Some(process) = process else {
                 return Ok(None);
             };
-            match decode_loaded_process(process_id, process, recovery_index, outbox_index) {
+            match decode_loaded_process(
+                process_id,
+                process,
+                recovery_index,
+                outbox_index,
+                ready_index,
+            ) {
                 Ok(loaded) => return Ok(Some(loaded)),
                 Err(error) if error.is_read_race() && attempt + 1 < LOAD_ATTEMPTS => {
                     tracing::debug!(
@@ -493,20 +834,6 @@ impl AsyncRecoveryRepository {
         limit: usize,
     ) -> Result<RecoveryPage, AsyncRepositoryError> {
         self.processes.load_recovery_page(after, limit).await
-    }
-}
-
-fn insert_recovery_candidate(
-    entries: &mut Vec<crate::scheduler::core::recovery::recovery_index::RecoveryIndexEntry>,
-    entry: crate::scheduler::core::recovery::recovery_index::RecoveryIndexEntry,
-    limit: usize,
-) {
-    let position = entries
-        .binary_search_by(|candidate| operation_order(&candidate.operation_id, &entry.operation_id))
-        .unwrap_or_else(|position| position);
-    entries.insert(position, entry);
-    if entries.len() > limit {
-        entries.pop();
     }
 }
 
@@ -683,11 +1010,24 @@ mod tests {
         async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
             let index = (read < self.torn).then(|| self.torn_index.clone());
-            assert_eq!(keys.len(), 3, "aggregate + recovery index + outbox index");
-            Ok(vec![Some(self.process.clone()), index, None])
+            assert_eq!(
+                keys.len(),
+                4,
+                "aggregate + recovery index + outbox index + ready index"
+            );
+            Ok(vec![Some(self.process.clone()), index, None, None])
         }
 
         async fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            unimplemented!("the load path does not scan")
+        }
+
+        async fn scan_range(
+            &self,
+            _prefix: &str,
+            _lower: Option<&str>,
+            _upper: Option<&str>,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
             unimplemented!("the load path does not scan")
         }
 
@@ -792,7 +1132,7 @@ mod tests {
 
         let store: Arc<dyn KvStore> = Arc::new(crate::store::MemoryStore::new());
         let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(store)));
-        repository.create(&process).await.unwrap();
+        repository.create(&process, 0, 800).await.unwrap();
 
         assert_eq!(
             RecoveryPlanner::classify(&committed, 0),
@@ -806,6 +1146,8 @@ mod tests {
                 OperationEvent::Complete {
                     commit: commit.clone(),
                 },
+                0,
+                800,
             )
             .await
             .unwrap();
@@ -813,5 +1155,213 @@ mod tests {
             panic!("the finalize must commit, not lose a compare-and-swap: {outcome:?}");
         };
         assert_eq!(operation.state, OperationState::Completed(commit));
+    }
+
+    fn ready_snapshot(process_id: &str) -> (ProcessSnapshot, OperationId) {
+        let task = TaskId::new("step", 0).unwrap();
+        let operation = OperationId {
+            process_id: process_id.into(),
+            task: task.clone(),
+            sequence: 0,
+        };
+        let mut process = snapshot(false);
+        process.process_id = process_id.into();
+        process.tasks.insert(
+            task,
+            TaskSnapshot {
+                model_node: NodeId::parse("model-step").unwrap(),
+                parent: None,
+                predecessors: vec![],
+                state: TaskState::Ready,
+                revision: 0,
+            },
+        );
+        process.operations.insert(
+            operation.clone(),
+            OperationRecord::pending(operation.clone(), OperationKind::ExecuteTask),
+        );
+        (process, operation)
+    }
+
+    fn repository_with_store() -> (AsyncProcessRepository, Arc<dyn KvStore>) {
+        let store: Arc<dyn KvStore> = Arc::new(crate::store::MemoryStore::new());
+        (
+            AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(store.clone()))),
+            store,
+        )
+    }
+
+    /// The ready record is installed by the create transaction and removed by
+    /// the claim transaction: a crash between aggregate and index cannot happen
+    /// because both are one guarded batch.
+    #[tokio::test]
+    async fn the_ready_record_moves_with_the_operation_state() {
+        let (process, id) = ready_snapshot("process");
+        let (repository, _) = repository_with_store();
+        repository.create(&process, 100, 800).await.unwrap();
+
+        let page = repository.due_ready_page(None, 100, 8).await.unwrap();
+        assert_eq!(page.operations, vec![id.clone()]);
+        assert_eq!(page.observed, 1);
+
+        let claim = ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 1,
+            lease_until_ms: 9_000,
+            heartbeat_revision: 0,
+        };
+        repository
+            .commit_operation_event(
+                &id,
+                0,
+                crate::scheduler::core::model::operation::OperationEvent::ClaimAndPrepare(
+                    claim.clone(),
+                ),
+                100,
+                800,
+            )
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .due_ready_page(None, 100, 8)
+                .await
+                .unwrap()
+                .operations
+                .is_empty(),
+            "the claim removes the record in the same batch"
+        );
+
+        repository
+            .commit_operation_event(
+                &id,
+                1,
+                crate::scheduler::core::model::operation::OperationEvent::ScheduleRetry {
+                    claim,
+                    attempt: 1,
+                },
+                200,
+                800,
+            )
+            .await
+            .unwrap();
+        let page = repository.due_ready_page(None, 200, 8).await.unwrap();
+        assert_eq!(page.operations, vec![id]);
+        assert_eq!(
+            page.oldest_ready_at_ms,
+            Some(200),
+            "the retry is due at its commit"
+        );
+    }
+
+    /// A timer is in the ready index but not due until its first poll; recovery
+    /// never sees it as exceptional work.
+    #[tokio::test]
+    async fn a_timer_waits_for_its_poll_and_is_not_recovery_work() {
+        let (mut process, id) = ready_snapshot("process");
+        process.operations.get_mut(&id).unwrap().kind = OperationKind::DispatchTimeout;
+        assert!(
+            crate::scheduler::core::recovery::recovery_index::RecoveryIndex::project(&process)
+                .is_none(),
+            "an idle timer is not recovery work"
+        );
+        let (repository, _) = repository_with_store();
+        repository.create(&process, 100, 800).await.unwrap();
+        assert!(
+            repository
+                .due_ready_page(None, 100, 8)
+                .await
+                .unwrap()
+                .operations
+                .is_empty()
+        );
+        assert_eq!(
+            repository
+                .due_ready_page(None, 900, 8)
+                .await
+                .unwrap()
+                .operations,
+            vec![id]
+        );
+    }
+
+    /// A missing ready document is rebuilt from the authoritative aggregate;
+    /// the repair is idempotent.
+    #[tokio::test]
+    async fn a_missing_ready_record_is_repaired_from_the_aggregate() {
+        let (process, id) = ready_snapshot("process");
+        let (repository, store) = repository_with_store();
+        repository.create(&process, 100, 800).await.unwrap();
+        store
+            .delete(&ready_index_key("process").unwrap())
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .due_ready_page(None, 100, 8)
+                .await
+                .unwrap()
+                .operations
+                .is_empty()
+        );
+        assert!(repository.repair_ready("process", 100, 800).await.unwrap());
+        assert_eq!(
+            repository
+                .due_ready_page(None, 100, 8)
+                .await
+                .unwrap()
+                .operations,
+            vec![id]
+        );
+        assert!(
+            !repository.repair_ready("process", 100, 800).await.unwrap(),
+            "a consistent index is left untouched"
+        );
+    }
+
+    /// Recovery pagination resumes at its cursor instead of rescanning the
+    /// documents before it, and the pages are disjoint.
+    #[tokio::test]
+    async fn recovery_pages_resume_at_the_cursor() {
+        let (repository, _) = repository_with_store();
+        let repository = Arc::new(repository);
+        let recovery = AsyncRecoveryRepository::new(repository.clone());
+        for process_id in ["p-a", "p-b", "p-c"] {
+            let (mut process, id) = ready_snapshot(process_id);
+            let claim = ClaimToken {
+                owner: "runtime-a".into(),
+                fence: 1,
+                lease_until_ms: 9_000,
+                heartbeat_revision: 0,
+            };
+            process.operations.insert(
+                id.clone(),
+                OperationRecord::pending(id.clone(), OperationKind::ExecuteTask)
+                    .evolve(
+                        crate::scheduler::core::model::operation::OperationEvent::ClaimAndPrepare(
+                            claim,
+                        ),
+                    )
+                    .unwrap(),
+            );
+            repository.create(&process, 0, 800).await.unwrap();
+        }
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = recovery.recoverable_page(cursor.as_ref(), 1).await.unwrap();
+            for operation in page.operations {
+                assert!(
+                    !seen.contains(&operation.id),
+                    "a pagination walk may not repeat an operation"
+                );
+                seen.push(operation.id);
+            }
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 3);
     }
 }

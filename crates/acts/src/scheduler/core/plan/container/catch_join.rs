@@ -134,6 +134,7 @@ impl ActPlan for CatchJoin {
                 sequence,
             },
             kind: OperationKind::PropagateTask,
+            ready_at_ms: None,
         };
         let change = |to: TaskState| StateChange {
             task: command.parent.clone(),

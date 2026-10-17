@@ -51,6 +51,11 @@ pub(crate) struct VariableWrite {
 pub(crate) struct OperationIntent {
     pub(crate) id: OperationId,
     pub(crate) kind: OperationKind,
+    /// When this operation becomes due, in the ready index's clock. `None`
+    /// means the commit instant: ordinary work is runnable as soon as it is
+    /// durable. Timers and boot-admission checks name a later instant so they
+    /// never enter the hot ready set.
+    pub(crate) ready_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -316,6 +321,7 @@ mod tests {
                 sequence: 1,
             },
             kind: OperationKind::PropagateTask,
+            ready_at_ms: None,
         });
         assert!(matches!(p.validate(), Err(PlanError::ForeignOperation(_))));
     }

@@ -206,6 +206,7 @@ impl ActPlan for Reenter {
             operations: vec![OperationIntent {
                 id: next_operation,
                 kind: OperationKind::ExecuteTask,
+                ready_at_ms: None,
             }],
             outbox: vec![OutboxIntent {
                 key: format!(

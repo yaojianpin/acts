@@ -90,6 +90,7 @@ impl ActOperation for SkipTask {
                 plan.operations.push(OperationIntent {
                     id: propagate_id,
                     kind: OperationKind::PropagateTask,
+                    ready_at_ms: None,
                 });
             }
             plan
@@ -180,6 +181,7 @@ impl ActOperation for AbortTask {
                     plan.operations.push(OperationIntent {
                         id: propagate_id,
                         kind: OperationKind::PropagateTask,
+                        ready_at_ms: None,
                     });
                 }
                 plan
