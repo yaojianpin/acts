@@ -1,8 +1,8 @@
 # scheduler(内核)重构设计笔记(2026-10-15)
 
 > **状态:D1-D4 已全部拍定(C1-C8c 已落地;D4 = 暂不挪,2026-10-17)。** 决策记录见 §2.2;
-> **2026-10-17 架构审计新增 A1-A11 修正波(§3.10),优先于第二波 P1/L*;A1a、A2、A11 已落地,
-> A1b 的 per-record 试点已回退(批量版待做),当前 A1b(批量确认)。** 任务状态见 `KERNEL_CUTOVER_NOTES.md` §11 D。
+> **2026-10-17 架构审计新增 A1-A11 修正波(§3.10),优先于第二波 P1/L*;A1a、A2、A11、A1b(批量确认)
+> 与 A1c(effect 幂等协议)已落地,A1b 的 per-record 试点保持回退。** 任务状态见 `KERNEL_CUTOVER_NOTES.md` §11 D。
 > **范围**:用户提出的 7 条 scheduler 重构思路 —— ①聚合命名 ②task 身份 ③投影出行 ④outbox 消息 ⑤立即投递 ⑥`core/plan/` 模块拆分 ⑦`core/model/view/` 的去留。
 > **关系**:本文档落实 `KERNEL_CUTOVER_NOTES.md` §11 C4/C5(「先写设计再动手」),并把 §11 L1 (删 `ops`)、§10「读模型行表 `procs`/`tasks`/`vars` 的去留」两个待决项的影响面写清。
 > **性质**:第 ⑤ 条原决策已被 A1b 取代(见 §2.1/§3.10),第 ③ 条**已经实现**(真实改动只是"一行一实例",依赖第 ② 条),第 ② 条是唯一动持久化格式的改动,第 ①/⑥ 条是命名与搬运。
@@ -477,6 +477,15 @@ Command
 - **A1c**:为可自动重试的 effect 引入稳定 idempotency key 与可查询的 effect observation;
   不能证明幂等的 effect 只走 `EffectUnknown -> ManualReconciliation`,并补齐人工处理闭环。
   自动重试只允许用于已证明幂等的 effect。
+  **落地(2026-10-18,详见 notes §10「A1c 完成」)**:`EffectKey` 是 operation 身份的纯函数
+  (`pid`/`node`/`generation`/`sequence`,渲染为 C5 instance wire + sequence),随 `ClaimAndPrepare`
+  的持久化 operation 一同存在,重规划/重试/重启不变;`EffectRunner::run` 收到该 key,
+  `PackageEffectRunner` 并以私有 env 暴露给包(`Context::effect_key`)。
+  `EffectRunner::observe(key)` 返回 `Applied(outcome)|Failed(message)|NotApplied|Unknown`;
+  recovery 只据此决定重放计划、同 key 重新入队或人工。`ActPackage::idempotent()` 是包对
+  “同 key 重复执行安全”的显式声明,默认 false。人工闭环:`Engine::effect_unknowns(pid)` 按 key
+  查询,`Engine::resolve_effect(pid, key, Applied{outputs}|NotApplied)` 以正常 guarded commit
+  写入 durable 事实(`EffectUnknown -> RetryScheduled` 用专用事件,不降低 attempt)。
 
 **验收**:effect 后的 CAS 冲突不产生第二次包执行;`EffectUnknown` 的 run 不会自动推进;
 消息发送发生在对应 aggregate commit 之后;at-least-once 语义与现有 channel 契约不变。

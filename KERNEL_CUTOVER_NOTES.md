@@ -3068,6 +3068,104 @@ per-record 试点在同一循环上是 >20s(debug)。本笔没有恢复该写放
   逐行 generation/补投影协议的边界,A1b 只保证正常路径的 project→transport 顺序。
 - 未引入独立 outbox log;批量确认在现有 aggregate + 派生索引上完成。
 
+### A1c 完成(2026-10-18):effect 幂等协议 —— 稳定 key + observation + 人工闭环
+
+**任务**:§11 D 的 A1c(P1)。A1a 已把 effect 后的 CAS 冲突/`next` 失败落到 `EffectUnknown`,
+A1b 已把 outbox 改为提交后发送并每 operation 一笔批量确认。本笔补齐 effect 侧的身份与证据:
+没有稳定 key 与可查询 observation 时,`EffectUnknown` 只能人工;任何自动重试都可能重复外部副作用。
+
+**事实与契约**
+
+- `EffectUnknown` 的产生点不变:`mark_effect_unknown`(`dispatch` 的 CAS 冲突、`execute_one`/`apply_action_once`
+  的 `next` 失败)与 `ReleaseExpiredClaim` 对 `CommitPrepared` 的租约过期。`ClaimAndPrepare` 仍在 effect
+  之前落盘;outbox 顺序/payload/channel ack 行语义未动,A1b 的提交后发送与批量确认未改。
+- **稳定 key**:新增 `core/model/effect.rs::EffectKey`,字段为 `process_id`/`TaskId(node,generation)`/
+  `sequence`,是持久化 operation 身份的**纯函数**;渲染为 C5 instance wire + sequence
+  (`<sha256(pid,node,gen)[..32]>-<sequence>`)。`ClaimAndPrepare` 已把 operation 身份写入 aggregate,
+  因此 key 在 effect 之前就是 durable 的;没有随机源,也不另存一份会漂移的副本。重规划、重试、
+  重启后由同一 operation 重建出 byte-identical 的 key。
+- **executor 接口**:`EffectRunner::run(request, key)` 收到 key;`PackageEffectRunner` 另把它写入
+  headless scope 的私有 env `__effect_key`,`Context::effect_key()` 只读地交给包,`is_private_key`
+  保证它不会写回 run 的 durable env,workflow 的 `$env` 也读不到。
+- **幂等声明**:`ActPackage::idempotent() -> bool`(默认 `false`)是包作者对“同 key 重复执行安全”的
+  显式声明;`ActPackageRegister` 捕获该函数指针,`PackageEffectRunner::idempotent` 按注册表回答。
+  没有声明的 effect 永远不被自动重试。
+- **observation**:`EffectRunner::observe(key)` 返回
+  `Applied(EffectOutcome) | Failed(message) | NotApplied | Unknown`;默认 `Unknown`。
+  observation 是 executor 自己的事实(可跨重启持久化,由 executor 决定),内核不把它塞进 aggregate,
+  因此不产生每 effect 一笔额外的 aggregate commit。
+- **恢复协议**(`recover` 的 `ManualReconciliation` 与 `ReclaimExpired -> EffectUnknown` 分支):
+  - `Applied`/`Failed` ⇒ `prepare_reconciliation` 以 `ClaimAndPrepare`(fence = attempt+1)重占,
+    用 observation 的结果直接跑 `ApplyAction::next` 并提交,**不再调用 effect**;
+  - `NotApplied` + `idempotent` ⇒ `ResolveEffectNotApplied` 把 operation 写回 `RetryScheduled`
+    (attempt 不降低),同 key 重新入队并 wake;
+  - `Unknown`、`NotApplied` 但非幂等、查询失败、重放失败 ⇒ `ManualReconciliation`,不自动 wake。
+  `RecoveryReport` 新增 `effect_applied`/`effect_retried`;剩下的仍在 `reconciliation_required`
+  (serve 的日志与 A11 的回收判定沿用该列表)。
+- **人工闭环**:`Engine::effect_unknowns(pid)` 按 pid 列出 `EffectUnknown` 的
+  `tid`/`sequence`/稳定 `key`/`attempt`;`Engine::resolve_effect(pid, key, resolution)`:
+  - `Applied { outputs }` ⇒ 以正常 guarded commit 重放计划(不再执行 effect),`outputs` 是操作员
+    捕获的返回值(可为空);
+  - `NotApplied` ⇒ 专用 `ResolveEffectNotApplied` durable 事件,回到 retry 队列,同 key 重试。
+  两条路径都走 aggregate 的 compare-and-swap;重启后读到的就是 decision 的结果,不会有进程内
+  “已复位”的假象。`EffectUnknown`/`Quarantined` 仍不可回收(A11 条件未改)。
+
+**测试**(`shell/tests/mod.rs`、`core/model/{effect,operation}.rs`)
+
+- `an_observed_effect_converges_without_running_it_again`:真实包 effect + `ConflictKv` 丢失 plan
+  commit ⇒ `EffectUnknown`;executor observation `Applied` 后 `tick` 报 `effect_applied`,operation
+  `Completed`、run 收敛,effect 计数保持 **1**。
+- `an_idempotent_effect_is_retried_under_the_same_key_and_dedupes`:observation `NotApplied` + 幂等声明
+  ⇒ `effect_retried`,`RetryScheduled`;重跑一次,executor 以 key 去重,attempts=2、external side
+  effects=**1**,两次 key 字符串相等。
+- `a_non_idempotent_effect_is_manually_reconciled_across_restarts`:无 observation、非幂等 ⇒
+  `reconciliation_required`;重启后的新 host 读出的 key 与 executor 见过的一致且等于
+  `EffectKey::of(operation)`;`resolve_effect(Applied)` 后不再调用 effect、run 收敛;第三个 host
+  读回 `Completed` 且 `effect_unknowns` 为空。
+- `a_non_idempotent_effect_can_be_resolved_not_applied`:人工 `NotApplied` 让非幂等 effect 重新入队,
+  同 key 执行,run 收敛。
+- `a_proven_not_applied_effect_returns_to_the_retry_queue`:状态机单测(错误 attempt 拒绝、同 attempt
+  转 `RetryScheduled`、下一 claim 必须 fence 更高)。
+- `effect.rs` 单测:key 由 operation 身份纯函数重建、不同 operation 不同、无随机/时间成分。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 908 passed, 0 failed, 1 ignored (517.11s, final)
+cargo test -p acts --lib effect -> 24 passed, 0 failed (all A1c cases + effect regression)
+cargo test -p acts --lib effect_write_back_folds_into_the_process -> 1 passed
+cargo test -p acts --lib non_idempotent_effect -> 2 passed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all --check -> OK
+```
+
+首次全量运行(661.40s)出现两个负载敏感的未通过,均单跑绿,最终全量运行不再出现:
+
+- `scheduler::tests::reliability::cancel::cancel_racing_next_converges_on_one_terminal_decision`
+  (单跑 1 passed,184.04s;当时 5s 行回收等待在满负载下超时,任务的 one running 属于等待窗口);
+- `scheduler::tests::reliability::timeout::the_driver_leaves_a_settled_run_alone`
+  (C7 已登记;单跑 1 passed)。
+
+`cancel_racing_next_converges_on_one_terminal_decision` 不在既有 flake 清单中;本笔未改该路径
+(effect runner/observation 均未参与),按负载/时序抖动登记,不静默忽略。门禁外的影响面套件:
+`acts-acl`、`acts-expr --all-features`、`acts-cli`、`acts-package-state/http/javascript/shell`
+绿;唯一失败 `acts-package-shell --test vars` 的 `the_inputs_of_the_act_embed_in_the_script`
+是 A2/A11 已登记的既有非本笔失败(`$inputs().data` 为 null)。
+
+**已知边界**
+
+- `PackageEffectRunner` 不替内置包保存 observation:它不知道外部系统实际发生了什么,默认回答
+  `Unknown`。因此内置包的 `EffectUnknown` 仍停在人工协调;可自动收敛的前提是 executor
+  (自定义 runner 或包自身的持久 observation)实现 `observe`。这是协议,不是遗漏 —— “不能证明”
+  就不能自动推进。
+- 幂等声明按当前注册表回答,不随 operation 落盘;重新发布一个包并改变声明会改变后续恢复的判定。
+  声明是运维断言,不是运行期事实;需要固化时可另立字段(会动持久化格式)。
+- 人工 `Applied` 只折叠操作员提供的 `outputs`;包在崩溃前写过的 task data/env 增量无法重建,
+  因此这类恢复不承诺逐字段等价于原 effect 结果。
+- 不引入跨进程 exactly-once:同一 key 的重复投递仍由 executor/外部系统去重;内核只保证不再生成
+  第二个 key,并在 observation 证明 not-applied 时才自动重试。
+- `EffectUnknown`/`Quarantined` 的 run 仍永久保留(直到人工 resolve),A11 回收条件未变。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3085,9 +3183,10 @@ per-record 试点在同一循环上是 >20s(debug)。本笔没有恢复该写放
 >
 > **2026-10-17 用户裁决(架构优先)**:在第一波之后、第二波之前插入**第三波 = A1→A11 架构修正**。
 > A1a 已完成;A2(durable ready queue)已完成(§10);A11(终态回收 + PID 复用)已完成(§10);
-> A1b(提交后发送 + 每 operation 一笔批量确认)已完成(§10「A1b 完成」)。
-> **当前执行项是 A1c(effect 幂等协议;§11 D 标 P1)**。
-> 其后为 A3/A4/A5 → A6 → A7/A8/A9/A10。第二波 P1/L* **暂缓,不删除**。
+> A1b(提交后发送 + 每 operation 一笔批量确认)已完成(§10「A1b 完成」);
+> A1c(effect 幂等协议)已完成(§10「A1c 完成」)。
+> **当前执行项是 A3(折叠纯内部 hop;§11 D 标 P1)**,其后 A4 → A5 → A6 → A7/A8/A9/A10。
+> 第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -3166,15 +3265,16 @@ per-record 试点在同一循环上是 >20s(debug)。本笔没有恢复该写放
 > **effect/commit 顺序、正常路径的活性来源、同一 Process 的写者模型、投影协议、Shell 仍承担状态机语义、
 > 以及终态 ProcessSnapshot/投影/索引的回收与 PID 复用**。
 > 执行顺序:**A1a → A2 → A11 → A1b(批量 confirm) → A1c → A3/A4/A5 → A6 → A7/A8/A9/A10**。
-> A1a/A2/A11/A1b 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
-> 正常路径不得恢复 per-record claim/confirm。
+> A1a/A2/A11/A1b/A1c 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
+> 正常路径不得恢复 per-record claim/confirm;A1c 的自动重试只对 executor observation 证明 not-applied
+> 且包显式声明幂等的 effect 生效。
 > 第二波 P1/L* 暂缓,不删除。
 
 | 编号 | 任务 | 审计条目 | 优先级 | 依赖 | 状态 / 验收 |
 |---|---|---|---|---|---|
 | **A1a** | effect 边界分类:包 effect 后丢失 CAS/`next` 失败 → `MarkEffectUnknown`,不释放 claim 自动重试;客户端动作路径同处理 | #2 | **P0** | — | **已做(§10「A1a 完成」)**。验收:effect 后冲突为 `EffectUnknown`,recovery 只报 `ManualReconciliation`,不 wake |
 | **A1b** | outbox 提交后发送:plan 先写 `Pending`;**批量确认本 operation 的新记录**(或把 outbox 状态移出 aggregate);投影先于外部消息;删除前置直发快路径。**per-record claim/confirm 变体已回退,不得原样重试** | #2 | **P0** | A1a;批量确认设计 | **已做(§10「A1b 完成」)**。验收:消息不在 aggregate commit 前可见;每 operation 最多一笔确认提交;loop/吞吐不退化;at-least-once 不变。正常路径 `deliver_committed_outbox` + `confirm_outbox_batch`;retry pass 仍 per-record |
-| **A1c** | effect 幂等协议:稳定 idempotency key + 可查询 observation;非幂等 effect 只走 manual reconciliation;补齐人工处理闭环 | #2 | P1 | A1b(批量) | 未做。验收:可证明幂等的 effect 才允许自动重试;恢复不重复外部副作用 |
+| **A1c** | effect 幂等协议:稳定 idempotency key + 可查询 observation;非幂等 effect 只走 manual reconciliation;补齐人工处理闭环 | #2 | P1 | A1b(批量) | **已做(§10「A1c 完成」)**。验收:`EffectKey` 由 operation 身份纯函数派生(重规划/重试/重启不变);`EffectRunner::observe` 的 `Applied`/`Failed` 直接重放、`NotApplied`+幂等声明才重新入队、其余人工;`Engine::effect_unknowns`/`resolve_effect` 提供可持久化的人工闭环;恢复不重复调用 effect |
 | **A2** | durable ready queue:业务提交内写 ready 索引;`try_send` 只做加速;driver 从 ready 取到期操作;recovery 只做异常兜底;修 recovery 分页每页全扫的 $O(N^2)$ | #1 | **P0** | —(与 A1b 的 store schema 改动需协调) | **已做(§10「A2 完成」)**。验收:队列满不导致下一跳等 tick;recovery 扫描量与异常操作数相关;idle timer/parked run 不进热 ready 集合;冷启动/缺 ready 记录可从 aggregate 修复 |
 | **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | 未做。验收:线性 3 节点不再产生 9 次 claim/commit;行为、消息、行投影逐字不变 |
 | **A4** | 每 Process 单写者 command lane:正常/客户端动作/恢复 command 串行决定状态;effect 可并发;observation 回 lane;CAS 只做恢复/fencing | #4 | P1 | A2 | 未做。验收:同一 pid 无并行 plan 竞争;正常路径不触发 `ACTION_ATTEMPTS`;不同 pid 仍并行 |
@@ -3187,7 +3287,9 @@ per-record 试点在同一循环上是 >20s(debug)。本笔没有恢复该写放
 | **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index + ready index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | **已做(§10「A11 完成」)**。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删。**pid 存在性只看 aggregate**(行/`ops` 不参与);start 与 cleanup 共用 per-pid 生命周期锁。A5 的完整投影 generation 协议仍未做,本笔以 pid 墓碑收窄清理后的旧投影重写窗口 |
 
 **A1/A2/A11 的边界**:A1a 只关闭“effect 已执行后自动重试”的重复路径;A1b(批量确认)已关闭 outbox 的提交前可见性,
-**per-record claim/confirm 试点保持回退**(写放大不可接受)。A1c 才提供可自动重试的幂等协议。
+**per-record claim/confirm 试点保持回退**(写放大不可接受)。A1c 已提供稳定 effect key、executor observation
+与人工 resolve 闭环:只有 observation 证明 not-applied 且包显式声明幂等时才自动重试,`Applied` 只重放计划、
+不重跑 effect,其余仍停在 `ManualReconciliation`。A1c 不提供跨进程 exactly-once,也不替内置包臆造 observation。
 A2 只把正常活性从 recovery 扫描移开,不改变 recovery 的异常兜底职责;**A11 已把 `ready` index 与
 aggregate/recovery/outbox 一起原子回收**(A11 完成)。
 A11 只回收**已完成且投递结算完毕**的 run;`EffectUnknown`、`Quarantined`、`DeliveryUnknown`、
@@ -3205,72 +3307,85 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A1c —— effect 幂等协议(§11 D,P1)
+# 当前任务:A3 —— 折叠纯内部 hop(§11 D,P1)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A1c 行、§10「A1a 完成」「A1b 完成」;
-`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A1/A1c。A1a 已把 effect 后的 CAS 冲突与 `next` 失败落到
-`EffectUnknown`,recovery 只报 `ManualReconciliation`,不自动重试;A1b 已把 outbox 改成提交后发送
-并每 operation 一笔批量确认。当前缺口:包 effect 没有稳定 idempotency key,也没有可查询的
-observation,所以 `EffectUnknown` 只能人工处理,任何自动重试都可能重复外部副作用。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A3 行、§10「A1a 完成」「A2 完成」「A11 完成」
+「A1b 完成」「A1c 完成」;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A3。A1c 已给出稳定 effect key、
+executor observation 与人工闭环;A2 已把正常活性移到 durable ready queue;A11 已给出 operation
+retire/回收边界。当前缺口:线性 3 节点流程产生 9 个 operation(每节点 `ExecuteTask + ApplyAction +
+PropagateTask`),每个 operation 独立 claim/commit,纯内部传播、join、branch 选择、终态推导被放大成
+“创建 -> 提交 -> wake -> 出队 -> claim -> load -> plan -> commit -> close”。
 
-**目标**:可证明幂等的 effect 在崩溃/未知后可以安全重试或直接判定完成;不能证明的仍停在人工协调;
-恢复不重复外部副作用;A1b 的 outbox 提交后发送与 at-least-once 契约不变。
+**目标**:Planner 在一次调用中运行到**下一个外部边界**;以下不创建独立 durable operation:
+branch/if 选择、内部变量变换、next 计算、join/catch-join 计算、终态推导;纯传播、纯级联
+(skip/abort 的后续传播)在完成/失败的同一提交内折叠。保留 durable operation 的边界:external
+action、timer、message、subflow、human task、跨进程 command、不能原子化的 effect。
+`ApplyAction` 只在承载外部 effect 时保留;没有 effect 的 client decision 可与后续内部传播合并。
+代码量不是目标:少一次 claim/commit 与少一次 load/plan 才是。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 先画清 `OperationState::EffectUnknown` 的产生点(A1a 的 `mark_effect_unknown`)、
-     `ClaimAndPrepare`/`ApplyAction`、`shell/effects.rs` 的 `EffectRunner`/`PackageEffectRunner`、
-     `OperationEvent::MarkEffectUnknown`、recovery 的 `ManualReconciliation` 分类与当前人工出口
-     (health/日志/指标,无复位 API)。
-   - idempotency key 必须稳定、可重建、跨重启一致:至少由 pid/task/generation/operation 身份派生,
-     在 effect **之前**随 claim/prepare 落盘;重规划、重试、重启复用同一 key,不得使用随机 id。
-   - effect observation 必须可查询:transport/executor 暴露按 key 查询“是否已执行/结果”的接口;
-     `EffectUnknown` 的恢复先查 observation,再决定完成/重试/人工。
-2. **幂等分级**
-   - 包/effect 显式声明是否幂等(或提供 observation 证明);只有可证明幂等的 effect 才允许自动
-     重试或按 observation 直接完成。
-   - 非幂等 effect 保持 `EffectUnknown -> ManualReconciliation`;补齐人工处置闭环(可查询、
-     可显式 resolve applied/not-applied,并写入 durable 事实),不得静默自动推进。
-   - 不把 channel 的 at-least-once 语义误用到包 effect。
-3. **恢复**
-   - `EffectUnknown`:observation 证明 applied ⇒ 收敛为已完成,不再执行;observation 证明 not-applied
-     且 effect 幂等 ⇒ 重新入队;不确定或非幂等 ⇒ 继续人工,不自动 wake。
-   - 同一 key 的重复执行必须被 executor 去重或可观察;CAS 丢失后的重规划不得生成新 key。
+   - 先画清一条线性流程当前的 operation 链:谁创建下一个 operation、`TransitionPlan` 在一次
+     commit 里能携带什么(`task_creates`/`state_changes`/`variable_writes`/`operations`/`outbox`/
+     `source_operation`)、`dispatch` 的投影/投递/唤醒顺序、ready 记录与 recovery 的分工。
+   - 找出真正的外部边界:effect(`EffectRunner`)、timer(`DispatchTimeout`)、message/IRQ、
+     subflow/trigger、client action 的 durable intent、跨 pid 命令、A1c 的 `EffectUnknown` 语义。
+     这些边界仍必须是独立 operation。
+   - 明确身份/消息契约:折叠不得改变 `OperationId` 的 pid/node/generation/sequence 规则,
+     不得改变 effect key(A1c 的 `EffectKey` 必须继续由承载 effect 的那个 operation 派生);
+     不得改变 outbox key/topic/payload、lifecycle 事件、行投影的字段与顺序。
+2. **折叠**
+   - 把 `PropagateTask`/`SkipTask`/`AbortTask`/`ReenterTask` 这类纯内部 operation 的工作移入产生
+     它们的那个 plan:一次 plan 直接写后继 `Created -> Ready`、`ExecuteTask`、join 判定、终态与
+     必要的 outbox,而不是先落一个 propagation operation 再 claim 它。
+   - branch/if、join/catch-join、next/终态推导在 planner 内一次算完;只有任务真正要跨外部边界
+     时才产生新的 durable operation。
+   - 无 external effect 的 client decision 可以在同一提交里折叠其后的内部传播;有 effect 的
+     仍走 `ApplyAction`(effect 前 `ClaimAndPrepare`、effect 后同一提交关闭 operation)。
+   - 折叠后每个被关闭的 operation 仍在同一 atomic batch 里带 `source_operation`;失败不得留下
+     半折叠状态。CAS 丢失的 effect-free 重试路径保持 A1a 的语义。
+3. **恢复/活性**
+   - ready 记录仍由产生操作的同一提交写入;不得靠 tick 补齐正常路径。
+   - recovery 只处理异常;折叠不得把 `EffectUnknown`/`Quarantined` 变成可自动推进。
+   - A11 的回收判定(`Pending`/`RetryScheduled`/`Claimed`/`CommitPrepared`/`Committed`/
+     `EffectUnknown`/`Quarantined` 任一存在不可回收)不得放宽。
 4. **测试**
-   - 稳定 key:崩溃前后、CAS 后重规划、重启后同一 operation 的 key 不变。
-   - observation applied:恢复不再次调用 effect,operation/run 收敛,external call 计数不增。
-   - 非幂等:不自动重试,进入 `ManualReconciliation`;人工 resolve 后收敛且可重启恢复。
-   - 幂等重试:executor 以同 key 去重,只产生一次外部副作用(计数断言)。
-   - A1a/A1b/outbox/reliability/A11 套件保持绿。
+   - 线性 3 节点不再产生 9 次 claim/commit:用 store 计数或 operation 数为断言,证明
+     `ExecuteTask`/`PropagateTask` 的 claim 次数下降;行为、消息、行投影逐字不变(既有 golden/
+     reliability 用例)。
+   - branch/join/catch/next/terminal 的折叠路径各有一条行为回归;失败原子性(effect 后丢失 CAS、
+     折叠 plan 冲突)与恢复语义不退。
+   - A1a/A1b/A1c/outbox/reliability/A11 套件保持绿。
 
 **边界**
 
-- 不改消息 payload/topic、channel ack/delivery 行语义与 outbox 顺序;不做 A3/A4 的 lane/折叠。
-- 不改 A11 回收条件:`EffectUnknown`/`Quarantined` 仍保留;确认完成的 effect 才允许 run 回收。
-- 不引入分布式事务或跨进程 exactly-once;自动重试只覆盖能证明幂等的 effect。
-- 不缩短 tick,不把恢复延迟转嫁为更频繁的扫描。
+- 不做 A4 的 per-pid command lane,不做 A5 的 projection 版本协议;不改 channel ack/delivery 行语义。
+- 不改消息 payload/topic、outbox 顺序与 A1b 的提交后发送/批量确认。
+- 不缩短 tick;不把活性转嫁给更频繁的 recovery 扫描。
+- 不引入新的持久化格式;不动 `EffectKey` 的派生规则。
+- 保持 `EffectUnknown -> ManualReconciliation` 的人工闭环与 A1c 的 observation 自动收敛。
 
 **验收**
 
-- 可证明幂等的 effect 才允许自动重试;恢复不重复外部副作用(计数/observation 证据);
-- 非幂等 effect 只能人工协调,且人工处置可持久化、可跨重启;
-- idempotency key 在重试/重启后稳定,不存在随机 key;
-- `cargo test -p acts --lib --tests` 与 reliability/effect/outbox 套件绿;
-- 写 §10「A1c 完成」,§11 D 状态更新,§12 原地指向下一项(A3/A4/A5)。
+- 线性 3 节点的 claim/commit 次数显著下降(不再 9 次),operation 链不再为纯内部传播单独落盘;
+- 行为、消息、行投影、lifecycle 逐字不变;失败原子性与恢复语义不退;
+- `cargo test -p acts --lib --tests` 与 reliability/effect/outbox/A11 套件绿;
+- 写 §10「A3 完成」,§11 D 状态更新,§12 原地指向下一项(A4)。
 
 # 限制与约束
 
-- **先读**:§11 D、§10「A1a 完成」「A1b 完成」、设计 §3.10 A1/A1c、
-  `shell/operation/{action,dispatch,prepare}.rs`、`shell/effects.rs`、`core/model/operation.rs`、
-  `core/commit/aggregate/{commit,snapshot}.rs`、`core/recovery/planner.rs`、
-  `shell/tests/mod.rs` 的 A1a 冲突用例。
-- 不改业务流程/消息 payload/outbox 顺序;effect 重试必须携带同一稳定 key。
+- **先读**:§11 D、§10「A1a 完成」「A1b 完成」「A1c 完成」「A2 完成」「A11 完成」、设计 §3.10 A3、
+  `shell/operation/{mod,task,propagate,cascade,action,dispatch,prepare}.rs`、
+  `core/model/transition_plan.rs`、`core/commit/aggregate/commit.rs`、
+  `core/plan/**`(`propagation`/`container`/`generation`/`branch`/`timeout`)、
+  `core/ready.rs`、`shell/tests/mod.rs` 的 operation 链/冲突用例。
+- 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-稳定 idempotency key + 可查询 observation + 幂等 effect 的自动收敛/非幂等的人工闭环 + 回归测试
+纯内部 operation 折叠进产生它们的 plan + claim/commit 计数断言 + 行为/消息/投影不变回归
 → 更新 §10/§11/§12。
 ```
 
