@@ -294,7 +294,6 @@ impl KernelHost {
                     ),
                     topic: "task.completed".into(),
                     payload: payload.to_string(),
-                    receipt: None,
                 },
             );
         }
@@ -672,7 +671,6 @@ impl KernelHost {
                     ),
                     topic: "task.failed".into(),
                     payload: payload.to_string(),
-                    receipt: None,
                 },
             );
             plan.validate().map_err(runtime)?;
@@ -743,7 +741,6 @@ impl KernelHost {
                         ),
                         topic: topic.to_string(),
                         payload: payload.to_string(),
-                        receipt: None,
                     },
                 ),
             }

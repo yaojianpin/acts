@@ -58,7 +58,10 @@ use crate::{
                     OperationCommit, OperationIntent, StateChange, TransitionPlan, VariableWrite,
                 },
             },
-            outbox::records::{DeliveryClaim, OutboxEvent, OutboxRecord},
+            outbox::{
+                outbox_dispatch::DeliveryOutcome,
+                records::{DeliveryClaim, OutboxEvent, OutboxRecord},
+            },
             plan::{
                 ActPlan,
                 branch::{
@@ -129,6 +132,61 @@ const ACTION_ATTEMPTS: usize = 8;
 const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
 
+/// The fence one delivery attempt uses. The normal path applies it only in
+/// memory before its batch confirmation; the retry pass persists it first, so
+/// a concurrent worker cannot deliver the same record under the same fence.
+fn delivery_claim(record: &OutboxRecord, now: i64) -> DeliveryClaim {
+    DeliveryClaim {
+        owner: OWNER.into(),
+        fence: record.last_fence + 1,
+        lease_until_ms: now + DELIVERY_LEASE_MS,
+        heartbeat_revision: 0,
+    }
+}
+
+/// The state-machine event one transport outcome becomes. `Quarantine` is
+/// valid from `Pending` directly; every other outcome needs the claim first.
+fn outcome_event(claim: &DeliveryClaim, outcome: DeliveryOutcome, now: i64) -> OutboxEvent {
+    match outcome {
+        DeliveryOutcome::Delivered { receipt } => OutboxEvent::ConfirmDelivered {
+            claim: claim.clone(),
+            receipt,
+            now_ms: now,
+        },
+        DeliveryOutcome::RetryAt {
+            available_at_ms,
+            error,
+        } => OutboxEvent::Reschedule {
+            claim: claim.clone(),
+            available_at_ms,
+            error,
+            now_ms: now,
+        },
+        DeliveryOutcome::OutcomeUnknown { reason } => OutboxEvent::MarkDeliveryUnknown {
+            claim: claim.clone(),
+            reason,
+            now_ms: now,
+        },
+        DeliveryOutcome::Quarantine { reason } => OutboxEvent::Quarantine { reason },
+    }
+}
+
+/// The in-memory event sequence a normal-path delivery applies before the one
+/// batch commit: claim, then the transport's outcome.
+fn delivery_events(claim: &DeliveryClaim, outcome: DeliveryOutcome, now: i64) -> Vec<OutboxEvent> {
+    let event = outcome_event(claim, outcome, now);
+    match event {
+        OutboxEvent::Quarantine { .. } => vec![event],
+        _ => vec![
+            OutboxEvent::Claim {
+                claim: claim.clone(),
+                now_ms: now,
+            },
+            event,
+        ],
+    }
+}
+
 /// Best-effort wake delivery into the host's queue. Losing a wake is safe:
 /// the operation also owns a durable ready record, and the driver's due pass
 /// picks it up. A failed send is counted and wakes the due-pass notification.
@@ -185,9 +243,10 @@ pub(crate) struct KernelHost {
             Box<dyn crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport>,
         >,
     >,
-    /// Immediate delivery: a commit that wrote outbox records notifies the
-    /// driver, whose delivery pass then runs at once instead of waiting for the
-    /// next tick. The tick stays the *retry* net.
+    /// Retry delivery: a normal-path confirmation that lost its guard, or a
+    /// record the transport deferred, notifies the driver so its outbox pass
+    /// redelivers at once instead of waiting for the next tick. The tick stays
+    /// the retry net.
     deliver: Arc<tokio::sync::Notify>,
     /// The process-lifecycle seam: when attached, a run's start and terminal
     /// are reported as engine events — the driver's mirror of the legacy
@@ -775,9 +834,9 @@ impl KernelHost {
 
     /// The background driver: executes woken operations as they arrive, drains
     /// the durable ready index on the tick and whenever a wake was lost, runs
-    /// one outbox delivery pass the moment a commit writes records, and on
-    /// every tick scans recovery's exceptional work. Exits when `shutdown`
-    /// fires.
+    /// one outbox retry pass when a confirmation was lost or a transport
+    /// deferred a record, and on every tick scans recovery's exceptional work.
+    /// Exits when `shutdown` fires.
     pub(crate) async fn serve(
         self: Arc<Self>,
         mut wake_rx: Receiver<OperationId>,
@@ -799,11 +858,12 @@ impl KernelHost {
                     }
                 }
                 _ = self.deliver.notified() => {
-                    // Bumped by the commit that wrote the records: the pass
-                    // runs while the write is still fresh. A notification
-                    // arriving while this pass runs is not lost — `Notify`
-                    // keeps one permit, so the loop comes back for the next
-                    // batch immediately instead of at the next tick.
+                    // Bumped by a normal-path confirmation that lost its
+                    // guard or by a transport that deferred a record: the
+                    // pass runs while the failure is still fresh. A
+                    // notification arriving while this pass runs is not lost —
+                    // `Notify` keeps one permit, so the loop comes back for
+                    // the next batch immediately instead of at the next tick.
                     if let Err(error) = self.dispatch_outbox().await {
                         tracing::warn!(error = %error, "kernel outbox pass failed");
                     }
@@ -1056,61 +1116,6 @@ impl KernelHost {
 
     pub(crate) fn ready_metrics(&self) -> ReadyMetrics {
         *self.ready_metrics.lock()
-    }
-
-    /// Deliver a plan's own records *before* it commits — the effect seam's
-    /// ordering, applied to the outbox: the work runs, then one commit records
-    /// it. A record the transport confirms commits as `Delivered`, so the
-    /// driver's pass never touches it and the operation pays no claim, no confirm and
-    /// no extra store pass for its message — one operation, one commit, one
-    /// delivery. A record the transport could not confirm is left `Pending`
-    /// (the commit writes it so) and the driver's pass is woken to retry it.
-    ///
-    /// The at-least-once window is the same one the effect seam documents: a
-    /// crash between the delivery and the commit re-runs the operation, and the
-    /// message goes out again (the channel is at-least-once by construction).
-    fn deliver_plan(
-        &self,
-        process_id: &str,
-        plan: &mut crate::scheduler::core::model::transition_plan::TransitionPlan,
-    ) {
-        if plan.outbox.is_empty() {
-            return;
-        }
-        let mut transport = self.transport.write();
-        let mut unconfirmed = false;
-        for intent in &mut plan.outbox {
-            let id = crate::scheduler::core::outbox::records::OutboxId {
-                process_id: process_id.to_string(),
-                key: intent.key.clone(),
-            };
-            let record = match crate::scheduler::core::outbox::records::OutboxRecord::pending(
-                id,
-                intent.topic.clone(),
-                intent.payload.clone(),
-                0,
-            ) {
-                Ok(record) => record,
-                Err(error) => {
-                    tracing::warn!(key = %intent.key, error = %error, "undeliverable outbox record left pending");
-                    unconfirmed = true;
-                    continue;
-                }
-            };
-            match transport.deliver(&record) {
-                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Delivered {
-                    receipt,
-                } => intent.receipt = Some(receipt),
-                other => {
-                    tracing::debug!(key = %intent.key, outcome = ?other, "outbox record not confirmed in the operation");
-                    unconfirmed = true;
-                }
-            }
-        }
-        drop(transport);
-        if unconfirmed {
-            self.deliver.notify_one();
-        }
     }
 
     /// The slot bookkeeping for one run, from a fresh snapshot of it. Returns
@@ -1759,7 +1764,6 @@ impl KernelHost {
                     ),
                     topic: topic.into(),
                     payload: String::new(),
-                    receipt: None,
                 },
             ],
         })
@@ -2243,6 +2247,89 @@ impl KernelHost {
         Ok(report)
     }
 
+    /// Deliver the records one operation just committed and persist every
+    /// outcome in **one** follow-up aggregate commit. This is the normal path
+    /// (A1b): the plan commit wrote the records `Pending`, the read model was
+    /// projected from that commit, and only now does the transport see them.
+    /// The confirmation batch is one guarded replace — never one claim and one
+    /// confirm per record — so a many-record operation still pays one extra
+    /// commit.
+    ///
+    /// A lost guard applies nothing: the records stay `Pending`, the outbox
+    /// pass redelivers them (at-least-once), and the run stays unreclaimable
+    /// until every record is `Delivered`.
+    async fn deliver_committed_outbox(
+        &self,
+        loaded: &mut crate::scheduler::durable::document_store::LoadedProcess,
+        ids: &[crate::scheduler::core::outbox::records::OutboxId],
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        let process_id = loaded.snapshot.process_id.clone();
+        let snapshot = &loaded.snapshot;
+        let now = SystemClock.now_ms();
+        let mut confirmations = Vec::with_capacity(ids.len());
+        {
+            let mut transport = self.transport.write();
+            for id in ids {
+                let Some(record) = snapshot.outbox.get(id) else {
+                    continue;
+                };
+                // Only a record this operation left `Pending` is ours to
+                // deliver. A concurrent pass may have claimed or settled it
+                // between the commit and this pass; that worker owns it now.
+                if !matches!(
+                    record.state,
+                    crate::scheduler::core::outbox::records::OutboxState::Pending { .. }
+                ) {
+                    continue;
+                }
+                let outcome = transport.deliver(record);
+                let claim = delivery_claim(record, now);
+                confirmations.push(
+                    crate::scheduler::core::outbox::outbox_repository::OutboxConfirmation {
+                        id: id.clone(),
+                        expected_revision: record.revision,
+                        events: delivery_events(&claim, outcome, now),
+                    },
+                );
+            }
+        }
+        if confirmations.is_empty() {
+            return;
+        }
+        match self
+            .processes
+            .confirm_outbox_batch(loaded, &confirmations)
+            .await
+        {
+            Ok(outcome) => {
+                // A rescheduled record whose retry is due now must not wait for
+                // the tick; the pass is the retry net, not the normal path.
+                let due_now = outcome.confirmed.iter().any(|record| {
+                    matches!(
+                        record.state,
+                        crate::scheduler::core::outbox::records::OutboxState::Pending {
+                            available_at_ms
+                        } if available_at_ms <= now
+                    )
+                });
+                if due_now {
+                    self.deliver.notify_one();
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pid = %process_id,
+                    error = %error,
+                    "outbox confirmation lost; the retry pass will redeliver"
+                );
+                self.deliver.notify_one();
+            }
+        }
+    }
+
     /// Deliver one already-loaded record: claim it with a fenced claim, hand
     /// it to the transport, then persist the reported outcome. After the
     /// transport ran, only its explicit `RetryAt` proves no external effect —
@@ -2253,12 +2340,7 @@ impl KernelHost {
     /// `Ok(true)` means the transport confirmed delivery; `Ok(false)` means the
     /// claim was lost or the record was no longer dispatchable.
     async fn dispatch_outbox_record(&self, record: OutboxRecord, now: i64) -> Result<bool> {
-        let claim = DeliveryClaim {
-            owner: OWNER.into(),
-            fence: record.last_fence + 1,
-            lease_until_ms: now + DELIVERY_LEASE_MS,
-            heartbeat_revision: 0,
-        };
+        let claim = delivery_claim(&record, now);
         let claimed = match self
             .processes
             .evolve_outbox(
@@ -2281,34 +2363,7 @@ impl KernelHost {
         };
         let event = {
             let outcome = self.transport.write().deliver(&claimed);
-            match outcome {
-                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Delivered {
-                    receipt,
-                } => OutboxEvent::ConfirmDelivered {
-                    claim: claim.clone(),
-                    receipt,
-                    now_ms: now,
-                },
-                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::RetryAt {
-                    available_at_ms,
-                    error,
-                } => OutboxEvent::Reschedule {
-                    claim: claim.clone(),
-                    available_at_ms,
-                    error,
-                    now_ms: now,
-                },
-                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::OutcomeUnknown {
-                    reason,
-                } => OutboxEvent::MarkDeliveryUnknown {
-                    claim: claim.clone(),
-                    reason,
-                    now_ms: now,
-                },
-                crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Quarantine {
-                    reason,
-                } => OutboxEvent::Quarantine { reason },
-            }
+            outcome_event(&claim, outcome, now)
         };
         let delivered = matches!(&event, OutboxEvent::ConfirmDelivered { .. });
         self.processes

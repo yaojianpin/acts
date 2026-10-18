@@ -218,7 +218,6 @@ impl ActPlan for Reenter {
                 ),
                 topic: "task.reentered".into(),
                 payload: format!("{}:{}", next.node.as_str(), next.generation),
-                receipt: None,
             }],
         };
         plan.validate()

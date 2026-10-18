@@ -140,7 +140,6 @@ impl KernelHost {
                     ),
                     topic: "task.completed".into(),
                     payload: payload.to_string(),
-                    receipt: None,
                 },
             );
         }
@@ -304,7 +303,6 @@ impl ActOperation for PropagateTask {
                                     key: record_key,
                                     topic: "task.failed".into(),
                                     payload: payload.to_string(),
-                                    receipt: None,
                                 },
                             );
                         }

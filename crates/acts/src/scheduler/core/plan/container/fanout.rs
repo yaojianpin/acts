@@ -414,6 +414,5 @@ fn fanout_outbox(command: &ContainerFanoutCommand, outcome: &str) -> OutboxInten
             command.source.node.as_str(),
             command.source.generation
         ),
-        receipt: None,
     }
 }

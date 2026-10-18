@@ -90,21 +90,11 @@ pub(crate) fn advance_transition(
             process_id: next.process_id.clone(),
             key: item.key.clone(),
         };
-        let mut record =
-            OutboxRecord::pending(id.clone(), item.topic.clone(), item.payload.clone(), 0)
-                .map_err(CommitError::InvalidOutbox)?;
-        // A record the operation's own transport already delivered commits as
-        // delivered (see `OutboxIntent::receipt`): the message is out, and the
-        // record exists to say so — the driver's pass never sees it, so one
-        // operation stays one delivery without a claim and a confirm of its own.
-        if let Some(receipt) = &item.receipt {
-            record.attempt = 1;
-            record.last_fence = 1;
-            record.revision = 1;
-            record.state = crate::scheduler::core::outbox::records::OutboxState::Delivered {
-                receipt: receipt.clone(),
-            };
-        }
+        // Every record is durable before it is visible: the operation commits
+        // it as `Pending` and the dispatcher delivers it after the commit, then
+        // confirms the whole batch in one follow-up commit (A1b).
+        let record = OutboxRecord::pending(id.clone(), item.topic.clone(), item.payload.clone(), 0)
+            .map_err(CommitError::InvalidOutbox)?;
         new_outbox.push(id.clone());
         next.outbox.insert(id, record);
     }

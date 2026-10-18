@@ -60,7 +60,6 @@ fn plan() -> TransitionPlan {
             key: "complete:p1:t1:0".into(),
             topic: "task.completed".into(),
             payload: "{}".into(),
-            receipt: None,
         }],
     }
 }

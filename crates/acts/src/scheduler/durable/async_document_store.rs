@@ -15,7 +15,10 @@ use crate::{
             },
             outbox::{
                 outbox_index::{OutboxIndexCodec, OutboxIndexState},
-                outbox_repository::{OutboxCursor, OutboxPage, OutboxRepositoryError},
+                outbox_repository::{
+                    OutboxBatchOutcome, OutboxConfirmation, OutboxCursor, OutboxPage,
+                    OutboxRepositoryError,
+                },
                 records::{OutboxEvent, OutboxId, OutboxRecord},
             },
             ready::{ReadyIndex, ReadyIndexCodec},
@@ -24,7 +27,8 @@ use crate::{
         durable::document_store::{
             DocumentGuard, DocumentMutation, DocumentRepositoryError, LoadedProcess,
             OUTBOX_INDEX_KEY_PREFIX, PROCESS_KEY_PREFIX, READY_INDEX_KEY_PREFIX,
-            RECOVERY_INDEX_KEY_PREFIX, build_create_transaction, build_orphan_reclaim_transaction,
+            RECOVERY_INDEX_KEY_PREFIX, ReplaceWrite, build_create_transaction,
+            build_orphan_reclaim_transaction, build_outbox_confirm_transaction,
             build_reclaim_transaction, build_repair_transaction, build_replace_transaction,
             decode_loaded_process, decode_process_key, loaded_after_write, outbox_index_key,
             process_key, ready_index_key, recovery_entries, recovery_entry_process_prefix,
@@ -306,10 +310,13 @@ impl AsyncProcessRepository {
             .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
             .await?;
         match outcome {
-            ReplaceOutcome::Committed => Ok(OperationCommitOutcome::Committed {
-                operation,
-                snapshot: loaded.snapshot,
-            }),
+            ReplaceOutcome::Committed(write) => {
+                loaded.install_replace_documents(write);
+                Ok(OperationCommitOutcome::Committed {
+                    operation,
+                    snapshot: loaded.snapshot,
+                })
+            }
             ReplaceOutcome::AlreadyCommitted(process) => {
                 let operation = authoritative_operation(&process, id)?;
                 Ok(OperationCommitOutcome::AlreadyCommitted {
@@ -350,14 +357,14 @@ impl AsyncProcessRepository {
             .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
             .await?;
         match outcome {
-            ReplaceOutcome::Committed => Ok(TransitionCommitOutcome::Committed {
-                receipt,
-                snapshot: loaded.snapshot,
-            }),
+            ReplaceOutcome::Committed(write) => {
+                loaded.install_replace_documents(write);
+                Ok(TransitionCommitOutcome::Committed { receipt, loaded })
+            }
             ReplaceOutcome::AlreadyCommitted(process) => {
                 Ok(TransitionCommitOutcome::AlreadyCommitted {
                     receipt,
-                    snapshot: process.snapshot.clone(),
+                    loaded: *process,
                 })
             }
             ReplaceOutcome::Conflict => Ok(TransitionCommitOutcome::Conflict {}),
@@ -738,11 +745,103 @@ impl AsyncProcessRepository {
             .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
             .await
         {
-            Ok(ReplaceOutcome::Committed | ReplaceOutcome::AlreadyCommitted(_)) => Ok(evolved),
+            Ok(ReplaceOutcome::Committed(_) | ReplaceOutcome::AlreadyCommitted(_)) => Ok(evolved),
             Ok(ReplaceOutcome::Conflict) => {
                 Err(OutboxRepositoryError::ConcurrentModification(id.clone()))
             }
             Err(error) => Err(OutboxRepositoryError::Unavailable(error.to_string())),
+        }
+    }
+
+    /// Persist one operation's post-delivery outcomes in **one** guarded
+    /// aggregate commit: every record the transport settled advances from
+    /// `Pending` (claim and outcome applied in memory) to its final state, and
+    /// the aggregate plus its outbox index are replaced under the exact bytes
+    /// the caller's plan commit just wrote. The recovery and ready indexes are
+    /// guarded but not rewritten — a confirmation changes no operation.
+    ///
+    /// A lost guard applies nothing; the records stay `Pending` and the outbox
+    /// pass redelivers them. Records whose revision moved since the caller read
+    /// them are skipped: a concurrent pass owns them now.
+    pub(crate) async fn confirm_outbox_batch(
+        &self,
+        loaded: &mut LoadedProcess,
+        confirmations: &[OutboxConfirmation],
+    ) -> Result<OutboxBatchOutcome, OutboxRepositoryError> {
+        if confirmations.is_empty() {
+            return Ok(OutboxBatchOutcome {
+                confirmed: Vec::new(),
+            });
+        }
+        let process_id = loaded.snapshot.process_id.clone();
+        let mut confirmed = Vec::new();
+        let mut previous = Vec::new();
+        for confirmation in confirmations {
+            let Some(record) = loaded.snapshot.outbox.get(&confirmation.id).cloned() else {
+                continue;
+            };
+            if record.revision != confirmation.expected_revision {
+                continue;
+            }
+            let mut evolved = record.clone();
+            let mut applicable = true;
+            for event in &confirmation.events {
+                match evolved.evolve(event.clone()) {
+                    Ok(next) => evolved = next,
+                    Err(_) => {
+                        applicable = false;
+                        break;
+                    }
+                }
+            }
+            if !applicable {
+                continue;
+            }
+            loaded
+                .snapshot
+                .outbox
+                .insert(confirmation.id.clone(), evolved.clone());
+            previous.push((confirmation.id.clone(), record));
+            confirmed.push(evolved);
+        }
+        if confirmed.is_empty() {
+            return Ok(OutboxBatchOutcome { confirmed });
+        }
+        let write = match build_outbox_confirm_transaction(loaded, &loaded.snapshot) {
+            Ok(write) => write,
+            Err(error) => {
+                restore_records(&mut loaded.snapshot, previous);
+                return Err(OutboxRepositoryError::Unavailable(error.to_string()));
+            }
+        };
+        let applied = match self
+            .store
+            .atomic_batch(write.transaction.guards(), write.transaction.mutations())
+            .await
+        {
+            Ok(applied) => applied,
+            Err(error) => {
+                restore_records(&mut loaded.snapshot, previous);
+                return Err(OutboxRepositoryError::Unavailable(error.to_string()));
+            }
+        };
+        if applied {
+            loaded.install_confirmed_documents(write.document, write.outbox_index);
+            return Ok(OutboxBatchOutcome { confirmed });
+        }
+        // The guard moved. If the authoritative aggregate already equals this
+        // replacement, a concurrent copy of the confirmation won; otherwise
+        // the caller leaves the records pending for the outbox pass.
+        let current = self
+            .load(&process_id)
+            .await
+            .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?;
+        if current.is_some_and(|current| current.snapshot == loaded.snapshot) {
+            loaded.install_confirmed_documents(write.document, write.outbox_index);
+            Ok(OutboxBatchOutcome { confirmed })
+        } else {
+            restore_records(&mut loaded.snapshot, previous);
+            Err(OutboxRepositoryError::ConcurrentProcess(process_id))
         }
     }
 
@@ -753,18 +852,24 @@ impl AsyncProcessRepository {
         current_recovery_entries: &std::collections::BTreeMap<String, Vec<u8>>,
         replacement_ready: Option<&[u8]>,
     ) -> Result<ReplaceOutcome, AsyncRepositoryError> {
-        let (transaction, ..) = build_replace_transaction(
-            loaded,
-            replacement_snapshot,
-            current_recovery_entries,
-            replacement_ready,
-        )?;
+        let (transaction, document, recovery_index, outbox_index, ready) =
+            build_replace_transaction(
+                loaded,
+                replacement_snapshot,
+                current_recovery_entries,
+                replacement_ready,
+            )?;
         if self
             .store
             .atomic_batch(transaction.guards(), transaction.mutations())
             .await?
         {
-            return Ok(ReplaceOutcome::Committed);
+            return Ok(ReplaceOutcome::Committed(ReplaceWrite {
+                document,
+                recovery_index,
+                outbox_index,
+                ready,
+            }));
         }
         let authoritative = self.load(&loaded.snapshot.process_id).await?;
         match authoritative {
@@ -948,6 +1053,17 @@ impl AsyncRecoveryRepository {
     }
 }
 
+/// Undo an in-memory confirmation whose guarded batch did not apply. The
+/// caller's snapshot must keep describing storage, not a write that lost.
+fn restore_records(
+    snapshot: &mut crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    previous: Vec<(OutboxId, OutboxRecord)>,
+) {
+    for (id, record) in previous {
+        snapshot.outbox.insert(id, record);
+    }
+}
+
 fn authoritative_operation(
     process: &LoadedProcess,
     id: &crate::scheduler::core::model::operation::OperationId,
@@ -980,18 +1096,23 @@ pub(crate) enum OperationCommitOutcome {
 pub(crate) enum TransitionCommitOutcome {
     Committed {
         receipt: CommitReceipt,
-        snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        /// The exact written aggregate and index bytes; the post-delivery
+        /// confirmation uses them as its guard instead of re-reading.
+        loaded: LoadedProcess,
     },
     AlreadyCommitted {
         receipt: CommitReceipt,
-        snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        loaded: LoadedProcess,
     },
     Conflict {},
 }
 
 #[derive(Debug)]
 pub(crate) enum ReplaceOutcome {
-    Committed,
+    /// The batch applied; the payload is the exact written aggregate plus the
+    /// index bytes, so the caller can adopt them as its next CAS token without
+    /// re-reading or re-encoding.
+    Committed(ReplaceWrite),
     AlreadyCommitted(Box<LoadedProcess>),
     Conflict,
 }

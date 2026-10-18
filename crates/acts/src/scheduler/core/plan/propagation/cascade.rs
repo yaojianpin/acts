@@ -299,7 +299,6 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                 ),
                 topic: "task.propagated".into(),
                 payload: format!("{}:{}", command.task.node.as_str(), command.task.generation),
-                receipt: None,
             }],
         };
         plan.validate()

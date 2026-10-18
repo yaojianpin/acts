@@ -1,4 +1,4 @@
-use crate::scheduler::core::outbox::records::{OutboxError, OutboxId, OutboxRecord};
+use crate::scheduler::core::outbox::records::{OutboxError, OutboxEvent, OutboxId, OutboxRecord};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OutboxCursor(pub(crate) OutboxId);
@@ -7,6 +7,26 @@ pub(crate) struct OutboxCursor(pub(crate) OutboxId);
 pub(crate) struct OutboxPage {
     pub(crate) records: Vec<OutboxRecord>,
     pub(crate) next: Option<OutboxCursor>,
+}
+
+/// One record's post-delivery facts, applied in memory before the one guarded
+/// commit that persists the batch. The events are the existing state machine
+/// (`claim` then `confirm`/`reschedule`/`unknown`, or `quarantine`): the claim
+/// is only an in-memory fence so the persisted record keeps the same counters
+/// a durable claim+confirm pair would leave.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OutboxConfirmation {
+    pub(crate) id: OutboxId,
+    pub(crate) expected_revision: u64,
+    pub(crate) events: Vec<OutboxEvent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OutboxBatchOutcome {
+    /// The records the batch advanced. A record whose revision moved under
+    /// the batch — a concurrent outbox pass claimed or settled it — is skipped
+    /// and left to that pass.
+    pub(crate) confirmed: Vec<OutboxRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +41,7 @@ pub(crate) enum OutboxRepositoryError {
     InvalidRecord(OutboxError),
     CorruptData(String),
     ConcurrentModification(OutboxId),
+    ConcurrentProcess(String),
     Unavailable(String),
 }
 
@@ -42,6 +63,9 @@ impl std::fmt::Display for OutboxRepositoryError {
             Self::CorruptData(reason) => write!(f, "corrupt outbox data: {reason}"),
             Self::ConcurrentModification(id) => {
                 write!(f, "outbox record {} modified concurrently", id.key)
+            }
+            Self::ConcurrentProcess(process_id) => {
+                write!(f, "process {process_id} modified concurrently")
             }
             Self::Unavailable(reason) => write!(f, "outbox repository unavailable: {reason}"),
         }

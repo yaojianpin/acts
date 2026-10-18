@@ -19,6 +19,16 @@ pub(crate) const RECOVERY_INDEX_KEY_PREFIX: &str = "kernel/indexes/recovery/";
 pub(crate) const OUTBOX_INDEX_KEY_PREFIX: &str = "kernel/indexes/outbox/";
 pub(crate) const READY_INDEX_KEY_PREFIX: &str = "kernel/indexes/ready/";
 
+/// The exact documents one guarded replacement wrote. The caller adopts them
+/// as its next CAS token instead of re-reading or re-encoding.
+#[derive(Debug)]
+pub(crate) struct ReplaceWrite {
+    pub(crate) document: Vec<u8>,
+    pub(crate) recovery_index: Option<Vec<u8>>,
+    pub(crate) outbox_index: Option<Vec<u8>>,
+    pub(crate) ready: Option<Vec<u8>>,
+}
+
 /// A loaded aggregate and the exact bytes observed from storage. The raw bytes
 /// are the CAS token. Re-encoding the snapshot is forbidden because a future
 /// codec may normalize legacy documents into different bytes.
@@ -43,6 +53,25 @@ impl LoadedProcess {
     }
     pub(crate) fn original_ready_index(&self) -> Option<&[u8]> {
         self.original_ready_index.as_deref()
+    }
+    /// Adopt the exact bytes a replacement just wrote, so the next guarded
+    /// write uses them as the CAS token without re-reading or re-encoding.
+    pub(crate) fn install_replace_documents(&mut self, write: ReplaceWrite) {
+        self.original_document = write.document;
+        self.original_recovery_index = write.recovery_index;
+        self.original_outbox_index = write.outbox_index;
+        self.original_ready_index = write.ready;
+    }
+    /// Adopt the exact bytes a confirmation just wrote for the aggregate and
+    /// its outbox index. The recovery and ready indexes cannot change in that
+    /// batch, so their observed bytes stay the CAS token.
+    pub(crate) fn install_confirmed_documents(
+        &mut self,
+        document: Vec<u8>,
+        outbox_index: Option<Vec<u8>>,
+    ) {
+        self.original_document = document;
+        self.original_outbox_index = outbox_index;
     }
 }
 
@@ -178,7 +207,7 @@ pub(crate) fn outbox_index_key(process_id: &str) -> Result<String, DocumentRepos
     encoded_process_key(OUTBOX_INDEX_KEY_PREFIX, process_id)
 }
 
-fn outbox_index_document(
+pub(crate) fn outbox_index_document(
     snapshot: &ProcessSnapshot,
 ) -> Result<Option<Vec<u8>>, DocumentRepositoryError> {
     OutboxIndex::project(&snapshot.process_id, &snapshot.outbox)
@@ -335,6 +364,64 @@ pub(crate) fn build_replace_transaction(
         outbox_index,
         replacement_ready.map(ToOwned::to_owned),
     ))
+}
+
+/// The guarded batch for one operation's post-delivery confirmation. Only the
+/// aggregate and its outbox index can move: the confirmation advances outbox
+/// records without changing tasks, operations or variables, so the recovery
+/// index (and its per-operation entry documents) and the ready index are
+/// guarded but not rewritten. Rewriting an unchanged derived index would make
+/// the normal path pay for work that cannot have changed.
+pub(crate) struct OutboxConfirmWrite {
+    pub(crate) transaction: DocumentTransaction,
+    /// The exact aggregate bytes the batch writes, kept so the caller can
+    /// adopt them as the next CAS token without re-encoding.
+    pub(crate) document: Vec<u8>,
+    pub(crate) outbox_index: Option<Vec<u8>>,
+}
+
+pub(crate) fn build_outbox_confirm_transaction(
+    loaded: &LoadedProcess,
+    replacement: &ProcessSnapshot,
+) -> Result<OutboxConfirmWrite, DocumentRepositoryError> {
+    if loaded.snapshot.process_id != replacement.process_id {
+        return Err(DocumentRepositoryError::ProcessIdentityMismatch {
+            requested: loaded.snapshot.process_id.clone(),
+            stored: replacement.process_id.clone(),
+        });
+    }
+    let process_id = &loaded.snapshot.process_id;
+    let key = process_key(process_id)?;
+    let recovery_key = recovery_index_key(process_id)?;
+    let outbox_key = outbox_index_key(process_id)?;
+    let ready_key = ready_index_key(process_id)?;
+    let document = ProcessDocumentCodec::encode(replacement)?;
+    let outbox_index = outbox_index_document(replacement)?;
+    let mut transaction =
+        DocumentTransaction::new().require_exact(&key, loaded.original_document().to_vec())?;
+    transaction = match loaded.original_recovery_index() {
+        Some(index) => transaction.require_exact(&recovery_key, index.to_vec())?,
+        None => transaction.require_absent(&recovery_key)?,
+    };
+    transaction = match loaded.original_outbox_index() {
+        Some(index) => transaction.require_exact(&outbox_key, index.to_vec())?,
+        None => transaction.require_absent(&outbox_key)?,
+    };
+    transaction = match loaded.original_ready_index() {
+        Some(index) => transaction.require_exact(&ready_key, index.to_vec())?,
+        None => transaction.require_absent(&ready_key)?,
+    };
+    transaction = transaction.put(&key, document.clone())?;
+    transaction = match &outbox_index {
+        Some(index) => transaction.put(&outbox_key, index.clone())?,
+        None => transaction.delete(&outbox_key)?,
+    };
+    transaction.validate()?;
+    Ok(OutboxConfirmWrite {
+        transaction,
+        document,
+        outbox_index,
+    })
 }
 
 fn replace_recovery_entries(

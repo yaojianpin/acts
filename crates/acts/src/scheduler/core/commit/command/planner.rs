@@ -80,7 +80,6 @@ impl ActionPlanner {
                 ),
                 topic: format!("task.{}", action_name(&command.action)),
                 payload: format!("{}:{}", command.task.node.as_str(), command.task.generation),
-                receipt: None,
             }],
         };
         plan.validate()

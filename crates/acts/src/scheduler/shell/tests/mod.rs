@@ -1282,6 +1282,31 @@ async fn wait_until_settled(runtime: &Arc<crate::scheduler::Runtime>, pid: &str)
     }
 }
 
+/// Wait until the aggregate itself is reclaimable: every execution terminal,
+/// every outbox record confirmed `Delivered`, every operation retired. Task
+/// settlement alone is not enough under A1b — the confirmation commit follows
+/// the plan commit — so cleanup tests wait on the A11 predicate.
+async fn wait_until_reclaimable(host: &KernelHost, pid: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let _ = host.dispatch_outbox().await;
+        if host
+            .snapshot(pid)
+            .await
+            .unwrap_or(None)
+            .is_some_and(|snapshot| snapshot.is_reclaimable())
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run {pid} never became reclaimable: {:?}",
+            host.snapshot(pid).await
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// Drive the cleanup until `pid`'s rows are gone.
 ///
 /// A single pass can legitimately find the run not yet reclaimable: the
@@ -1356,7 +1381,7 @@ async fn kernel_engine_finishes_an_interrupted_terminal_cleanup() {
     runtime.start(&workflow, options.clone()).await.unwrap();
     wait_until_settled(&runtime, &pid).await;
     let host = runtime.kernel().clone();
-    host.dispatch_outbox().await.unwrap();
+    wait_until_reclaimable(&host, &pid).await;
     runtime.flush_writer().await.unwrap();
 
     // The mark the cleanup writes before cutting, then the cut itself — the
@@ -1461,7 +1486,7 @@ async fn kernel_engine_keeps_a_run_with_an_open_delivery() {
 
     wait_until_settled(&runtime, &pid).await;
     let host = runtime.kernel().clone();
-    host.dispatch_outbox().await.unwrap();
+    wait_until_reclaimable(&host, &pid).await;
     runtime.flush_writer().await.unwrap();
     host.refresh_projection(&pid).await;
     let dir = root.join(&pid);
@@ -6362,4 +6387,596 @@ async fn a_commit_delivers_its_records_without_waiting_for_a_tick() {
     shutdown.cancel();
     driver.await.unwrap();
     engine.close().await;
+}
+
+/// A store that instruments the aggregate batches of one run: it counts the
+/// plan commits that add outbox records and the follow-up confirmations that
+/// settle them, can refuse one plan commit, can lose one confirmation's
+/// guard, and records every key written (for ordering assertions).
+struct InstrumentedKv {
+    inner: MemoryStore,
+    process_key: String,
+    writes: parking_lot::Mutex<Vec<String>>,
+    fail_plan_commit: AtomicBool,
+    plan_commit_failures: AtomicUsize,
+    fail_confirmation: AtomicBool,
+    confirmation_failures: AtomicUsize,
+    plan_commits_with_records: AtomicUsize,
+    added_records: AtomicUsize,
+    confirmations: AtomicUsize,
+    confirmed_records: AtomicUsize,
+    max_confirmation_batch: AtomicUsize,
+}
+
+impl InstrumentedKv {
+    fn new(process_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryStore::new(),
+            process_key: crate::scheduler::durable::document_store::process_key(process_id)
+                .expect("a process id the aggregate key derives from"),
+            writes: parking_lot::Mutex::new(Vec::new()),
+            fail_plan_commit: AtomicBool::new(false),
+            plan_commit_failures: AtomicUsize::new(0),
+            fail_confirmation: AtomicBool::new(false),
+            confirmation_failures: AtomicUsize::new(0),
+            plan_commits_with_records: AtomicUsize::new(0),
+            added_records: AtomicUsize::new(0),
+            confirmations: AtomicUsize::new(0),
+            confirmed_records: AtomicUsize::new(0),
+            max_confirmation_batch: AtomicUsize::new(0),
+        })
+    }
+
+    fn arm_plan_commit_failure(&self) {
+        self.fail_plan_commit.store(true, Ordering::SeqCst);
+    }
+
+    fn arm_confirmation_failure(&self) {
+        self.fail_confirmation.store(true, Ordering::SeqCst);
+    }
+
+    fn plan_commit_failures(&self) -> usize {
+        self.plan_commit_failures.load(Ordering::SeqCst)
+    }
+
+    fn confirmation_failures(&self) -> usize {
+        self.confirmation_failures.load(Ordering::SeqCst)
+    }
+
+    fn plan_commits_with_records(&self) -> usize {
+        self.plan_commits_with_records.load(Ordering::SeqCst)
+    }
+
+    fn added_records(&self) -> usize {
+        self.added_records.load(Ordering::SeqCst)
+    }
+
+    fn confirmations(&self) -> usize {
+        self.confirmations.load(Ordering::SeqCst)
+    }
+
+    fn confirmed_records(&self) -> usize {
+        self.confirmed_records.load(Ordering::SeqCst)
+    }
+
+    fn max_confirmation_batch(&self) -> usize {
+        self.max_confirmation_batch.load(Ordering::SeqCst)
+    }
+
+    fn wrote_prefix(&self, prefix: &str) -> bool {
+        self.writes.lock().iter().any(|key| key.starts_with(prefix))
+    }
+
+    fn remember(&self, ops: &[crate::StoreBatchOp]) {
+        let mut writes = self.writes.lock();
+        for op in ops {
+            match op {
+                crate::StoreBatchOp::Put { key, .. } | crate::StoreBatchOp::Delete { key } => {
+                    writes.push(key.clone());
+                }
+            }
+        }
+    }
+
+    fn replacement_snapshot(&self, ops: &[crate::StoreBatchOp]) -> Option<ProcessSnapshot> {
+        ops.iter().find_map(|op| match op {
+            crate::StoreBatchOp::Put { key, value } if key == &self.process_key => {
+                crate::scheduler::durable::document::ProcessDocumentCodec::decode(value).ok()
+            }
+            _ => None,
+        })
+    }
+
+    async fn stored_snapshot(&self) -> Option<ProcessSnapshot> {
+        self.inner
+            .one(&self.process_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                crate::scheduler::durable::document::ProcessDocumentCodec::decode(&bytes).ok()
+            })
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStore for InstrumentedKv {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.writes.lock().push(key.to_string());
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.writes.lock().push(key.to_string());
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::StoreBatchOp],
+        guards: &[crate::StoreGuard],
+    ) -> Result<bool> {
+        let writes_process = ops.iter().any(
+            |op| matches!(op, crate::StoreBatchOp::Put { key, .. } if key == &self.process_key),
+        );
+        let (old, new) = if writes_process {
+            (self.stored_snapshot().await, self.replacement_snapshot(ops))
+        } else {
+            (None, None)
+        };
+        if let (Some(old), Some(new)) = (&old, &new) {
+            let confirmation = old.version == new.version && old.outbox != new.outbox;
+            if confirmation && self.fail_confirmation.swap(false, Ordering::SeqCst) {
+                self.confirmation_failures.fetch_add(1, Ordering::SeqCst);
+                // A guard that does not hold: the batch applies nothing.
+                return Ok(false);
+            }
+            let plan_commit = old.version != new.version
+                && old
+                    .operations
+                    .values()
+                    .any(|operation| matches!(operation.state, OperationState::CommitPrepared(_)));
+            if plan_commit && self.fail_plan_commit.swap(false, Ordering::SeqCst) {
+                self.plan_commit_failures.fetch_add(1, Ordering::SeqCst);
+                return Err(crate::ActError::Store(
+                    "injected plan commit failure".into(),
+                ));
+            }
+        }
+        let applied = self.inner.batch(ops, guards).await?;
+        if applied {
+            self.remember(ops);
+            if let (Some(old), Some(new)) = (old, new) {
+                if old.version == new.version {
+                    let changed = new
+                        .outbox
+                        .iter()
+                        .filter(|(id, record)| old.outbox.get(*id) != Some(record))
+                        .count();
+                    if changed > 0 {
+                        self.confirmations.fetch_add(1, Ordering::SeqCst);
+                        self.confirmed_records.fetch_add(changed, Ordering::SeqCst);
+                        self.max_confirmation_batch
+                            .fetch_max(changed, Ordering::SeqCst);
+                    }
+                } else {
+                    let added = new
+                        .outbox
+                        .keys()
+                        .filter(|id| !old.outbox.contains_key(*id))
+                        .count();
+                    if added > 0 {
+                        self.plan_commits_with_records
+                            .fetch_add(1, Ordering::SeqCst);
+                        self.added_records.fetch_add(added, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::ScanOptions,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// A transport that checks, at delivery time, whether the read model's proc
+/// row was already written: the message must never precede the projection.
+struct OrderingTransport {
+    kv: Arc<InstrumentedKv>,
+    proc_prefix: String,
+    observed: Arc<parking_lot::Mutex<Vec<bool>>>,
+}
+
+impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for OrderingTransport {
+    fn deliver(&mut self, _record: &OutboxRecord) -> DeliveryOutcome {
+        self.observed
+            .lock()
+            .push(self.kv.wrote_prefix(&self.proc_prefix));
+        DeliveryOutcome::Delivered {
+            receipt: "ordered".into(),
+        }
+    }
+}
+
+fn two_record_plan(process_id: &str, snapshot: &ProcessSnapshot) -> TransitionPlan {
+    TransitionPlan {
+        process_id: process_id.into(),
+        expected: snapshot.version.clone(),
+        task_creates: Vec::new(),
+        state_changes: Vec::new(),
+        // An outbox-only plan does not move the aggregate version; the marker
+        // makes this a real transition, exactly like an operation's plan.
+        variable_writes: vec![
+            crate::scheduler::core::model::transition_plan::VariableWrite {
+                scope: crate::scheduler::core::model::task_graph::TaskId::new("root", 0).unwrap(),
+                name: "batch.marker".into(),
+                value: "1".into(),
+            },
+        ],
+        source_operation: None,
+        operations: Vec::new(),
+        outbox: vec![
+            crate::scheduler::core::model::transition_plan::OutboxIntent {
+                key: "batch:first".into(),
+                topic: "batch.first".into(),
+                payload: "{}".into(),
+            },
+            crate::scheduler::core::model::transition_plan::OutboxIntent {
+                key: "batch:second".into(),
+                topic: "batch.second".into(),
+                payload: "{}".into(),
+            },
+        ],
+    }
+}
+
+/// A message is not visible before its aggregate commit: when the plan commit
+/// is refused, the transport is never called and no record reaches the
+/// aggregate.
+#[tokio::test]
+async fn an_outbox_message_waits_for_its_aggregate_commit() {
+    const PID: &str = "p-outbox-commit";
+    let stored = InstrumentedKv::new(PID);
+    stored.arm_plan_commit_failure();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let delivered = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(CountingTransport {
+        delivered: delivered.clone(),
+    }));
+    let spec = ProcessSpec::linear(PID, "root", &["only"]);
+    host.start_process(&spec).await.unwrap();
+
+    let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+    assert_eq!(stored.plan_commit_failures(), 1);
+    assert!(
+        report.retried >= 1,
+        "the refused commit must surface: {report:?}"
+    );
+    assert_eq!(
+        *delivered.lock(),
+        0,
+        "a failed plan commit must not reach the transport"
+    );
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        snapshot.outbox.is_empty(),
+        "a failed plan commit writes no record: {:?}",
+        snapshot.outbox
+    );
+}
+
+/// The normal path settles a whole operation's records in **one** confirmation
+/// commit: every plan commit that adds records is followed by exactly one
+/// aggregate write that advances them, and records are never claimed or
+/// confirmed one at a time.
+#[tokio::test]
+async fn one_operation_confirms_all_its_records_in_one_commit() {
+    const PID: &str = "p-outbox-batch";
+    let stored = InstrumentedKv::new(PID);
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let delivered = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(CountingTransport {
+        delivered: delivered.clone(),
+    }));
+    let spec = ProcessSpec::linear(PID, "root", &["a", "b"]);
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    assert_eq!(
+        stored.confirmations(),
+        stored.plan_commits_with_records(),
+        "one confirmation per operation, never one per record"
+    );
+    assert_eq!(
+        stored.confirmed_records(),
+        stored.added_records(),
+        "every committed record was confirmed"
+    );
+    assert_eq!(
+        *delivered.lock(),
+        stored.added_records(),
+        "the normal path delivers each record exactly once"
+    );
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        snapshot
+            .outbox
+            .values()
+            .all(|record| matches!(record.state, OutboxState::Delivered { .. })),
+        "the normal path leaves no pending record: {:?}",
+        snapshot.outbox
+    );
+}
+
+/// One operation carrying several records still pays a single confirmation
+/// commit, and that commit advances all of them.
+#[tokio::test]
+async fn a_commit_with_two_records_confirms_them_in_one_commit() {
+    const PID: &str = "p-outbox-two";
+    let stored = InstrumentedKv::new(PID);
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, _wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let delivered = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(CountingTransport {
+        delivered: delivered.clone(),
+    }));
+    let spec = ProcessSpec::linear(PID, "root", &["only"]);
+    host.start_process(&spec).await.unwrap();
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    let plan = two_record_plan(PID, &snapshot);
+    let (receipt, mut committed) = match host
+        .processes
+        .commit_transition(&plan, SystemClock.now_ms(), host.timer_poll_ms())
+        .await
+        .unwrap()
+    {
+        crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Committed {
+            receipt,
+            loaded,
+        }
+        | crate::scheduler::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted {
+            receipt,
+            loaded,
+        } => (receipt, loaded),
+        crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
+            panic!("the plan commit must apply")
+        }
+    };
+    assert_eq!(receipt.new_outbox.len(), 2);
+
+    host.deliver_committed_outbox(&mut committed, &receipt.new_outbox)
+        .await;
+
+    assert_eq!(
+        stored.confirmations(),
+        1,
+        "two records, one confirmation commit"
+    );
+    assert_eq!(stored.max_confirmation_batch(), 2);
+    assert_eq!(*delivered.lock(), 2);
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        snapshot
+            .outbox
+            .values()
+            .all(|record| matches!(record.state, OutboxState::Delivered { .. }))
+    );
+    assert!(
+        host.processes
+            .load(PID)
+            .await
+            .unwrap()
+            .unwrap()
+            .original_outbox_index()
+            .is_none(),
+        "delivered records leave no outbox index entry"
+    );
+}
+
+/// A confirmation that loses its aggregate guard loses no message: the
+/// records stay `Pending`, the outbox pass redelivers them, and the run
+/// settles. The redelivery is the documented at-least-once duplicate.
+#[tokio::test]
+async fn a_lost_confirmation_is_redelivered_without_losing_the_message() {
+    const PID: &str = "p-outbox-confirm-conflict";
+    let stored = InstrumentedKv::new(PID);
+    stored.arm_confirmation_failure();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let delivered = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(CountingTransport {
+        delivered: delivered.clone(),
+    }));
+    let spec = ProcessSpec::linear(PID, "root", &["only"]);
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    assert_eq!(stored.confirmation_failures(), 1);
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    let pending: Vec<_> = snapshot
+        .outbox
+        .values()
+        .filter(|record| matches!(record.state, OutboxState::Pending { .. }))
+        .collect();
+    assert_eq!(
+        pending.len(),
+        1,
+        "the lost confirmation leaves its record pending: {:?}",
+        snapshot.outbox
+    );
+    let sent_once = *delivered.lock();
+    assert!(sent_once >= 1);
+
+    let settled = host.dispatch_outbox().await.unwrap();
+    assert_eq!(settled, 1, "the retry pass redelivers the pending record");
+    assert_eq!(
+        *delivered.lock(),
+        sent_once + 1,
+        "at-least-once: the lost confirmation's record is sent again"
+    );
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        snapshot
+            .outbox
+            .values()
+            .all(|record| matches!(record.state, OutboxState::Delivered { .. })),
+        "the retry pass settles the message: {:?}",
+        snapshot.outbox
+    );
+}
+
+/// Partial transport outcomes persist through the same one batch without
+/// losing the record's semantics, and A11 keeps the run because its outbox is
+/// not all `Delivered`.
+#[tokio::test]
+async fn partial_delivery_failures_are_persisted_and_keep_the_run() {
+    const PID: &str = "p-outbox-partial";
+    struct PartialTransport {
+        delivered: Arc<parking_lot::Mutex<usize>>,
+    }
+    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for PartialTransport {
+        fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
+            *self.delivered.lock() += 1;
+            match record.topic.as_str() {
+                "task.started" => DeliveryOutcome::RetryAt {
+                    available_at_ms: SystemClock.now_ms() + 60_000,
+                    error: "busy".into(),
+                },
+                "task.completed" => DeliveryOutcome::OutcomeUnknown {
+                    reason: "transport lost the ack".into(),
+                },
+                _ => DeliveryOutcome::Quarantine {
+                    reason: "refused".into(),
+                },
+            }
+        }
+    }
+    let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let delivered = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(PartialTransport {
+        delivered: delivered.clone(),
+    }));
+    let spec = ProcessSpec::linear(PID, "root", &["only"]);
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert!(*delivered.lock() > 0);
+
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    let has = |predicate: &dyn Fn(&OutboxState) -> bool| {
+        snapshot
+            .outbox
+            .values()
+            .any(|record| predicate(&record.state))
+    };
+    assert!(
+        has(
+            &|state| matches!(state, OutboxState::Pending { available_at_ms } if *available_at_ms > 0)
+        ),
+        "RetryAt must persist as a deferred pending record: {:?}",
+        snapshot.outbox
+    );
+    assert!(
+        has(&|state| matches!(state, OutboxState::DeliveryUnknown { .. })),
+        "an unclassified outcome must persist as DeliveryUnknown: {:?}",
+        snapshot.outbox
+    );
+    assert!(
+        has(&|state| matches!(state, OutboxState::Quarantined { .. })),
+        "a quarantine must persist: {:?}",
+        snapshot.outbox
+    );
+    assert!(!snapshot.is_reclaimable(), "A11 must retain this run");
+    let loaded = host.processes.load(PID).await.unwrap().unwrap();
+    let index = crate::scheduler::core::outbox::outbox_index::OutboxIndexCodec::decode(
+        loaded
+            .original_outbox_index()
+            .expect("undelivered records keep the outbox index"),
+    )
+    .unwrap();
+    use crate::scheduler::core::outbox::outbox_index::OutboxIndexState;
+    assert!(
+        index.entries.iter().any(|entry| matches!(
+            entry.state,
+            OutboxIndexState::Pending { available_at_ms } if available_at_ms > 0
+        )),
+        "the index carries the deferred retry: {:?}",
+        index.entries
+    );
+    assert!(
+        index
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.state, OutboxIndexState::DeliveryUnknown)),
+        "the index carries the unknown delivery: {:?}",
+        index.entries
+    );
+    assert!(
+        index
+            .entries
+            .iter()
+            .all(|entry| !matches!(entry.state, OutboxIndexState::Claimed { .. })),
+        "a confirmed loss is not left claimed: {:?}",
+        index.entries
+    );
+    assert!(
+        matches!(
+            host.reclaim_process(PID).await.unwrap(),
+            crate::scheduler::durable::async_document_store::ReclaimOutcome::Retained
+        ),
+        "an undelivered record keeps the aggregate"
+    );
+}
+
+/// The transport runs after the projection: every message observes the proc
+/// row of its commit already written.
+#[tokio::test]
+async fn messages_are_visible_only_after_the_projection() {
+    const PID: &str = "p-outbox-projection";
+    let stored = InstrumentedKv::new(PID);
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let store = Arc::new(crate::store::Store::new(kv));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+    host.attach_row_projector(Arc::new(RowProjector::new(store, writer, None)));
+    let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    host.attach_outbox_transport(Box::new(OrderingTransport {
+        kv: stored.clone(),
+        proc_prefix: crate::store::StoreIden::Procs.as_ref().to_string(),
+        observed: observed.clone(),
+    }));
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-outbox-projection")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    let observed = observed.lock().clone();
+    assert!(!observed.is_empty(), "the run must have delivered messages");
+    assert!(
+        observed.iter().all(|written| *written),
+        "a message saw the proc row missing: {observed:?}"
+    );
 }

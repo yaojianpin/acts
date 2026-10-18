@@ -276,7 +276,6 @@ impl ActOperation for ExecuteTask {
                             ),
                             topic: "message.created".into(),
                             payload: payload.to_string(),
-                            receipt: None,
                         },
                     );
                 }

@@ -18,9 +18,10 @@
 //! 3. **ActPlan** ([`ActOperation::next`]): that outcome folded into the
 //!    durable next plan — the state changes, the successor operations and the
 //!    outbox records it implies.
-//! 4. **Dispatch** ([`dispatch`]): the plan's records delivered, its
-//!    transition committed, its new operations woken, and the run's
-//!    bookkeeping (lifecycle, read model, slot) settled.
+//! 4. **Dispatch** ([`dispatch`]): the transition committed (its outbox
+//!    records written `Pending`), the read model projected, the plan's
+//!    records delivered and confirmed in one batch, its new operations woken,
+//!    and the run's bookkeeping (lifecycle, slot) settled.
 //!
 //! Everything kind-specific lives in one module per kind under this one —
 //! [`task`], [`action`], [`timeout`], [`cascade`], [`propagate`], [`reentry`]
@@ -259,7 +260,7 @@ impl KernelHost {
                 return Err(error);
             }
         };
-        // Phase 4 — dispatch: deliver, commit, wake, settle.
+        // Phase 4 — dispatch: commit, project, deliver, wake, settle.
         self.dispatch(&claimed, plan, Projection::Touched, effect_started)
             .await?;
         Ok(true)

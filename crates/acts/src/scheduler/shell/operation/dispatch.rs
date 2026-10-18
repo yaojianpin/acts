@@ -45,7 +45,10 @@ impl KernelHost {
         Ok(())
     }
 
-    /// Phase 4: deliver, commit, wake and settle. A lost compare-and-swap
+    /// Phase 4: commit, project, deliver and settle. The commit writes the
+    /// plan's outbox records `Pending`; the projection runs from the committed
+    /// snapshot; only then does the transport see the records, and their
+    /// outcomes advance in one batch confirmation. A lost compare-and-swap
     /// releases an effect-free operation's claim for recovery; if phase 2
     /// crossed the external-effect boundary, the operation instead becomes
     /// `EffectUnknown` and is never retried automatically. Every other
@@ -58,19 +61,15 @@ impl KernelHost {
         effect_started: bool,
     ) -> Result<()> {
         let id = &claimed.id;
-        let mut plan = plan;
         let phase = operation_trace::start();
-        self.deliver_plan(&id.process_id, &mut plan);
-        operation_trace::end(operation_trace::DELIVER, phase);
-        let phase = operation_trace::start();
-        let (receipt, loaded) = match self
+        let (receipt, mut loaded) = match self
             .processes
             .commit_transition(&plan, SystemClock.now_ms(), self.timer_poll_ms)
             .await
             .map_err(repository_error)?
         {
-            crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Committed { receipt, snapshot }
-            | crate::scheduler::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { receipt, snapshot } => (receipt, snapshot),
+            crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Committed { receipt, loaded }
+            | crate::scheduler::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { receipt, loaded } => (receipt, loaded),
             crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
                 // A conflict applies nothing, so the *plan* definitely did not
                 // commit. An external effect is different: phase 2 may already
@@ -128,6 +127,7 @@ impl KernelHost {
             // ran.
             if claimed.kind == OperationKind::ExecuteTask
                 && loaded
+                    .snapshot
                     .operations
                     .get(operation)
                     .is_some_and(|created| created.kind == OperationKind::DispatchTimeout)
@@ -137,46 +137,57 @@ impl KernelHost {
             self.wake(operation);
         }
         operation_trace::end(operation_trace::WAKE, phase);
-        // The run's lifecycle, from the freshly committed state: a start while
-        // it is alive, one terminal event once every execution settled. A
-        // closed sink or an absent one makes this a no-op.
-        let phase = operation_trace::start();
-        self.report_lifecycle(&loaded);
-        operation_trace::end(operation_trace::LIFECYCLE, phase);
         // The read model follows the same commit — the snapshot that commit
         // returned, never a fresh load: a load is a second read that can
         // already be older than a concurrent operation's commit, and projecting it
         // would write that operation's rows away with an older state (the
-        // projection's write order must be the commit order).
+        // projection's write order must be the commit order). It runs before
+        // any external observer sees the commit: the lifecycle events and the
+        // outbox transport below.
         let phase = operation_trace::start();
         match projection {
-            Projection::Whole => self.project(&loaded).await,
+            Projection::Whole => self.project(&loaded.snapshot).await,
             Projection::Touched => {
                 let touched: std::collections::BTreeSet<String> = plan
                     .state_changes
                     .iter()
-                    .map(|change| change.task.wire(&loaded.process_id))
+                    .map(|change| change.task.wire(&loaded.snapshot.process_id))
                     .chain(
                         plan.task_creates
                             .iter()
-                            .map(|create| create.task.wire(&loaded.process_id)),
+                            .map(|create| create.task.wire(&loaded.snapshot.process_id)),
                     )
                     .chain(
                         plan.variable_writes
                             .iter()
-                            .map(|write| write.scope.wire(&loaded.process_id)),
+                            .map(|write| write.scope.wire(&loaded.snapshot.process_id)),
                     )
                     .collect();
-                self.project_touched(&loaded, &touched).await;
+                self.project_touched(&loaded.snapshot, &touched).await;
             }
         }
         operation_trace::end(operation_trace::PROJECT, phase);
+        // The run's lifecycle, from the freshly committed state: a start while
+        // it is alive, one terminal event once every execution settled. A
+        // closed sink or an absent one makes this a no-op.
+        let phase = operation_trace::start();
+        self.report_lifecycle(&loaded.snapshot);
+        operation_trace::end(operation_trace::LIFECYCLE, phase);
+        // The commit's own outbox records are now visible to the transport —
+        // after the aggregate commit and after the projection — and their
+        // outcomes are persisted in one batch confirmation. A record the
+        // confirmation could not settle stays `Pending`; the outbox pass owns
+        // the retry.
+        let phase = operation_trace::start();
+        self.deliver_committed_outbox(&mut loaded, &receipt.new_outbox)
+            .await;
+        operation_trace::end(operation_trace::DELIVER, phase);
         // This operation may have settled the run: its slot goes back to the parked
         // queue right here, so the run that has waited longest starts now
         // instead of on the driver's next tick. The run is the one this operation
         // just drove, so it either holds its slot or needs none — never parked.
         let phase = operation_trace::start();
-        let (_, admission) = self.place_run(&loaded);
+        let (_, admission) = self.place_run(&loaded.snapshot);
         if let Some(admission) = admission {
             self.admit_run(&admission).await?;
         }

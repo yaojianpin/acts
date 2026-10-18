@@ -69,10 +69,6 @@ pub(crate) struct OutboxIntent {
     pub(crate) key: String,
     pub(crate) topic: String,
     pub(crate) payload: String,
-    /// The receipt the operation's own transport returned for this record, when it
-    /// delivered it *before* committing. The commit creates the record already
-    /// `Delivered`; `None` leaves it `Pending` for the outbox retry pass.
-    pub(crate) receipt: Option<String>,
 }
 
 /// Complete, value-only output of a planner. It contains no live process,
@@ -332,7 +328,6 @@ mod tests {
             key: "k".into(),
             topic: " ".into(),
             payload: "{}".into(),
-            receipt: None,
         });
         assert_eq!(
             p.validate(),
