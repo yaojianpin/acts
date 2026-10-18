@@ -45,7 +45,7 @@
 | `data::Task` 字段:`id, pid, tid, node_data, kind, prev, next, parent, name, state, err, start_time, end_time, timestamp, v`;`tid` = node id,`prev/next/parent` = **node id** | `store/data/task.rs:9-26`、`shell/projection.rs:331,365-380` |
 | 行键 = `Id::id()` = **`pid + tid` 无分隔符直接拼** | `utils/id.rs:39-46` |
 | API 形状已经把实例与节点分开:`TaskInfo.id = tid`,`TaskInfo.nid = node_data.id` | `model/info.rs:189-207` |
-| `data::Op`(`ops` 集合)**生产侧无 writer/reader**,是死件(§11 L1 已排期删) | `store/store.rs:81`、§10「可靠性矩阵回归」§6 T1 |
+| `data::Op`(`ops` 集合)生产侧无 writer/reader;**已删除**(§11 L1,见 §10「L1 完成」) | 原 `store/store.rs:81`、§10「可靠性矩阵回归」§6 T1 |
 
 ### 1.4 消息面(outbox → Message)
 
@@ -136,7 +136,7 @@
 
 **D2 —— 实例 id 的派生与形态:`TaskId{node, generation}` + hex `wire()`。**
 → **已拍(2026-10-16,用户裁决):乙 —— `sha256` 定长 32 hex 摘要**,C5 执行;同时确认**接受 golden 全量重冻结(BREAKING)**;
-恢复条目旧键成孤儿的处理口径:**先登记不实现,与 §11 L1(死掉的 `ops` 族孤儿)同批拍**。
+恢复条目旧键成孤儿的处理口径:**先登记不实现**;`ops` 族孤儿已在 §10「L1 完成」定为“接受”,恢复条目旧键仍待决。
 执行见 `KERNEL_CUTOVER_NOTES.md` §12(C5 提示词)与 §10 的「C5 完成」(落地后)。
 
 ```rust
@@ -233,7 +233,7 @@ pub(crate) struct OperationId {                              // task_id 换类�
 **持久化(必须与身份同批)**
 
 - `ACTSPV2` → **V3**:每个 `TaskId`/`OperationId.task` 落 `wire` 字符串 + node 字符串 + gen(`snapshot_codec.rs:210-230,362-368` 一带);V2 文档 **upcast**:`instance id := 该代 node 的 wire`(退化等价,行为不变)。
-- 恢复条目索引键格式随之变 ⇒ 老库遗留的旧键成**孤儿**(与 §11 L1  `ops` 孤儿同类),处理策略与那一项一起定。
+- 恢复条目索引键格式随之变 ⇒ 老库遗留的旧键成**孤儿**(与 §11 L1 的 `ops` 孤儿同类;**`ops` 侧已定为“接受”,见 §10「L1 完成」;恢复条目旧键仍待决**)。
 
 ### 3.2 命名表(终态)
 
@@ -829,7 +829,7 @@ graph LR
 | **golden 重冻结** | P0 有意冻结了 parity 为常量(§10 P0、§11 正文) | C5 必须写明"为什么解冻";D2 允许时优先选不破 golden 的形态,但 hex 与"gen==0 裸 node id"互斥(§2.2) |
 | **外部面 BREAKING** | `tid` 出现在 CLI 列 / `task:get` / `MessageInfo.tid` / gRPC `data`(`agent://TaskIdIdentity` 第 3 节) | CHANGELOG 记 BREAKING;C6 顺手把"`nid` 找节点"写进契约 |
 | **键长 / 存储字节** | `tasks` 6 个索引字段 + `vars` 2 个,每条索引键含 id 段;行键 `pid+tid`(`collection.rs:190`、`utils/id.rs:39`) | 选乙(定长 32);C5 前用 §10 P6-1 的探针量一次字节增量 |
-| **旧库兼容** | codec `ACTSPV2` + 恢复条目键 `hex(task_id).gen.seq` | codec V3 + V2 upcast(退化等价);孤儿键与 §11 L1 一起定 |
+| **旧库兼容** | codec `ACTSPV2` + 恢复条目键 `hex(task_id).gen.seq` | codec V3 + V2 upcast(退化等价);`ops` 孤儿已定(接受,§10「L1 完成」),恢复条目旧键与 §11 L1 一起定 |
 | **根 `$` 字符集** | `$` = 0x24 < 0x2D,违反"ids are alphanumeric"(今天无害) | D2 选"一律 hex" ⇒ 一并修掉;`TASK_ROOT_TID` 退回 `NodeId` 层面 |
 | **两套字符集混淆** | node id 可含 `#`(合成器),tid 必须纯 hex | §3.1:分开定义;`NodeId` 不新增限制 |
 | **`view` 换渲染实现** | `tree_output` 是生产 API(`model_executor.rs:58` = `model:get fmt=tree`),且无测试 pin 其输出(只有 `Node::from_str` 的往返测试) ⇒ 回归不会被测试抓住 | C8a 逐字保留输出(同一 DFS 顺序、同一缩进),并在 `model:get fmt=tree` 上做一次 smoke |
@@ -838,6 +838,6 @@ graph LR
 
 - 不改 `action_target` 的选法(§11 C4/C5 的告诫)。
 - ~~不做聚合文档回收/归档(§11 L2)~~ **已撤销**:A11 明确终态且消息全部投递/结算后回收 aggregate/索引/行/workdir,不做历史归档;回收后 PID 可复用(§3.10)。
-- 不删 `ops`、不删读模型行表(§11 L1 、§10「读模型行表去留」)。
+- ~~不删 `ops`~~ **已撤销**:L1 删除了 `ops` 族(§10「L1 完成」);读模型行表仍保留(§10「读模型行表去留」)。
 - 不动 `timeout` 的 `__timeouts` 分支 node id(那是模型语义,且走变量值不走键)。
 - ~~不改投递顺序(§2.1)~~ **已撤销**:A1b 明确把 outbox 投递移到提交之后(§2.1、§3.5、§3.10)。

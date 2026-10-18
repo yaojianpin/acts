@@ -4355,6 +4355,75 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 `Runtime::start` 返回 `String`;`Executor::proc().get_process` 删除(**BREAKING**)。持久化 `store::data::Task`
 行类型保留 —— 它是行格式本身,不在"退休类型"之列。本笔不改 A3/A4/A5/A9/A10/A11 语义,不引入 `unsafe`。
 
+### L1 完成(2026-10-19):删死掉的 `ops` 族
+
+**任务**:§11 B 的 L1(原 §5)。内核把 outbox 记录保存在聚合里(`kernel/aggregates/*` +
+`kernel/indexes/outbox/*`);切换后 `ops` 行族既无 writer 也无 reader,只剩登记/清理代码:
+`Store::ops()`、`StoreIden::Ops`、`store/data/op.rs`(`data::{Op, OpPhase, OpStatus, OpType}`)、
+`remove_proc_rows` 的家族清单,以及两处测试把它当示例集合。
+
+**老库 `ops-*` 孤儿行:接受(不再读写)**
+
+三案中选 **(i) 接受**,不取 (ii) 保留只删不建、(iii) 一次性清理:
+
+- (ii) 会把一个已经死掉的读面变成永久的写路径 —— `remove_proc_rows` 每次清理都要多扫一族、
+  多锁一堆文档、多写一批删除,只为释放旧库字节;新库永远没有这些行。
+- (iii) 需要一个 boot 入口或 `rebuild_indexes` 旁的前缀删除;本笔的边界禁止新增后台扫描,
+  而一次性入口在没有版本标记时会在每次启动重复扫描整库。
+- 结论:孤儿行只占字节,任何生产路径都不读它们(`rebuild_indexes` 只遍历已知集合,恢复/读 API/
+  sweeper 都不按 `ops` 前缀查询)。运维若想回收,可按 `ops` 前缀一次性 `scan_prefix` + delete;
+  这不是常驻能力。不新增版本标记、不改已有 aggregate/row 格式。
+
+**改法**
+
+- 删除 `store/data/op.rs` 及其 `data/mod.rs` 的 `mod op`/`pub use op::{...}`;删除
+  `StoreIden::Ops` 与 `Store::ops()`。
+- `remove_proc_rows` 去掉 `ops` 集合、id 查询、文档锁与删除批;剩余五族
+  (`tasks`/`vars`/`messages`/`deliveries`/`proc`)仍在**同一原子批**里删除,文档注释同步。
+- `store/store.rs` 的“超过一页仍须清理完”用例改用 `messages` 行播种(仍是 100 001 行,
+  仍断言 `query` 页上限与 `remove_proc_rows` 的穷尽性);`store/collection.rs` 的三个测试
+  `DbCollectionIden::iden()` 从 `Ops` 换成 `Messages`。
+- reliability harness 的 `dump_state` 不再读 `ops` 行(它本来就已经打印聚合里的 outbox 记录),
+  `sweep_until_gone` 的 `ops` 行断言换成“清理后聚合不存在”;其余行族断言不变。
+- 未改 `NodeData`/`NodeContent`/`NodeKind`、行 key/字段、消息 payload、outbox 顺序或
+  outbox/aggregate/recovery 语义;不引入 `unsafe`。
+
+**验收**
+
+- 生产侧 `git grep "Store::ops\|StoreIden::Ops\|data::Op"` = 0(设计/notes 的历史说明除外);
+  `ops`/`Ops` 只剩这两份文档的记录。
+- `cargo test -p acts --lib --tests` = **937 passed / 0 failed**。相对 L12 的 941 是净 −4:
+  `store/data/op.rs` 自带的 4 个只 pin 死类型及其 upcast 的单测随文件删除;其余用例数不变,
+  改写后的穷尽性用例通过。
+- per-crate:`acts-acl` **13 + 10 + 5**;`acts-expr --all-features` **42 + 3**;
+  `acts-channel` **32**(2 ignored doctests);`acts-plugin-nats` **6 + 5**;
+  `acts-plugin-grpc` **14 passed / 2 failed**、`acts-plugin-web` **22 passed / 2 failed**、
+  `acts-package-shell` **10 + 7 + 3 + 2 passed, vars 3 passed / 1 failed**
+  (三个套件的既有红与 §10「L11 完成」/「L12 完成」完全相同);
+  `acts-package-http` **16**、`acts-package-javascript` **9**、`acts-package-nats` **2**、
+  `acts-package-state` **0**;`acts-store --features sled,sqlite,postgres` **385 passed**
+  (1 ignored;0/2/94/96/96/97 六个 target);`acts-cli` **24 + 1 + 5**;
+  `acts-server` **17**(11 + 2 + 1 + 3,四个 target,`-j 1`)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check` 绿;
+  未改 manifest,未跑 `cargo deny`。
+- 环境:NATS **2.14.5** JetStream(`nats-server -js -p 4222 -a 127.0.0.1`);Postgres **18.3**
+  (`localhost:5433`,db `tests`,password `yao`;`pg_ctl` 启动报“拒绝访问”,改用
+  `postgres -D D:/tools/postgres/data` 直接启动)。两者在跑 per-crate 前已就绪。
+- `acts-server` 首次全 target 运行因 Windows 页面文件不足失败(`os error 1455`,
+  `failed to mmap ... .rlib`),不是代码错误;`-j 1` 重跑全绿,已记在本条。
+
+**既有红(非本笔回归;与 §10「L11 完成」/「L12 完成」同一组)**
+
+- `acts-package-shell::vars::the_inputs_of_the_act_embed_in_the_script`
+- `acts-plugin-grpc::tests::test_on_message_stream_drop_deregisters_channel`/
+  `test_on_message_slow_subscriber_is_disconnected`
+- `acts-plugin-web::sse::tests::sse_stream_drop_deregisters_channel_handler`/
+  `sse_slow_subscriber_is_disconnected_instead_of_queueing`
+
+**API 面**:`Store::ops()`、`StoreIden::Ops` 与 `store::data::{Op, OpPhase, OpStatus, OpType}`
+删除;它们经 `pub use store::*` 属公开面,故为 **BREAKING**(CHANGELOG 已记)。
+持久化面只少了 `ops` 行族的写读登记;本笔不新增迁移、不新增后台扫描。
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4377,7 +4446,7 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1、P2、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L1**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L3**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4423,12 +4492,12 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L8、L9、L10、L11、L12 已完成,§12 当前指向 L1。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L8、L9、L10、L11、L12 已完成,§12 当前指向 L3。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
 | **P2** | **整包编码只算一次 SHA-256**(无格式变更):`ProcessDocumentCodec::encode` 现在 `seal` 一次、`encode.validate` 再一次;去掉重复的一次。可选:跳过未变化的派生索引文档编码(先量)。 | §10「P1 完成」 | **已做(§10「P2 完成」)**。验收:同一探针每次 encode 省一次 SHA-256(新旧交错中位 0.41/0.58 ms = 一次 `envelope.encode` 量级),commit 数不变(187/295)、best ms/commit −8.1%/−13.8%;聚合字节/摘要不变(交错断言 + 单测);`-p acts --lib --tests` 952 绿 + clippy/fmt。可选的索引降频未做(本笔不碰事务/guard) |
-| **L1** | 删死掉的 `ops` 族(**BREAKING**):`Store::ops()`/`StoreIden::Ops`/`store/data/op.rs` + `remove_proc_rows` 家族清单那一行;先决定老库 `ops-*` 孤儿行的处理(接受 / 保留只删不建 / 一次性清理) | 原 §5 | 未做。验收:生产侧 `grep` 为 0 + 全量门禁绿 + CHANGELOG BREAKING |
+| **L1** | 删死掉的 `ops` 族(**BREAKING**):`Store::ops()`/`StoreIden::Ops`/`store/data/op.rs` + `remove_proc_rows` 家族清单那一行;先决定老库 `ops-*` 孤儿行的处理(接受 / 保留只删不建 / 一次性清理) | 原 §5 | **已做(§10「L1 完成」)**。孤儿行选“接受”;生产侧 `git grep "Store::ops\|StoreIden::Ops\|data::Op"` = 0;`remove_proc_rows` 仍以同一原子批删除 tasks/vars/messages/deliveries/proc;`-p acts --lib --tests` **937 passed**(净 −4 = `op.rs` 自带单测随类型删除);per-crate/clippy/fmt 见 §10;CHANGELOG 已记 **BREAKING** |
 | **L2** | 聚合文档回收/归档:~~先定保留策略 / pid 复用语义 / 历史取舍~~ **已由 A11 取代**。A11 明确:存储只服务恢复,终态且消息全部投递/结算后回收;不做历史归档;回收后 PID 可复用,旧 pid 重复执行由业务系统负责 | 原 §6;2026-10-17 用户裁决 | **被 A11 取代**(设计见 `KERNEL_REFACTOR_DESIGN.md` §3.10);不再单独执行 |
 | **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | 未做(现状 = 写成边界) |
 | **L4** | 逐项绑定 `index`/`value` 的上浮:给一个不参与折叠的载体,或写成永久边界 | 原 §7b | 未做(证据见 §10「Feature B 完成」§4) |
@@ -4499,48 +4568,47 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:L1 —— 删死掉的 `ops` 族(§11 B)
+# 当前任务:L3 —— 决定 `sealed` 边界(§11 B)
 
-**依据**:§11 B 的 L1(原 §5);设计 `KERNEL_REFACTOR_DESIGN.md` §2.2/§5 的孤儿键条目。内核把
-outbox 记录保存在 aggregate 内,`ops` 行族已无生产写入者;读 API、恢复与回收都不读它。L12 已把
-`remove_proc_rows` 的清理清单留在 `store/store.rs`。
+**依据**:§11 B 的 L3(原 §2);§10「可靠性矩阵回归」§3/§6 与 §10「P5 收口」§2 的登记:
+`projection.rs` 写 `TaskVars.sealed` 时恒为 `String::new()`,聚合也不持久化 sealed 快照 ——
+`sealed` 只在一次 effect 解析时按模型/authority 计算(`Context::resolve_sealed` →
+`Scope::set_sealed`),因此不是可恢复的 run 状态。本条要么实现(聚合持久化 sealed 或让投影
+携带),要么把它写成永久已知边界。二选一,不混做。
 
-**目标**:删除 `ops` 族的生产面 —— `Store::ops()`、`StoreIden::Ops`、`store/data/op.rs`(及
-`store/data/mod.rs` 的导出/聚合)与 `remove_proc_rows` 里 `ops` 那一行;先决定老库 `ops-*`
-孤儿行怎么处理并在 §10 记明。
+**目标**:先核实现状(sealed 的计算点、写入点、读取点;`vars.sealed` 的消费者;重启/恢复/
+`proc:get` 对 sealed 的可见性),然后**明确选择其一**,把选择、理由与影响面写进 §10「L3 完成」。
 
-**本笔内容**
-
-1. 先 `git grep "ops()\|StoreIden::Ops\|data::Op\|store/data/op"` 列全调用面;生产侧应只剩
-   登记/清理代码。逐处删除或改用 aggregate/outbox。
-2. 决定老库 `ops-*` 孤儿行:接受(不再读写)/ 保留只删不建 / 一次性清理,三选一写进 §10;
-   不改已有 aggregate/row 格式,不为此新增后台扫描。
-3. 删 `remove_proc_rows` 的 `ops` 分支与相关 imports;确认 `remove_proc` 的原子批仍覆盖
-   tasks/vars/messages/deliveries/proc 行。
-4. 保持 `NodeData`/`NodeContent`/`NodeKind`、现有行 key/字段、消息 payload 与 outbox 顺序不变;
-   不引入 `unsafe`。
+1. 若选“写成永久已知边界”:
+   - 在设计/`lib.rs`/相关 API doc 写清:sealed 是 per-effect 的授权解析结果,不进入持久化读模型;
+     恢复后的 run 不重建历史 sealed 快照;哪些 API 因此回答空/不可得。
+   - 对 `projection.rs` 恒写空串的 `TaskVars.sealed` 给出决定(保留现状并在文档标明 / 停止写空串
+     而字段保留);行格式不能改。
+2. 若选“实现”:
+   - 二选一并说明为什么:(a) 聚合持久化 sealed 快照;(b) 投影携带 sealed。改持久化格式必须按
+     既有 codec 版本/upcast 规则,不允许静默改字段语义;golden/row 断言与 CHANGELOG 同步。
+   - 恢复路径必须从所选载体重建 sealed;`proc:get`/相关读 API 的行为要有测试;不引入 `unsafe`,
+     不顺手改 outbox/aggregate/recovery 的其他语义。
 
 **边界**
 
-- 只删死件;不顺手改 outbox/aggregate/recovery 语义,不提前做 §11 B 的其他项。
-- `ops` 是 **BREAKING**(若仍有外部读 `Store::ops()`);CHANGELOG 记录。
-- 不改 manifest 就不跑 `cargo deny`;探针/临时插桩不提交;生产代码与文档分开提交。
+- 只做 L3;不提前做 §11 B 的 L4-L7,不顺手改 `procs`/`tasks`/`vars` 行表的去留(§10 已登记为待决)。
+- 生产代码与文档分开提交;探针/临时插桩不提交。
 
 **验收**
 
-- 生产侧 `git grep "Store::ops\|StoreIden::Ops\|data::Op"` = 0(历史注释除外);
-  `cargo test -p acts --lib --tests` 全绿。
-- 动到 store 面,按 §11.C 跑完整 per-crate 套件(`-p acts`、`acts-acl`、`acts-expr --all-features`、
-  `acts-channel`、`acts-plugin-*`、`acts-package-*`、`acts-store --features sled,sqlite,postgres`、
-  `acts-cli`、`acts-server`);NATS 127.0.0.1:4222、Postgres localhost:5433 按现场环境记录。
-- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
-- CHANGELOG 记录 BREAKING;§10 写「L1 完成」并更新 §11 B 状态;§12 原地指向下一项。
+- 选择与理由、影响面写入 §10「L3 完成」;若实现,相关行为有测试;若写边界,文档明确。
+- 视改动面按 §11.C 跑 `-p acts --lib --tests` 与受影响的 per-crate 套件;
+  `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
+- 若改持久化格式或公开面:CHANGELOG 记 BREAKING;不改 manifest 就不跑 `cargo deny`。
+- §10 写「L3 完成」并更新 §11 B 状态;§12 原地指向下一项(L4)。
 
 # 限制与约束
 
-- **先读**:§10「L12 完成」、§11 B L1、设计 §2.2/§5;`store/mod.rs`(`StoreIden`)、
-  `store/data/{mod,op}.rs`、`store/store.rs` 的 `remove_proc_rows`、`store/writebehind.rs` 与
-  `scheduler/**` 中 `ops()` 的调用面。
+- **先读**:§10「可靠性矩阵回归」§3/§6、§10「P5 收口」§2、§10「L12 完成」;
+  `scheduler/shell/projection.rs` 的 `TaskVars.sealed` 写点、`scheduler/shell/context.rs` 的
+  `resolve_sealed`、`scheduler/shell/scope.rs` 的 `set_sealed`/`sealed`、`store/data/task.rs` 的字段、
+  `shell/read_model.rs` 与 `proc:get` 的读面。
 - 遵守 §11.C 门禁;改到 store/CLI/server 面时跑完整 per-crate 套件;不改 manifest 就不跑 `cargo deny`。
 - 探针与临时插桩不提交;生产代码与文档分开提交,提交前过 §11.C 门禁。
 ```
