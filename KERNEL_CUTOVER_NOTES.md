@@ -3266,6 +3266,97 @@ NATS(4222)/Postgres(5433),未运行。
 - 保持 A11 回收判定不变:折叠不产生额外 non-terminal operation,也不把 `EffectUnknown`/`Quarantined`
   变成可自动推进。
 
+### A4 完成(2026-10-18):每 Process 单写者 command lane
+
+**任务**:§11 D 的 A4(P1)。driver 的 `serve` 串行执行 ready operation,但客户端动作在独立任务上并发提交;
+同一 aggregate 的 client action 之间、以及与 driver/恢复之间靠 revision/CAS + `ACTION_ATTEMPTS=8` 重规划。
+A1a 只关闭 effect 后的自动重试,A1c 只把已执行 effect 的冲突落到人工/observation;正常路径仍可能两个 plan
+基于同一 revision 竞争。
+
+**事实与契约(本笔前的一个 pid 写者)**
+
+- driver:`serve` 的 select 循环 → `drive_ready` → 逐个 `execute_one`(prepare/run/next/dispatch);一个任务,
+  跨 pid 也串行。
+- client:`Runtime::do_action` → `KernelHost::apply_action`,在调用方任务上跑;`apply_action_once` 每次
+  load → preflight → intent commit → claim → plan → commit,冲突由 `ACTION_ATTEMPTS` 重新 load/规划。
+- recovery:tick 上的 `recover`;`ReclaimExpired`/`FinalizeCommit` 直接 `operation_event`,
+  `ManualReconciliation` 走 `reconcile_unknown_effect` → `converge_observed_effect`/`retry_unknown_effect`。
+- outbox:`dispatch` 内的 `deliver_committed_outbox`(提交后发送 + 一笔批量确认)与 tick 上的
+  `dispatch_outbox`(per-record claim → transport → confirm)都写 aggregate。
+- cleanup:`sweep_removable` → `cleanup_process`,持 per-pid lifecycle + projection 锁,guarded 删除 aggregate。
+- 结论:同一 pid 有 5 类进程内写者;driver 与 client、client 与 client 之间完全由 revision/CAS 仲裁。
+
+**lane**
+
+- `KernelHost` 新增 `command_lanes`(per-pid `tokio::sync::Mutex`,与 `lifecycle_locks` 同形)与
+  `lock_command_lane`;`shell/operation::CommandLane` 是命令持有的 guard,提供 `release()`/`resume()`。
+- `Operation` 携带 `lane: &'a mut CommandLane`;`ActOperation::run` 改收 `&mut Operation`(只有 run 需要动
+  lane;`next` 仍是 `&Operation`)。
+- 进入 lane 的命令:`execute_one`(driver 每次驱动)、`apply_action_once`(client 每次尝试,load 之前)、
+  `converge_observed_effect`、`retry_unknown_effect`、`resume_action_intent`、`recover` 的
+  `ReclaimExpired`/`FinalizeCommit`、`dispatch_outbox_record` 的 claim 与 confirm。lane 按 pid,不同 pid 独立。
+- effect 窗口:`ApplyAction::run` 在 `EffectRunner::run` 前 `release()`、返回后立即 `resume()`,两者之间没有
+  其他 await;其余 phase 全在 lane 内。effect 期间其他 command 推进 aggregate 时,dispatch 的提交失败按
+  A1a/A1c 分类(effect_started ⇒ `EffectUnknown`,不重跑 effect)。
+- 折叠:A3 的 scratch 计划用 `CommandLane::detached`(不持 lane、不跑 effect),仍在产生者的 turn 内完成。
+- 锁顺序:cleanup 走 lifecycle → projection 且**从不等 lane**;命令只持 lane(内部只有同步锁与 store 写)。
+  lane 与 lifecycle/projection 从不嵌套 ⇒ 无环。lane 不可重入:`recover` 的 reclaim 只把 lane 包住
+  `operation_event` 本身,随后的 reconcile(converge/retry)自己取 lane。
+
+**同步化暴露的 A1a 分类缺口(本笔修复)**
+
+`commit_transition` 在 domain 层对陈旧 plan 返回 `VersionConflict`(`repository_error` 映射为 conflict),
+原 `dispatch` 只在 store guard 的 `Ok(Conflict)` 分支做 effect 分类;effect 之后走 Err 分支会停在
+`CommitPrepared` 等 60s 租约。现在 `dispatch` 对 `effect_started && is_conflict(&error)` 的 Err 也
+`mark_effect_unknown` 并返回同一 conflict 错误;effect-free 的 Err 保持原样(由 client 重试循环/ready pass
+处理)。这使 lane 唯一的 effect 窗口内提交失败立即落到 A1a 的 `EffectUnknown`,而不是等租约。
+
+**指标**:`KernelHost::action_replans()` 统计 `ACTION_ATTEMPTS` 的重规划次数(正常路径必须为 0),每次
+重规划写进 debug 日志。
+
+**测试**(`shell/tests/mod.rs`)
+
+- `GuardCountingKv`:数 per-pid aggregate 上被拒绝的 guard(store-level CAS 冲突计数器)。
+- `concurrent_client_actions_decide_exactly_once_under_the_lane`:同一 execution 上 8 个并发 client
+  action(4×Complete、2×Fail、1×Cancel、1×Back)。恰好一个决策提交;loser 全部是**决策性拒绝**(不是
+  conflict);`action_replans()==0`;aggregate guard 冲突计数 **0**(无两个 plan 基于同一 revision);
+  失配的 auto ApplyAction 仍落盘并在随后 drain 中完成。
+- `effects_of_different_runs_overlap_outside_the_lanes`:两个 pid 的 step effect 在 `Barrier(2)` 会合——
+  任一 lane 或全局 driver 锁跨 effect 持有都会卡死;两者都提交,run 都收敛。证明 lane 不全局串行、
+  effect 不被 lane 串行。
+- `an_effect_releases_the_lane_for_a_concurrent_decision`:effect 被闸住时,同一 pid 的 client Complete
+  在 10s 内成功(lane 已释放);放行后 effect 的 plan commit 失配 ⇒ driver 报 conflict、operation
+  `EffectUnknown`、effect 计数保持 1;`recover` 报 `reconciliation_required`;人工 `resolve` 作为 lane
+  命令返回(此处按契约拒绝重放一个已被 client 完成的 decision),不重跑 effect。
+- A1a/A1b/A1c/A2/A3/A11/outbox/reliability 既有套件全部保持绿(见验证)。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 914 passed, 0 failed, 1 ignored (154.72s)
+cargo test -p acts --lib reliability:: -> 65 passed, 0 failed (119.23s)
+cargo test -p acts --lib effect -> 26 passed, 0 failed
+cargo test -p acts --lib reclaim_ -> 7 passed, 0 failed
+cargo test -p acts --lib outbox -> 32 passed, 0 failed
+cargo test -p acts --lib concurrent_client_actions_decide_exactly_once_under_the_lane -> 1 passed
+cargo test -p acts --lib effects_of_different_runs_overlap_outside_the_lanes -> 1 passed (5 consecutive runs)
+cargo test -p acts --lib an_effect_releases_the_lane_for_a_concurrent_decision -> 1 passed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all --check -> OK
+```
+
+**边界/剩余**
+
+- lane 是**进程内**正常并发控制:崩溃/重启/租约过期仍由 recovery 以 CAS 接管,跨实例写者仍由 revision
+  guard 挡住。`EffectUnknown`/`Quarantined` 的人工闭环、A11 的回收判定、A1b 的提交后发送与批量确认均未改。
+- lane 表按 pid 常驻(与 `lifecycle_locks` 同口径),不在回收时删除;PID 复用时复用同一 lane。
+- cleanup 不取 lane:它以 aggregate exact-bytes guard 为 fence,且在 lifecycle/projection 锁内;与 lane
+  无嵌套。A11 的 pid 墓碑仍是清理后旧投影的唯一防线(A5 接手)。
+- 本笔不做 A5 的 projection 版本协议、不做 A6 的 Core Decision、不做 A7 的统一 Recovery Command;
+  `run_settled` 与投影 `settled` 的两套语义未合并(A5/A6)。
+- 新增的 dispatch Err 分类只覆盖 `is_conflict` 的错误;非 conflict 的提交失败(真正损坏的 plan)仍原样
+  上抛,e2(协议错误)不被吞掉。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3365,7 +3456,7 @@ NATS(4222)/Postgres(5433),未运行。
 > **effect/commit 顺序、正常路径的活性来源、同一 Process 的写者模型、投影协议、Shell 仍承担状态机语义、
 > 以及终态 ProcessSnapshot/投影/索引的回收与 PID 复用**。
 > 执行顺序:**A1a → A2 → A11 → A1b(批量 confirm) → A1c → A3/A4/A5 → A6 → A7/A8/A9/A10**。
-> A1a/A2/A11/A1b/A1c 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
+> A1a/A2/A11/A1b/A1c/A3/A4 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
 > 正常路径不得恢复 per-record claim/confirm;A1c 的自动重试只对 executor observation 证明 not-applied
 > 且包显式声明幂等的 effect 生效。
 > 第二波 P1/L* 暂缓,不删除。
@@ -3377,7 +3468,7 @@ NATS(4222)/Postgres(5433),未运行。
 | **A1c** | effect 幂等协议:稳定 idempotency key + 可查询 observation;非幂等 effect 只走 manual reconciliation;补齐人工处理闭环 | #2 | P1 | A1b(批量) | **已做(§10「A1c 完成」)**。验收:`EffectKey` 由 operation 身份纯函数派生(重规划/重试/重启不变);`EffectRunner::observe` 的 `Applied`/`Failed` 直接重放、`NotApplied`+幂等声明才重新入队、其余人工;`Engine::effect_unknowns`/`resolve_effect` 提供可持久化的人工闭环;恢复不重复调用 effect |
 | **A2** | durable ready queue:业务提交内写 ready 索引;`try_send` 只做加速;driver 从 ready 取到期操作;recovery 只做异常兜底;修 recovery 分页每页全扫的 $O(N^2)$ | #1 | **P0** | —(与 A1b 的 store schema 改动需协调) | **已做(§10「A2 完成」)**。验收:队列满不导致下一跳等 tick;recovery 扫描量与异常操作数相关;idle timer/parked run 不进热 ready 集合;冷启动/缺 ready 记录可从 aggregate 修复 |
 | **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | **已做(§10「A3 完成」)**。验收:线性 3 节点 claim/commit 从 9 降到 6(`ExecuteTask` + `ApplyAction`,无纯 hand-off 落盘);branch/join/catch/next/终态与 skip/abort 级联、rewind 都在产生者提交内折叠;行为、消息、行投影、lifecycle 不变;fold 失败回退原计划,effect/CAS 语义不退 |
-| **A4** | 每 Process 单写者 command lane:正常/客户端动作/恢复 command 串行决定状态;effect 可并发;observation 回 lane;CAS 只做恢复/fencing | #4 | P1 | A2 | 未做。验收:同一 pid 无并行 plan 竞争;正常路径不触发 `ACTION_ATTEMPTS`;不同 pid 仍并行 |
+| **A4** | 每 Process 单写者 command lane:正常/客户端动作/恢复 command 串行决定状态;effect 可并发;observation 回 lane;CAS 只做恢复/fencing | #4 | P1 | A2 | **已做(§10「A4 完成」)**。验收:同一 pid 的并发 client action 恰一个决策、loser 为决策性拒绝、`action_replans()==0`、aggregate guard 冲突为 0;不同 pid 的 effect 在 `Barrier(2)` 会合、各自提交;effect 窗口内同一 pid 的 command 可执行,effect 后冲突落 `EffectUnknown`(不重跑)。`commit_transition` 的 domain `VersionConflict` Err 在 effect 后也按 A1a 分类 |
 | **A5** | projection 正式协议:每行持久化 `source_aggregate_revision`;store-level 条件写;启动增量补投影;repair queue;API lag/强读 aggregate;lifecycle 后置或显式契约 | #5 | P1 | — | 未做。验收:旧投影不能覆盖新投影;重启不丢版本;消息/完成事件消费者能看到对应行 |
 | **A6** | Shell 变薄:Core 输出完整 `Decision`(aggregate changes/operations/effect intents/outbox/timers/process status/admission directives);Shell 只做 IO/commit/execute | #6 | P1 | A3/A4/A5 | 未做。验收:settle/lifecycle/admission 规则进入 Core 或 policy;新增 operation 不再改四处 |
 | **A7** | Recovery 统一成 `RecoverOperation(observed) -> Decision`:恢复层只收集 observed;正常/恢复共用 transition/commit 与 per-pid lane | #7 | P1 | A2/A4 | 未做。验收:恢复不再自行决定 wake/reclaim/finalize;正常/恢复同状态同 Decision |
@@ -3407,74 +3498,68 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A4 —— 每 Process 单写者 command lane(§11 D,P1)
+# 当前任务:A5 —— Projection 版本协议(§11 D,P1)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A4 行、§10「A1a 完成」「A1c 完成」「A2 完成」
-「A3 完成」「A11 完成」;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A4。当前缺口:driver 的 `serve` 串行执行
-ready operation,但 `apply_action` 在客户端任务上并发提交;同一 aggregate 的 client action 之间、以及与
-driver/恢复之间靠 revision/CAS + `ACTION_ATTEMPTS=8` 重规划。A1a 只保证 effect 后冲突不再自动重试,
-A1c 只把已执行 effect 的冲突落到人工/observation;正常路径仍可能两个 plan 基于同一 revision 竞争,
-`ACTION_ATTEMPTS` 仍可能触发,effect 已执行而提交冲突的窗口仍存在。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A5 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A5;
+§10「A11 完成」「A3 完成」「A4 完成」。当前缺口:`RowProjector::claim` 的按行 `ProcessVersion` 守卫是
+**进程内 map**,只在写前检查、写后不复核,也没有 store-level CAS 或持久化 `projection_revision`;重启后
+map 清空。一个先 claim 的旧投影可以在 await 之后覆盖新投影;`report_lifecycle` 还在 projection 之前上报,
+`on_complete` 订阅者可能读到旧行。A11 的 pid 墓碑与 A3 的 `forget_run` 重投影只是临时修正。
 
-**目标**:每个 pid 一个 command lane。正常 operation、client action、recovery command 都作为 command
-进入该 lane;lane 串行决定状态变更。外部 effect 可并发执行,executor observation 再入 lane。revision/CAS
-保留,但只用于崩溃恢复、lease 接管与跨实例 fencing,不再是正常并发控制的主要手段。
+**目标**:投影成为有持久化版本的条件写。每行(proc/task/vars)记录来源 aggregate revision;写入只允许
+`incoming_revision > stored_revision`;启动按持久化版本增量补投影,失败进入 durable repair queue;
+lag/失败/修复有指标;读模型与权威聚合的边界写清楚。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 画清现有并发路径:driver(`serve`/`drive_ready`/`execute_one`)、client(`apply_action`/
-     `resume_action_intent`/`ACTION_ATTEMPTS` 循环)、recovery(`recover`/`reclaim`/`converge_observed_effect`/
-     `retry_unknown_effect`/`resolve_effect`)、cleanup(`lock_lifecycle`)的写入顺序与锁。
-   - 明确 command 的边界:claim/prepare/plan/commit 在 lane 内;effect(`EffectRunner::run`)在 lane 外;
-     `EffectRunner::observe`/人工 resolve 以 command 回到 lane。A1a 的 `EffectUnknown`、A1c 的 effect key/
-     observation、A1b 的提交后发送/批量确认、A2 的 ready 记录、A3 的折叠计划、A11 的回收判定不得改语义。
-   - 明确锁/身份:lane 按 pid;不同 pid 并行;lane 不能跨 await 持有 effect(否则 effect 被串行化);
-     lane 与 A11 的 lifecycle/projection 锁必须有固定顺序、无死锁;revision/CAS 仍守住跨实例与恢复。
-2. **lane**
-   - 为每个 pid 实现单写者 command lane(进程内 actor/串行队列或 per-pid async mutex,按现有结构选最小实现);
-     正常 operation 的 claim→plan→commit、client action 的 intent→claim→plan→commit、recovery 的
-     reclaim/finalize/converge 都经 lane。
-   - effect 前释放 lane:claim 之后、`run` 之前;effect 完成后以 observation/结果重新入 lane 做 next+commit。
-     effect 期间若 lane 被其他 command 推进,CAS 冲突按 A1a/A1c 分类,不得重跑 effect。
-   - `ACTION_ATTEMPTS` 循环在正常路径不再触发;保留为恢复/冲突兜底并加断言/指标。
+   - 画清 `shell/projection.rs`(RowProjector 的 claim 表、`project`/`project_nodes`/`project_proc_row`/
+     `forget_*`/`resume`)、行键与版本来源、`store/writebehind.rs` 的写路径、`dispatch` 的
+     projection → lifecycle → deliver 顺序、`sweep_removable`/`cleanup_process` 的 `removable` 刷新与
+     A11 的 pid 墓碑、A4 的 per-pid lane 与投影写入的关系。
+   - 明确版本载体:每行持久化 `source_aggregate_revision`(或等价 projection offset)的字段形态、字节编码
+     与旧库迁移;若必须改格式,按现有 codec 规则升版本并登记。
+   - 明确读/写契约:写入是 store-level 条件写;Core/Recovery 永不读投影做权威判断;查询 API 在 lag 时
+     强读 aggregate 或显式返回 lag(二选一并在文档写清)。
+2. **协议**
+   - 实现 store-level 条件写与写后复核;拿掉“进程内 claim 表 = 唯一守卫”的假设(可保留为快路径)。
+   - 启动增量补投影:按持久化 revision 找出落后的 run/行并重投影;失败进 durable repair queue
+     (有界、可重试、有指标),不靠更短的 tick。
+   - lifecycle 与外部消息的位置:`report_lifecycle` 后置到投影完成之后,或明确“事件先于读模型”的契约;
+     A1b 的提交后发送/批量确认语义不得改。
+   - 合并或分别命名 `run_settled`(只看 task terminal)与投影 `settled`(还看 outbox)两套终态语义。
 3. **测试**
-   - 同一 pid 并发 client actions(Complete/Cancel/Back/Fail)与 driver 同跑:恰好一个决策提交,loser
-     被明确拒绝;无两个 plan 基于同一 revision 竞争(用 CAS 冲突计数或 instrumented store 断言)。
-   - 不同 pid 的 operation/effect 仍并行(lane 不全局串行;effect 不被 lane 串行)。
-   - effect 后冲突按 A1a/A1c 语义:`EffectUnknown`/observation 收敛不回归;人工 resolve 经 lane 生效。
-   - A1a/A1b/A1c/A2/A3/A11/outbox/reliability 套件绿。
-4. **恢复/活性**
-   - lane 是进程内正常并发控制;崩溃/重启/租约过期仍由 recovery 以 CAS 接管;
-   - lane 不得成为回收/清理的死锁源;A11 的 PID 复用与 lifecycle 锁顺序保持;
-   - 不建议靠缩短 tick 或更多 recovery 扫描规避 lane 排队。
+   - 旧投影在 await 后不能覆盖新投影(instrumented store 注入逆序写);重启不丢版本;
+     完成事件/消息的消费者能看到对应提交的行;A11 的墓碑/清理顺序不回归。
+   - A1a/A1b/A1c/A2/A3/A4/A11/outbox/reliability 套件绿。
 
 **边界**
 
-- 不做 A5 的 projection 版本协议、不做 A6 的 Core Decision、不做 A7 的 Recovery Unified Command;
+- 不做 A6 的 Core Decision、不做 A7 的统一 Recovery Command;
 - 不改 channel ack/delivery 行语义、消息 payload/topic、A1b 的提交后发送/批量确认;
-- 不引入新的持久化格式;不改 `EffectKey` 派生;不缩短 tick;不把活性转嫁 recovery 扫描;
-- 保持 `EffectUnknown -> ManualReconciliation` 与 A1c 的 observation 自动收敛。
+- A4 的 lane 边界不改:投影写入不得让 lane 跨 effect 或 transport 持有;若投影需要 lane,必须写明位置;
+- 不缩短 tick;不把活性转嫁 recovery 扫描;
+- 保持 `EffectUnknown -> ManualReconciliation` 与 A1c 的 observation 自动收敛;不改 `EffectKey` 派生。
 
 **验收**
 
-- 同一 pid 不再有两个 plan 同时基于同一 revision 竞争;`ACTION_ATTEMPTS` 在正常路径不触发;
-- 不同 pid 仍并行;effect 执行不被 lane 串行化;effect 后冲突/恢复语义不退;
+- 旧投影不能覆盖新投影;重启不丢版本;完成事件/消息的消费者能看到对应提交的行;
+- projection lag、失败、修复有指标;`run_settled`/`settled` 只有一套明确语义(或分别命名并写清用途);
 - `cargo test -p acts --lib --tests` 与 reliability/effect/outbox/A11 套件绿;
-- 写 §10「A4 完成」,§11 D 状态更新,§12 原地指向下一项(A5)。
+- 写 §10「A5 完成」,§11 D 状态更新,§12 原地指向下一项(A6)。
 
 # 限制与约束
 
-- **先读**:§11 D、§10「A1a 完成」「A1c 完成」「A2 完成」「A3 完成」「A11 完成」、设计 §3.10 A4、
-  `shell/mod.rs`(`serve`/`drive_ready`/`apply_action`/`resume_action_intent`/`recover`)、
-  `shell/operation/{mod,dispatch,prepare}.rs`、`core/commit/{aggregate,command}/**`、`core/ready.rs`、
-  `shell/tests/mod.rs` 的 conflict/concurrency 用例、`scheduler/tests/reliability/{action,cancel,back,next}.rs`。
+- **先读**:§11 D、§10「A11 完成」「A3 完成」「A4 完成」、设计 §3.10 A5、`shell/projection.rs`、
+  `shell/mod.rs`(`project`/`project_touched`/`report_lifecycle`/`refresh_projection`/`refresh_proc_row`)、
+  `store/writebehind.rs`、`store/process_rows.rs`、`scheduler/runtime.rs`(`sweep_removable`/`cleanup_process`)、
+  `shell/tests/mod.rs` 的投影/乱序用例。
 - 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-per-pid command lane + CAS 冲突/`ACTION_ATTEMPTS` 断言 + 跨 pid 并行与 effect 并发回归
+per-row 持久化 source revision + store-level 条件写 + 启动增量补投影/repair queue + lag/指标
 → 更新 §10/§11/§12。
 ```
 
