@@ -23,6 +23,27 @@ impl KernelHost {
         id: &OperationId,
         slot: Slot,
     ) -> Result<Option<Claimed>> {
+        self.prepare_with(id, slot, false).await
+    }
+
+    /// Claim an `EffectUnknown` operation to replay the executor's observation
+    /// (A1c). The decision is already proof, so the slot policy is bypassed
+    /// exactly like a client action's; only this path accepts
+    /// `EffectUnknown`, and the normal driver never reaches it (an unknown
+    /// effect has no ready record and is never woken as normal work).
+    pub(in crate::scheduler::shell) async fn prepare_reconciliation(
+        &self,
+        id: &OperationId,
+    ) -> Result<Option<Claimed>> {
+        self.prepare_with(id, Slot::Direct, true).await
+    }
+
+    async fn prepare_with(
+        &self,
+        id: &OperationId,
+        slot: Slot,
+        allow_effect_unknown: bool,
+    ) -> Result<Option<Claimed>> {
         // A parked run's ready record is deferred by the driver until a slot
         // frees, so the parked answer comes from the set — a store read would
         // be pure waste on the retry path.
@@ -70,6 +91,7 @@ impl KernelHost {
             .ok_or_else(|| ActError::Runtime(format!("operation {id:?} not found")))?;
         match record.state {
             OperationState::Pending | OperationState::RetryScheduled { .. } => {}
+            OperationState::EffectUnknown { .. } if allow_effect_unknown => {}
             _ => return Ok(None),
         }
 

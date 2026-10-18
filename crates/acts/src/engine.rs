@@ -1,5 +1,5 @@
 use crate::{
-    AccessControl, ActPlugin, ChannelOptions, Config, Principal, Signal,
+    AccessControl, ActPlugin, ChannelOptions, Config, Principal, Signal, Vars,
     builder::EngineBuilder,
     export::{Channel, Executor},
     package::{self, ActPackageRegister},
@@ -8,6 +8,42 @@ use crate::{
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+/// One operation whose external effect may have run but whose commit was lost
+/// (A1c).
+///
+/// Such an operation is deliberately not re-driven: the key is the stable
+/// identity the effect executor saw, and the operator either resolves it or
+/// lets an executor observation decide it (recovery asks the attached effect
+/// runner automatically).
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EffectUnknown {
+    /// The run that owns the operation.
+    pub pid: String,
+    /// The acting execution's external id (`tid`).
+    pub tid: String,
+    /// The operation's sequence within that execution.
+    pub sequence: u64,
+    /// The stable effect key: the token the executor saw and a caller may use
+    /// to query the external system.
+    pub key: String,
+    /// The attempt whose effect became unknown.
+    pub attempt: u32,
+}
+
+/// An operator's durable decision about an unknown effect (A1c).
+#[derive(Debug, Clone)]
+pub enum EffectResolution {
+    /// The external effect ran. `outputs` are the returned values the
+    /// operator captured (empty when only the act must settle); they are
+    /// folded into the same commit that completes the operation.
+    Applied { outputs: Vars },
+    /// The effect provably did not run. The operation returns to the retry
+    /// queue **under the same effect key**; only do this when the external
+    /// step is safe to attempt again (the executor deduplicates the key) or
+    /// was never attempted.
+    NotApplied,
+}
 
 /// A started workflow engine.
 ///
@@ -87,6 +123,36 @@ impl Engine {
     /// Snapshot manager for feeding snapshot-backed sealed data.
     pub fn snapshot(&self) -> Arc<SnapshotManager> {
         Arc::new(SnapshotManager::new(&self.runtime))
+    }
+
+    /// The unknown effects of one run, in operation order (A1c).
+    ///
+    /// Each entry carries the stable key to correlate with the external
+    /// system. Recovery asks the attached effect runner's observation first;
+    /// an entry remains here only while nothing could prove applied or
+    /// not-applied (or the effect is not idempotent), i.e. while it needs a
+    /// human.
+    pub async fn effect_unknowns(&self, pid: &str) -> crate::Result<Vec<EffectUnknown>> {
+        self.runtime.kernel().effect_unknowns(pid).await
+    }
+
+    /// Resolve one unknown effect with a durable operator decision (A1c).
+    ///
+    /// `key` is the [`EffectUnknown::key`] the executor saw. `Applied`
+    /// replays the operation's plan without running the effect again;
+    /// `NotApplied` returns it to the retry queue under the same key. Both
+    /// write through the aggregate's normal guarded commit, so the decision
+    /// survives a restart and is never silently redone.
+    pub async fn resolve_effect(
+        &self,
+        pid: &str,
+        key: &str,
+        resolution: EffectResolution,
+    ) -> crate::Result<()> {
+        self.runtime
+            .kernel()
+            .resolve_effect_by_key(pid, key, resolution)
+            .await
     }
 
     pub(crate) fn runtime(&self) -> Arc<Runtime> {

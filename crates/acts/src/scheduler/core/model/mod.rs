@@ -1,6 +1,7 @@
 //! Domain model: durable facts and their transitions.
 
 pub(crate) mod clock;
+pub(crate) mod effect;
 pub(crate) mod legacy_task_state;
 pub(crate) mod model_graph;
 pub(crate) mod operation;

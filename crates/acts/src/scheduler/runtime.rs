@@ -553,8 +553,9 @@ impl Runtime {
     }
 
     /// The kernel host — the engine. The driver tests read it to inspect an
-    /// aggregate; the serving paths hold the field directly.
-    #[cfg(test)]
+    /// aggregate; the serving paths hold the field directly, and the public
+    /// reconciliation API (`Engine::effect_unknowns`/`resolve_effect`) needs
+    /// the same aggregate view.
     pub(crate) fn kernel(&self) -> &Arc<crate::scheduler::shell::KernelHost> {
         &self.kernel
     }

@@ -1151,13 +1151,20 @@ impl ActOperation for ApplyAction {
                 // `catches` handler answers the act's failure — never a failure
                 // of the children it already dispatched.
                 match host.step_effect(snapshot, task_id, &task.model_node)? {
-                    Some((runner, request)) => match runner.run(request).await {
-                        Ok(outcome) => Effect::Completed(Some(outcome)),
-                        // A package error takes the failure path, where a step
-                        // declaring `catches` keeps running and dispatches them
-                        // (the legacy `Step::on_error`).
-                        Err(error) => Effect::Failed(error),
-                    },
+                    Some((runner, request)) => {
+                        // The effect's identity is the operation's durable
+                        // identity (A1c): every retry, replan and recovery of
+                        // this operation reuses this exact key.
+                        let key =
+                            crate::scheduler::core::model::effect::EffectKey::of(operation.id);
+                        match runner.run(request, key).await {
+                            Ok(outcome) => Effect::Completed(Some(outcome)),
+                            // A package error takes the failure path, where a
+                            // step declaring `catches` keeps running and
+                            // dispatches them (the legacy `Step::on_error`).
+                            Err(error) => Effect::Failed(error),
+                        }
+                    }
                     None => Effect::Completed(None),
                 }
             }

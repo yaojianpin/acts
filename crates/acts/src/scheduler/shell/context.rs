@@ -93,6 +93,19 @@ impl Context {
         self.task.read().clone()
     }
 
+    /// The stable idempotency key of the effect this call is executing, when
+    /// the call is a package effect (A1c).
+    ///
+    /// The key is derived from the durable operation identity and is identical
+    /// on every retry, replan and restart, so a package can forward it to an
+    /// external system as its idempotency token. It is engine-owned and
+    /// private: it is not a workflow variable and cannot be forged through
+    /// `$env`, nor does it become part of the run's durable data.
+    pub fn effect_key(&self) -> Option<String> {
+        self.proc
+            .with_env(|env| env.get::<String>(consts::EFFECT_KEY))
+    }
+
     /// The directory this process's filesystem access is confined to
     /// (`<workdir>/<pid>`), or `None` when the engine config declares no
     /// workdir root. Packages that touch the filesystem (shell,

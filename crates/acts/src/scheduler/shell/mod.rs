@@ -49,9 +49,11 @@ use crate::{
             },
             model::{
                 clock::{Clock, SystemClock},
+                effect::EffectKey,
                 model_graph::NodeId,
                 operation::{
-                    ClaimToken, OperationEvent, OperationId, OperationKind, OperationState,
+                    ClaimToken, OperationEvent, OperationId, OperationKind, OperationRecord,
+                    OperationState,
                 },
                 task_graph::TaskId,
                 transition_plan::{
@@ -131,6 +133,18 @@ const LEASE_MS: i64 = 60_000;
 const ACTION_ATTEMPTS: usize = 8;
 const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
+
+/// What recovery could prove about one `EffectUnknown` operation (A1c).
+enum EffectReconcile {
+    /// The executor observed the effect applied; the plan was replayed.
+    Applied,
+    /// The executor observed it not applied and the effect is idempotent;
+    /// the operation is back in the retry queue.
+    Retried,
+    /// Nothing could be proven (or the effect is not idempotent): a human
+    /// must reconcile it.
+    Manual,
+}
 
 /// The fence one delivery attempt uses. The normal path applies it only in
 /// memory before its batch confirmation; the retry pass persists it first, so
@@ -871,18 +885,30 @@ impl KernelHost {
                 _ = ticker.tick() => {
                     let now = SystemClock.now_ms();
                     match self.recover(now).await {
-                        Ok(report) if !report.reconciliation_required.is_empty() => {
-                            // An operation whose effect outcome is unknown is
-                            // never re-driven automatically (`ManualReconciliation`),
-                            // so the run that owns it stops here. Nothing else
-                            // reports it: without this line a stranded run is
-                            // silent.
-                            tracing::warn!(
-                                operations = ?report.reconciliation_required,
-                                "kernel recovery needs manual reconciliation for these operations; the runs that own them will not settle on their own"
-                            );
+                        Ok(report) => {
+                            if !report.reconciliation_required.is_empty() {
+                                // An operation whose effect outcome could not
+                                // be proven (no observation, a non-idempotent
+                                // effect, or a failed replay) is never
+                                // re-driven automatically (`ManualReconciliation`),
+                                // so the run that owns it stops here. Nothing
+                                // else reports it: without this line a
+                                // stranded run is silent.
+                                tracing::warn!(
+                                    operations = ?report.reconciliation_required,
+                                    "kernel recovery needs manual reconciliation for these operations; the runs that own them will not settle on their own"
+                                );
+                            }
+                            if !report.effect_applied.is_empty()
+                                || !report.effect_retried.is_empty()
+                            {
+                                tracing::info!(
+                                    applied = ?report.effect_applied,
+                                    retried = ?report.effect_retried,
+                                    "kernel recovery reconciled unknown effects from executor observations"
+                                );
+                            }
                         }
-                        Ok(_) => {}
                         Err(error) => tracing::warn!(error = %error, "kernel recovery scan failed"),
                     }
                     if let Err(error) = self.drive_ready(now, PAGE_SIZE).await {
@@ -2048,7 +2074,6 @@ impl KernelHost {
         self.processes.load(process_id).await.map_err(runtime)
     }
 
-    #[cfg(test)]
     pub(crate) async fn snapshot(
         &self,
         process_id: &str,
@@ -2121,6 +2146,199 @@ impl KernelHost {
             .snapshot(process_id)
             .await?
             .is_some_and(|snapshot| run_settled(&snapshot)))
+    }
+
+    /// Reconcile one `EffectUnknown` operation from the executor's own
+    /// observation (A1c).
+    ///
+    /// The order is the protocol: ask the executor by the operation's stable
+    /// effect key, then
+    /// - `Applied`/`Failed` ⇒ replay the plan without running the effect;
+    /// - `NotApplied` + a declared-idempotent effect ⇒ put the operation back
+    ///   in the ready queue under the same key;
+    /// - anything else ⇒ leave it for a human (never wake it).
+    async fn reconcile_unknown_effect(
+        &self,
+        operation: &OperationRecord,
+    ) -> Result<EffectReconcile> {
+        if operation.kind != OperationKind::ApplyAction
+            || !matches!(operation.state, OperationState::EffectUnknown { .. })
+        {
+            return Ok(EffectReconcile::Manual);
+        }
+        let Some(loaded) = self.load(&operation.id.process_id).await? else {
+            return Ok(EffectReconcile::Manual);
+        };
+        let Some(task) = loaded.snapshot.tasks.get(&operation.id.task) else {
+            return Ok(EffectReconcile::Manual);
+        };
+        let model_node = task.model_node.clone();
+        let Some((runner, request)) =
+            self.step_effect(&loaded.snapshot, &operation.id.task, &model_node)?
+        else {
+            return Ok(EffectReconcile::Manual);
+        };
+        let key = EffectKey::of(&operation.id);
+        let observation = match runner.observe(&key).await {
+            Ok(observation) => observation,
+            Err(error) => {
+                tracing::warn!(
+                    operation = ?operation.id,
+                    error = %error,
+                    "querying the effect observation failed; manual reconciliation still owns the operation"
+                );
+                return Ok(EffectReconcile::Manual);
+            }
+        };
+        match observation {
+            observation @ (effects::EffectObservation::Applied(_)
+            | effects::EffectObservation::Failed(_)) => {
+                match self
+                    .converge_observed_effect(&operation.id, observation)
+                    .await
+                {
+                    Ok(true) => Ok(EffectReconcile::Applied),
+                    Ok(false) => Ok(EffectReconcile::Manual),
+                    Err(error) => {
+                        tracing::warn!(
+                            operation = ?operation.id,
+                            error = %error,
+                            "replaying an observed effect failed; the operation stays unknown"
+                        );
+                        Ok(EffectReconcile::Manual)
+                    }
+                }
+            }
+            effects::EffectObservation::NotApplied => {
+                // Re-running can only be safe when the effect itself is
+                // provably idempotent; the executor keeps the same key, so a
+                // duplicate delivery is deduplicated on its side.
+                if !runner.idempotent(&request) {
+                    return Ok(EffectReconcile::Manual);
+                }
+                match self.retry_unknown_effect(operation).await {
+                    Ok(true) => Ok(EffectReconcile::Retried),
+                    Ok(false) => Ok(EffectReconcile::Manual),
+                    Err(error) => {
+                        tracing::warn!(
+                            operation = ?operation.id,
+                            error = %error,
+                            "re-queuing an idempotent effect failed; the next scan retries"
+                        );
+                        Ok(EffectReconcile::Manual)
+                    }
+                }
+            }
+            effects::EffectObservation::Unknown => Ok(EffectReconcile::Manual),
+        }
+    }
+
+    /// The unknown effects of one run, in operation order (A1c).
+    pub(crate) async fn effect_unknowns(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<crate::engine::EffectUnknown>> {
+        let Some(snapshot) = self.snapshot(process_id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut unknowns = snapshot
+            .operations
+            .values()
+            .filter_map(|record| match record.state {
+                OperationState::EffectUnknown { attempt } => Some(crate::engine::EffectUnknown {
+                    pid: process_id.to_string(),
+                    tid: record.id.task.wire(process_id),
+                    sequence: record.id.sequence,
+                    key: EffectKey::of(&record.id).wire(),
+                    attempt,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        unknowns.sort_by(|left, right| {
+            left.sequence
+                .cmp(&right.sequence)
+                .then_with(|| left.tid.cmp(&right.tid))
+        });
+        Ok(unknowns)
+    }
+
+    /// Resolve one unknown effect by its stable key (A1c).
+    pub(crate) async fn resolve_effect_by_key(
+        &self,
+        process_id: &str,
+        key: &str,
+        resolution: crate::engine::EffectResolution,
+    ) -> Result<()> {
+        let snapshot = self
+            .snapshot(process_id)
+            .await?
+            .ok_or_else(|| ActError::Runtime(format!("aggregate {process_id} not found")))?;
+        let operation = snapshot
+            .operations
+            .values()
+            .find(|record| EffectKey::of(&record.id).wire() == key)
+            .map(|record| record.id.clone())
+            .ok_or_else(|| {
+                ActError::Runtime(format!(
+                    "no operation with effect key {key:?} in run {process_id}"
+                ))
+            })?;
+        self.resolve_effect(&operation, resolution).await
+    }
+
+    /// The operator's durable decision for one `EffectUnknown` operation
+    /// (A1c): replay it as applied (with the outputs the operator captured),
+    /// or prove it never ran so it may be retried.
+    pub(crate) async fn resolve_effect(
+        &self,
+        id: &OperationId,
+        resolution: crate::engine::EffectResolution,
+    ) -> Result<()> {
+        let Some(loaded) = self.load(&id.process_id).await? else {
+            return Err(ActError::Runtime(format!(
+                "aggregate {} not found",
+                id.process_id
+            )));
+        };
+        let record = loaded
+            .snapshot
+            .operations
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ActError::Runtime(format!("operation {id:?} not found")))?;
+        if !matches!(record.state, OperationState::EffectUnknown { .. }) {
+            return Err(ActError::Runtime(format!(
+                "operation {id:?} is {:?}, not an unknown effect",
+                record.state
+            )));
+        }
+        match resolution {
+            crate::engine::EffectResolution::Applied { outputs } => {
+                let applied = self
+                    .converge_observed_effect(
+                        id,
+                        effects::EffectObservation::Applied(effects::EffectOutcome::from_outputs(
+                            outputs,
+                        )),
+                    )
+                    .await?;
+                if !applied {
+                    return Err(ActError::Runtime(format!(
+                        "operation {id:?} is no longer reconcilable"
+                    )));
+                }
+                Ok(())
+            }
+            crate::engine::EffectResolution::NotApplied => {
+                if !self.retry_unknown_effect(&record).await? {
+                    return Err(ActError::Runtime(format!(
+                        "operation {id:?} is no longer reconcilable"
+                    )));
+                }
+                Ok(())
+            }
+        }
     }
 
     /// One driver tick for the test suites: the ready queue first, then
@@ -2203,7 +2421,25 @@ impl KernelHost {
                                     self.wake(&reclaimed.id);
                                 }
                                 OperationState::EffectUnknown { .. } => {
-                                    report.reconciliation_required.push(reclaimed.id);
+                                    match self.reconcile_unknown_effect(&reclaimed).await {
+                                        Ok(EffectReconcile::Applied) => {
+                                            report.effect_applied.push(reclaimed.id)
+                                        }
+                                        Ok(EffectReconcile::Retried) => {
+                                            report.effect_retried.push(reclaimed.id)
+                                        }
+                                        Ok(EffectReconcile::Manual) => {
+                                            report.reconciliation_required.push(reclaimed.id)
+                                        }
+                                        Err(error) => {
+                                            tracing::debug!(
+                                                operation = ?reclaimed.id,
+                                                error = %error,
+                                                "effect observation reconciliation failed; next scan retries"
+                                            );
+                                            report.reconciliation_required.push(reclaimed.id);
+                                        }
+                                    }
                                 }
                                 _ => {}
                             },
@@ -2234,7 +2470,25 @@ impl KernelHost {
                         }
                     }
                     RecoveryDisposition::ManualReconciliation => {
-                        report.reconciliation_required.push(operation.id);
+                        match self.reconcile_unknown_effect(&operation).await {
+                            Ok(EffectReconcile::Applied) => {
+                                report.effect_applied.push(operation.id)
+                            }
+                            Ok(EffectReconcile::Retried) => {
+                                report.effect_retried.push(operation.id)
+                            }
+                            Ok(EffectReconcile::Manual) => {
+                                report.reconciliation_required.push(operation.id)
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    operation = ?operation.id,
+                                    error = %error,
+                                    "effect observation reconciliation failed; next scan retries"
+                                );
+                                report.reconciliation_required.push(operation.id);
+                            }
+                        }
                     }
                     RecoveryDisposition::IgnoreTerminal => {}
                 }

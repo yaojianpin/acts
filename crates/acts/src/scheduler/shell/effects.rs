@@ -5,10 +5,12 @@
 //! contract the kernel's own tests use); the serving host has
 //! [`PackageEffectRunner`] attached, which executes the step's package for
 //! real and folds its outputs into the same atomic commit that completes the
-//! execution. The contract is the legacy
-//! engine's own: the effect runs before the state commits (at-least-once —
-//! a crash between effect and commit re-runs the package on recovery,
-//! exactly like the legacy `exec` → persist ordering).
+//! execution. The effect runs before the state commits, exactly like the
+//! legacy `exec` → persist ordering, but it is **not** blindly re-run when
+//! that commit is lost: A1a turns the operation `EffectUnknown`, and A1c
+//! lets only the executor's observation decide it. The executor receives the
+//! stable [`EffectKey`] of the operation, so a retry, replan or restart can
+//! present the same idempotency token instead of a fresh random one.
 //!
 //! The runner drives the package through a *headless* scope: a bare
 //! in-memory [`Process`] over the declaring model with one task on the
@@ -21,8 +23,10 @@ use crate::{
     ActRunAs, Result, Vars,
     scheduler::{
         Runtime,
+        core::model::effect::EffectKey,
         shell::{Context, Process, Task},
     },
+    utils::consts,
 };
 use std::sync::Arc;
 
@@ -51,6 +55,7 @@ pub(crate) struct ResolvedEffect {
 
 /// What one package effect left behind: the values the host folds into the
 /// same atomic commit that completes the execution.
+#[derive(Clone, Debug)]
 pub(crate) struct EffectOutcome {
     /// The package's returned outputs — the legacy
     /// `task.update_data(&vars)`, written to the acting scope.
@@ -63,6 +68,32 @@ pub(crate) struct EffectOutcome {
     /// into the run's durable env map, so every later task of the run reads
     /// it as `$env.X`.
     pub(crate) env: Vec<(String, serde_json::Value)>,
+}
+
+/// What an executor can prove about one effect key (A1c).
+///
+/// The observation is the executor's own durable fact, not the aggregate's:
+/// the host asks it when an `EffectUnknown` operation is recovered and only
+/// lets the proof decide the operation's fate. `Unknown` (the default for an
+/// executor that does not keep observations) is always safe — it leaves the
+/// operation for manual reconciliation.
+// `Failed`/`NotApplied` are the executor-facing vocabulary: an attached
+// runner (in-tree or an embedder's) is the only constructor, and the default
+// `observe` answers `Unknown`. The host consumes all four variants, so the
+// lint would flag a vocabulary that is used by construction.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) enum EffectObservation {
+    /// The effect ran and produced this outcome; recovery re-plans it without
+    /// running it again.
+    Applied(EffectOutcome),
+    /// The effect ran and failed with this message; recovery takes the
+    /// failure path without running it again.
+    Failed(String),
+    /// The executor can prove the effect did not run.
+    NotApplied,
+    /// The executor cannot prove either way.
+    Unknown,
 }
 
 /// Runs one package effect. Attach with
@@ -78,7 +109,27 @@ pub(crate) trait EffectRunner: Send + Sync {
 
     /// The package's work: a Func package executes (an Irq/Msg package has
     /// none). The outcome carries the values to fold into the operation's commit.
-    async fn run(&self, request: EffectRequest) -> Result<EffectOutcome>;
+    ///
+    /// `key` is the stable identity of this effect (see [`EffectKey`]); an
+    /// executor that forwards it to an external system gets the same token on
+    /// every retry, replan and restart. Reusing a key is the executor's
+    /// deduplication contract, not a new one: the host never mints a second
+    /// key for one operation.
+    async fn run(&self, request: EffectRequest, key: EffectKey) -> Result<EffectOutcome>;
+
+    /// Whether executing this effect twice under the same key is provably
+    /// harmless. Only such an effect may be re-queued after an executor
+    /// observation proves it did not run. The default is "not provable".
+    fn idempotent(&self, _request: &EffectRequest) -> bool {
+        false
+    }
+
+    /// The executor's own observation for `key`. A runner that does not keep
+    /// one answers [`EffectObservation::Unknown`], which keeps the operation in
+    /// manual reconciliation.
+    async fn observe(&self, _key: &EffectKey) -> Result<EffectObservation> {
+        Ok(EffectObservation::Unknown)
+    }
 }
 
 /// Runs real packages through the engine's registry and a headless scope.
@@ -122,7 +173,7 @@ impl EffectRunner for PackageEffectRunner {
         })
     }
 
-    async fn run(&self, request: EffectRequest) -> Result<EffectOutcome> {
+    async fn run(&self, request: EffectRequest, key: EffectKey) -> Result<EffectOutcome> {
         let definition = self.runtime.package_definition(&request.package).await?;
         // Every `run_as` prepares the act's scope first — the legacy act's own
         // `run()`: seed its vars and seal the snapshot data its target
@@ -132,6 +183,11 @@ impl EffectRunner for PackageEffectRunner {
         // legacy engine prepared before it dispatched on `run_as` too, so an
         // Irq act whose seal is refused failed instead of waiting forever.
         let (process, task, ctx) = self.headless(&request)?;
+        // The stable effect identity travels into the package's own process
+        // env under a private key: `Context::effect_key` answers it, the
+        // workflow's `$env` proxy refuses it, and the write-back below filters
+        // it out (`is_private_key`), so it never becomes durable run data.
+        ctx.set_env(consts::EFFECT_KEY, key.wire());
         ctx.prepare().await?;
         if definition.run_as() != ActRunAs::Func {
             // The package itself only executes for Func: Irq waits for the
@@ -175,12 +231,33 @@ impl EffectRunner for PackageEffectRunner {
             env,
         })
     }
+
+    fn idempotent(&self, request: &EffectRequest) -> bool {
+        // The declaration is the package registration's, next to its
+        // `run_as`: a package opts in only when executing it twice with the
+        // same key is provably harmless.
+        self.runtime
+            .package()
+            .get(&request.package)
+            .is_some_and(|register| (register.idempotent)())
+    }
 }
 
 impl EffectOutcome {
     pub(crate) fn empty() -> Self {
         Self {
             outputs: None,
+            data: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    /// A manually reconciled applied effect: the operator proved the external
+    /// work happened, but the package's returned values were not captured.
+    /// Only the declared outputs can be supplied; task/env deltas are empty.
+    pub(crate) fn from_outputs(outputs: Vars) -> Self {
+        Self {
+            outputs: Some(outputs),
             data: Vec::new(),
             env: Vec::new(),
         }

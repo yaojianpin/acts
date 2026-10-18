@@ -583,6 +583,480 @@ async fn a_package_effect_that_loses_its_commit_is_marked_unknown() {
     engine.close().await;
 }
 
+// ---- A1c: effect idempotency and observation-driven reconciliation ----
+
+/// One executor observation shared by a host and the test (and, for the
+/// restart case, by a second host over the same store).
+struct ObservedRunner {
+    calls: Arc<AtomicUsize>,
+    keys: Arc<parking_lot::Mutex<Vec<String>>>,
+    observation: Arc<parking_lot::Mutex<effects::EffectObservation>>,
+    /// Whether the runner publishes the applied observation. `false` models
+    /// an executor that keeps none, which must leave the operation manual.
+    record: bool,
+    idempotent: bool,
+}
+
+#[async_trait::async_trait]
+impl effects::EffectRunner for ObservedRunner {
+    async fn resolve(
+        &self,
+        _request: &effects::EffectRequest,
+    ) -> crate::Result<effects::ResolvedEffect> {
+        Ok(effects::ResolvedEffect {
+            params: serde_json::json!({ "n": 2 }),
+            options: serde_json::Value::Null,
+        })
+    }
+
+    async fn run(
+        &self,
+        _request: effects::EffectRequest,
+        key: crate::scheduler::core::model::effect::EffectKey,
+    ) -> crate::Result<effects::EffectOutcome> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.keys.lock().push(key.wire());
+        let outcome =
+            effects::EffectOutcome::from_outputs(crate::Vars::new().with("observed", "once"));
+        if self.record {
+            *self.observation.lock() = effects::EffectObservation::Applied(outcome.clone());
+        }
+        Ok(outcome)
+    }
+
+    fn idempotent(&self, _request: &effects::EffectRequest) -> bool {
+        self.idempotent
+    }
+
+    async fn observe(
+        &self,
+        _key: &crate::scheduler::core::model::effect::EffectKey,
+    ) -> crate::Result<effects::EffectObservation> {
+        Ok(self.observation.lock().clone())
+    }
+}
+
+/// An idempotent executor that deduplicates by the stable key: the host may
+/// invoke it twice after a lost observation, but the external side effect
+/// happens once.
+struct DedupingRunner {
+    attempts: Arc<AtomicUsize>,
+    side_effects: Arc<AtomicUsize>,
+    keys: Arc<parking_lot::Mutex<Vec<String>>>,
+    seen: Arc<parking_lot::Mutex<std::collections::HashMap<String, effects::EffectOutcome>>>,
+}
+
+#[async_trait::async_trait]
+impl effects::EffectRunner for DedupingRunner {
+    async fn resolve(
+        &self,
+        _request: &effects::EffectRequest,
+    ) -> crate::Result<effects::ResolvedEffect> {
+        Ok(effects::ResolvedEffect {
+            params: serde_json::json!({ "n": 2 }),
+            options: serde_json::Value::Null,
+        })
+    }
+
+    async fn run(
+        &self,
+        _request: effects::EffectRequest,
+        key: crate::scheduler::core::model::effect::EffectKey,
+    ) -> crate::Result<effects::EffectOutcome> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        let wire = key.wire();
+        self.keys.lock().push(wire.clone());
+        if let Some(outcome) = self.seen.lock().get(&wire).cloned() {
+            return Ok(outcome);
+        }
+        self.side_effects.fetch_add(1, Ordering::SeqCst);
+        let outcome =
+            effects::EffectOutcome::from_outputs(crate::Vars::new().with("observed", "once"));
+        self.seen.lock().insert(wire, outcome.clone());
+        Ok(outcome)
+    }
+
+    fn idempotent(&self, _request: &effects::EffectRequest) -> bool {
+        true
+    }
+
+    async fn observe(
+        &self,
+        _key: &crate::scheduler::core::model::effect::EffectKey,
+    ) -> crate::Result<effects::EffectObservation> {
+        // The deliberately lost observation: the external duplicate would
+        // have been real unless the executor deduplicates the key.
+        Ok(effects::EffectObservation::NotApplied)
+    }
+}
+
+/// A fresh host over `kv` with the same workflow shape the A1a conflict test
+/// uses: one `uses` step whose `ApplyAction` crosses the effect boundary.
+fn effect_kernel(
+    kv: Arc<dyn KvStore>,
+    runner: Arc<dyn effects::EffectRunner>,
+) -> (Arc<KernelHost>, tokio::sync::mpsc::Receiver<OperationId>) {
+    let (host, wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_effect_runner(runner);
+    (host, wake_rx)
+}
+
+async fn effect_host(
+    kv: Arc<dyn KvStore>,
+    pid: &str,
+    runner: Arc<dyn effects::EffectRunner>,
+) -> (
+    Arc<KernelHost>,
+    tokio::sync::mpsc::Receiver<OperationId>,
+    crate::Engine,
+) {
+    let (host, wake_rx) = effect_kernel(kv, runner);
+    // The step's `run_as` is resolved from the engine's package registry; the
+    // effect itself never reaches the package (the test runner owns it).
+    let engine = crate::Engine::builder().start().await.unwrap();
+    let package = engine.runtime().package().clone();
+    let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-effect-reconcile")
+        .with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_SET,
+                crate::Vars::new().with("n", 2),
+            )
+        });
+    let spec = ProcessSpec::from_workflow(pid, &workflow, &run_as).unwrap();
+    host.start_process(&spec).await.unwrap();
+    (host, wake_rx, engine)
+}
+
+/// Drive the chain until the step's `ApplyAction` operation is the next wake.
+async fn drive_to_step_effect(
+    host: &KernelHost,
+    wake_rx: &mut tokio::sync::mpsc::Receiver<OperationId>,
+    pid: &str,
+) -> OperationId {
+    loop {
+        let id = wake_rx
+            .try_recv()
+            .expect("the chain must expose the step's ApplyAction operation");
+        let snapshot = host.snapshot(pid).await.unwrap().unwrap();
+        let is_step_effect = id.task.node.as_str() == "s1"
+            && snapshot.operations.get(&id).map(|record| record.kind)
+                == Some(crate::scheduler::core::model::operation::OperationKind::ApplyAction);
+        if is_step_effect {
+            return id;
+        }
+        host.execute_one(&id).await.unwrap();
+    }
+}
+
+/// Run `apply` to its plan commit and lose that commit: the effect has run,
+/// the aggregate did not move.
+async fn lose_the_effect_commit(
+    host: &KernelHost,
+    stored: &Arc<ConflictKv>,
+    apply: &OperationId,
+    pid: &str,
+) {
+    stored.arm(apply.clone());
+    let hop_host = host.clone();
+    let hop_operation = apply.clone();
+    let hop = tokio::spawn(async move { hop_host.execute_one(&hop_operation).await });
+    stored.wait_parked().await;
+
+    let current = host.snapshot(pid).await.unwrap().unwrap();
+    let rival = TransitionPlan {
+        process_id: pid.into(),
+        expected: current.version.clone(),
+        task_creates: Vec::new(),
+        state_changes: Vec::new(),
+        variable_writes: vec![VariableWrite {
+            scope: crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap(),
+            name: "rival.marker".into(),
+            value: "1".into(),
+        }],
+        source_operation: None,
+        operations: Vec::new(),
+        outbox: Vec::new(),
+    };
+    host.processes
+        .commit_transition(&rival, SystemClock.now_ms(), host.timer_poll_ms())
+        .await
+        .unwrap();
+    stored.release();
+
+    let error = hop
+        .await
+        .unwrap()
+        .expect_err("the lost plan commit must surface");
+    assert!(
+        error.to_string().contains("conflict"),
+        "the hop reports the lost compare-and-swap: {error}"
+    );
+    let snapshot = host.snapshot(pid).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[apply].state,
+            OperationState::EffectUnknown { .. }
+        ),
+        "an effect that may have run must not be retried automatically: {:?}",
+        snapshot.operations[apply].state
+    );
+}
+
+/// A1c: an executor observation that proves the effect ran converges the
+/// operation without invoking the effect again. The effect count stays one,
+/// and the run settles.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn an_observed_effect_converges_without_running_it_again() {
+    const PID: &str = "p-effect-observed";
+    let stored = ConflictKv::new(PID);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let runner = Arc::new(ObservedRunner {
+        calls: calls.clone(),
+        keys: keys.clone(),
+        observation,
+        record: true,
+        idempotent: false,
+    });
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx, engine) = effect_host(kv, PID, runner).await;
+    let apply = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+
+    lose_the_effect_commit(&host, &stored, &apply, PID).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the effect ran once");
+
+    let report = host.tick(SystemClock.now_ms()).await.unwrap();
+    assert!(
+        report.effect_applied.contains(&apply),
+        "the applied observation must replay the operation: {report:?}"
+    );
+    assert!(
+        !report.reconciliation_required.contains(&apply),
+        "a proven-applied effect needs no human: {report:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "recovery may not call the effect again"
+    );
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[&apply].state,
+            OperationState::Completed(_)
+        ),
+        "the operation converges to Completed: {:?}",
+        snapshot.operations[&apply].state
+    );
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert!(
+        host.process_completed(PID).await.unwrap(),
+        "the run settles from the observed outcome"
+    );
+    assert_eq!(keys.lock().len(), 1, "one effect key, one execution");
+    engine.close().await;
+}
+
+/// A1c: observation `NotApplied` + a declared-idempotent effect re-queues the
+/// operation; the executor deduplicates the stable key, so the external
+/// side-effect count stays one while the operation runs twice.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn an_idempotent_effect_is_retried_under_the_same_key_and_dedupes() {
+    const PID: &str = "p-effect-idempotent";
+    let stored = ConflictKv::new(PID);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let side_effects = Arc::new(AtomicUsize::new(0));
+    let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let runner = Arc::new(DedupingRunner {
+        attempts: attempts.clone(),
+        side_effects: side_effects.clone(),
+        keys: keys.clone(),
+        seen: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+    });
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx, engine) = effect_host(kv, PID, runner).await;
+    let apply = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+
+    lose_the_effect_commit(&host, &stored, &apply, PID).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+    let report = host.tick(SystemClock.now_ms()).await.unwrap();
+    assert!(
+        report.effect_retried.contains(&apply),
+        "not-applied + idempotent must re-queue: {report:?}"
+    );
+    assert!(
+        !report.reconciliation_required.contains(&apply),
+        "a provably safe retry needs no human: {report:?}"
+    );
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[&apply].state,
+            OperationState::RetryScheduled { attempt: 1 }
+        ),
+        "the not-applied effect returns to the retry queue under its attempt: {:?}",
+        snapshot.operations[&apply].state
+    );
+
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert!(
+        host.process_completed(PID).await.unwrap(),
+        "the retried effect settles the run"
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "the operation ran twice"
+    );
+    assert_eq!(
+        side_effects.load(Ordering::SeqCst),
+        1,
+        "the executor deduplicated the same key: one external effect"
+    );
+    engine.close().await;
+    let keys = keys.lock();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1], "the retry reuses the stable effect key");
+}
+
+/// A1c: an effect with no observation and no idempotency declaration stays
+/// manual across a restart. The operator resolves it `Applied`; the effect is
+/// not called again and the decision is durable.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_non_idempotent_effect_is_manually_reconciled_across_restarts() {
+    const PID: &str = "p-effect-manual";
+    let stored = ConflictKv::new(PID);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let runner = Arc::new(ObservedRunner {
+        calls: calls.clone(),
+        keys: keys.clone(),
+        observation,
+        record: false,
+        idempotent: false,
+    });
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx, engine) = effect_host(kv.clone(), PID, runner.clone()).await;
+    let apply = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+    lose_the_effect_commit(&host, &stored, &apply, PID).await;
+
+    let report = host.tick(SystemClock.now_ms()).await.unwrap();
+    assert!(
+        report.reconciliation_required.contains(&apply),
+        "an unprovable effect stays manual: {report:?}"
+    );
+    assert!(report.effect_applied.is_empty() && report.effect_retried.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // The same durable key is visible after a restart, before any decision.
+    let (restarted, mut restarted_wake) = effect_kernel(kv.clone(), runner.clone());
+    // A restart must not start the same pid again; the aggregate is loaded.
+    assert!(restarted.exists(PID).await.unwrap());
+    let unknowns = restarted.effect_unknowns(PID).await.unwrap();
+    assert_eq!(unknowns.len(), 1, "one unknown effect: {unknowns:?}");
+    assert_eq!(unknowns[0].sequence, apply.sequence);
+    assert_eq!(
+        unknowns[0].key,
+        crate::scheduler::core::model::effect::EffectKey::of(&apply).wire(),
+        "the key is rebuilt from the durable operation identity"
+    );
+    assert_eq!(
+        unknowns[0].key,
+        keys.lock().first().cloned().unwrap(),
+        "the executor saw the same key the API exposes"
+    );
+
+    restarted
+        .resolve_effect_by_key(
+            PID,
+            &unknowns[0].key,
+            crate::EffectResolution::Applied {
+                outputs: crate::Vars::new().with("manual", "applied"),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "manual applied resolution may not call the effect again"
+    );
+    restarted
+        .run_until_quiescent(&mut restarted_wake, 200)
+        .await
+        .unwrap();
+    assert!(
+        restarted.process_completed(PID).await.unwrap(),
+        "the manual applied decision settles the run"
+    );
+    assert!(
+        restarted.effect_unknowns(PID).await.unwrap().is_empty(),
+        "the durable decision clears the unknown state"
+    );
+
+    // A third host over the same store reads the committed outcome: the
+    // decision is durable, not process-local.
+    let (verified, _) = effect_kernel(kv.clone(), runner);
+    let snapshot = verified.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[&apply].state,
+            OperationState::Completed(_)
+        ),
+        "the resolved operation stays Completed after a restart: {:?}",
+        snapshot.operations[&apply].state
+    );
+    assert!(verified.effect_unknowns(PID).await.unwrap().is_empty());
+    engine.close().await;
+}
+
+/// A1c: the operator may prove a non-idempotent effect never ran; the
+/// operation returns to the retry queue and the effect runs again. This is a
+/// human decision, not an automatic one.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_non_idempotent_effect_can_be_resolved_not_applied() {
+    const PID: &str = "p-effect-not-applied";
+    let stored = ConflictKv::new(PID);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let runner = Arc::new(ObservedRunner {
+        calls: calls.clone(),
+        keys: keys.clone(),
+        observation,
+        record: false,
+        idempotent: false,
+    });
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx, engine) = effect_host(kv, PID, runner).await;
+    let apply = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+    lose_the_effect_commit(&host, &stored, &apply, PID).await;
+
+    let unknowns = host.effect_unknowns(PID).await.unwrap();
+    host.resolve_effect_by_key(PID, &unknowns[0].key, crate::EffectResolution::NotApplied)
+        .await
+        .unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert!(
+        host.process_completed(PID).await.unwrap(),
+        "a not-applied decision re-runs and settles the operation"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "the effect ran again");
+    engine.close().await;
+    let keys = keys.lock();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1], "the retry kept the stable key");
+}
+
 /// The slot cap (`Config::cache_cap`): with one slot the first run owns it, the
 /// runs started behind it park, and each freed slot admits the parked run that
 /// has waited longest (`__created` ascending — the legacy parked row's
@@ -1573,8 +2047,16 @@ async fn effect_write_back_folds_into_the_process() {
             _params: &serde_json::Value,
         ) -> crate::Result<Option<crate::Vars>> {
             ctx.set_env("GREETING", "hi");
-            ctx.task()
-                .update_data(&crate::Vars::new().with("written", 7));
+            // A1c: the package sees the stable operation-derived key, and the
+            // private carrier never becomes durable run data (asserted below).
+            let effect_key = ctx
+                .effect_key()
+                .expect("a package effect carries its stable key");
+            ctx.task().update_data(
+                &crate::Vars::new()
+                    .with("written", 7)
+                    .with("effect_key", effect_key),
+            );
             Ok(Some(crate::Vars::new().with("output", 1)))
         }
     }
@@ -1676,6 +2158,21 @@ async fn effect_write_back_folds_into_the_process() {
     };
     assert_eq!(var("s1", "output").as_deref(), Some("1"));
     assert_eq!(var("s1", "written").as_deref(), Some("7"));
+    // The package saw the key of the ApplyAction operation that ran it; the
+    // key is the durable operation identity, not a random per-call token.
+    let apply = snapshot
+        .operations
+        .values()
+        .find(|record| {
+            record.kind == crate::scheduler::core::model::operation::OperationKind::ApplyAction
+                && record.id.task.node.as_str() == "s1"
+        })
+        .expect("the step's effect operation");
+    let expected = format!(
+        "\"{}\"",
+        crate::scheduler::core::model::effect::EffectKey::of(&apply.id).wire()
+    );
+    assert_eq!(var("s1", "effect_key").as_deref(), Some(expected.as_str()));
     // The env the package set is the run's, read back by the next task.
     assert_eq!(var("s2", "seen").as_deref(), Some("\"hi\""));
     // …and it is projected into the run's row, exactly like the legacy
@@ -1689,6 +2186,11 @@ async fn effect_write_back_folds_into_the_process() {
     assert!(
         row.env.contains("\"GREETING\":\"hi\""),
         "the proc env must carry the package env: {}",
+        row.env
+    );
+    assert!(
+        !row.env.contains(crate::utils::consts::EFFECT_KEY),
+        "the effect key is a private carrier, not durable run data: {}",
         row.env
     );
 

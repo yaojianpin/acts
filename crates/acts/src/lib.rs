@@ -39,7 +39,7 @@ pub use acl::{
 };
 pub use builder::EngineBuilder;
 pub use config::{Config, ConfigLog, DEFAULT_LOG_MAX_FILES, MissingParamAction};
-pub use engine::Engine;
+pub use engine::{EffectResolution, EffectUnknown, Engine};
 pub use env::ActUserVar;
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};

@@ -265,4 +265,78 @@ impl KernelHost {
             .await?;
         Ok(true)
     }
+
+    /// Converge an `EffectUnknown` operation from an executor observation
+    /// that proves the effect ran (A1c): re-plan the operation from the
+    /// observed outcome and commit it **without** calling the effect again.
+    ///
+    /// Returns `Ok(false)` when the observation is not an applied proof or the
+    /// operation is no longer claimable. The dispatch is marked as "effect
+    /// started" even though this attempt did not run it: a lost commit must
+    /// return the operation to `EffectUnknown`, never release it for an
+    /// automatic re-drive that would run the effect a second time.
+    pub(in crate::scheduler::shell) async fn converge_observed_effect(
+        &self,
+        id: &OperationId,
+        observation: effects::EffectObservation,
+    ) -> Result<bool> {
+        let effect = match observation {
+            effects::EffectObservation::Applied(outcome) => {
+                action::Effect::Completed(Some(outcome))
+            }
+            effects::EffectObservation::Failed(message) => {
+                action::Effect::Failed(ActError::Package(message))
+            }
+            effects::EffectObservation::NotApplied | effects::EffectObservation::Unknown => {
+                return Ok(false);
+            }
+        };
+        let Some(claimed) = self.prepare_reconciliation(id).await? else {
+            return Ok(false);
+        };
+        let operation = claimed.operation();
+        let plan = match ApplyAction
+            .next(self, &operation, Outcome::Effect(effect))
+            .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                if let Err(mark_error) = self.mark_effect_unknown(&claimed).await {
+                    tracing::warn!(
+                        id = ?claimed.id,
+                        error = %mark_error,
+                        "marking an observed effect's failed replan as unknown failed; its lease expiry will decide it"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        self.dispatch(&claimed, plan, Projection::Touched, true)
+            .await?;
+        Ok(true)
+    }
+
+    /// Return an `EffectUnknown` operation to the retry queue under its own
+    /// attempt. Only called for a provably idempotent effect whose executor
+    /// observation says it did not run, or for an operator's explicit
+    /// "not applied" resolution. The operation identity — and therefore its
+    /// effect key — does not change.
+    pub(in crate::scheduler::shell) async fn retry_unknown_effect(
+        &self,
+        operation: &crate::scheduler::core::model::operation::OperationRecord,
+    ) -> Result<bool> {
+        let OperationState::EffectUnknown { attempt } = &operation.state else {
+            return Ok(false);
+        };
+        let attempt = *attempt;
+        let (evolved, _) = self
+            .operation_event(
+                &operation.id,
+                operation.revision,
+                OperationEvent::ResolveEffectNotApplied { attempt },
+            )
+            .await?;
+        self.wake(&evolved.id);
+        Ok(true)
+    }
 }

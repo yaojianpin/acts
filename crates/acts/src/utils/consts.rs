@@ -37,6 +37,12 @@ pub const ACT_RUN_AS_MSG: &str = "acts.core.msg";
 /// workflow can neither read nor forge its own scope authority.
 pub const PROC_OWNER: &str = "__owner";
 
+/// Process env key holding the stable idempotency key of the effect currently
+/// executing. Private (see [`is_private_key`]): the workflow's `$env` proxy
+/// refuses it and the effect's write-back filters it, so it never becomes
+/// durable run data. Packages read it through `Context::effect_key`.
+pub const EFFECT_KEY: &str = "__effect_key";
+
 /// Process env key holding the process's own directory
 /// (`<workdir>/<pid>`). Private like [`PROC_OWNER`]: the JS `$env`
 /// proxy refuses it, and packages read it through `Context::workdir`.

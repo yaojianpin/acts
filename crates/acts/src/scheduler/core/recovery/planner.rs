@@ -52,6 +52,12 @@ pub(crate) struct RecoveryReport {
     pub(crate) ready_repaired: Vec<OperationId>,
     pub(crate) awaiting_owner: Vec<OperationId>,
     pub(crate) finalized: Vec<OperationId>,
+    /// `EffectUnknown` operations whose executor observation proved the
+    /// effect ran; the plan was replayed without calling the effect again.
+    pub(crate) effect_applied: Vec<OperationId>,
+    /// `EffectUnknown` operations whose observation proved the effect did not
+    /// run and whose effect is idempotent; they are back in the ready queue.
+    pub(crate) effect_retried: Vec<OperationId>,
     pub(crate) reconciliation_required: Vec<OperationId>,
     pub(crate) wake_failures: Vec<(OperationId, WakeError)>,
 }

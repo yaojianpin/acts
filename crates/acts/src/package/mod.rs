@@ -70,6 +70,20 @@ pub trait ActPackage: Send + Sync {
     fn definition() -> ActPackageDefinition
     where
         Self: Sized;
+    /// Whether executing this package twice with the same effect key is
+    /// provably harmless.
+    ///
+    /// The declaration is the package author's assertion, and the kernel only
+    /// uses it for the A1c recovery path: an executor observation that proves
+    /// the effect did not run may re-queue a *declared idempotent* effect.
+    /// The default is "not provable", so a package that does not answer keeps
+    /// every ambiguous effect in manual reconciliation.
+    fn idempotent() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
     /// executing with task context
     async fn execute(&self, _ctx: &Context, _params: &serde_json::Value) -> Result<Option<Vars>> {
         Ok(None)
@@ -197,6 +211,8 @@ pub struct ActResource {
 pub struct ActPackageRegister {
     pub meta: fn() -> ActPackageDefinition,
     pub create: fn(config: &Config) -> Result<Arc<dyn ActPackage>>,
+    /// The package's own A1c idempotency declaration (`ActPackage::idempotent`).
+    pub idempotent: fn() -> bool,
 }
 
 impl ActPackageRegister {
@@ -206,6 +222,7 @@ impl ActPackageRegister {
     {
         Self {
             meta: T::definition,
+            idempotent: T::idempotent,
             create: (|config: &Config| {
                 // let meta = T::definition();
                 // jsonschema::validate(&meta.schema, params).map_err(|err| {

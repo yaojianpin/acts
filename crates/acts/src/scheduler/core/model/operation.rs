@@ -104,15 +104,16 @@ pub(crate) struct CommitToken {
 
 /// The durable lifecycle events one operation accepts.
 ///
-/// REGISTERED EXCEPTION (KERNEL_CUTOVER_NOTES.md §10, P4a): `RenewClaim`,
-/// `MarkEffectUnknown`, `Quarantine`, `ReleaseQuarantine` and `Supersede` are
+/// `MarkEffectUnknown` is emitted at the external-effect boundary (A1a), and
+/// `ResolveEffectNotApplied` is emitted by recovery when an executor's
+/// observation proves the effect did not run and the effect is idempotent
+/// (A1c). `RenewClaim`, `Quarantine`, `ReleaseQuarantine` and `Supersede` are
 /// transitions of the operation lifecycle `RecoveryPlanner` classifies and
 /// `snapshot_codec` persists (the states they produce are part of the durable
-/// V2 format, tags 5–7), but no in-tree caller emits them today: the kernel's
-/// operation and recovery paths use `Claim`/`PrepareCommit`/`Commit`/`Complete`/
-/// `ScheduleRetry`/`ReleaseExpiredClaim` only. Kept as the lifecycle's stated
-/// vocabulary rather than deleted, because deleting the events would delete
-/// the states they produce and change the persisted format.
+/// V2 format, tags 5–7), but no in-tree caller emits them today. Kept as the
+/// lifecycle's stated vocabulary rather than deleted, because deleting the
+/// events would delete the states they produce and change the persisted
+/// format.
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OperationEvent {
@@ -141,6 +142,14 @@ pub(crate) enum OperationEvent {
     },
     MarkEffectUnknown {
         claim: ClaimToken,
+        attempt: u32,
+    },
+    /// An operator/executor observation proved that the effect of an
+    /// `EffectUnknown` operation never ran. Only a provably idempotent effect
+    /// may take this path automatically; the record returns to the retry
+    /// queue under the same operation identity (and therefore the same effect
+    /// key).
+    ResolveEffectNotApplied {
         attempt: u32,
     },
     Quarantine {
@@ -268,6 +277,15 @@ impl OperationRecord {
                 if current == &claim && attempt > 0 && u64::from(attempt) == current.fence =>
             {
                 S::EffectUnknown { attempt }
+            }
+
+            // The proof that the effect never ran clears the unknown state
+            // without lowering the attempt: the next claim is fenced at
+            // `attempt + 1`, exactly like a lease-expiry retry.
+            (S::EffectUnknown { attempt: current }, E::ResolveEffectNotApplied { attempt })
+                if current == &attempt && attempt > 0 =>
+            {
+                S::RetryScheduled { attempt }
             }
 
             // Claimed means the handler has not crossed the effect boundary yet,
@@ -816,6 +834,49 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn a_proven_not_applied_effect_returns_to_the_retry_queue() {
+        let claim = ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 3,
+            lease_until_ms: i64::MAX,
+            heartbeat_revision: 0,
+        };
+        let unknown = OperationRecord::pending(id(), OperationKind::ApplyAction)
+            .evolve(OperationEvent::ClaimAndPrepare(claim.clone()))
+            .unwrap()
+            .evolve(OperationEvent::MarkEffectUnknown {
+                claim: claim.clone(),
+                attempt: 3,
+            })
+            .unwrap();
+        assert_eq!(unknown.state, OperationState::EffectUnknown { attempt: 3 });
+        assert!(
+            unknown
+                .clone()
+                .evolve(OperationEvent::ResolveEffectNotApplied { attempt: 2 })
+                .is_err(),
+            "only the unknown attempt may be resolved"
+        );
+        let retried = unknown
+            .evolve(OperationEvent::ResolveEffectNotApplied { attempt: 3 })
+            .unwrap();
+        assert_eq!(retried.state, OperationState::RetryScheduled { attempt: 3 });
+        // The next claim is fenced past the attempt, exactly like a lease
+        // expiry; the operation identity (and its effect key) is unchanged.
+        assert!(retried.evolve(OperationEvent::Claim(claim)).is_err());
+        assert!(
+            retried
+                .evolve(OperationEvent::Claim(ClaimToken {
+                    owner: "runtime-a".into(),
+                    fence: 4,
+                    lease_until_ms: i64::MAX,
+                    heartbeat_revision: 0,
+                }))
+                .is_ok()
+        );
+    }
+
     #[test]
     fn quarantine_requires_current_claim_and_explicit_compensation() {
         let current = claim();
