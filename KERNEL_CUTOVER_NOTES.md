@@ -3602,6 +3602,114 @@ cargo fmt --all -- --check -> OK
 - 不引入跨进程 exactly-once;recovery 的 wake 只是“event 已写 ready record”的 accelerator,
   业务语义由 directive 决定。
 
+### A8 完成(2026-10-18):Admission 分离(execution / effect / recovery / reconciliation / projection)
+
+**任务**:§11 D 的 A8(P1)。把 `Admissions { cap, active, parked }` 的单一额度拆成显式类别;
+`EffectUnknown`/`Quarantined` 的 run 退出 execution 额度;manual reconciliation 不占正常 slot;
+cancel/终态决策在同一 `Decision` 里释放 slot;parked 准入由释放方直接 `admit_run`,tick 只兜底。
+
+**事实与契约(当前准入事实)**
+
+- `Admissions` 原状:一个 `cap`,一个 `active: HashSet<String>`,一个 `parked: BTreeMap<(i64, pid), OperationId>`;
+  `start_process` 用 `reserve` 与决策同锁占位;`place_run` 调 `decision::place`;`dispatch` 在 commit 后
+  用 `Admissions::directive` 构造 `Decision`,再在 `execute_decision` 末尾 `apply`。
+- 原 `decision::place` 只读 `root_state` 与 `run_settled`;因此 root 仍非终态、但只剩
+  `EffectUnknown`/`Quarantined` 的 run 会一直持有 execution slot;manual decision 本身走
+  `Slot::Direct`,不占 slot,但被它占住的 slot 会挡住新 run。
+- `mark_effect_unknown` 只写 operation event,不碰 slot;释放要等下一次 operation 的
+  `prepare → place_run`。客户端终态动作虽然会在 `execute_decision` 里释放,但规则仍只认
+  `run_settled`。
+- `admit_run` 已是释放方驱动(`set_ready_at(now)` + wake);`drive_ready` 的 `set_ready_at(now+tick)`
+  只是兜底。A11 的 `forget_process` 仍通过 `Admissions::abandon` 清掉进程内状态。
+
+**业务规则 vs IO 顺序**
+
+| 事实 | 归属 |
+|---|---|
+| 谁占 execution slot:root 非终态且无 reconciliation 挂起 | Core(`RunFacts::execution_active`) |
+| 何时释放:settled / 终态决策 / `EffectUnknown`/`Quarantined` | Core(`place`) |
+| manual reconciliation 不占 execution slot | Core(`NoSlot`) + Shell(`Slot::Direct`) |
+| parked FIFO 顺序、`__created` 键、队首是谁 | Shell 的集合(规则仍由 Core 给出 Release/Park) |
+| `set_ready_at`、wake、tick cadence、lane | Shell(IO 顺序) |
+| 四类辅助额度的 `active < cap` | Core(`decision::quota`);Shell 的 gate 只计数/等待 |
+
+**Core 协议**
+
+- 新增 `RunFacts { root_state, run_settled, awaiting_reconciliation }`,由 `RunFacts::of(snapshot)` 一次导出;
+  `awaiting_reconciliation` 认 operation 的 `EffectUnknown { .. }` 与 `Quarantined { .. }`。
+  `place(observation, facts)` 的唯一规则:
+  - `Parked → Park`;
+  - `Holding` 且 `!facts.execution_active() → Drive(Release)`(settled 或 quarantine);
+  - `Holding → Keep`;
+  - `Unplaced` 且 root 终态或 quarantine → `Drive(NoSlot)`(不需要/不能用 execution 额度);
+  - 其余按 `concurrency::Admit` 的 cap 规则 `Take`/`Park`。
+- `Decision` 新增 `quarantined: bool`,与 `settlement/lifecycle/admission` 同源;`Decision::committed` 与
+  `Decision::recovered` 对同一 snapshot 给出同一值。
+- 新增 `AdmissionCategory::{Execution, Effect, Recovery, Reconciliation, Projection}` 与
+  `QuotaDirective::{Admit, Wait}`;`decision::quota(cap, active)` 是四类辅助额度的唯一规则(`0` = 无界)。
+
+**Shell 协议**
+
+- `Admissions` 现在保存:execution 的 `cap/active/parked`、一个 `quarantined` gauge,以及
+  effect/recovery/reconciliation/projection 四个 `AdmissionGate`(计数器 + `Notify`)。`directive`
+  只构造 `SlotObservation` 与 `RunFacts`,不再在 Shell 判断业务条件;`apply` 只执行 directive。
+- `mark_effect_unknown` 在 event 成功后立即 `place_run` 该 event 返回的 snapshot:持有槽位的 run
+  因 quarantine 得到 `Release`,Shell 立刻 `admit_run` 队首 —— 不等下一次 operation/tick。
+- `execute_decision` 在应用 admission 前记录 `decision.quarantined`;manual 决策成功后同一路径把
+  gauge 清零并释放已不存在的 quarantine。
+- 四类 gate 接在实际调用点:effect 在 `runner.run` 外(命令 lane 已释放)、recovery 在整个 `recover`
+  pass、reconciliation 在 `resolve_effect`、projection 在 `project`/`project_touched`/`repair_projection`。
+  gate 用 Core 的 `quota` 判断,只有饱和时才等待;execution 与 reconciliation 因此不会互相占用。
+- worker/cancel 的释放顺序不变:`project → lifecycle → outbox 批量 confirm → admission`;释放后的
+  `admit_run` 仍在同一决策内完成。
+- 未改:A4 lane、A5 的行/版本顺序、A1b 的 outbox 顺序、A7 的 `Observed -> RecoveryDecision`、
+  A11 的回收判定与顺序。
+
+**配置与指标**
+
+- `[data]` 新增 `effect_concurrency` / `recovery_concurrency` / `reconciliation_concurrency` /
+  `projection_concurrency`(默认 256/16/16/16,`0` = 无界);`cache_cap` 仍是 execution 的上限。
+  `AdmissionCaps` 由 `KernelHost::new_with_caps` 接收,Runtime 从 `Config` 构造。
+- `AdmissionMetrics { execution: QuotaMetrics, parked, effect, recovery, reconciliation,
+  projection, quarantined_runs }` 由 `KernelHost::admission_metrics()` 暴露;tick 在有积压/隔离时输出
+  `kernel admission` 日志。
+
+**测试**
+
+- Core 新增/改写:`place` 的 Parked/Holding/Unplaced 表;`a_quarantined_run_leaves_the_execution_quota`
+  (Holding + EffectUnknown → Release;Unplaced + 满 cap → NoSlot);`awaiting_reconciliation` 同时认
+  `EffectUnknown` 与 `Quarantined`;辅助额度 `quota` 的 cap/无界边界。
+- Shell 新增 3 条:
+  - `a_quarantined_run_frees_its_slot_and_admits_the_parked_run`:cap=1,effect 丢 commit → run A
+    进 quarantine,A 的 slot 在同一决策释放,B 立即被准入并完成;A 仍为 `EffectUnknown`。
+  - `manual_reconciliation_advances_while_the_execution_quota_is_full`:holder 占唯一 execution slot,
+    `resolve_effect` 的 manual 决策照常提交;execution active 仍为 1,reconciliation permit 归还,
+    `quarantined_runs` 归零。
+  - `a_terminal_cancel_frees_the_slot_and_admits_the_parked_run`:`Abort` 结束唯一 run 的 deciding
+    command 释放 slot 并准入 parked run,不经过 tick。
+- 既有 reliability/A1a/A1b/A1c/A2/A3/A4/A5/A6/A7/A11、action/cancel、outbox/effect 套件保留。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 940 passed, 0 failed, 1 ignored (157.71s)
+cargo test -p acts --lib scheduler::core::decision -> 10 passed
+cargo test -p acts --lib reliability:: -> 65 passed
+cargo test -p acts --lib outbox -> 32 passed
+cargo test -p acts --lib effect -> 28 passed
+cargo test -p acts --lib cancel -> 15 passed
+cargo test -p acts --lib reclaim -> 9 passed
+cargo test -p acts --lib projection -> 9 passed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all -- --check -> OK
+```
+
+**边界**
+
+- 不做 A9 的 durable handle、A10 的调度器拆分;不缩短 tick、不把正常活性转嫁 recovery 扫描。
+- 不改 effect/outbox payload、channel 语义、A5 持久 revision/repair queue、A11 回收。
+- 不引入跨进程 exactly-once;quarantine gauge 只是进程内观测,准入规则仍从 aggregate 推导。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3623,8 +3731,9 @@ cargo fmt --all -- --check -> OK
 > A1c(effect 幂等协议)已完成(§10「A1c 完成」);A3(折叠纯内部 hop)已完成(§10「A3 完成」);
 > A4(每 Process 单写者 command lane)已完成(§10「A4 完成」);A5(projection 版本协议)已完成(§10「A5 完成」);
 > A6(Shell 变薄,Core 输出完整 Decision)已完成(§10「A6 完成」);
-> A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」)。
-> **当前执行项是 A8(Admission 分离;§11 D)**,其后 A9/A10。
+> A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
+> A8(Admission 分离)已完成(§10「A8 完成」)。
+> **当前执行项是 A9(durable run handle;§11 D)**,其后 A10。
 > 第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
@@ -3720,7 +3829,7 @@ cargo fmt --all -- --check -> OK
 | **A5** | projection 正式协议:每行持久化 `source_aggregate_revision`;store-level 条件写;启动增量补投影;repair queue;API lag/强读 aggregate;lifecycle 后置或显式契约 | #5 | P1 | — | **已做(§10「A5 完成」)**。验收:旧投影不能覆盖新投影(store guard + 持久 revision);重启不丢版本(boot catch-up);消息/完成事件消费者只能在行 current 后看到提交;lag/failed/repaired 有指标 |
 | **A6** | Shell 变薄:Core 输出完整 `Decision`(aggregate changes/operations/effect intents/outbox/timers/process status/admission directives);Shell 只做 IO/commit/execute | #6 | P1 | A3/A4/A5 | **已做(§10「A6 完成」)**。验收:`core/decision.rs` 的 `Decision { transition, process_status, settlement, lifecycle, admission }` 由 `Decision::committed` 产出;`run_settled`/`projection_settled`/lifecycle/admission/resume-operation 规则只在 Core;`Admissions`/`report_lifecycle`/`place_run` 只执行 directive;`OperationKind::is_schedulable` 与 enum 同处;Recovery 按 state 分类、Projection 不匹配 kind |
 | **A7** | Recovery 统一成 `RecoverOperation(observed) -> Decision`:恢复层只收集 observed;正常/恢复共用 transition/commit 与 per-pid lane | #7 | P1 | A2/A4 | **已做(§10「A7 完成」)**。验收:`Observed { operation_id, kind, persisted_phase, revision, aggregate_revision, effect_receipt, now_ms }` 是唯一输入;`recover_operation -> RecoveryDecision { directive, command }` 是唯一入口,`RecoveryPlanner::classify` 私有;reclaim/finalize 走 lane + revision guard,`FinalizeCommit` 与正常 `dispatch` 共用 `execute_decision`(project → lifecycle → outbox batch confirm → admission);`EffectUnknown` 仍按 A1c(`Applied`/`Failed` 重放、`NotApplied`+幂等才重试、其余人工);正常/恢复同状态同 Decision |
-| **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | 未做。验收:manual run 不阻塞新 run;cancel 后 slot 立即可用;parked 准入不依赖 tick |
+| **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | **已做(§10「A8 完成」)**。验收:`RunFacts::execution_active`/`place` 在 Core,`EffectUnknown`/`Quarantined` 的 run 立即释放 execution slot;manual 决策走 `Slot::Direct` + reconciliation gate;`mark_effect_unknown` 与终态 client decision 在同一决策里 `admit_run` 队首;五类 cap 各自配置,`AdmissionMetrics` 暴露 execution/parked/effect/recovery/reconciliation/projection/quarantined |
 | **A9** | durable run handle:`start()` 返回可 `wait()` 的 handle;先查终态→订阅→复查;event channel 只做通知;示例改先注册或 `wait()` | #9 | P2 | A1/A5 | 未做。验收:check-subscribe race 不存在;重启后仍可等待 |
 | **A10** | 拆分控制面调度器:timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair 独立 interval/backoff/budget/指标;禁止用统一缩短 tick 解决延迟 | #10 | P2 | A2 | 未做。验收:调整 recovery 频率不影响 timer/outbox;各循环有独立健康/积压指标 |
 | **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index + ready index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | **已做(§10「A11 完成」)**。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删。**pid 存在性只看 aggregate**(行/`ops` 不参与);start 与 cleanup 共用 per-pid 生命周期锁。A5 的完整投影 generation 协议仍未做,本笔以 pid 墓碑收窄清理后的旧投影重写窗口 |
@@ -3746,72 +3855,60 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A8 —— Admission 分离(§11 D,P1)
+# 当前任务:A9 —— Durable run handle(§11 D,P2)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A8 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A8;
-§10「A7 完成」「A6 完成」「A4 完成」「A2 完成」「A1c 完成」「A11 完成」。当前缺口:所有 run 共用
-`Admissions { cap, active, parked }` 一个额度;`decision::place` 只按 root state 与 `run_settled` 判定,
-`cancel` 的释放也依赖下一次 operation 的 admission 检查。`EffectUnknown`/`Quarantined` 的 run 在 root
-仍非终态时继续占用 execution slot,manual reconciliation 会阻塞新 run;parked 的准入仍由 recovery tick
-上的 `set_ready_at` 推动。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A9 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A9;
+§10「A8 完成」「A5 完成」「A1c 完成」。当前缺口:`ProcessExecutor::start` 只返回 `String`(pid),
+完成/失败只通过进程内 `Channel` 事件通知;示例先 `start` 再注册 `on_complete`/`on_error`,
+足够快的 run 可能在订阅前结束,事件丢失且调用方无法补查。
 
-**目标**:把 admission 拆成显式额度与生命周期——**execution**(正常 run)、**effect**(并发外部 effect)、
-**recovery**(异常扫描/命令)、**reconciliation quarantine**(`EffectUnknown`/`Quarantined` 的人工处理)、
-**projection**(行/repair)各自独立;manual run 不占正常 execution slot;cancel 立即释放;
-parked 准入不再依赖 recovery tick。规则的唯一来源仍是 `core/decision.rs` 的纯函数,Shell 只执行 directive。
+**目标**:让 `start()` 返回可 `wait()` 的 durable handle;`wait()` 的顺序固定为
+**先查持久化终态 → 未完成则订阅 → 订阅后再次复查**,事件 channel 只做通知,不是正确性来源;
+重启后仍能对同一 pid 等待并读到终态。示例改为先注册再 start,或直接 `handle.wait()`。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 画清当前准入事实:`Admissions` 的 `cap/active/parked`、`start_process` 的预留、
-     `prepare`/`place_run` 的检查、`dispatch` 的 `apply`、`admit_run` 的 `set_ready_at` + wake、
-     parked 记录的 `__created` 顺序,以及 A11 的 `forget_process`。
-   - 列出哪些是**业务规则**(谁占哪个额度、何时释放、manual 是否占 slot、cancel 的释放时点)、
-     哪些是 **IO 顺序**(in-memory 集合、ready 记录写、wake、tick cadence)。
-   - 定义各类额度与它们的输入(`cap`、当前占用、run 状态/root state、是否 `EffectUnknown`/
-     `Quarantined`);`EffectUnknown` 的 run 必须退出 execution 额度但仍可被 reconciliation 驱动。
-   - `cancel` 的释放必须是该 command 决策的一部分(经 `Decision`),不等待下一次 tick 或 recovery 扫描。
+   - 画清 `Execution`/`ProcessExecutor::start`、`Runtime::start` 与 `Channel::on_*` 的现状:
+     pid 何时持久化、终态在哪里(aggregate/`run_settled`/lifecycle sink)、事件何时发出。
+   - `run_settled` 的判定来源仍是 `core/decision.rs`;handle 不复制状态机。
+   - 定义 handle 的 identity(pid + runtime/store 句柄)与 `wait()` 的返回值
+     (Completed/Errored/Terminated;failed root 的 error facts 复用 lifecycle directive)。
 2. **协议**
-   - `Decision`/`place` 扩展为按类别输出准入 directive(至少 execution 与 reconciliation 两类;
-     effect/recovery/projection 的内部并发额度按实际调用点接线);Shell 的 `Admissions` 只保存各类集合、
-     执行 directive,不再判断业务条件。
-   - parked 的准入由释放方(正常 settle/cancel/manual 转出)直接触发 `admit_run`;tick 只做兜底,
-     不是延迟来源。
-   - manual reconciliation 的驱动路径(`prepare_reconciliation`/`resolve_effect`)不申请 execution slot;
-     其运行不与新 run 的准入争同一额度。
-   - 不改 A4 lane、A5 projection 顺序、A1b outbox 顺序、A7 的 `Observed -> RecoveryDecision` 协议、
-     A11 的回收判定。
-3. **测试**
-   - Core 单测表驱动:execution 满时 manual run 仍可推进;cancel 后 slot 立即归还并 admit 最老的 parked run;
-     parked 在释放时立即准入而不依赖 tick;`EffectUnknown` 的 run 不再计入 execution 占用。
-   - 既有 reliability/A1a/A1b/A1c/A2/A3/A4/A5/A6/A7/A11、action/cancel、outbox/effect 套件绿。
+   - `start()` 返回 `RunHandle`(或 engine/executor 层等价类型);`wait()`:
+     查 aggregate → 未终态则注册一次性通知 → 再查 aggregate;通知只把 waiter 唤醒。
+   - handle 不依赖进程内 `Channel` 存活;重启后由同一个 pid 重新构造 handle 也能等待。
+   - `Channel` 的既有事件语义、outbox/effect 顺序、A4 lane、A5 projection、A11 回收不变。
+3. **测试/示例**
+   - Core/Shell 单测:已完成 run 的 `wait()` 立即返回;start 后立即 `wait()` 不丢终态
+     (含极短 workflow 与订阅前完成);重启后用同一 pid 等待;failed root 返回 error facts。
+   - `examples/actions`、`examples/simple`、`examples/approve` 等改为先注册或 `wait()`。
+   - 既有 reliability/A1*/A2/A3/A4/A5/A6/A7/A8/A11、action/cancel、outbox/effect、channel 套件绿。
 
 **边界**
 
-- 不做 A9 的 durable handle、A10 的调度器拆分;不缩短 tick、不把正常活性转嫁 recovery 扫描;
-- 不改 effect/outbox payload、channel 语义、A5 持久 revision/repair queue、A11 回收;
-- 不引入跨进程 exactly-once。
+- 不做 A10 的调度器拆分;不缩短 tick;不引入跨进程 exactly-once。
+- 不改 effect/outbox payload、channel ack/delivery 语义、A5 持久 revision/repair queue、A11 回收;
+- handle 只是等待语义,不替代 admission/durable ready。
 
 **验收**
 
-- manual reconciliation 不阻塞新 run;`cancel` 后 execution slot 立即可用;
-- parked 准入不依赖 recovery tick;
-- 各额度有独立配置/指标(至少 execution 与 reconciliation),规则只在 Core;
-- `cargo test -p acts --lib --tests` 与 reliability/action/cancel/effect/outbox/A1*/A11 套件绿;
-- 写 §10「A8 完成」,§11 D 状态更新,§12 原地指向下一项(A9)。
+- check-subscribe race 不存在:极短 run 在 `start` 返回前完成也能 `wait()` 到终态;
+- 重启后仍可等待同一 pid;
+- `cargo test -p acts --lib --tests` 与相关 channel/example 编译/套件绿;
+- 写 §10「A9 完成」,§11 D 状态更新,§12 原地指向下一项(A10)。
 
 # 限制与约束
 
-- **先读**:§11 D A8、设计 §3.10 A8、`core/decision.rs`(`AdmissionDirective`/`place`/`SlotObservation`)、
-  `shell/mod.rs`(`Admissions`/`place_run`/`admit_run`/`start_process`/`forget_process`)、
-  `shell/operation/{prepare,dispatch}.rs`(claim 前准入与 dispatch 后 `apply`)、
-  `shell/operation/action.rs`(cancel/back 的决策路径)、`core/commit/command/*`、A7 的
-  `core/recovery/planner.rs`(`prepare_reconciliation` 的驱动路径)。
+- **先读**:§11 D A9、设计 §3.10 A9、`export/executor/process_executor.rs`、
+  `scheduler/runtime.rs`(`start`/lifecycle sink)、`event/channel` 的 `on_complete`/`on_error`、
+  `core/decision.rs`(`run_settled`/`LifecycleDirective`/failed-root error facts)、
+  `shell/mod.rs`(`process_completed`/`report_lifecycle`)。
 - 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-Admission 分类规则 + 立即释放/准入 + 各额度指标 → 更新 §10/§11/§12。
+RunHandle(`start` 返回、`wait()` 查-订阅-复查)+ 示例迁移 + 测试 → 更新 §10/§11/§12。
 ```
 
