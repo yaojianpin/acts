@@ -546,7 +546,7 @@ impl Runtime {
                 })?;
         }
 
-        let proc = Process::new(&proc_id, self);
+        let proc = Process::new(&proc_id);
         proc.load_with_vars(model, &options)?;
         // The process directory root comes from the engine config, never from
         // the request: a caller can neither name the directory nor place a

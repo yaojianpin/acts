@@ -1,6 +1,5 @@
 mod action;
 mod emitter;
-mod extra;
 mod message;
 
 use crate::{ActError, Result};
@@ -8,16 +7,14 @@ pub use action::Action;
 pub(crate) use emitter::ActWorkflowMessageHandle;
 pub use emitter::Emitter;
 pub(crate) use emitter::ProcessGate;
-pub use extra::TaskExtra;
 pub use message::{Message, MessageState};
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 #[derive(Clone)]
-pub struct Event<T, E = ()> {
+pub struct Event<T> {
     inner: T,
-    extra: E,
 }
 
 #[derive(
@@ -54,10 +51,9 @@ impl EventAction {
     }
 }
 
-impl<T, E> std::ops::Deref for Event<T, E>
+impl<T> std::ops::Deref for Event<T>
 where
     T: std::fmt::Debug + Clone,
-    E: std::fmt::Debug + Clone + Default,
 {
     type Target = T;
     fn deref(&self) -> &Self::Target {
@@ -65,41 +61,22 @@ where
     }
 }
 
-impl<T, E> Event<T, E>
+impl<T> Event<T>
 where
     T: std::fmt::Debug + Clone,
-    E: std::fmt::Debug + Clone + Default,
 {
     pub fn inner(&self) -> &T {
         &self.inner
     }
-    pub fn new(inner: &T) -> Self {
-        Self::from_inner(inner.clone())
-    }
 
     pub fn from_inner(inner: T) -> Self {
-        Self {
-            extra: E::default(),
-            inner,
-        }
-    }
-
-    pub fn new_with_extra(inner: &T, extra: &E) -> Self {
-        Self {
-            extra: extra.clone(),
-            inner: inner.clone(),
-        }
-    }
-
-    pub fn extra(&self) -> &E {
-        &self.extra
+        Self { inner }
     }
 }
 
-impl<T, E> std::fmt::Debug for Event<T, E>
+impl<T> std::fmt::Debug for Event<T>
 where
     T: std::fmt::Debug + Clone,
-    E: std::fmt::Debug + Clone + Default,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("{:?}", self.inner))

@@ -2,7 +2,7 @@ use super::{
     build,
     node::{Node, NodeContent, NodeOutputKind},
 };
-use crate::{ActError, Result, Workflow, utils::shortid};
+use crate::{ActError, Result, Workflow};
 
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -78,25 +78,6 @@ impl NodeTree {
             return Ok(node);
         }
         self.make(id, data, level)
-    }
-
-    /// create a dynamic node under parent and register it in the tree map.
-    /// node ids must be unique so persisted links resolve on restore;
-    /// parallel acts may share the same model id, so uniquify on collision
-    pub fn append_node(
-        &self,
-        parent: &Arc<Node>,
-        id: &str,
-        data: NodeContent,
-        level: usize,
-    ) -> Result<Arc<Node>> {
-        let mut node_id = id.to_string();
-        if self.node(&node_id).is_some() {
-            node_id = format!("{}-{}", node_id, shortid());
-        }
-        let node = self.make(&node_id, data, level)?;
-        parent.nodes.write().push(node.clone());
-        Ok(node)
     }
 
     pub fn set_root(&mut self, node: &Arc<Node>) {

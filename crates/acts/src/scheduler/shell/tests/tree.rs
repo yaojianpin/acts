@@ -1,6 +1,6 @@
 use crate::{
     Act, Workflow,
-    scheduler::core::model::view::{Node, NodeContent, NodeData, NodeTree, dyn_build_act},
+    scheduler::core::model::view::{Node, NodeContent, NodeData, NodeTree},
 };
 use std::sync::Arc;
 
@@ -304,7 +304,8 @@ fn sch_tree_act_node_data_round_trips() {
 }
 #[tokio::test]
 async fn sch_tree_dyn_acts_restore_chain() {
-    // build the dynamic act chain exactly like ctx.build_acts does
+    // build a dynamic act chain: the first act hangs off the step, the rest
+    // follow it one by one
     let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|step| step.with_id("step1"));
@@ -317,8 +318,17 @@ async fn sch_tree_dyn_acts_restore_chain() {
         Act::irq(|r| r.with_params_vars(|v| v.with("key", "act3"))),
     ];
     let mut prev = step1.clone();
-    for (index, act) in acts.iter_mut().enumerate() {
-        dyn_build_act(act, &tree, &step1, &mut prev, step1.level + 1, index, true).unwrap();
+    for act in acts.iter_mut() {
+        act.id = crate::utils::shortid();
+        let node = tree
+            .make(&act.id, NodeContent::Act(act.clone()), step1.level + 1)
+            .unwrap();
+        if node.level == prev.level {
+            prev.set_next(&node, true);
+        } else {
+            node.set_parent(&step1);
+        }
+        prev = node;
     }
 
     // dynamic nodes are registered in the tree map
@@ -332,7 +342,7 @@ async fn sch_tree_dyn_acts_restore_chain() {
     let act2 = tree.node(&act_ids[1]).unwrap();
     assert_eq!(act1.next().upgrade().unwrap().id(), act2.id());
 
-    // persist every node like Task::into_data does
+    // serialize every node the way a task row stores it
     let datas = acts
         .iter()
         .map(|a| {

@@ -48,7 +48,7 @@ pub(crate) fn headless_scope(
     runtime: &Arc<Runtime>,
     spec: &ScopeSpec,
 ) -> Result<(Arc<Process>, Arc<Task>, Context)> {
-    let process = Process::new(&spec.process_id, runtime);
+    let process = Process::new(&spec.process_id);
     process.load(&spec.model)?;
     process.set_owner_scope(&spec.owner);
     if let Some(root) = runtime.config().workdir() {

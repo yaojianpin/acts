@@ -838,7 +838,7 @@ async fn a_duplicate_child_completion_is_refused_and_starts_no_second_child_inne
 /// The container is the kernel's own: a step's model branches
 /// (`Step::with_branch`), each holding a subflow step. The legacy cell used the
 /// `acts.core.parallel` package's `in`/`acts` expansion, which the kernel does
-/// not drive from the model — `ctx.build_acts` writes into the headless effect
+/// not drive from the model — `ctx.build_acts` wrote into the headless effect
 /// scope only, no durable child exists — so the nearest kernel property is a
 /// branched container, the shape the kernel's fan-out/fan-in actually runs.
 #[serial]

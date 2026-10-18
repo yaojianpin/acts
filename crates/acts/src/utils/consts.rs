@@ -12,9 +12,6 @@ pub const ACT_PARAMS_KEY: &str = "params";
 pub const ACT_ERR_MESSAGE: &str = "message";
 pub const ACT_ERR_CODE: &str = "ecode";
 
-pub const ACT_INDEX: &str = "$index";
-pub const ACT_VALUE: &str = "$value";
-
 pub const TASK_COST: &str = "__cost";
 
 /// Node ids of the timeout branches that already fired for one task (the

@@ -1,7 +1,6 @@
 use crate::{
-    Event, Result, ShareLock,
+    Event, ShareLock,
     event::Message,
-    scheduler::{Process, Task},
     utils::{LaneRouter, shared},
 };
 use parking_lot::RwLock;
@@ -15,15 +14,8 @@ use tokio::sync::{
 };
 use tracing::{debug, error, instrument};
 
-use super::TaskExtra;
-
 pub type ActWorkflowMessageHandle =
     Arc<dyn Fn(Event<Message>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
-pub type ProcHandle =
-    Arc<dyn Fn(Event<Arc<Process>>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
-pub type TaskHandle = Arc<
-    dyn Fn(Event<Arc<Task>, TaskExtra>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
->;
 
 /// Keyed workflow events. Events are routed to one ordered queue consumer per
 /// process (`Message.pid`): handlers of one process run in emission order
@@ -215,24 +207,6 @@ async fn run_handle(handle: ActWorkflowMessageHandle, event: Event<Message>) {
     }
 }
 
-async fn run_proc_handle(handle: ProcHandle, event: Event<Arc<Process>>) {
-    let result = tokio::spawn(async move { handle(event).await }).await;
-    if let Err(payload) = result
-        && payload.is_panic()
-    {
-        error!("proc handler panicked");
-    }
-}
-
-async fn run_task_handle(handle: TaskHandle, event: Event<Arc<Task>, TaskExtra>) {
-    let result = tokio::spawn(async move { handle(event).await }).await;
-    if let Err(payload) = result
-        && payload.is_panic()
-    {
-        error!("task handler panicked");
-    }
-}
-
 /// Deliver a stored delivery row to the single channel handler it belongs to.
 /// When no handler is registered under the channel (it unsubscribed) the row
 /// is dropped — it stays in the store and will be retried later.
@@ -269,9 +243,6 @@ pub struct Emitter {
     messages: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     errors: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
 
-    procs: ShareLock<Vec<ProcHandle>>,
-    tasks: ShareLock<Vec<TaskHandle>>,
-
     workers: Workers,
     process_gate: ProcessGate,
 }
@@ -299,8 +270,6 @@ impl Emitter {
             starts: Arc::new(RwLock::new(HashMap::new())),
             completes: Arc::new(RwLock::new(HashMap::new())),
             errors: Arc::new(RwLock::new(HashMap::new())),
-            procs: Arc::new(RwLock::new(Vec::new())),
-            tasks: Arc::new(RwLock::new(Vec::new())),
             process_gate,
             workers: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -366,24 +335,6 @@ impl Emitter {
             .or_insert(f);
     }
 
-    pub fn on_proc<F, Fut>(&self, f: F)
-    where
-        F: Fn(Event<Arc<Process>>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let f: ProcHandle = Arc::new(move |e| Box::pin(f(e)));
-        self.procs.write().push(f);
-    }
-
-    pub fn on_task<F, Fut>(&self, f: F)
-    where
-        F: Fn(Event<Arc<Task>, TaskExtra>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let f: TaskHandle = Arc::new(move |e| Box::pin(f(e)));
-        self.tasks.write().push(f);
-    }
-
     /// Route one workflow event to the ordered consumer of its process,
     /// starting the consumer on first use.
     ///
@@ -440,40 +391,6 @@ impl Emitter {
 
     pub(crate) fn process_gate(&self) -> ProcessGate {
         self.process_gate.clone()
-    }
-
-    #[instrument(skip(self, proc), fields(pid = %proc.id()))]
-    pub async fn emit_proc_event(&self, proc: &Arc<Process>) {
-        debug!("proc event emitted");
-        let handlers: Vec<ProcHandle> = self.procs.read().clone();
-        let proc = proc.clone();
-        for handle in handlers {
-            run_proc_handle(handle, Event::new(&proc)).await;
-        }
-    }
-
-    pub async fn emit_task_event(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
-        self.emit_task_event_with_extra(proc, task, true).await
-    }
-
-    #[instrument(skip(self, proc, task), fields(pid = %task.pid, tid = %task.id))]
-    pub async fn emit_task_event_with_extra(
-        &self,
-        proc: &Arc<Process>,
-        task: &Arc<Task>,
-        emit_message: bool,
-    ) -> Result<()> {
-        debug!("task event emitted");
-        let handlers: Vec<TaskHandle> = self.tasks.read().clone();
-        let task = task.clone();
-        for handle in handlers {
-            let extra = TaskExtra {
-                emit_message,
-                proc: Some(proc.clone()),
-            };
-            run_task_handle(handle, Event::new_with_extra(&task, &extra)).await;
-        }
-        Ok(())
     }
 
     #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]
@@ -538,8 +455,6 @@ impl Emitter {
         self.starts.write().clear();
         self.completes.write().clear();
         self.errors.write().clear();
-        self.procs.write().clear();
-        self.tasks.write().clear();
         // Dropping every sender closes the per-process queues; the workers
         // exit on the closed channel and remove themselves.
         self.workers.write().clear();

@@ -9,7 +9,7 @@
 //! join completes it once every child is terminal.
 //!
 //! The container packages needed a bridge to that shape — their inline acts live
-//! in the package's `in`/`acts` params, and `ctx.build_acts` writes them into
+//! in the package's `in`/`acts` params, and `ctx.build_acts` wrote them into
 //! the headless scope the effect runner throws away
 //! (`scheduler/shell/effects.rs`) — and until 2026-10-15 a
 //! `uses: acts.core.parallel` step resolved its package and auto-completed with

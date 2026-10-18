@@ -89,8 +89,11 @@ impl ActPackage for BlockPackage {
         Ok(Self)
     }
 
-    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
-        let params = serde_json::from_value::<BlockPackageParams>(params.clone()).map_err(|e| {
+    async fn execute(&self, _ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        // The kernel fans a block out from the model's own `branches`, which
+        // the import materializes from these params; there is nothing left to
+        // build at execution time. Parsing stays: it is the act's schema check.
+        serde_json::from_value::<BlockPackageParams>(params.clone()).map_err(|e| {
             ActError::Package(format!(
                 "invalid ActPackage({}) params: {}",
                 Self::definition().id,
@@ -98,13 +101,6 @@ impl ActPackage for BlockPackage {
             ))
         })?;
 
-        let mut options = ctx.task().options();
-        let mut acts = params.acts;
-        for act in acts.iter_mut() {
-            // append block options to each child act
-            act.options.append(&mut options);
-        }
-        ctx.build_acts(&acts, params.mode == RunningMode::Sequence)?;
         Ok(None)
     }
 }

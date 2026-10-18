@@ -57,9 +57,6 @@ pub struct Node {
     /// by its `if`/`while` condition falls through to. It is never an explicit
     /// jump target, so a following step can never clobber a declared `next`.
     pub chain: Arc<RwLock<Weak<Node>>>,
-
-    // nodes created dynamically
-    pub nodes: Arc<RwLock<Vec<Arc<Node>>>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeData {
@@ -161,7 +158,6 @@ impl Node {
             prev: Arc::new(RwLock::new(Weak::new())),
             next: Arc::new(RwLock::new(Weak::new())),
             chain: Arc::new(RwLock::new(Weak::new())),
-            nodes: Arc::new(RwLock::new(Vec::new())),
         }
     }
 

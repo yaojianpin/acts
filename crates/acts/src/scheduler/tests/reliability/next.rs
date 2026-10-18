@@ -137,7 +137,7 @@ async fn finish_chain(engine: &Engine, pid: &str) {
 /// The kernel's fan-out is read from the model (`model::step_branches`), so the
 /// container is a step with explicit branches. The container packages' `in`/
 /// `acts` expansion is *not* a model shape the kernel drives: `ctx.build_acts`
-/// writes into the headless effect scope the package runner throws away, so a
+/// used to write into the headless effect scope the package runner throws away, so a
 /// `uses: acts.core.parallel` step with an `acts` array resolves the package and
 /// auto-completes — no child execution, no act, no message.
 fn branched_workflow() -> Workflow {

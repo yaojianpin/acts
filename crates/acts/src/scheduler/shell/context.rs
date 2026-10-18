@@ -1,8 +1,7 @@
 use crate::{
-    Act, ActError, Executor, MissingParamAction, Result,
+    ActError, Executor, MissingParamAction, Result,
     scheduler::{
         Runtime,
-        core::model::view::dyn_build_act,
         shell::{Process, Task},
     },
     snapshot::{SnapshotPolicy, SnapshotStore, join_scope, resolve_scope_params},
@@ -263,26 +262,5 @@ impl Context {
 
     pub fn eval<T: DeserializeOwned + Serialize>(&self, expr: &str) -> Result<T> {
         Context::scope(self, || self.runtime.env().eval::<T>(expr))
-    }
-
-    pub fn build_acts(&self, acts: &[Act], is_sequence: bool) -> Result<()> {
-        let task = self.task();
-        let tree = self.proc.tree();
-
-        let mut prev = task.node().clone();
-        let mut acts = acts.to_owned();
-        for (index, act) in acts.iter_mut().enumerate() {
-            dyn_build_act(
-                act,
-                &tree,
-                task.node(),
-                &mut prev,
-                task.node().level + 1,
-                index,
-                is_sequence,
-            )?;
-        }
-
-        Ok(())
     }
 }

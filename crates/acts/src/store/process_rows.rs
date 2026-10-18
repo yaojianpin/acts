@@ -28,7 +28,7 @@ impl Store {
             return Ok(None);
         };
         let model = Workflow::from_json(&p.model)?;
-        let proc = crate::scheduler::Process::new(pid, rt);
+        let proc = crate::scheduler::Process::new(pid);
         let env_local: serde_json::Value =
             serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
 

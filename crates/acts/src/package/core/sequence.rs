@@ -1,11 +1,7 @@
-use super::super::core::RunningMode;
-use crate::package::core::block::BlockPackageParams;
 use crate::package::{
     ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, Result,
 };
-use crate::utils::consts;
-use crate::{Act, Vars, package::ActRunAs};
-use crate::{ActError, Context};
+use crate::{Act, ActError, Context, Vars, package::ActRunAs};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
@@ -69,33 +65,19 @@ impl ActPackage for SequencePackage {
         Ok(Self)
     }
 
-    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
-        let params =
-            serde_json::from_value::<SequencePackageParams>(params.clone()).map_err(|e| {
-                ActError::Package(format!(
-                    "invalid ActPackage({}) params: {}",
-                    Self::definition().id,
-                    e
-                ))
-            })?;
-        let mut acts = Vec::new();
-        for (index, value) in params.r#in.iter().enumerate() {
-            let block_params = serde_json::to_value(BlockPackageParams {
-                mode: RunningMode::Sequence,
-                acts: params.acts.clone(),
-            })?;
+    async fn execute(&self, _ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        // The kernel fans the sequence out from the model's own `branches`,
+        // which the import materializes from these params; there is nothing
+        // left to build at execution time. Parsing stays: it is the act's
+        // schema check.
+        serde_json::from_value::<SequencePackageParams>(params.clone()).map_err(|e| {
+            ActError::Package(format!(
+                "invalid ActPackage({}) params: {}",
+                Self::definition().id,
+                e
+            ))
+        })?;
 
-            acts.push(Act {
-                uses: "acts.core.block".to_string(),
-                options: Vars::new()
-                    .with(consts::ACT_INDEX, index)
-                    .with(consts::ACT_VALUE, value),
-                params: block_params,
-                ..Default::default()
-            })
-        }
-
-        ctx.build_acts(&acts, true)?;
         Ok(None)
     }
 }

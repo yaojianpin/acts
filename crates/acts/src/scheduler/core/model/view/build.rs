@@ -3,7 +3,7 @@ use super::{
     node_tree::NodeTree,
 };
 use crate::{
-    Act, ActError, Branch, Result, Step, Workflow,
+    ActError, Branch, Result, Step, Workflow,
     utils::{longid, shortid},
 };
 use std::sync::Arc;
@@ -186,34 +186,4 @@ fn assign_branch_ids(branch: &mut Branch) {
     for step in branch.steps.iter_mut() {
         assign_step_ids(step);
     }
-}
-
-pub fn dyn_build_act(
-    act: &mut Act,
-    tree: &NodeTree,
-    parent: &Arc<Node>,
-    prev: &mut Arc<Node>,
-    level: usize,
-    _index: usize,
-    is_sequence: bool,
-) -> Result<()> {
-    if act.id.is_empty() {
-        act.id = shortid();
-    }
-
-    let data = NodeContent::Act(act.clone());
-    let node = tree.append_node(parent, &act.id, data, level)?;
-
-    if is_sequence {
-        // set the act order one by one
-        if node.level == prev.level {
-            prev.set_next(&node, true);
-        } else {
-            node.set_parent(parent);
-        }
-        *prev = node;
-    } else {
-        node.set_parent(parent);
-    }
-    Ok(())
 }

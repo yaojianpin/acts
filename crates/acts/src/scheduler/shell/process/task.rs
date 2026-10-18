@@ -1,11 +1,10 @@
 use crate::{
-    Error, NodeKind, Result, ShareLock, Variant, Vars, data,
+    Error, NodeKind, ShareLock, Variant, Vars,
     scheduler::{
         Runtime,
         core::model::{legacy_task_state::LegacyTaskState, view::Node},
         shell::{Context, Process},
     },
-    store::DbCollectionIden,
     utils::{self, consts},
 };
 
@@ -13,7 +12,6 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -31,17 +29,6 @@ pub struct Task {
 
     /// sealed data (read-only, written only by resolver)
     sealed_data: ShareLock<Vars>,
-
-    /// the scope's vars row (data + sealed) diverged from the store since the
-    /// last flush; set by every data mutation, cleared when the vars row is
-    /// persisted (see `Cache::persist_task`)
-    vars_dirty: Arc<AtomicBool>,
-
-    /// bumped by every data mutation that dirties the scope — lets the
-    /// persist path tell "no mutation happened while the vars row was being
-    /// written" apart from "a mutation raced the write and must not be
-    /// cleared", so a concurrent mutation can never be lost to a stale clear
-    vars_gen: Arc<AtomicU64>,
 
     /// task state
     state: ShareLock<LegacyTaskState>,
@@ -79,8 +66,6 @@ impl Task {
             node,
             data: Arc::new(RwLock::new(Vars::new())),
             sealed_data: Arc::new(RwLock::new(Vars::new())),
-            vars_dirty: Arc::new(AtomicBool::new(false)),
-            vars_gen: Arc::new(AtomicU64::new(0)),
             state: Arc::new(RwLock::new(LegacyTaskState::None)),
             // a child of the runtime's shutdown token: this task's token fires
             // when the task is overridden *or* when the engine shuts down
@@ -94,10 +79,6 @@ impl Task {
             timestamp: utils::time::timestamp(),
             runtime: rt.clone(),
         }
-    }
-
-    pub fn unique_id(&self) -> String {
-        format!("{}:{}", self.pid, self.id)
     }
 
     pub(crate) fn runtime(&self) -> &Arc<Runtime> {
@@ -157,31 +138,6 @@ impl Task {
     pub fn parent(&self, proc: &Arc<Process>) -> Option<Arc<Task>> {
         let parent = self.parent.read().clone()?;
         proc.task(&parent)
-    }
-
-    pub fn children(&self, proc: &Arc<Process>) -> Vec<Arc<Self>> {
-        proc.children(&self.id)
-    }
-
-    pub fn next(&self, proc: &Arc<Process>) -> Vec<Arc<Self>> {
-        let mut ret = Vec::new();
-        let nexts = self.next_ids();
-        for tid in &nexts {
-            if let Some(task) = proc.task(tid) {
-                ret.push(task);
-            }
-        }
-        ret
-    }
-
-    pub fn siblings(&self, proc: &Arc<Process>) -> Vec<Arc<Self>> {
-        let mut ret = Vec::new();
-        if let Some(parent) = self.parent(proc) {
-            let children = parent.children(proc);
-            ret.extend(children.iter().filter(|iter| iter.id != self.id).cloned());
-        }
-
-        ret
     }
 
     pub fn inputs(self: &Arc<Self>, ctx: &Context) -> Vars {
@@ -272,50 +228,6 @@ impl Task {
     pub fn is_kind(&self, kind: NodeKind) -> bool {
         self.node.kind() == kind
     }
-
-    pub fn is_uses(&self, v: &str) -> bool {
-        if self.node.kind() == NodeKind::Act {
-            return self.node.uses().as_deref() == Some(v);
-        }
-        false
-    }
-
-    pub fn into_data(self: &Arc<Self>) -> Result<data::Task> {
-        let id = utils::Id::new(&self.pid, &self.id);
-        Ok(data::Task {
-            id: id.id(),
-            prev: self.prev_id(),
-            next: self.next_ids(),
-            parent: self.parent_id(),
-            name: self.node.content.name(),
-            kind: self.node.kind().to_string(),
-            pid: self.pid.clone(),
-            tid: self.id.clone(),
-            node_data: self.node.to_string()?,
-            state: self.state().into(),
-            start_time: self.start_time(),
-            end_time: self.end_time(),
-            timestamp: self.timestamp,
-            err: self.err().map(|err| err.to_string()),
-            source_revision: String::new(),
-            v: data::Task::version(),
-        })
-    }
-
-    /// The scope vars row paired with this task's lifecycle row: the task's
-    /// own `data` and `sealed`, stored apart from the lifecycle row.
-    pub fn into_data_vars(self: &Arc<Self>) -> Result<data::TaskVars> {
-        let id = utils::Id::new(&self.pid, &self.id);
-        Ok(data::TaskVars {
-            id: id.id(),
-            pid: self.pid.clone(),
-            tid: self.id.clone(),
-            data: self.data().to_string(),
-            sealed: self.sealed_data.read().to_string(),
-            source_revision: String::new(),
-            v: data::TaskVars::version(),
-        })
-    }
 }
 
 impl std::fmt::Debug for Task {
@@ -374,18 +286,9 @@ impl Task {
         f(&data)
     }
 
-    /// Mark the scope's vars as diverged. The generation is bumped before the
-    /// dirty flag so a persist that is writing the row concurrently can never
-    /// clear this mutation away (see [`Self::clear_vars_dirty`]).
-    fn mark_vars_dirty(&self) {
-        self.vars_gen.fetch_add(1, Ordering::Release);
-        self.vars_dirty.store(true, Ordering::Release);
-    }
-
     pub fn set_data_with<F: Fn(&mut Vars)>(&self, f: F) {
         let mut data = self.data.write();
         f(&mut data);
-        self.mark_vars_dirty();
     }
 
     pub fn set_data(&self, vars: &Vars) {
@@ -393,7 +296,6 @@ impl Task {
         for (name, value) in vars.iter() {
             data.set(name, value);
         }
-        self.mark_vars_dirty();
     }
 
     /// Restore-time write of a scope's persisted vars — fills the in-memory
@@ -408,7 +310,6 @@ impl Task {
     pub(crate) fn set_sealed(&self, name: &str, value: Vars) {
         let mut sealed = self.sealed_data.write();
         sealed.set(name, value);
-        self.mark_vars_dirty();
     }
 
     /// Restore-time write of a scope's persisted sealed vars.
@@ -417,12 +318,6 @@ impl Task {
         for (name, value) in vars.iter() {
             data.set(name, value);
         }
-    }
-
-    /// The scope's vars row (data + sealed) diverged from the store since its
-    /// last flush.
-    pub fn is_vars_dirty(&self) -> bool {
-        self.vars_dirty.load(Ordering::Acquire)
     }
 
     /// Get sealed data by resolver name. Walks the parent chain
@@ -446,14 +341,6 @@ impl Task {
     /// walk the parent chain) — used to keep the first-sealed value on retry.
     pub(crate) fn has_sealed_local(&self, name: &str) -> bool {
         self.sealed_data.read().get_value(name).is_some()
-    }
-
-    pub fn has_sealed(&self) -> bool {
-        !self.sealed_data.read().is_empty()
-    }
-
-    pub fn sealed_keys(&self) -> Vec<String> {
-        self.sealed_data.read().keys().cloned().collect()
     }
 
     pub fn find<T>(&self, proc: &Arc<Process>, name: &str) -> Option<T>

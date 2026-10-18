@@ -81,13 +81,13 @@ pub(crate) const SEQUENCE_PACKAGE: &str = "acts.core.sequence";
 ///
 /// The kernel fans a container out from the *model*: a step's `branches` and a
 /// branch's `steps` are its children. A container package's acts live in its
-/// `params.acts` array instead, and the package's `ctx.build_acts` writes them
-/// into the headless scope the effect seam discards — so without this pass a
-/// `acts.core.block`/`sequence`/`parallel` step resolves its package and
-/// completes with no children at all.
+/// `params.acts` array instead; before L9 the package built them with
+/// `ctx.build_acts` into the headless scope the effect seam discarded — so
+/// without this pass a `acts.core.block`/`sequence`/`parallel` step resolves
+/// its package and completes with no children at all.
 ///
-/// The rewrite mirrors the legacy expansion (each package's `execute` built the
-/// same shape through `ctx.build_acts`):
+/// The rewrite mirrors the legacy expansion (each package's `execute` used to
+/// build the same shape through `ctx.build_acts`):
 ///
 /// - `acts.core.block{ mode: sequence }` → one always-selected branch
 ///   `<step>#acts` whose steps are the acts, in declaration order (the branch
