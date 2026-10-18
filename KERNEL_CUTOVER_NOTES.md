@@ -2885,6 +2885,108 @@ cargo fmt --all --check -> OK
   记录,不属于 recovery,也不会在热路径自旋。
 - A11 必须把 `kernel/indexes/ready/` 与 aggregate/recovery/outbox 一起原子回收。
 
+### A11 完成(2026-10-18):终态回收 + PID 复用
+
+**任务**:§11 D 的 A11(P1)。存储只保留恢复所需的最小状态:run 终态、outbox 全 `Delivered`、
+operation 全部 retired、channel delivery 全部结算后,原子删除 aggregate + 派生索引,再幂等删除
+行/messages/deliveries/workdir;清理后同一 pid 可再次启动。不做历史归档。
+
+**事实与契约**
+
+- 可回收判定收敛为 `ProcessSnapshot::is_reclaimable()`:tasks 非空且全部 terminal;outbox 每条
+  `Delivered`;operations 全部 retired(`Completed`/`Superseded`)。`Pending`/`RetryScheduled`/
+  `Claimed`/`CommitPrepared`/`Committed`/`EffectUnknown`/`Quarantined` 任一存在即为不可回收;
+  `DeliveryUnknown`/`Quarantined` 的 outbox record 同样保留。投影的 `removable` 复用该判定;
+  channel delivery 仍按既有 `has_unsettled_deliveries`(只有 `Completed` 算结算)。
+- 正常终态 run 的三个派生索引本来就可为空(A2 的“可空索引不写文档”),所以权威删除 batch 通常只删
+  aggregate;但 batch 仍对每个索引分别 `require_exact`(存在时)或 `require_absent`(缺失时),
+  并删除 aggregate + recovery/outbox/ready 三键,外加该 pid 前缀下残留的 recovery-entry 文档。
+  aggregate 的 exact bytes 就是 version guard:任何 commit 都会改变它;guard 失败重读重试,绝不删
+  一个已移动的 aggregate。
+- 顺序:`refresh_projection` 先确认/重写 `removable` → `flush_pid` 后检查 delivery → **要求 proc 行
+  已标 `removable`**(设计第 1 步;未标记则本轮不切割)→ guarded batch 删 aggregate+索引 → 通过
+  writer 的 `RemoveProc` 幂等删行(含 messages/deliveries,workdir 先删)——删行与 `flush_pid` 都在
+  per-pid 生命周期锁内完成,锁释放时行已落盘删除。aggregate 已删而索引/行
+  残留时,下一轮以 `Absent` 识别:只删仍存在的索引并继续删行——标记在切割前已持久化,所以这个
+  重试有据可依;不会出现“索引先删而 aggregate 残留”。
+- 崩溃安全:删除 batch 是后端原子的;中断后 aggregate 缺失 → recovery/outbox/ready 扫描跳过
+  missing aggregate(ready 记录由 `prepare` 忽略,outbox page 跳过),清理下一轮补删行/workdir。
+  清除进程内状态(reported/admission/projection claims)在 aggregate 删除成功后、行删除前完成,
+  不依赖墓碑。
+- PID 复用:pid 的存在性**只看 aggregate**(`KernelHost::exists`);行、消息、delivery、尤其
+  legacy `ops` 都不参与判定(`ops` 由 L1 删除,本笔已删掉 `Store::pid_has_rows`)。start 与 cleanup
+  共用 per-pid 生命周期锁:start 在锁内查 aggregate 并创建 run;cleanup 从 aggregate batch 到
+  行/workdir 删除完成都持锁,并用 `reclaiming` 标记覆盖“batch 已删、行删除失败”的重试窗口,因此
+  新 run 不会落进旧 run 的残渣清理窗口。删除失败时若 proc 行已消失(整批删除已生效),标记即清;
+  每轮 cleanup 也会清掉 proc 行已不存在的陈旧标记。到达旧 run 的迟到消息/动作属于业务去重边界,
+  acts 不保存 generation 映射(CHANGELOG 已写)。
+- 调度:cleanup 从 retry timer 拆出为独立 loop(`init_cleanup_timer`),独立 interval
+  (`cleanup_interval_secs`,默认跟随 tick)、批大小(`cleanup_batch`,默认 256)、`LoopGuard`
+  健康(`SchedulerHealth::cleanup`)与指标(`Runtime::cleanup_metrics`:backlog、最老 removable
+  年龄、reclaimed、删除字节、删除失败、孤儿索引)。cleanup 失败只影响自己的 health。
+- 测试构建不启动 cleanup timer(`init_cleanup_timer` 在 `cfg(test)` 下直接返回):reliability 用例
+  在 run 结束后仍把 aggregate 当作决策真值读取,回收由用例显式调用 `sweep_removable` 驱动;生产
+  构建的循环代码不变。投影故障用例在等待行收敛时也显式驱动 sweep(否则 A11 不再自动替它清掉
+  滞后的行)。
+- 投影遗留边界:A5 的逐行 generation 协议未做;清理在 `RowProjector` 记录 pid 墓碑,阻止清理后
+  仍持有旧 snapshot 的投影重写行,下一次同 pid start 前清除。投影与清理另按 pid 用一把异步锁
+  串行:cleanup 等已开始的投影写完再删 aggregate,墓碑再挡住之后的投影。完整 generation 防护
+  留给 A5。
+
+**测试**
+
+- `reclaim_deletes_the_guarded_documents_and_is_idempotent`:完整终态 run 的 aggregate 与四个键
+  全删,第二次 reclaim 为无副作用 `Absent`(覆盖旧库缺 ready index)。
+- `reclaim_transaction_guards_the_aggregate_and_every_index`:batch 对 aggregate 用 exact bytes
+  guard、缺失索引用 absent guard;`reclaim_refuses_to_delete_an_aggregate_that_moved` 在 batch
+  前注入一次并发 commit,guard 拒绝删除并重读为 `Retained`(batch 前崩溃/竞争的可重试性)。
+- `reclaim_retains_effect_unknown_and_quarantined_runs` /
+  `reclaim_retains_outbox_records_that_did_not_deliver`:`EffectUnknown`、`Quarantined`、
+  `DeliveryUnknown`、`Pending` outbox 一律保留,文档不动。
+- `reclaim_cleans_orphan_indexes_after_the_aggregate_is_gone`:aggregate 缺失时只删存在的
+  索引/recovery-entry,不碰其他 pid;`outbox_page_skips_an_index_whose_aggregate_is_gone` 固定
+  outbox 扫描跳过 missing aggregate。
+- `kernel_engine_finishes_an_interrupted_terminal_cleanup`:模拟 batch 后崩溃,下一轮补删行与 workdir,
+  且再次 sweep 幂等;残渣未清时同 pid `start` 仍被拒(aggregate 已无,由 cleanup 的 `reclaiming`
+  标记 + 生命周期锁挡住),清理完成后允许。
+- `kernel_engine_keeps_a_run_with_an_open_delivery`:未结算 delivery 保留 aggregate/行/workdir,
+  结算后才回收。
+- `kernel_engine_refuses_a_pid_until_the_run_is_reclaimed_and_then_reuses_it`:清理前拒绝、清理后
+  允许并保留 pid;`kernel_engine_projects_the_legacy_read_model` 增加聚合/索引全消失断言。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 894 passed, 0 failed, 1 ignored (219.44s)
+cargo test -p acts --lib reliability:: -> 65 passed, 0 failed (186.35s)
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --check -> OK
+```
+
+**下游套件**:`acts-acl`、`acts-expr --all-features`、`acts-cli`、
+`acts-package-state/http/javascript/nats`、`acts-store --features sled,sqlite,postgres` 绿。
+两个已知非本笔失败:base `f57fde5` worktree 上 `acts-plugin-grpc` 的
+`test_on_message_stream_drop_deregisters_channel` / `test_on_message_slow_subscriber_is_disconnected`
+同样在 10s 超时;`acts-package-shell --test vars` 的
+`the_inputs_of_the_act_embed_in_the_script` 与 A2 记录一致。
+`acts-server` 的 test 构建在本机 rustc ICE(metadata/alloc;与 A2 记录的链接期 `os error 1455`
+同属环境资源问题),`cargo clippy --all-targets` 的 check 构建已通过;未据此改代码。
+
+**已知边界**
+
+- 测试构建不跑 cleanup timer(§10 上文),生产构建照常;`Runtime::cleanup_metrics` 与
+  `SchedulerHealth::cleanup` 在两种构建都可用。
+- A11 的投影防护只是 pid 墓碑;真正的逐行 generation 协议仍是 A5。清理后仍持有旧 snapshot 的
+  投影不会再写行,但新 run 复用同一 pid 后,A5 之前没有跨 generation 的严格隔离。
+- 一个带有 `EffectUnknown`/`Quarantined` operation 或 `DeliveryUnknown`/`Quarantined` outbox
+  记录的 run 会永久保留其 aggregate/行/pid,直到人工处理。这是契约,不是泄漏。
+- 权威 batch 通常只删 aggregate:终态 run 的 recovery/outbox/ready 索引按设计已为空;batch 仍
+  逐一 guard(present=exact / absent=absent),以覆盖旧库和并发写。`recovery-entry` 文档在
+  reclaimable snapshot 里本应为空,清理会顺带删除该 pid 前缀下的残留并计入孤儿索引指标。
+- `reclaiming` 是进程内标记,不跨重启。重启后第一轮 cleanup 与同一 pid 的 start 仍由 per-pid
+  生命周期锁串行:start 先建出新 aggregate 时,cleanup 读到的就不是 `Absent`,而是这个非终态
+  新 run,因此 `Retained`,不会删除它的行;cleanup 先完成时,start 随后从空 aggregate 开始。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -2901,9 +3003,10 @@ cargo fmt --all --check -> OK
 > 再做其他工作(**第二波 = P1 性能画像 + L\* 遗留,可与彼此交错**)。
 >
 > **2026-10-17 用户裁决(架构优先)**:在第一波之后、第二波之前插入**第三波 = A1→A11 架构修正**。
-> A1a 已完成;A2(durable ready queue)已完成(§10);A1b 的 per-record claim/confirm 试点因写放大回退
-> (需批量 confirm/独立 outbox 后再做)。当前执行项是 **A11**(终态回收 + PID 复用;§11 D 标 P1),
-> 其后为 A1b(批量 confirm;虽标 P0,按用户顺序排在 A11 之后)。第二波 P1/L* **暂缓,不删除**。
+> A1a 已完成;A2(durable ready queue)已完成(§10);A11(终态回收 + PID 复用)已完成(§10)。
+> A1b 的 per-record claim/confirm 试点因写放大回退(需批量 confirm/独立 outbox 后再做);
+> **当前执行项是 A1b(批量确认;§11 D 标 P0)**,须按批量版设计,不得原样重试 per-record 变体。
+> 其后为 A1c → A3/A4/A5 → A6 → A7/A8/A9/A10。第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -2999,14 +3102,17 @@ cargo fmt --all --check -> OK
 | **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | 未做。验收:manual run 不阻塞新 run;cancel 后 slot 立即可用;parked 准入不依赖 tick |
 | **A9** | durable run handle:`start()` 返回可 `wait()` 的 handle;先查终态→订阅→复查;event channel 只做通知;示例改先注册或 `wait()` | #9 | P2 | A1/A5 | 未做。验收:check-subscribe race 不存在;重启后仍可等待 |
 | **A10** | 拆分控制面调度器:timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair 独立 interval/backoff/budget/指标;禁止用统一缩短 tick 解决延迟 | #10 | P2 | A2 | 未做。验收:调整 recovery 频率不影响 timer/outbox;各循环有独立健康/积压指标 |
-| **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index + ready index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | 未做。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删 |
+| **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index + ready index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | **已做(§10「A11 完成」)**。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删。**pid 存在性只看 aggregate**(行/`ops` 不参与);start 与 cleanup 共用 per-pid 生命周期锁。A5 的完整投影 generation 协议仍未做,本笔以 pid 墓碑收窄清理后的旧投影重写窗口 |
 
 **A1/A2/A11 的边界**:A1a 只关闭“effect 已执行后自动重试”的重复路径;A1b(批量确认)才关闭 outbox 的提交前可见性,
 **per-record claim/confirm 试点已回退**(写放大不可接受)。A1c 才提供可自动重试的幂等协议。
-A2 只把正常活性从 recovery 扫描移开,不改变 recovery 的异常兜底职责;**A2 已落地,新增的 `ready` index
-必须由 A11 与 aggregate/recovery/outbox 一起原子回收**。
-A11 只回收**已完成且投递结算完毕**的 run;`EffectUnknown`、`Quarantined`、未 ack 消息、未决 operation 一律保留。
+A2 只把正常活性从 recovery 扫描移开,不改变 recovery 的异常兜底职责;**A11 已把 `ready` index 与
+aggregate/recovery/outbox 一起原子回收**(A11 完成)。
+A11 只回收**已完成且投递结算完毕**的 run;`EffectUnknown`、`Quarantined`、`DeliveryUnknown`、
+未结算 delivery、未决 operation 一律保留。
 A11 的存储语义是“恢复所需的最小状态”,不是历史归档;PID 复用只在回收完成后放行,旧 pid 迟到消息由业务去重。
+A1b 落地后 outbox 记录会先以 `Pending` 提交、再由 dispatcher 批量确认,因此 A11 的“全部 `Delivered` 才回收”
+判定天然把“已提交但未投递”的 run 保留在存储中;A1b 不得绕过该判定。
 **不要把“缩短 tick”当作活性手段** —— 正常活性来自 durable ready 记录;tick 只决定 ready 轮询、定时器
 cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,单页不再全扫索引。
 
@@ -3017,67 +3123,76 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A11 —— 终态回收 + PID 复用(§11 D)
+# 当前任务:A1b —— outbox 提交后发送 + 批量确认(§11 D,P0)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A11 行、§10「A2 完成」;
-`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A11。A2 已完成:正常活性来自 durable ready index,
-recovery 只做异常兜底。A11 是当前执行项(§11 D 标 P1);A1b(批量 confirm)按其后的顺序执行。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A1b 行、§10「A1b 试点回退」「A11 完成」;
+`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A1b。A1a、A2、A11 已完成。当前 outbox 仍是**提交前发送**:
+`dispatch` 在 plan commit 之前调用 `deliver_plan`,确认成功的记录以 `OutboxIntent.receipt` 随 commit
+直接写成 `Delivered`,未确认的记录写成 `Pending` 由 tick 的 outbox pass 重试。A1b 要关闭这个
+“消息先于 aggregate commit 可见”的窗口;per-record claim/confirm 试点已因写放大回退(§10),**不得原样重试**。
 
-**目标**:存储只保留“恢复所需的最小状态”。一个 run 进入终态、所有消息投递并结算、且没有未决
-operation 之后,原子回收 aggregate + 全部派生索引,再幂等回收行/messages/deliveries/workdir;
-回收完成后同一个 pid 可以再次启动。不做历史归档。
+**目标**:一个 operation 的业务消息只在它的 aggregate commit 之后才对外可见;正常路径每个 operation
+**至多一笔**确认提交(不是每条 outbox record 一笔);投影先于外部消息;at-least-once 与现有 channel
+契约不变;A11 的“全部 `Delivered` 才回收”判定继续成立。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 先画清 `sweep_removable`、投影 `removable`、`Runtime::start` 的存在性检查、outbox/recovery 扫描、
-     `ready` index 的现有路径。
-   - 可回收判定必须同时满足:所有 task 终态;所有 outbox record `Delivered`;所有 channel delivery 已结算;
-     没有 `Pending`/`Claimed`/`CommitPrepared`/`EffectUnknown`/`Quarantined` operation;没有在飞 effect、
-     parked 准入或未完成的 recovery 动作。
-   - `EffectUnknown`、`Quarantined`、`DeliveryUnknown`、未 ack 消息的 run **不得**回收。
-2. **原子切割**
-   - 权威切割点是一个带 aggregate version guard 的 batch:删除 aggregate + recovery index +
-     outbox index + **ready index**(A2 新增),四者原子删除;禁止先删索引后删 aggregate。
-   - 删除顺序:先确认 `removable` → 四文档原子删除 → 行/messages/deliveries/workdir 幂等删除。
-   - 任一步崩溃后必须可重试:aggregate 已删而索引/行残留时,recovery/outbox/ready 扫描跳过 missing aggregate;
-     索引先删而 aggregate 残留不可接受。清理后不留墓碑。
-3. **PID 复用**
-   - 只要 aggregate、投影行、未决 operation、未结算消息任一仍存在,同一 pid 继续拒绝启动;
-   - 全部回收后允许复用;旧 run 的迟到消息/动作由业务系统按业务键去重,acts 不保留旧 generation 映射。
-     `CHANGELOG` 写明该契约边界。
-4. **调度与指标**
-   - cleanup 独立预算/interval,不与正常 operation 热路径或 recovery 扫描共用 loop;
-   - 指标:cleanup backlog、最老 removable 年龄、删除字节数、删除失败、孤儿索引数。
+   - 先画清 `deliver_plan`、`OutboxIntent`/`receipt`、`dispatch` 的 commit→project→wake 顺序、
+     `dispatch_outbox`/`dispatchable_outbox_page`、`evolve_outbox`、`OutboxIndex` 与 A11 的
+     `is_reclaimable`(outbox 必须全 `Delivered`)。
+   - 目标顺序:plan commit(新记录 `Pending`)→ 投影 → 外部发送 → **一次批量确认提交**。
+     提交失败的 operation 不产生任何外部消息。
+   - 正常路径删除前置直发快路径(`deliver_plan` 与 `OutboxIntent.receipt` 的提交前语义);
+     retry pass 仍负责重投与异常确认,但不得退化成 per-record claim+confirm 的正常路径。
+2. **批量确认**
+   - 一次发送产生的多条记录,用**同一笔** aggregate commit 从 `Pending`/`Claimed` 推进到
+     `Delivered`(可携带每条的 receipt/失败态);每 operation 最多一笔确认提交。
+   - 确认提交必须带 aggregate exact-bytes/版本 guard;CAS 失败时记录保持 `Pending`/可重投,
+     由 outbox pass 或 recovery 收敛,不得丢消息、不得二次外部副作用。
+   - 部分发送失败:同一批里成功的写 `Delivered`,失败的按现有 `RetryAt`/`DeliveryUnknown`/
+     `Quarantine` 语义落盘;仍是一笔提交。
+   - outbox record 的 payload/topic/顺序与 channel 契约不变;`OutboxIndex` 投影随新状态更新。
+3. **投影顺序**
+   - 外部消息的消费者在看到消息时必须能读到对应 aggregate 与投影行:先 `project`(proc/task/vars),
+     再调用 transport。lifecycle 事件仍按现有语义,不新增第二种“完成”真值。
+4. **调度与兼容**
+   - `Runtime::init_cleanup_timer` 与 A11 回收不受影响:确认前 run 因 outbox 非 `Delivered` 被保留,
+     确认后由 cleanup 回收;清理批不得删除仍 `Pending`/`Claimed`/`DeliveryUnknown` 的记录。
+   - 不缩短 tick,不把“消息延迟”转嫁给 tick;正常路径由 commit 后立即触发的 outbox pass 驱动。
 5. **测试**
-   - 完整投递并结算的 run sweep 后:aggregate、recovery/outbox/ready 索引、行、workdir 全消失;
-   - 清理前同 pid `start` 被拒,清理后允许;
-   - 在删除 batch 前后各注入一次崩溃:恢复后要么可重试删除,要么已删除,不出现不可恢复半状态;
-   - `EffectUnknown`/`Quarantined`/未 ack 消息的 run 不被误删;
-   - 现有 `sweep_removable`、投影、outbox/recovery 套件保持绿。
+   - 一个 operation 的消息在其 aggregate commit 前不可见(注入 commit 失败:transport 未被调用);
+     提交后消费者收到消息时 aggregate/投影行已存在。
+   - 一个 operation 携带多条 outbox record 时,正常路径只产生**一笔**确认提交(store 写入计数),
+     全部 `Delivered`;不得回归 per-record claim/confirm。
+   - CAS 失败的确认提交不丢消息:记录仍可被 outbox pass 重投并最终 `Delivered`;at-least-once 保持。
+   - 部分失败记录按 `RetryAt`/`DeliveryUnknown`/`Quarantine` 落盘,run 不被 A11 回收。
+   - 现有 outbox/recovery/A11/reliability 套件保持绿;`examples/simple` 量级无吞吐退化。
 
 **边界**
 
-- 不改 outbox 投递顺序/消息 payload;不缩短 tick;不改 per-process lane(A4)。
-- 不做历史归档、不保留终态 aggregate/索引;不提供跨 run 去重。
-- 新索引(A2 的 `ready`)必须与 aggregate 同批回收;不得留下孤儿索引。
+- 不改消息 payload/topic、不改 channel 的 ack/delivery 行语义;不做 A1c 的幂等 effect 协议。
+- 不允许“每条记录一次 claim + 一次 confirm”的正常路径;per-record 试点实现不得原样恢复。
+- 不做独立 outbox log 的大迁移,除非批量确认无法满足验收(需先说明并单独设计)。
+- 不改 A11 的回收条件;确认提交必须让记录变成 `Delivered`,而不是绕过 `is_reclaimable`。
 
 **验收**
 
-- 回收后聚合/索引/行/workdir 全消失;回收前拒绝复用、回收后允许;
-- 崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删;
-- `cargo test -p acts --lib --tests` 与 reliability 套件绿;
-- 写 §10「A11 完成」,§11 D 状态更新,§12 原地指向 A1b(批量 confirm)。
+- 消息不在 aggregate commit 前可见;每 operation 至多一笔确认提交;loop/吞吐不退化;at-least-once 不变;
+- 先投影后消息;CAS 丢失可重投且不产生第二次外部副作用;
+- `cargo test -p acts --lib --tests` 与 reliability/outbox 套件绿;
+- 写 §10「A1b 完成」,§11 D 状态更新,§12 原地指向 A1c(effect 幂等协议)。
 
 # 限制与约束
 
-- **先读**:§11 D、§10「A2 完成」、设计 §3.10 A11、`shell/mod.rs` 的 `sweep_removable`/projection、
-  `runtime.rs` 的 start 存在性检查、`document_store.rs` 的四个文档键与事务构造。
-- 不改业务流程/消息 payload/outbox 顺序;删除 batch 必须带 aggregate version guard。
+- **先读**:§11 D、§10「A1b 试点回退」「A2 完成」「A11 完成」、设计 §3.10 A1b/§3.5、
+  `shell/mod.rs` 的 `deliver_plan`/`dispatch_outbox`、`shell/operation/dispatch.rs`、
+  `core/outbox/**`、`document_store.rs` 的 replace transaction。
+- 不改业务流程/消息 payload/outbox 顺序语义;确认提交必须带 aggregate guard。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-终态回收实现 + 崩溃安全/幂等测试 + PID 复用边界 → 更新 §10/§11/§12。
+提交后发送 + 每 operation 一笔批量确认 + 投影先于消息 + 回归测试 → 更新 §10/§11/§12。
 ```
 
