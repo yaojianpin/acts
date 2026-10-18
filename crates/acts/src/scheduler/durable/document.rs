@@ -2,24 +2,24 @@ use crate::scheduler::{
     core::commit::aggregate::ProcessSnapshot,
     durable::{
         envelope::{EnvelopeError, ProcessEnvelope},
-        snapshot_codec::{SnapshotCodecError, SnapshotCodecV2, SnapshotCodecV3},
+        snapshot_codec::{
+            HeadPayload, LogChanges, LogPayload, SnapshotCodecError, SnapshotCodecV2,
+            SnapshotCodecV3, SnapshotCodecV4,
+        },
     },
 };
 
 use std::fmt;
 
-/// The only supported conversion between a domain aggregate and persisted
-/// document bytes. Repositories must not compose envelope and payload codecs
-/// themselves because doing so would allow validation steps to drift.
-///
-/// Writes are V3 (the versioned identity: every instance carries its wire).
-/// Reads accept V2 as well — the C5 upcast: a V2 document holds the same
-/// node strings and generations, so its instances derive the identical wire
-/// (`instance id := 该代 node 的 wire`, degenerate equivalence, behavior
-/// unchanged), and nothing else in the layout moved.
+/// The legacy (pre-L8) whole-snapshot codec. It is the only reader of the
+/// V2/V3 documents an earlier kernel wrote; production writes the L8 family
+/// through [`ProcessLogCodec`] instead.
 pub(crate) struct ProcessDocumentCodec;
 
 impl ProcessDocumentCodec {
+    /// The legacy writer, kept as the migration fixture builder. Production
+    /// never writes a whole aggregate document any more.
+    #[cfg(test)]
     pub(crate) fn encode(snapshot: &ProcessSnapshot) -> Result<Vec<u8>, ProcessDocumentError> {
         snapshot
             .validate()
@@ -29,12 +29,126 @@ impl ProcessDocumentCodec {
         Ok(sealed)
     }
 
+    #[cfg(test)]
     pub(crate) fn decode(bytes: &[u8]) -> Result<ProcessSnapshot, ProcessDocumentError> {
         let envelope = ProcessEnvelope::decode(bytes)?;
-        let snapshot = match SnapshotCodecV3::decode(&envelope.payload) {
-            Err(SnapshotCodecError::InvalidMagic) => SnapshotCodecV2::decode(&envelope.payload)?,
+        if envelope.schema_version
+            != crate::scheduler::durable::envelope::LEGACY_AGGREGATE_SCHEMA_VERSION
+        {
+            return Err(EnvelopeError::UnsupportedSchema(envelope.schema_version).into());
+        }
+        Self::decode_payload(&envelope.payload)
+    }
+
+    /// Decode a legacy payload (envelope already verified).
+    pub(crate) fn decode_payload(payload: &[u8]) -> Result<ProcessSnapshot, ProcessDocumentError> {
+        let snapshot = match SnapshotCodecV3::decode(payload) {
+            Err(SnapshotCodecError::InvalidMagic) => SnapshotCodecV2::decode(payload)?,
             other => other?,
         };
+        snapshot
+            .validate()
+            .map_err(SnapshotCodecError::InvalidProcess)?;
+        Ok(snapshot)
+    }
+}
+
+/// The L8 document family: one small head plus a base snapshot and an
+/// append-only log of per-commit records.
+///
+/// A normal commit encodes only the records it changed (one log entry) and a
+/// fresh head; it never rewrites the whole aggregate. The base snapshot is
+/// rewritten only when the log reaches its threshold, and the whole family is
+/// written in the same atomic guarded batch as the derived indexes. Reads
+/// accept the legacy whole-snapshot documents too (see
+/// [`ProcessDocumentCodec`]).
+pub(crate) struct ProcessLogCodec;
+
+impl ProcessLogCodec {
+    pub(crate) fn encode_head(head: &HeadPayload) -> Result<Vec<u8>, ProcessDocumentError> {
+        let payload = SnapshotCodecV4::encode_head(head)?;
+        ProcessEnvelope::seal_v2(payload).map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode_head(bytes: &[u8]) -> Result<HeadPayload, ProcessDocumentError> {
+        let envelope = ProcessEnvelope::decode(bytes)?;
+        if envelope.schema_version != crate::scheduler::durable::envelope::AGGREGATE_SCHEMA_VERSION
+        {
+            return Err(EnvelopeError::UnsupportedSchema(envelope.schema_version).into());
+        }
+        Self::decode_head_payload(&envelope.payload)
+    }
+
+    pub(crate) fn decode_head_payload(payload: &[u8]) -> Result<HeadPayload, ProcessDocumentError> {
+        SnapshotCodecV4::decode_head(payload).map_err(Into::into)
+    }
+
+    pub(crate) fn encode_base(
+        snapshot: &ProcessSnapshot,
+        base_seq: u64,
+    ) -> Result<Vec<u8>, ProcessDocumentError> {
+        let payload = SnapshotCodecV4::encode_base(snapshot, base_seq)?;
+        ProcessEnvelope::seal_v2(payload).map_err(Into::into)
+    }
+
+    /// Decode a base payload and the log sequence it covers.
+    pub(crate) fn decode_base_payload(
+        payload: &[u8],
+    ) -> Result<(u64, ProcessSnapshot), ProcessDocumentError> {
+        SnapshotCodecV4::decode_base(payload).map_err(Into::into)
+    }
+
+    pub(crate) fn encode_log(
+        snapshot: &ProcessSnapshot,
+        sequence: u64,
+        changes: &LogChanges,
+    ) -> Result<Vec<u8>, ProcessDocumentError> {
+        let entry = LogPayload::collect(snapshot, sequence, changes)?;
+        let payload = SnapshotCodecV4::encode_log(&entry)?;
+        ProcessEnvelope::seal_v2(payload).map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode_log(bytes: &[u8]) -> Result<LogPayload, ProcessDocumentError> {
+        let envelope = ProcessEnvelope::decode(bytes)?;
+        if envelope.schema_version != crate::scheduler::durable::envelope::AGGREGATE_SCHEMA_VERSION
+        {
+            return Err(EnvelopeError::UnsupportedSchema(envelope.schema_version).into());
+        }
+        Self::decode_log_payload(&envelope.payload)
+    }
+
+    pub(crate) fn decode_log_payload(payload: &[u8]) -> Result<LogPayload, ProcessDocumentError> {
+        SnapshotCodecV4::decode_log(payload).map_err(Into::into)
+    }
+
+    /// Rebuild the aggregate from the base snapshot and the ordered log
+    /// entries in `[head.base_seq, head.next_seq)`.
+    pub(crate) fn assemble(
+        base: ProcessSnapshot,
+        head: &HeadPayload,
+        entries: &[LogPayload],
+    ) -> Result<ProcessSnapshot, ProcessDocumentError> {
+        if base.process_id != head.process_id {
+            return Err(SnapshotCodecError::InvalidLog(format!(
+                "base process {:?} does not match head {:?}",
+                base.process_id, head.process_id
+            ))
+            .into());
+        }
+        let mut snapshot = base;
+        snapshot.version = head.version.clone();
+        for entry in entries {
+            if entry.process_id != head.process_id {
+                return Err(SnapshotCodecError::InvalidLog(format!(
+                    "log entry {:?} belongs to {:?}, not {:?}",
+                    entry.sequence, entry.process_id, head.process_id
+                ))
+                .into());
+            }
+            entry.apply_to(&mut snapshot);
+        }
         snapshot
             .validate()
             .map_err(SnapshotCodecError::InvalidProcess)?;
@@ -180,5 +294,82 @@ mod tests {
         let source = snapshot();
         let v2 = ProcessEnvelope::seal(SnapshotCodecV2::encode(&source).unwrap()).unwrap();
         assert_eq!(ProcessDocumentCodec::decode(&v2).unwrap(), source);
+    }
+
+    fn all_changes(snapshot: &ProcessSnapshot) -> LogChanges {
+        LogChanges {
+            tasks: snapshot.tasks.keys().cloned().collect(),
+            variables: snapshot.variables.keys().cloned().collect(),
+            operations: snapshot.operations.keys().cloned().collect(),
+            outbox: snapshot.outbox.keys().cloned().collect(),
+        }
+    }
+
+    /// The L8 family rebuilds exactly the aggregate the legacy document held:
+    /// head + base + the records one commit changed assemble to a value-equal
+    /// snapshot, and the log entry decodes through the envelope boundary.
+    #[test]
+    fn family_round_trip_rebuilds_the_aggregate() {
+        let source = snapshot();
+        let changes = all_changes(&source);
+        let head = ProcessLogCodec::encode_head(&HeadPayload {
+            process_id: source.process_id.clone(),
+            version: source.version.clone(),
+            epoch: 7,
+            base_seq: 0,
+            next_seq: 1,
+        })
+        .unwrap();
+        let base = ProcessLogCodec::encode_base(&source, 0).unwrap();
+        let log = ProcessLogCodec::encode_log(&source, 0, &changes).unwrap();
+
+        let head = ProcessLogCodec::decode_head(&head).unwrap();
+        let base_envelope = ProcessEnvelope::decode(&base).unwrap();
+        let (base_seq, base) =
+            ProcessLogCodec::decode_base_payload(&base_envelope.payload).unwrap();
+        assert_eq!(base_seq, 0);
+        let entry = ProcessLogCodec::decode_log(&log).unwrap();
+        assert_eq!(entry.sequence, 0);
+        let assembled = ProcessLogCodec::assemble(base, &head, &[entry]).unwrap();
+        assert_eq!(assembled, source);
+    }
+
+    /// The L8 golden. The V3 *payload* golden above did not move: the base and
+    /// every log record keep the V3 record layout. What L8 changed is the
+    /// document family — a head payload, a base snapshot and a per-commit log
+    /// entry — so those three framings are frozen here. Freezing them is
+    /// deliberate: a format change must update this test and the CHANGELOG
+    /// together, not drift silently.
+    #[test]
+    fn family_wire_format_matches_golden_fingerprint() {
+        use crate::scheduler::core::commit::aggregate::sha256_hex;
+
+        let source = snapshot();
+        let changes = all_changes(&source);
+        let head = ProcessLogCodec::encode_head(&HeadPayload {
+            process_id: source.process_id.clone(),
+            version: source.version.clone(),
+            epoch: 7,
+            base_seq: 0,
+            next_seq: 1,
+        })
+        .unwrap();
+        let base = ProcessLogCodec::encode_base(&source, 0).unwrap();
+        let log = ProcessLogCodec::encode_log(&source, 0, &changes).unwrap();
+        assert_eq!(head.len(), 149);
+        assert_eq!(
+            sha256_hex(&head),
+            "0b0c06f9f9f295fd9a97cd9fb97bc251c76c2e680122cc7814f25bb20f471bf6"
+        );
+        assert_eq!(base.len(), 431);
+        assert_eq!(
+            sha256_hex(&base),
+            "0696f88f8821a655737fe3a6dedd0c2a2a6bbb5349c29225036f96595ccbb649"
+        );
+        assert_eq!(log.len(), 395);
+        assert_eq!(
+            sha256_hex(&log),
+            "1531ee230b05ca2a4517b9089250ab31e2de2ec0d105615978817d055d3e7157"
+        );
     }
 }

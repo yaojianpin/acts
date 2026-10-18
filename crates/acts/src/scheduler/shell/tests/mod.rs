@@ -175,8 +175,64 @@ async fn wake_loss_is_recovered_by_the_ready_queue() {
 /// [`Self::aggregate`] while the hop's own operation is already durably
 /// `CommitPrepared`, which is exactly the state the claim leaves behind and the
 /// plan commit consumes.
+/// Decode one stored aggregate family (head, base, log, indexes) straight from
+/// the store. The test doubles below intercept a batch and need the current
+/// snapshot before it applies; the repository's own load is async and would
+/// re-enter the interceptor.
+async fn read_stored_snapshot(kv: &MemoryStore, process_id: &str) -> Option<ProcessSnapshot> {
+    use crate::scheduler::durable::document_store::{
+        decode_loaded_process, outbox_index_key, process_base_key, process_key, process_log_prefix,
+        ready_index_key, recovery_index_key,
+    };
+    let head = kv
+        .one(&process_key(process_id).ok()?)
+        .await
+        .ok()
+        .flatten()?;
+    let base = kv
+        .one(&process_base_key(process_id).ok()?)
+        .await
+        .ok()
+        .flatten();
+    let log_prefix = process_log_prefix(process_id).ok()?;
+    let log_entries = kv
+        .scan_prefix(
+            &log_prefix,
+            crate::ScanOptions::new(crate::store::ScanOperation::Eq, log_prefix.clone(), false),
+        )
+        .await
+        .ok()?;
+    let recovery = kv
+        .one(&recovery_index_key(process_id).ok()?)
+        .await
+        .ok()
+        .flatten();
+    let outbox = kv
+        .one(&outbox_index_key(process_id).ok()?)
+        .await
+        .ok()
+        .flatten();
+    let ready = kv
+        .one(&ready_index_key(process_id).ok()?)
+        .await
+        .ok()
+        .flatten();
+    decode_loaded_process(
+        process_id,
+        head,
+        base,
+        &log_entries,
+        recovery,
+        outbox,
+        ready,
+    )
+    .ok()
+    .map(|loaded| loaded.snapshot)
+}
+
 struct ConflictKv {
     inner: MemoryStore,
+    process_id: String,
     process_key: String,
     /// The operation whose plan commit should park. Tests that know the id up
     /// front arm it at construction; a test that discovers the operation after
@@ -195,6 +251,7 @@ impl ConflictKv {
     fn new(process_id: &str) -> Arc<Self> {
         Arc::new(Self {
             inner: MemoryStore::new(),
+            process_id: process_id.into(),
             process_key: crate::scheduler::durable::document_store::process_key(process_id)
                 .expect("a process id the aggregate key derives from"),
             operation: parking_lot::Mutex::new(None),
@@ -226,12 +283,7 @@ impl ConflictKv {
         if !writes_process {
             return false;
         }
-        let Ok(Some(bytes)) = self.inner.one(&self.process_key).await else {
-            return false;
-        };
-        let Ok(snapshot) =
-            crate::scheduler::durable::document::ProcessDocumentCodec::decode(&bytes)
-        else {
+        let Some(snapshot) = read_stored_snapshot(&self.inner, &self.process_id).await else {
             return false;
         };
         matches!(
@@ -7656,6 +7708,7 @@ async fn a_commit_delivers_its_records_without_waiting_for_a_tick() {
 /// guard, and records every key written (for ordering assertions).
 struct InstrumentedKv {
     inner: MemoryStore,
+    process_id: String,
     process_key: String,
     writes: parking_lot::Mutex<Vec<String>>,
     fail_plan_commit: AtomicBool,
@@ -7673,6 +7726,7 @@ impl InstrumentedKv {
     fn new(process_id: &str) -> Arc<Self> {
         Arc::new(Self {
             inner: MemoryStore::new(),
+            process_id: process_id.into(),
             process_key: crate::scheduler::durable::document_store::process_key(process_id)
                 .expect("a process id the aggregate key derives from"),
             writes: parking_lot::Mutex::new(Vec::new()),
@@ -7739,24 +7793,55 @@ impl InstrumentedKv {
         }
     }
 
-    fn replacement_snapshot(&self, ops: &[crate::StoreBatchOp]) -> Option<ProcessSnapshot> {
-        ops.iter().find_map(|op| match op {
+    /// The snapshot the batch installs: its head names the version, a base
+    /// put (migration/compaction) carries the whole aggregate, and a log put
+    /// carries only the records that commit changed.
+    fn replacement_snapshot(
+        &self,
+        old: &ProcessSnapshot,
+        ops: &[crate::StoreBatchOp],
+    ) -> Option<ProcessSnapshot> {
+        use crate::scheduler::durable::{
+            document::ProcessLogCodec, document_store::process_base_key,
+            document_store::process_log_prefix, envelope::ProcessEnvelope,
+        };
+        let head_bytes = ops.iter().find_map(|op| match op {
             crate::StoreBatchOp::Put { key, value } if key == &self.process_key => {
-                crate::scheduler::durable::document::ProcessDocumentCodec::decode(value).ok()
+                Some(value.clone())
             }
             _ => None,
-        })
+        })?;
+        let head = ProcessLogCodec::decode_head(&head_bytes).ok()?;
+        if let Some(base_bytes) = ops.iter().find_map(|op| match op {
+            crate::StoreBatchOp::Put { key, value }
+                if key == &process_base_key(&self.process_id).ok()? =>
+            {
+                Some(value.clone())
+            }
+            _ => None,
+        }) {
+            let envelope = ProcessEnvelope::decode(&base_bytes).ok()?;
+            let (_, mut snapshot) = ProcessLogCodec::decode_base_payload(&envelope.payload).ok()?;
+            snapshot.version = head.version;
+            return Some(snapshot);
+        }
+        let log_prefix = process_log_prefix(&self.process_id).ok()?;
+        let entry_bytes = ops.iter().find_map(|op| match op {
+            crate::StoreBatchOp::Put { key, value } if key.starts_with(&log_prefix) => {
+                Some(value.clone())
+            }
+            _ => None,
+        })?;
+        let envelope = ProcessEnvelope::decode(&entry_bytes).ok()?;
+        let entry = ProcessLogCodec::decode_log_payload(&envelope.payload).ok()?;
+        let mut snapshot = old.clone();
+        snapshot.version = head.version;
+        entry.apply_to(&mut snapshot);
+        Some(snapshot)
     }
 
     async fn stored_snapshot(&self) -> Option<ProcessSnapshot> {
-        self.inner
-            .one(&self.process_key)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|bytes| {
-                crate::scheduler::durable::document::ProcessDocumentCodec::decode(&bytes).ok()
-            })
+        read_stored_snapshot(&self.inner, &self.process_id).await
     }
 }
 
@@ -7789,7 +7874,11 @@ impl KvStore for InstrumentedKv {
             |op| matches!(op, crate::StoreBatchOp::Put { key, .. } if key == &self.process_key),
         );
         let (old, new) = if writes_process {
-            (self.stored_snapshot().await, self.replacement_snapshot(ops))
+            let old = self.stored_snapshot().await;
+            let new = old
+                .as_ref()
+                .and_then(|old| self.replacement_snapshot(old, ops));
+            (old, new)
         } else {
             (None, None)
         };

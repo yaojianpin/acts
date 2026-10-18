@@ -385,6 +385,9 @@ impl SubflowKv {
             .unwrap()
             .into_iter()
             .map(|(key, _)| key)
+            // The base and log entries live under the head's prefix; only the
+            // head names a run.
+            .filter(|key| crate::scheduler::durable::document_store::is_process_head_key(key))
             .collect();
         keys.sort();
         keys
@@ -399,8 +402,12 @@ impl SubflowKv {
             if allowed.is_empty() {
                 return None;
             }
-            keys.into_iter()
-                .find(|key| key.starts_with(PROCESS_PREFIX) && !allowed.contains(key))?
+            keys.into_iter().find(|key| {
+                // The base and log entries share the prefix; only a head is a
+                // run start.
+                crate::scheduler::durable::document_store::is_process_head_key(key)
+                    && !allowed.contains(key)
+            })?
         };
         {
             let mut starts = self.starts.lock();

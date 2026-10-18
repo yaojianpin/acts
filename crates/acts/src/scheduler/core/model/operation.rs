@@ -5,7 +5,7 @@ use std::fmt;
 ///
 /// `task` is the instance the work is attached to; `sequence` numbers the
 /// work items of that one instance.
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct OperationId {
     pub(crate) process_id: String,
     pub(crate) task: TaskId,

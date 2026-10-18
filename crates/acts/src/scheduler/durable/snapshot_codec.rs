@@ -6,15 +6,24 @@ use crate::scheduler::core::{
             ClaimToken, CommitToken, OperationId, OperationKind, OperationRecord, OperationState,
         },
         task_graph::{TaskId, TaskState},
-        transition_plan::ProcessVersion,
+        transition_plan::{ProcessVersion, TransitionPlan},
     },
+    outbox::records::OutboxId,
 };
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 const PAYLOAD_MAGIC: &[u8; 8] = b"ACTSPV2\0";
 const PAYLOAD_MAGIC_V3: &[u8; 8] = b"ACTSPV3\0";
+/// L8 head payload: identity, aggregate version and the log window.
+pub(crate) const PAYLOAD_MAGIC_V4_HEAD: &[u8; 8] = b"ACTSPH4\0";
+/// L8 base payload: the log sequence the base snapshot covers, then a V3
+/// snapshot. Binding the two lets a reader reject a base paired with a head
+/// from another version.
+pub(crate) const PAYLOAD_MAGIC_V4_BASE: &[u8; 8] = b"ACTSPB4\0";
+/// L8 log payload: the records one commit changed.
+pub(crate) const PAYLOAD_MAGIC_V4_LOG: &[u8; 8] = b"ACTSPL4\0";
 const MIN_EXECUTION_BYTES: usize = 4 + 8 + 4 + 1 + 4 + 1 + 8;
 const MIN_EXECUTION_ID_BYTES: usize = 4 + 8;
 const MIN_VARIABLE_BYTES: usize = MIN_EXECUTION_ID_BYTES + 4 + 4;
@@ -213,24 +222,12 @@ impl SnapshotCodecV3 {
         tasks.sort_by_key(|(id, _)| *id);
         writer.count(tasks.len())?;
         for (id, value) in tasks {
-            writer.wire_task_id(id, &snapshot.process_id)?;
-            writer.string(value.model_node.as_str())?;
-            writer.wire_optional_task(value.parent.as_ref(), &snapshot.process_id)?;
-            let mut predecessors = value.predecessors.clone();
-            predecessors.sort();
-            writer.count(predecessors.len())?;
-            for predecessor in &predecessors {
-                writer.wire_task_id(predecessor, &snapshot.process_id)?;
-            }
-            writer.u8(task_state_tag(value.state));
-            writer.u64(value.revision);
+            writer.task_record(id, value, &snapshot.process_id)?;
         }
 
         writer.count(snapshot.variables.len())?;
         for ((scope, name), value) in &snapshot.variables {
-            writer.wire_task_id(scope, &snapshot.process_id)?;
-            writer.string(name)?;
-            writer.string(value)?;
+            writer.variable_record(scope, name, value, &snapshot.process_id)?;
         }
 
         let mut operations = snapshot.operations.values().collect::<Vec<_>>();
@@ -244,9 +241,7 @@ impl SnapshotCodecV3 {
         outbox.sort_by(|left, right| left.id.cmp(&right.id));
         writer.count(outbox.len())?;
         for record in outbox {
-            let bytes = crate::scheduler::core::outbox::outbox_codec::OutboxCodec::encode(record)
-                .map_err(|error| SnapshotCodecError::InvalidOutbox(error.to_string()))?;
-            writer.bytes(&bytes)?;
+            writer.outbox_record(record)?;
         }
         Ok(writer.bytes)
     }
@@ -266,30 +261,8 @@ impl SnapshotCodecV3 {
         let task_count = reader.count_bounded(MIN_EXECUTION_BYTES_V3)?;
         let mut tasks = HashMap::with_capacity(task_count);
         for _ in 0..task_count {
-            let id = reader.wire_task_id()?;
-            let model_node =
-                NodeId::parse(reader.string()?).map_err(|_| SnapshotCodecError::InvalidNodeId)?;
-            let parent = reader.wire_optional_task()?;
-            let predecessor_count = reader.count_bounded(MIN_EXECUTION_ID_BYTES_V3)?;
-            let mut predecessors = Vec::with_capacity(predecessor_count);
-            for _ in 0..predecessor_count {
-                predecessors.push(reader.wire_task_id()?);
-            }
-            let state = decode_task_state(reader.u8()?)?;
-            let revision = reader.u64()?;
-            if tasks
-                .insert(
-                    id.clone(),
-                    TaskSnapshot {
-                        model_node,
-                        parent,
-                        predecessors,
-                        state,
-                        revision,
-                    },
-                )
-                .is_some()
-            {
+            let (id, value) = reader.task_record()?;
+            if tasks.insert(id.clone(), value).is_some() {
                 return Err(SnapshotCodecError::DuplicateTask(id));
             }
         }
@@ -297,9 +270,7 @@ impl SnapshotCodecV3 {
         let variable_count = reader.count_bounded(MIN_VARIABLE_BYTES_V3)?;
         let mut variables = BTreeMap::new();
         for _ in 0..variable_count {
-            let scope = reader.wire_task_id()?;
-            let name = reader.string()?;
-            let value = reader.string()?;
+            let ((scope, name), value) = reader.variable_record()?;
             if variables
                 .insert((scope.clone(), name.clone()), value)
                 .is_some()
@@ -323,9 +294,7 @@ impl SnapshotCodecV3 {
         let outbox_count = reader.count_bounded(MIN_OUTBOX_FIELD_BYTES)?;
         let mut outbox = HashMap::with_capacity(outbox_count);
         for _ in 0..outbox_count {
-            let record =
-                crate::scheduler::core::outbox::outbox_codec::OutboxCodec::decode(reader.bytes()?)
-                    .map_err(|error| SnapshotCodecError::InvalidOutbox(error.to_string()))?;
+            let record = reader.outbox_record()?;
             if outbox.insert(record.id.clone(), record.clone()).is_some() {
                 return Err(SnapshotCodecError::DuplicateOutboxKey(record.id.key));
             }
@@ -345,6 +314,323 @@ impl SnapshotCodecV3 {
             .validate()
             .map_err(SnapshotCodecError::InvalidProcess)?;
         Ok(snapshot)
+    }
+}
+
+/// The records one commit changed, relative to the aggregate the commit
+/// loaded. A log entry carries only these; every other record stays in the
+/// base snapshot and is not re-encoded.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LogChanges {
+    pub(crate) tasks: BTreeSet<TaskId>,
+    pub(crate) variables: BTreeSet<(TaskId, String)>,
+    pub(crate) operations: BTreeSet<OperationId>,
+    pub(crate) outbox: BTreeSet<OutboxId>,
+}
+
+impl LogChanges {
+    /// The changes `advance_transition` applies. This is the complete set:
+    /// the advance inserts creates/operations/outbox records, bumps state
+    /// changes and variable writes, and closes the source operation.
+    pub(crate) fn from_transition(plan: &TransitionPlan) -> Self {
+        let mut changes = Self::default();
+        for create in &plan.task_creates {
+            changes.tasks.insert(create.task.clone());
+        }
+        for change in &plan.state_changes {
+            changes.tasks.insert(change.task.clone());
+        }
+        for write in &plan.variable_writes {
+            changes
+                .variables
+                .insert((write.scope.clone(), write.name.clone()));
+        }
+        for intent in &plan.operations {
+            changes.operations.insert(intent.id.clone());
+        }
+        if let Some(source) = &plan.source_operation {
+            changes.operations.insert(source.id.clone());
+        }
+        for item in &plan.outbox {
+            changes.outbox.insert(OutboxId {
+                process_id: plan.process_id.clone(),
+                key: item.key.clone(),
+            });
+        }
+        changes
+    }
+
+    pub(crate) fn operation(id: OperationId) -> Self {
+        let mut changes = Self::default();
+        changes.operations.insert(id);
+        changes
+    }
+
+    pub(crate) fn outbox(ids: impl IntoIterator<Item = OutboxId>) -> Self {
+        let mut changes = Self::default();
+        changes.outbox.extend(ids);
+        changes
+    }
+}
+
+/// The L8 head: the aggregate version and the log window
+/// `[base_seq, next_seq)`. `epoch` advances on every write so the head bytes
+/// are a version guard even for a commit that leaves the domain version
+/// unchanged (an outbox confirmation).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HeadPayload {
+    pub(crate) process_id: String,
+    pub(crate) version: ProcessVersion,
+    pub(crate) epoch: u64,
+    pub(crate) base_seq: u64,
+    pub(crate) next_seq: u64,
+}
+
+/// One log entry: exactly the records one commit changed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LogPayload {
+    pub(crate) process_id: String,
+    pub(crate) sequence: u64,
+    pub(crate) tasks: Vec<(TaskId, TaskSnapshot)>,
+    pub(crate) variables: Vec<((TaskId, String), String)>,
+    pub(crate) operations: Vec<OperationRecord>,
+    pub(crate) outbox: Vec<crate::scheduler::core::outbox::records::OutboxRecord>,
+}
+
+impl LogPayload {
+    pub(crate) fn collect(
+        snapshot: &ProcessSnapshot,
+        sequence: u64,
+        changes: &LogChanges,
+    ) -> Result<Self, SnapshotCodecError> {
+        let mut tasks = Vec::with_capacity(changes.tasks.len());
+        for id in &changes.tasks {
+            let value = snapshot
+                .tasks
+                .get(id)
+                .ok_or_else(|| SnapshotCodecError::ChangedRecordMissing(format!("task {id:?}")))?;
+            tasks.push((id.clone(), value.clone()));
+        }
+        let mut variables = Vec::with_capacity(changes.variables.len());
+        for key in &changes.variables {
+            let value = snapshot.variables.get(key).ok_or_else(|| {
+                SnapshotCodecError::ChangedRecordMissing(format!("variable {key:?}"))
+            })?;
+            variables.push((key.clone(), value.clone()));
+        }
+        let mut operations = Vec::with_capacity(changes.operations.len());
+        for id in &changes.operations {
+            let value = snapshot.operations.get(id).ok_or_else(|| {
+                SnapshotCodecError::ChangedRecordMissing(format!("operation {id:?}"))
+            })?;
+            operations.push(value.clone());
+        }
+        let mut outbox = Vec::with_capacity(changes.outbox.len());
+        for id in &changes.outbox {
+            let value = snapshot.outbox.get(id).ok_or_else(|| {
+                SnapshotCodecError::ChangedRecordMissing(format!("outbox record {id:?}"))
+            })?;
+            outbox.push(value.clone());
+        }
+        Ok(Self {
+            process_id: snapshot.process_id.clone(),
+            sequence,
+            tasks,
+            variables,
+            operations,
+            outbox,
+        })
+    }
+
+    /// Apply this entry on top of a snapshot. Records are overwritten: a log
+    /// carries state, not a mutation script, and no commit deletes a record
+    /// (A11 reclaims the whole family instead).
+    pub(crate) fn apply_to(&self, snapshot: &mut ProcessSnapshot) {
+        for (id, value) in &self.tasks {
+            snapshot.tasks.insert(id.clone(), value.clone());
+        }
+        for (key, value) in &self.variables {
+            snapshot.variables.insert(key.clone(), value.clone());
+        }
+        for operation in &self.operations {
+            snapshot
+                .operations
+                .insert(operation.id.clone(), operation.clone());
+        }
+        for record in &self.outbox {
+            snapshot.outbox.insert(record.id.clone(), record.clone());
+        }
+    }
+}
+
+pub(crate) struct SnapshotCodecV4;
+
+impl SnapshotCodecV4 {
+    pub(crate) fn encode_head(head: &HeadPayload) -> Result<Vec<u8>, SnapshotCodecError> {
+        if head.process_id.trim().is_empty() {
+            return Err(SnapshotCodecError::InvalidLog("empty process id".into()));
+        }
+        if head.base_seq > head.next_seq {
+            return Err(SnapshotCodecError::InvalidLog(
+                "log window is inverted".into(),
+            ));
+        }
+        let mut writer = Writer::default();
+        writer.raw(PAYLOAD_MAGIC_V4_HEAD);
+        writer.string(&head.process_id)?;
+        writer.u64(head.version.graph);
+        writer.u64(head.version.process);
+        writer.u64(head.version.operations);
+        writer.u64(head.epoch);
+        writer.u64(head.base_seq);
+        writer.u64(head.next_seq);
+        Ok(writer.bytes)
+    }
+
+    pub(crate) fn decode_head(bytes: &[u8]) -> Result<HeadPayload, SnapshotCodecError> {
+        let mut reader = Reader::new(bytes);
+        if reader.raw(PAYLOAD_MAGIC_V4_HEAD.len())? != PAYLOAD_MAGIC_V4_HEAD {
+            return Err(SnapshotCodecError::InvalidMagic);
+        }
+        let head = HeadPayload {
+            process_id: reader.string()?,
+            version: ProcessVersion {
+                graph: reader.u64()?,
+                process: reader.u64()?,
+                operations: reader.u64()?,
+            },
+            epoch: reader.u64()?,
+            base_seq: reader.u64()?,
+            next_seq: reader.u64()?,
+        };
+        if !reader.is_finished() {
+            return Err(SnapshotCodecError::TrailingBytes);
+        }
+        if head.process_id.trim().is_empty() {
+            return Err(SnapshotCodecError::InvalidLog("empty process id".into()));
+        }
+        if head.base_seq > head.next_seq {
+            return Err(SnapshotCodecError::InvalidLog(
+                "log window is inverted".into(),
+            ));
+        }
+        Ok(head)
+    }
+
+    pub(crate) fn encode_base(
+        snapshot: &ProcessSnapshot,
+        base_seq: u64,
+    ) -> Result<Vec<u8>, SnapshotCodecError> {
+        let payload = SnapshotCodecV3::encode(snapshot)?;
+        let mut writer = Writer::default();
+        writer.raw(PAYLOAD_MAGIC_V4_BASE);
+        writer.u64(base_seq);
+        writer.bytes(&payload)?;
+        Ok(writer.bytes)
+    }
+
+    pub(crate) fn decode_base(bytes: &[u8]) -> Result<(u64, ProcessSnapshot), SnapshotCodecError> {
+        let mut reader = Reader::new(bytes);
+        if reader.raw(PAYLOAD_MAGIC_V4_BASE.len())? != PAYLOAD_MAGIC_V4_BASE {
+            return Err(SnapshotCodecError::InvalidMagic);
+        }
+        let base_seq = reader.u64()?;
+        let snapshot = SnapshotCodecV3::decode(reader.bytes()?)?;
+        if !reader.is_finished() {
+            return Err(SnapshotCodecError::TrailingBytes);
+        }
+        Ok((base_seq, snapshot))
+    }
+
+    pub(crate) fn encode_log(entry: &LogPayload) -> Result<Vec<u8>, SnapshotCodecError> {
+        let mut writer = Writer::default();
+        writer.raw(PAYLOAD_MAGIC_V4_LOG);
+        writer.string(&entry.process_id)?;
+        writer.u64(entry.sequence);
+        writer.count(entry.tasks.len())?;
+        for (id, value) in &entry.tasks {
+            writer.task_record(id, value, &entry.process_id)?;
+        }
+        writer.count(entry.variables.len())?;
+        for ((scope, name), value) in &entry.variables {
+            writer.variable_record(scope, name, value, &entry.process_id)?;
+        }
+        writer.count(entry.operations.len())?;
+        for operation in &entry.operations {
+            writer.wire_operation(operation)?;
+        }
+        writer.count(entry.outbox.len())?;
+        for record in &entry.outbox {
+            writer.outbox_record(record)?;
+        }
+        Ok(writer.bytes)
+    }
+
+    pub(crate) fn decode_log(bytes: &[u8]) -> Result<LogPayload, SnapshotCodecError> {
+        let mut reader = Reader::new(bytes);
+        if reader.raw(PAYLOAD_MAGIC_V4_LOG.len())? != PAYLOAD_MAGIC_V4_LOG {
+            return Err(SnapshotCodecError::InvalidMagic);
+        }
+        let process_id = reader.string()?;
+        let sequence = reader.u64()?;
+
+        let task_count = reader.count_bounded(MIN_EXECUTION_BYTES_V3)?;
+        let mut tasks = Vec::with_capacity(task_count);
+        let mut task_ids = std::collections::HashSet::with_capacity(task_count);
+        for _ in 0..task_count {
+            let (id, value) = reader.task_record()?;
+            if !task_ids.insert(id.clone()) {
+                return Err(SnapshotCodecError::DuplicateTask(id));
+            }
+            tasks.push((id, value));
+        }
+
+        let variable_count = reader.count_bounded(MIN_VARIABLE_BYTES_V3)?;
+        let mut variables = Vec::with_capacity(variable_count);
+        let mut variable_keys = std::collections::HashSet::with_capacity(variable_count);
+        for _ in 0..variable_count {
+            let record = reader.variable_record()?;
+            if !variable_keys.insert(record.0.clone()) {
+                return Err(SnapshotCodecError::DuplicateVariable(
+                    record.0.0.clone(),
+                    record.0.1.clone(),
+                ));
+            }
+            variables.push(record);
+        }
+
+        let operation_count = reader.count_bounded(MIN_OPERATION_BYTES_V3)?;
+        let mut operations = Vec::with_capacity(operation_count);
+        let mut operation_ids = std::collections::HashSet::with_capacity(operation_count);
+        for _ in 0..operation_count {
+            let operation = reader.wire_operation()?;
+            if !operation_ids.insert(operation.id.clone()) {
+                return Err(SnapshotCodecError::DuplicateOperation(operation.id));
+            }
+            operations.push(operation);
+        }
+
+        let outbox_count = reader.count_bounded(MIN_OUTBOX_FIELD_BYTES)?;
+        let mut outbox = Vec::with_capacity(outbox_count);
+        let mut outbox_keys = std::collections::HashSet::with_capacity(outbox_count);
+        for _ in 0..outbox_count {
+            let record = reader.outbox_record()?;
+            if !outbox_keys.insert(record.id.clone()) {
+                return Err(SnapshotCodecError::DuplicateOutboxKey(record.id.key));
+            }
+            outbox.push(record);
+        }
+        if !reader.is_finished() {
+            return Err(SnapshotCodecError::TrailingBytes);
+        }
+        Ok(LogPayload {
+            process_id,
+            sequence,
+            tasks,
+            variables,
+            operations,
+            outbox,
+        })
     }
 }
 
@@ -461,6 +747,51 @@ impl Writer {
         self.u8(operation_kind_tag(operation.kind));
         self.u64(operation.revision);
         self.operation_state(&operation.state)
+    }
+
+    /// One task record, in the V3 shape: the base snapshot and every log
+    /// entry use this exact layout, so applying a log record cannot drift from
+    /// decoding a whole snapshot.
+    fn task_record(
+        &mut self,
+        id: &TaskId,
+        value: &TaskSnapshot,
+        process_id: &str,
+    ) -> Result<(), SnapshotCodecError> {
+        self.wire_task_id(id, process_id)?;
+        self.string(value.model_node.as_str())?;
+        self.wire_optional_task(value.parent.as_ref(), process_id)?;
+        let mut predecessors = value.predecessors.clone();
+        predecessors.sort();
+        self.count(predecessors.len())?;
+        for predecessor in &predecessors {
+            self.wire_task_id(predecessor, process_id)?;
+        }
+        self.u8(task_state_tag(value.state));
+        self.u64(value.revision);
+        Ok(())
+    }
+
+    fn variable_record(
+        &mut self,
+        scope: &TaskId,
+        name: &str,
+        value: &str,
+        process_id: &str,
+    ) -> Result<(), SnapshotCodecError> {
+        self.wire_task_id(scope, process_id)?;
+        self.string(name)?;
+        self.string(value)?;
+        Ok(())
+    }
+
+    fn outbox_record(
+        &mut self,
+        record: &crate::scheduler::core::outbox::records::OutboxRecord,
+    ) -> Result<(), SnapshotCodecError> {
+        let bytes = crate::scheduler::core::outbox::outbox_codec::OutboxCodec::encode(record)
+            .map_err(|error| SnapshotCodecError::InvalidOutbox(error.to_string()))?;
+        self.bytes(&bytes)
     }
 
     /// The lifecycle state both document versions encode identically.
@@ -650,6 +981,44 @@ impl<'a> Reader<'a> {
         })
     }
 
+    fn task_record(&mut self) -> Result<(TaskId, TaskSnapshot), SnapshotCodecError> {
+        let id = self.wire_task_id()?;
+        let model_node =
+            NodeId::parse(self.string()?).map_err(|_| SnapshotCodecError::InvalidNodeId)?;
+        let parent = self.wire_optional_task()?;
+        let predecessor_count = self.count_bounded(MIN_EXECUTION_ID_BYTES_V3)?;
+        let mut predecessors = Vec::with_capacity(predecessor_count);
+        for _ in 0..predecessor_count {
+            predecessors.push(self.wire_task_id()?);
+        }
+        let state = decode_task_state(self.u8()?)?;
+        let revision = self.u64()?;
+        Ok((
+            id,
+            TaskSnapshot {
+                model_node,
+                parent,
+                predecessors,
+                state,
+                revision,
+            },
+        ))
+    }
+
+    fn variable_record(&mut self) -> Result<((TaskId, String), String), SnapshotCodecError> {
+        let scope = self.wire_task_id()?;
+        let name = self.string()?;
+        let value = self.string()?;
+        Ok(((scope, name), value))
+    }
+
+    fn outbox_record(
+        &mut self,
+    ) -> Result<crate::scheduler::core::outbox::records::OutboxRecord, SnapshotCodecError> {
+        crate::scheduler::core::outbox::outbox_codec::OutboxCodec::decode(self.bytes()?)
+            .map_err(|error| SnapshotCodecError::InvalidOutbox(error.to_string()))
+    }
+
     /// The lifecycle state both document versions encode identically.
     fn operation_state(&mut self) -> Result<OperationState, SnapshotCodecError> {
         Ok(match self.u8()? {
@@ -769,6 +1138,8 @@ pub(crate) enum SnapshotCodecError {
     DuplicateOutboxKey(String),
     InvalidOutbox(String),
     InvalidProcess(CommitError),
+    ChangedRecordMissing(String),
+    InvalidLog(String),
 }
 impl fmt::Display for SnapshotCodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

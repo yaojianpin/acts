@@ -24,15 +24,20 @@ use crate::{
             ready::{ReadyIndex, ReadyIndexCodec},
             recovery::recovery_index::RecoveryIndexCodec,
         },
-        durable::document_store::{
-            DocumentGuard, DocumentMutation, DocumentRepositoryError, LoadedProcess,
-            OUTBOX_INDEX_KEY_PREFIX, PROCESS_KEY_PREFIX, READY_INDEX_KEY_PREFIX,
-            RECOVERY_INDEX_KEY_PREFIX, ReplaceWrite, build_create_transaction,
-            build_orphan_reclaim_transaction, build_outbox_confirm_transaction,
-            build_reclaim_transaction, build_repair_transaction, build_replace_transaction,
-            decode_loaded_process, decode_process_key, loaded_after_write, outbox_index_key,
-            process_key, ready_index_key, recovery_entries, recovery_entry_process_prefix,
-            recovery_index_document, recovery_index_key,
+        durable::{
+            document_store::{
+                DocumentGuard, DocumentMutation, DocumentRepositoryError, InstallWrite,
+                LoadedProcess, OUTBOX_INDEX_KEY_PREFIX, PROCESS_KEY_PREFIX, READY_INDEX_KEY_PREFIX,
+                RECOVERY_INDEX_KEY_PREFIX, ReplaceWrite, build_create_transaction,
+                build_migration_transaction, build_orphan_reclaim_transaction,
+                build_outbox_confirm_transaction, build_reclaim_transaction,
+                build_repair_transaction, build_replace_transaction, decode_loaded_process,
+                decode_process_key, install_migration, loaded_after_write, outbox_index_key,
+                process_base_key, process_key, process_log_prefix, ready_index_key,
+                recovery_entries, recovery_entry_process_prefix, recovery_index_document,
+                recovery_index_key,
+            },
+            snapshot_codec::LogChanges,
         },
     },
     store::{KvStore, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard},
@@ -173,7 +178,7 @@ impl AsyncProcessRepository {
         now_ms: i64,
         poll_ms: i64,
     ) -> Result<LoadedProcess, AsyncRepositoryError> {
-        let (transaction, document, recovery_index, outbox_index, ready_index) =
+        let InstallWrite { transaction, write } =
             build_create_transaction(snapshot, now_ms, poll_ms)?;
         if !self
             .store
@@ -182,13 +187,7 @@ impl AsyncProcessRepository {
         {
             return Err(AsyncRepositoryError::Conflict(snapshot.process_id.clone()));
         }
-        Ok(loaded_after_write(
-            snapshot,
-            document,
-            recovery_index,
-            outbox_index,
-            ready_index,
-        ))
+        Ok(loaded_after_write(snapshot, write))
     }
 
     /// Read a stable page from the compact recovery projection, then validate
@@ -311,8 +310,15 @@ impl AsyncProcessRepository {
         let operation = advance_operation_event(&mut loaded.snapshot, id, expected_revision, event)
             .map_err(AsyncRepositoryError::Domain)?;
         let ready = self.ready_document(&loaded, now_ms, poll_ms, &HashMap::new())?;
+        let changes = LogChanges::operation(id.clone());
         let outcome = self
-            .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
+            .replace(
+                &loaded,
+                &loaded.snapshot,
+                &entries,
+                ready.as_deref(),
+                &changes,
+            )
             .await?;
         match outcome {
             ReplaceOutcome::Committed(write) => {
@@ -355,8 +361,15 @@ impl AsyncProcessRepository {
         let receipt =
             advance_transition(&mut loaded.snapshot, plan).map_err(AsyncRepositoryError::Domain)?;
         let ready = self.ready_document(&loaded, now_ms, poll_ms, &ready_at)?;
+        let changes = LogChanges::from_transition(plan);
         let outcome = self
-            .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
+            .replace(
+                &loaded,
+                &loaded.snapshot,
+                &entries,
+                ready.as_deref(),
+                &changes,
+            )
             .await?;
         match outcome {
             ReplaceOutcome::Committed(write) => {
@@ -576,7 +589,11 @@ impl AsyncProcessRepository {
     pub(crate) async fn process_ids(&self) -> Result<Vec<String>, AsyncRepositoryError> {
         let mut ids = Vec::new();
         for (key, _) in self.store.scan_prefix(PROCESS_KEY_PREFIX).await? {
-            ids.push(decode_process_key(&key)?);
+            // The base and log entries live under the head's prefix; only the
+            // head itself names a process.
+            if crate::scheduler::durable::document_store::is_process_head_key(&key) {
+                ids.push(decode_process_key(&key)?);
+            }
         }
         Ok(ids)
     }
@@ -590,6 +607,9 @@ impl AsyncProcessRepository {
     ) -> Result<usize, AsyncRepositoryError> {
         let mut repaired = 0usize;
         for (key, _) in self.store.scan_prefix(PROCESS_KEY_PREFIX).await? {
+            if !crate::scheduler::durable::document_store::is_process_head_key(&key) {
+                continue;
+            }
             let process_id = decode_process_key(&key)?;
             if self.repair_ready(&process_id, now_ms, poll_ms).await? {
                 repaired += 1;
@@ -774,8 +794,15 @@ impl AsyncProcessRepository {
         let entries = recovery_entries(&loaded.snapshot);
         loaded.snapshot.outbox.insert(id.clone(), evolved.clone());
         let ready = loaded.original_ready_index().map(ToOwned::to_owned);
+        let changes = LogChanges::outbox([id.clone()]);
         match self
-            .replace(&loaded, &loaded.snapshot, &entries, ready.as_deref())
+            .replace(
+                &loaded,
+                &loaded.snapshot,
+                &entries,
+                ready.as_deref(),
+                &changes,
+            )
             .await
         {
             Ok(ReplaceOutcome::Committed(_) | ReplaceOutcome::AlreadyCommitted(_)) => Ok(evolved),
@@ -840,7 +867,12 @@ impl AsyncProcessRepository {
         if confirmed.is_empty() {
             return Ok(OutboxBatchOutcome { confirmed });
         }
-        let write = match build_outbox_confirm_transaction(loaded, &loaded.snapshot) {
+        let confirmed_ids = confirmed
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        let write = match build_outbox_confirm_transaction(loaded, &loaded.snapshot, confirmed_ids)
+        {
             Ok(write) => write,
             Err(error) => {
                 restore_records(&mut loaded.snapshot, previous);
@@ -859,7 +891,7 @@ impl AsyncProcessRepository {
             }
         };
         if applied {
-            loaded.install_confirmed_documents(write.document, write.outbox_index);
+            loaded.install_confirmed_documents(write.write);
             return Ok(OutboxBatchOutcome { confirmed });
         }
         // The guard moved. If the authoritative aggregate already equals this
@@ -870,7 +902,7 @@ impl AsyncProcessRepository {
             .await
             .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?;
         if current.is_some_and(|current| current.snapshot == loaded.snapshot) {
-            loaded.install_confirmed_documents(write.document, write.outbox_index);
+            loaded.install_confirmed_documents(write.write);
             Ok(OutboxBatchOutcome { confirmed })
         } else {
             restore_records(&mut loaded.snapshot, previous);
@@ -884,25 +916,21 @@ impl AsyncProcessRepository {
         replacement_snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         current_recovery_entries: &std::collections::BTreeMap<String, Vec<u8>>,
         replacement_ready: Option<&[u8]>,
+        changes: &LogChanges,
     ) -> Result<ReplaceOutcome, AsyncRepositoryError> {
-        let (transaction, document, recovery_index, outbox_index, ready) =
-            build_replace_transaction(
-                loaded,
-                replacement_snapshot,
-                current_recovery_entries,
-                replacement_ready,
-            )?;
+        let InstallWrite { transaction, write } = build_replace_transaction(
+            loaded,
+            replacement_snapshot,
+            current_recovery_entries,
+            replacement_ready,
+            changes,
+        )?;
         if self
             .store
             .atomic_batch(transaction.guards(), transaction.mutations())
             .await?
         {
-            return Ok(ReplaceOutcome::Committed(ReplaceWrite {
-                document,
-                recovery_index,
-                outbox_index,
-                ready,
-            }));
+            return Ok(ReplaceOutcome::Committed(write));
         }
         let authoritative = self.load(&loaded.snapshot.process_id).await?;
         match authoritative {
@@ -945,6 +973,8 @@ impl AsyncProcessRepository {
                     let recovery_entries = self.store.scan_prefix(&entry_prefix).await?;
                     let transaction = build_reclaim_transaction(&loaded, &recovery_entries)?;
                     let document_bytes = loaded.original_document().len()
+                        + loaded.original_base().map_or(0, <[u8]>::len)
+                        + loaded.original_log().values().map(Vec::len).sum::<usize>()
                         + loaded.original_recovery_index().map_or(0, <[u8]>::len)
                         + loaded.original_outbox_index().map_or(0, <[u8]>::len)
                         + loaded.original_ready_index().map_or(0, <[u8]>::len)
@@ -965,19 +995,26 @@ impl AsyncProcessRepository {
                 }
                 None => {
                     let recovery_entries = self.store.scan_prefix(&entry_prefix).await?;
+                    let log_entries = self
+                        .store
+                        .scan_prefix(&process_log_prefix(process_id)?)
+                        .await?;
                     let keys = [
+                        process_base_key(process_id)?,
                         recovery_index_key(process_id)?,
                         outbox_index_key(process_id)?,
                         ready_index_key(process_id)?,
                     ];
                     let mut documents = self.store.read_many(&keys).await?.into_iter();
+                    let base = documents.next().flatten();
                     let recovery_index = documents.next().flatten();
                     let outbox_index = documents.next().flatten();
                     let ready_index = documents.next().flatten();
-                    let orphan_indexes = [&recovery_index, &outbox_index, &ready_index]
+                    let orphan_indexes = [&base, &recovery_index, &outbox_index, &ready_index]
                         .into_iter()
                         .filter(|document| document.is_some())
                         .count()
+                        + log_entries.len()
                         + recovery_entries.len();
                     if orphan_indexes == 0 {
                         return Ok(ReclaimOutcome::Absent {
@@ -985,15 +1022,22 @@ impl AsyncProcessRepository {
                             orphan_indexes: 0,
                         });
                     }
-                    let document_bytes = recovery_index.as_ref().map_or(0, Vec::len)
+                    let document_bytes = base.as_ref().map_or(0, Vec::len)
+                        + recovery_index.as_ref().map_or(0, Vec::len)
                         + outbox_index.as_ref().map_or(0, Vec::len)
                         + ready_index.as_ref().map_or(0, Vec::len)
+                        + log_entries
+                            .iter()
+                            .map(|(_, bytes)| bytes.len())
+                            .sum::<usize>()
                         + recovery_entries
                             .iter()
                             .map(|(_, bytes)| bytes.len())
                             .sum::<usize>();
                     let transaction = build_orphan_reclaim_transaction(
                         process_id,
+                        base,
+                        &log_entries,
                         recovery_index,
                         outbox_index,
                         ready_index,
@@ -1015,15 +1059,45 @@ impl AsyncProcessRepository {
         Err(AsyncRepositoryError::Conflict(process_id.to_string()))
     }
 
-    /// Load one aggregate with its derived indexes.
+    /// Upgrade a legacy whole-snapshot aggregate to the L8 family. A store
+    /// write failure is not fatal to reads: the caller keeps serving the
+    /// legacy snapshot and the next load retries. A guard loss means another
+    /// load migrated first, so the caller re-reads.
+    async fn migrate_legacy(
+        &self,
+        loaded: LoadedProcess,
+    ) -> Result<MigrationOutcome, AsyncRepositoryError> {
+        let (transaction, head, base) = build_migration_transaction(&loaded)?;
+        match self
+            .store
+            .atomic_batch(transaction.guards(), transaction.mutations())
+            .await
+        {
+            Ok(true) => Ok(MigrationOutcome::Migrated(install_migration(
+                loaded, head, base,
+            ))),
+            Ok(false) => Ok(MigrationOutcome::Conflict),
+            Err(error) => {
+                tracing::warn!(
+                    process_id = loaded.snapshot.process_id,
+                    error = %error,
+                    "legacy aggregate migration failed; keeping the legacy document readable"
+                );
+                Ok(MigrationOutcome::Failed(loaded))
+            }
+        }
+    }
+
+    /// Load one aggregate family with its derived indexes.
     ///
-    /// The three documents are read in one `read_many` call, but a store
-    /// without a native batch read serves that key by key (`KvStore::many`'s
-    /// default loops `one`), so a commit landing between the reads can pair an
-    /// aggregate with its neighbours from another version. The decoder catches
-    /// exactly that — the indexes are derived from the aggregate — so the read
-    /// is retried: it is a race with the writers this repository serves, not
-    /// damage. A mismatch that survives the attempts is still surfaced.
+    /// The head, base and indexes are read in one `read_many` call and the log
+    /// entries in one prefix scan. A store without a native batch read serves
+    /// the batch key by key, so a commit landing between reads can pair a head
+    /// with records from another version. The head is re-read after the log
+    /// scan and compared byte for byte — any commit installs a different head
+    /// (its epoch advances) — and the derived indexes are checked against the
+    /// rebuilt snapshot; either disagreement retries the read. A mismatch that
+    /// survives the attempts is surfaced as damage.
     pub(crate) async fn load(
         &self,
         process_id: &str,
@@ -1033,36 +1107,120 @@ impl AsyncProcessRepository {
             recovery_index_key(process_id)?,
             outbox_index_key(process_id)?,
             ready_index_key(process_id)?,
+            process_base_key(process_id)?,
         ];
+        let log_prefix = process_log_prefix(process_id)?;
         for attempt in 0..LOAD_ATTEMPTS {
             let mut documents = self.store.read_many(&keys).await?.into_iter();
             let process = documents.next().flatten();
             let recovery_index = documents.next().flatten();
             let outbox_index = documents.next().flatten();
             let ready_index = documents.next().flatten();
+            let base = documents.next().flatten();
             let Some(process) = process else {
                 return Ok(None);
             };
+            let log_entries = self.store.scan_prefix(&log_prefix).await?;
+            let head_bytes = process.clone();
             match decode_loaded_process(
                 process_id,
                 process,
+                base,
+                &log_entries,
                 recovery_index,
                 outbox_index,
                 ready_index,
             ) {
-                Ok(loaded) => return Ok(Some(loaded)),
-                Err(error) if error.is_read_race() && attempt + 1 < LOAD_ATTEMPTS => {
-                    tracing::debug!(
-                        process_id,
-                        attempt,
-                        "aggregate read raced a writer; re-reading"
-                    );
+                Ok(loaded) if loaded.is_legacy() => match self.migrate_legacy(loaded).await? {
+                    MigrationOutcome::Migrated(loaded) => return Ok(Some(loaded)),
+                    MigrationOutcome::Failed(loaded) => return Ok(Some(loaded)),
+                    MigrationOutcome::Conflict if attempt + 1 < LOAD_ATTEMPTS => {
+                        tracing::debug!(
+                            process_id,
+                            attempt,
+                            "legacy migration lost a guard; re-reading"
+                        );
+                    }
+                    MigrationOutcome::Conflict => {
+                        return Err(AsyncRepositoryError::Conflict(process_id.into()));
+                    }
+                },
+                Ok(loaded) => {
+                    // Prefer the newest consistent view: if a commit landed
+                    // between the batch read and the log scan, retry. On the
+                    // last attempt the decoded snapshot is still internally
+                    // consistent (base/head/log all agree), so hand it back
+                    // rather than failing a reader under a busy writer.
+                    let current = self
+                        .store
+                        .read_many(&[process_key(process_id)?])
+                        .await?
+                        .into_iter()
+                        .next()
+                        .flatten();
+                    if current.as_deref() == Some(head_bytes.as_slice()) {
+                        return Ok(Some(loaded));
+                    }
+                    if attempt + 1 < LOAD_ATTEMPTS {
+                        tracing::debug!(
+                            process_id,
+                            attempt,
+                            "aggregate head moved while reading its log; re-reading"
+                        );
+                        continue;
+                    }
+                    return Ok(Some(loaded));
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    // A derived index can be read from another version; that
+                    // is a plain race and retries without another head read. A
+                    // compaction can also delete the log window between the
+                    // batch read and the prefix scan, leaving an intact old
+                    // head with no entries — so a non-race error is retried
+                    // only when the head moved.
+                    if error.is_read_race() {
+                        if attempt + 1 < LOAD_ATTEMPTS {
+                            tracing::debug!(
+                                process_id,
+                                attempt,
+                                "aggregate read raced a writer; re-reading"
+                            );
+                            continue;
+                        }
+                        return Err(error.into());
+                    }
+                    let current = self
+                        .store
+                        .read_many(&[process_key(process_id)?])
+                        .await?
+                        .into_iter()
+                        .next()
+                        .flatten();
+                    if current.as_deref() != Some(head_bytes.as_slice())
+                        && attempt + 1 < LOAD_ATTEMPTS
+                    {
+                        tracing::debug!(
+                            process_id,
+                            attempt,
+                            "aggregate head moved while reading its log; re-reading"
+                        );
+                        continue;
+                    }
+                    return Err(error.into());
+                }
             }
         }
         unreachable!("the loop returns within LOAD_ATTEMPTS")
     }
+}
+
+enum MigrationOutcome {
+    /// The legacy document was rewritten as an L8 head + base.
+    Migrated(LoadedProcess),
+    /// Another writer changed the head first; the caller re-reads.
+    Conflict,
+    /// The store refused the migration; the legacy snapshot stays readable.
+    Failed(LoadedProcess),
 }
 
 /// Recovery-specific production port. Recovery owns scanning and paging;
@@ -1229,6 +1387,7 @@ mod tests {
     use crate::scheduler::core::model::transition_plan::ProcessVersion;
     use crate::scheduler::core::recovery::recovery_index::{RecoveryIndex, RecoveryIndexCodec};
     use crate::scheduler::durable::document::ProcessDocumentCodec;
+    use crate::scheduler::durable::document_store::{MAX_LOG_ENTRIES, outbox_index_document};
     use std::collections::{BTreeMap, HashMap};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1289,7 +1448,8 @@ mod tests {
     /// the three single-key reads produces — and a consistent pair after.
     /// `torn: usize::MAX` keeps serving the torn pair.
     struct TornIndexStore {
-        process: Vec<u8>,
+        head: Vec<u8>,
+        base: Vec<u8>,
         torn_index: Vec<u8>,
         torn: usize,
         reads: Arc<AtomicUsize>,
@@ -1299,17 +1459,27 @@ mod tests {
     impl AsyncDocumentStore for TornIndexStore {
         async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            if keys.len() == 1 {
+                // The post-decode head re-read.
+                return Ok(vec![Some(self.head.clone())]);
+            }
             let index = (read < self.torn).then(|| self.torn_index.clone());
             assert_eq!(
                 keys.len(),
-                4,
-                "aggregate + recovery index + outbox index + ready index"
+                5,
+                "head + recovery index + outbox index + ready index + base"
             );
-            Ok(vec![Some(self.process.clone()), index, None, None])
+            Ok(vec![
+                Some(self.head.clone()),
+                index,
+                None,
+                None,
+                Some(self.base.clone()),
+            ])
         }
 
         async fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
-            unimplemented!("the load path does not scan")
+            Ok(Vec::new())
         }
 
         async fn scan_range(
@@ -1332,8 +1502,22 @@ mod tests {
 
     fn torn_store(torn: usize) -> (Arc<TornIndexStore>, Arc<AtomicUsize>) {
         let reads = Arc::new(AtomicUsize::new(0));
+        let source = snapshot(false);
+        let head = crate::scheduler::durable::document::ProcessLogCodec::encode_head(
+            &crate::scheduler::durable::snapshot_codec::HeadPayload {
+                process_id: source.process_id.clone(),
+                version: source.version.clone(),
+                epoch: 0,
+                base_seq: 0,
+                next_seq: 0,
+            },
+        )
+        .unwrap();
+        let base =
+            crate::scheduler::durable::document::ProcessLogCodec::encode_base(&source, 0).unwrap();
         let store = Arc::new(TornIndexStore {
-            process: ProcessDocumentCodec::encode(&snapshot(false)).unwrap(),
+            head,
+            base,
             torn_index: RecoveryIndexCodec::encode(
                 &RecoveryIndex::project(&snapshot(true)).unwrap(),
             )
@@ -1416,13 +1600,21 @@ mod tests {
     #[test]
     fn reclaim_transaction_guards_the_aggregate_and_every_index() {
         let snapshot = reclaimable_snapshot("guard");
-        let document = ProcessDocumentCodec::encode(&snapshot).unwrap();
-        let loaded = loaded_after_write(&snapshot, document.clone(), None, None, None);
+        let InstallWrite { write, .. } = build_create_transaction(&snapshot, 0, 800).unwrap();
+        let loaded = loaded_after_write(&snapshot, write);
         let transaction = build_reclaim_transaction(&loaded, &[]).unwrap();
         let aggregate_key = process_key("guard").unwrap();
         assert!(transaction.guards().iter().any(|guard| {
-            guard.key == aggregate_key && guard.expected.as_deref() == Some(document.as_slice())
+            guard.key == aggregate_key
+                && guard.expected.as_deref() == Some(loaded.original_document())
         }));
+        let base_key = process_base_key("guard").unwrap();
+        assert!(
+            transaction.guards().iter().any(|guard| {
+                guard.key == base_key && guard.expected.as_deref() == loaded.original_base()
+            }),
+            "the base snapshot must be guarded by its exact bytes"
+        );
         for key in [
             recovery_index_key("guard").unwrap(),
             outbox_index_key("guard").unwrap(),
@@ -1438,6 +1630,7 @@ mod tests {
         }
         for key in [
             aggregate_key,
+            process_base_key("guard").unwrap(),
             recovery_index_key("guard").unwrap(),
             outbox_index_key("guard").unwrap(),
             ready_index_key("guard").unwrap(),
@@ -1462,10 +1655,16 @@ mod tests {
             .expect("the aggregate is created");
 
         // A settled run projects no recovery/outbox/ready document, so the
-        // aggregate is the only document present — and a missing ready index
-        // (an older database) is still a clean delete.
+        // aggregate family (head + base) is the only document present — and a
+        // missing ready index (an older database) is still a clean delete.
         assert!(
             kv.one(&process_key("reclaim").unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            kv.one(&process_base_key("reclaim").unwrap())
                 .await
                 .unwrap()
                 .is_some()
@@ -1482,6 +1681,7 @@ mod tests {
         ));
         for key in [
             process_key("reclaim").unwrap(),
+            process_base_key("reclaim").unwrap(),
             recovery_index_key("reclaim").unwrap(),
             outbox_index_key("reclaim").unwrap(),
             ready_index_key("reclaim").unwrap(),
@@ -1709,9 +1909,17 @@ mod tests {
             "the moved aggregate is no longer reclaimable"
         );
         assert_eq!(
-            kv.one(&process_key("race").unwrap()).await.unwrap(),
-            Some(replacement_document),
-            "the concurrent commit's bytes must survive the reclaim attempt"
+            repository.load("race").await.unwrap().unwrap().snapshot,
+            replacement,
+            "the concurrent commit's aggregate must survive the reclaim attempt"
+        );
+        assert_ne!(
+            kv.one(&process_key("race").unwrap())
+                .await
+                .unwrap()
+                .unwrap(),
+            replacement_document,
+            "the legacy document the rival writer installed was migrated, not deleted"
         );
     }
 
@@ -1765,7 +1973,11 @@ mod tests {
             .unwrap()
             .expect("the aggregate loaded");
         assert_eq!(loaded.snapshot.version, snapshot(false).version);
-        assert_eq!(reads.load(Ordering::SeqCst), 2, "the torn read was retried");
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            3,
+            "the torn read was retried, then the head re-read verified the window"
+        );
     }
 
     /// A store that keeps serving the mismatched pair is damage: the load
@@ -2069,5 +2281,330 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 3);
+    }
+
+    fn snapshot_for(process_id: &str) -> ProcessSnapshot {
+        let mut source = snapshot(true);
+        source.process_id = process_id.into();
+        source.operations = source
+            .operations
+            .into_values()
+            .map(|mut operation| {
+                operation.id.process_id = process_id.into();
+                (operation.id.clone(), operation)
+            })
+            .collect();
+        source.outbox = source
+            .outbox
+            .into_values()
+            .map(|mut record| {
+                record.id.process_id = process_id.into();
+                (record.id.clone(), record)
+            })
+            .collect();
+        source
+    }
+
+    /// A 30-task aggregate: enough that a whole-snapshot write dwarfs the
+    /// records one commit changes.
+    fn long_snapshot(process_id: &str) -> ProcessSnapshot {
+        let mut tasks = HashMap::new();
+        let mut variables = BTreeMap::new();
+        let mut previous = None;
+        for index in 0..30 {
+            let id = TaskId::new(format!("step{index}"), 0).unwrap();
+            tasks.insert(
+                id.clone(),
+                TaskSnapshot {
+                    model_node: NodeId::parse("model-step").unwrap(),
+                    parent: None,
+                    predecessors: previous.clone().into_iter().collect(),
+                    state: TaskState::Ready,
+                    revision: 0,
+                },
+            );
+            variables.insert((id.clone(), "payload".into()), "value".into());
+            previous = Some(id);
+        }
+        ProcessSnapshot {
+            process_id: process_id.into(),
+            version: ProcessVersion {
+                graph: 30,
+                process: 1,
+                operations: 0,
+            },
+            tasks,
+            variables,
+            operations: HashMap::new(),
+            outbox: HashMap::new(),
+        }
+    }
+
+    fn legacy_document(source: &ProcessSnapshot, use_v2_payload: bool) -> Vec<u8> {
+        if use_v2_payload {
+            crate::scheduler::durable::envelope::ProcessEnvelope::seal(
+                crate::scheduler::durable::snapshot_codec::SnapshotCodecV2::encode(source).unwrap(),
+            )
+            .unwrap()
+        } else {
+            ProcessDocumentCodec::encode(source).unwrap()
+        }
+    }
+
+    async fn seed_legacy(kv: &crate::store::MemoryStore, source: &ProcessSnapshot, v2: bool) {
+        let pid = &source.process_id;
+        kv.put(&process_key(pid).unwrap(), legacy_document(source, v2))
+            .await
+            .unwrap();
+        if let Some(index) = recovery_index_document(source).unwrap() {
+            kv.put(&recovery_index_key(pid).unwrap(), index)
+                .await
+                .unwrap();
+        }
+        if let Some(index) = outbox_index_document(source).unwrap() {
+            kv.put(&outbox_index_key(pid).unwrap(), index)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// An old V2 (payload) or V3 document opens through the new family: the
+    /// load migrates it in one atomic batch, the rebuilt snapshot is
+    /// value-equal, and a second load reads the family without rewriting it.
+    #[tokio::test]
+    async fn legacy_v2_and_v3_documents_migrate_on_load() {
+        for (pid, v2) in [("legacy-v2", true), ("legacy-v3", false)] {
+            let kv = Arc::new(crate::store::MemoryStore::new());
+            let repository =
+                AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+            let source = snapshot_for(pid);
+            seed_legacy(&kv, &source, v2).await;
+            let legacy_bytes = kv.one(&process_key(pid).unwrap()).await.unwrap().unwrap();
+
+            let loaded = repository.load(pid).await.unwrap().expect("aggregate");
+            assert_eq!(loaded.snapshot, source);
+            assert!(!loaded.is_legacy(), "{pid} must migrate on load");
+            let head = kv.one(&process_key(pid).unwrap()).await.unwrap().unwrap();
+            assert_ne!(head, legacy_bytes, "{pid}'s head is an L8 document");
+            assert!(
+                kv.one(&process_base_key(pid).unwrap())
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{pid}'s base snapshot was written"
+            );
+
+            let again = repository.load(pid).await.unwrap().expect("aggregate");
+            assert_eq!(again.snapshot, source);
+            assert_eq!(
+                again.original_document(),
+                head,
+                "a migrated aggregate is not rewritten on the next load"
+            );
+        }
+    }
+
+    enum MigrationFault {
+        StoreError,
+        LostGuard,
+    }
+
+    /// Refuses the first migration batch, either with a store error or with a
+    /// lost guard.
+    struct FaultyMigrationStore {
+        inner: Arc<KvDocumentStore>,
+        fault: MigrationFault,
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncDocumentStore for FaultyMigrationStore {
+        async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+            self.inner.read_many(keys).await
+        }
+        async fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            self.inner.scan_prefix(prefix).await
+        }
+        async fn scan_range(
+            &self,
+            prefix: &str,
+            lower: Option<&str>,
+            upper: Option<&str>,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            self.inner.scan_range(prefix, lower, upper).await
+        }
+        async fn atomic_batch(
+            &self,
+            guards: &[DocumentGuard],
+            mutations: &[DocumentMutation],
+        ) -> Result<bool, ActError> {
+            if !self.fired.swap(true, Ordering::SeqCst) {
+                return match self.fault {
+                    MigrationFault::StoreError => {
+                        Err(ActError::Store("injected migration failure".into()))
+                    }
+                    MigrationFault::LostGuard => Ok(false),
+                };
+            }
+            self.inner.atomic_batch(guards, mutations).await
+        }
+    }
+
+    /// A migration the store refuses leaves the legacy document readable —
+    /// the load still answers the old snapshot — and the next load retries
+    /// and succeeds. A lost guard re-reads and then migrates too.
+    #[tokio::test]
+    async fn migration_failure_keeps_the_legacy_document_readable_and_reenters() {
+        for (pid, fault) in [
+            ("migration-error", MigrationFault::StoreError),
+            ("migration-conflict", MigrationFault::LostGuard),
+        ] {
+            let kv = Arc::new(crate::store::MemoryStore::new());
+            let inner = Arc::new(KvDocumentStore::new(kv.clone()));
+            let source = snapshot_for(pid);
+            seed_legacy(&kv, &source, false).await;
+            let legacy_bytes = kv.one(&process_key(pid).unwrap()).await.unwrap().unwrap();
+            let repository = AsyncProcessRepository::new(Arc::new(FaultyMigrationStore {
+                inner,
+                fault,
+                fired: std::sync::atomic::AtomicBool::new(false),
+            }));
+
+            let first = repository.load(pid).await.unwrap().expect("aggregate");
+            assert_eq!(first.snapshot, source);
+            let second = repository.load(pid).await.unwrap().expect("aggregate");
+            assert_eq!(second.snapshot, source);
+            assert!(!second.is_legacy(), "{pid} must migrate on the retry");
+            assert_ne!(
+                kv.one(&process_key(pid).unwrap()).await.unwrap().unwrap(),
+                legacy_bytes,
+                "{pid}'s head was rewritten by the retry"
+            );
+        }
+    }
+
+    /// A normal commit appends one small log entry and never rewrites the
+    /// 30-task base; the commit that fills the window compacts the log away in
+    /// the same guarded batch.
+    #[tokio::test]
+    async fn commits_append_log_entries_and_compact_at_the_window() {
+        use crate::scheduler::durable::snapshot_codec::LogChanges;
+
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        let process_id = "log-window";
+        let source = long_snapshot(process_id);
+        let mut loaded = repository.create(&source, 0, 800).await.unwrap();
+        let base_key = process_base_key(process_id).unwrap();
+        let base_before = kv.one(&base_key).await.unwrap().unwrap();
+        let log_prefix = process_log_prefix(process_id).unwrap();
+        let mut log_bytes = 0u64;
+
+        for _ in 0..MAX_LOG_ENTRIES {
+            let mut replacement = loaded.snapshot.clone();
+            replacement.version.process += 1;
+            let task = replacement.tasks.keys().next().unwrap().clone();
+            replacement.tasks.get_mut(&task).unwrap().revision += 1;
+            let mut changes = LogChanges::default();
+            changes.tasks.insert(task);
+            let entries = recovery_entries(&loaded.snapshot);
+            let ReplaceOutcome::Committed(write) = repository
+                .replace(&loaded, &replacement, &entries, None, &changes)
+                .await
+                .unwrap()
+            else {
+                panic!("an uncontended commit must install");
+            };
+            let (_, entry) = write
+                .log_entry
+                .as_ref()
+                .expect("an ordinary commit appends a log entry");
+            assert!(write.base.is_none(), "no ordinary commit rewrites the base");
+            assert!(
+                (entry.len() as u64) * 4 < base_before.len() as u64,
+                "one commit's log entry ({} B) must not approach the {}-task base ({} B)",
+                entry.len(),
+                source.tasks.len(),
+                base_before.len()
+            );
+            log_bytes += entry.len() as u64;
+            loaded.install_replace_documents(write);
+        }
+        let logged = kv
+            .scan_prefix(
+                &log_prefix,
+                crate::store::ScanOptions::new(
+                    crate::store::ScanOperation::Eq,
+                    log_prefix.clone(),
+                    false,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logged.len() as u64, MAX_LOG_ENTRIES);
+        assert_eq!(
+            logged
+                .iter()
+                .map(|(_, bytes)| bytes.len() as u64)
+                .sum::<u64>(),
+            log_bytes
+        );
+        assert_eq!(kv.one(&base_key).await.unwrap().unwrap(), base_before);
+
+        let mut replacement = loaded.snapshot.clone();
+        replacement.version.process += 1;
+        let task = replacement.tasks.keys().next().unwrap().clone();
+        replacement.tasks.get_mut(&task).unwrap().revision += 1;
+        let mut changes = LogChanges::default();
+        changes.tasks.insert(task);
+        let entries = recovery_entries(&loaded.snapshot);
+        let ReplaceOutcome::Committed(write) = repository
+            .replace(&loaded, &replacement, &entries, None, &changes)
+            .await
+            .unwrap()
+        else {
+            panic!("the compacting commit must install");
+        };
+        assert!(write.base.is_some(), "the full window folds into a base");
+        assert!(write.log_entry.is_none());
+        assert_eq!(write.base_seq, write.next_seq);
+        assert!(
+            kv.scan_prefix(
+                &log_prefix,
+                crate::store::ScanOptions::new(
+                    crate::store::ScanOperation::Eq,
+                    log_prefix.clone(),
+                    false,
+                ),
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert_ne!(kv.one(&base_key).await.unwrap().unwrap(), base_before);
+    }
+
+    /// A base document names the log sequence it covers. Pairing it with a head
+    /// from another window is a torn read, not a silently mixed snapshot.
+    #[tokio::test]
+    async fn a_base_from_another_window_is_not_mixed_into_the_snapshot() {
+        use crate::scheduler::durable::document::ProcessLogCodec;
+
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        let source = snapshot(false);
+        repository.create(&source, 0, 800).await.unwrap();
+        kv.put(
+            &process_base_key("process").unwrap(),
+            ProcessLogCodec::encode_base(&source, 7).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let error = repository.load("process").await.unwrap_err();
+        assert!(
+            format!("{error}").contains("base covers sequence 7"),
+            "the mismatched base must be surfaced, got {error}"
+        );
     }
 }
