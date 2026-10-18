@@ -1651,7 +1651,7 @@ kernel 期版本,只有 2 处 `cache()` reach-through 待改)+ 重新施加本�
 
 1. **P4c 性能**:基线已测(§5f,**11.3 hop/s** vs legacy 2778–5099);§9.3.2 已完成但**无实测收益**(§5g)
    → 剩余 **§9.3.4(整包编码,先做)** 与 **§9.3.3(投影降频)**;每 hop ~7 次全量聚合读 + 整包编码仍是主因。
-2. `sealed` 快照进读模型仍是唯一保留的边界(若要支持,需在聚合里持久化 sealed 快照或让投影携带它)。
+2. ~~`sealed` 快照进读模型仍是唯一保留的边界~~ → **已由 L3 定为永久边界**( §10「L3 完成」;不持久化,聚合/投影/`proc:get` 都不携带)。
 3. `cargo test -p acts-plugin-*` / `-p acts-package-*` 的完整复核(本机把全部 target 放在一条命令里构建会撞
    环境 rlib flavor 问题,见 §7;逐 target 跑是绿的)。
 
@@ -4424,6 +4424,63 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 删除;它们经 `pub use store::*` 属公开面,故为 **BREAKING**(CHANGELOG 已记)。
 持久化面只少了 `ops` 行族的写读登记;本笔不新增迁移、不新增后台扫描。
 
+### L3 完成(2026-10-19):`sealed` 定为永久已知边界
+
+**任务**:§11 B 的 L3(原 §2)。先核实现状,再在“实现(聚合持久化 / 投影携带)”与“写成永久边界”之间
+二选一。**选择:写成永久已知边界,不实现持久化。** 设计口径写在 `KERNEL_REFACTOR_DESIGN.md` §3.11。
+
+**现状(已核实)**
+
+- **计算**:`scheduler/shell/context.rs::resolve_sealed` 只在 effect 的 `prepare` 里运行;输入是
+  `ScopeSpec`(acting execution 的 vars、run 的 owner、declaring model),经 `SnapshotStore` 的内存缓存
+  求值并写 `ScopeTask::set_sealed`。`EffectRunner::resolve`/`run` 各自建一次 headless scope。
+- **写入点**:仅内存 `ScopeTask.sealed`;`scheduler/shell/projection.rs` 写 `TaskVars.sealed` 恒为
+  `String::new()`;聚合 `ProcessSnapshot` 没有 sealed 区。
+- **读取点**:`env/functions.rs` 的 `$target.key` 经 `ScopeTask::sealed`;`resolve_sealed` 自身用于
+  同一次 prepare 的去重。`scheduler/shell/read_model.rs` 只读 `TaskVars.data`,`proc:get` 的 `TaskInfo`
+  没有 sealed 字段。`vars.sealed` 在生产侧无消费者。
+- **重启/恢复**:不重建历史 sealed;下一个 effect 从 feed 重建的缓存重新解析。
+- predicate seam 不调用 `prepare`,因此不 seal(谓词里的 `$target.key` 为空),既有行为。
+
+**为什么不做**
+
+- sealed 是 effect 执行前的授权/数据解析结果,不是可恢复的 run 状态;effect 提交后其 params/outputs 已在
+  聚合里,历史 sealed 不再被读。
+- 快照缓存明确是内存态,durability 来自 bus。把 sealed 写进 L8 的 append-only 聚合需要新增持久化形状、
+  codec/upcast 与 golden 断言,却不会改变已提交 effect 的结果;把 `PerProc` 的旧 lineage pin 跨重启保留,
+  反而会让可能已过期的租户/权限数据继续生效。
+- `proc:get` 没有 sealed 列;投影携带 sealed 要同时改聚合与行格式,而消费者为零。
+
+**对 `projection.rs` 恒写空串的决定**:保留现状(继续写 `sealed: String::new()`),字段与 `vars` 行格式
+不变(老库行仍按 `#[serde(default)]` 解码),并在 `data::TaskVars` 的字段文档与投影注释里标明“永久为空、
+无读 API 消费”。不停止写字段:跳过序列化同样会改行 JSON 形状,且没有收益。
+
+**文档面(本笔代码零行为变更)**
+
+- `crates/acts/src/snapshot.rs`:模块文档改写为“每个 effect prepare 解析一次、不是持久化 run 状态”,
+  明确聚合/投影/`proc:get` 不携带、重启不重建历史 seal、predicate 不 seal;`SnapshotPolicy` 的两个变体
+  按 kernel 语义重写(都等价于每个 effect prepare 解析一次),`SnapshotOptions.policy` 与
+  `SnapshotManager` 的读路径说明同步。
+- `crates/acts/src/store/data/task.rs`:`TaskVars` 与 `sealed` 字段文档标明固定行形状、恒空、无消费者。
+- `crates/acts/src/scheduler/shell/{context,scope,projection}.rs`:相关 doc/注释按同一口径收口
+  (`resolve_sealed` 的生命周期、`ScopeTask` 的 sealed 只活一次 evaluation、空字段是刻意保留)。
+- `crates/acts-server/src/lib.rs` 的 `SnapshotConfig.policy` 文档与内嵌默认配置注释、
+  `crates/acts-server/README.md` 的 Snapshot targets 一节:同步为“每个 effect prepare 解析一次、
+  不持久化”。
+- `KERNEL_REFACTOR_DESIGN.md` §3.11:记录选择、理由、影响面与回答口径。
+
+**API / 持久化面**:无变化。`TaskVars.sealed` 字段保留、行 `v` 不变,不新增/迁移格式,不引入 `unsafe`;
+不改 outbox/aggregate/recovery 语义;不改 `procs`/`tasks`/`vars` 行表去留。未改公开面,故 CHANGELOG 无
+BREAKING 行(仅文档口径澄清)。
+
+**验收**
+
+- `cargo test -p acts --lib --tests` = **937 passed / 0 failed**(与 L1 相同的基线;本笔为注释/doc-only)。
+- `cargo test -p acts-server -j 1` = **17 passed**(6 targets,注释/doc-only;首次全 target 运行触发
+  已知的 Windows 页面文件不足 `os error 1455`,`-j 1` 重跑全绿,与 §10「L1 完成」同一环境现象)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check` 绿。
+- 未改 manifest,未跑 `cargo deny`;未改行为/持久化/公开面,其余 per-crate 套件未跑。
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4446,7 +4503,7 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L3**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L3、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L3 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L4**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4492,14 +4549,14 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L8、L9、L10、L11、L12 已完成,§12 当前指向 L3。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L3、L8、L9、L10、L11、L12 已完成,§12 当前指向 L4。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
 | **P2** | **整包编码只算一次 SHA-256**(无格式变更):`ProcessDocumentCodec::encode` 现在 `seal` 一次、`encode.validate` 再一次;去掉重复的一次。可选:跳过未变化的派生索引文档编码(先量)。 | §10「P1 完成」 | **已做(§10「P2 完成」)**。验收:同一探针每次 encode 省一次 SHA-256(新旧交错中位 0.41/0.58 ms = 一次 `envelope.encode` 量级),commit 数不变(187/295)、best ms/commit −8.1%/−13.8%;聚合字节/摘要不变(交错断言 + 单测);`-p acts --lib --tests` 952 绿 + clippy/fmt。可选的索引降频未做(本笔不碰事务/guard) |
 | **L1** | 删死掉的 `ops` 族(**BREAKING**):`Store::ops()`/`StoreIden::Ops`/`store/data/op.rs` + `remove_proc_rows` 家族清单那一行;先决定老库 `ops-*` 孤儿行的处理(接受 / 保留只删不建 / 一次性清理) | 原 §5 | **已做(§10「L1 完成」)**。孤儿行选“接受”;生产侧 `git grep "Store::ops\|StoreIden::Ops\|data::Op"` = 0;`remove_proc_rows` 仍以同一原子批删除 tasks/vars/messages/deliveries/proc;`-p acts --lib --tests` **937 passed**(净 −4 = `op.rs` 自带单测随类型删除);per-crate/clippy/fmt 见 §10;CHANGELOG 已记 **BREAKING** |
 | **L2** | 聚合文档回收/归档:~~先定保留策略 / pid 复用语义 / 历史取舍~~ **已由 A11 取代**。A11 明确:存储只服务恢复,终态且消息全部投递/结算后回收;不做历史归档;回收后 PID 可复用,旧 pid 重复执行由业务系统负责 | 原 §6;2026-10-17 用户裁决 | **被 A11 取代**(设计见 `KERNEL_REFACTOR_DESIGN.md` §3.10);不再单独执行 |
-| **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | 未做(现状 = 写成边界) |
+| **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | **已做(§10「L3 完成」)**。选**永久边界**:sealed 是 effect prepare 的 per-evaluation 授权/解析结果,不进聚合/投影/`proc:get`,恢复不重建;`TaskVars.sealed` 保留字段并继续写空串(行格式不变);设计见 `KERNEL_REFACTOR_DESIGN.md` §3.11;doc-only,零行为变更 |
 | **L4** | 逐项绑定 `index`/`value` 的上浮:给一个不参与折叠的载体,或写成永久边界 | 原 §7b | 未做(证据见 §10「Feature B 完成」§4) |
 | **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | 未做,**低优先**:§10「P6-1」已证与 hop 吞吐无关(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义 |
 | **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
@@ -4568,47 +4625,51 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:L3 —— 决定 `sealed` 边界(§11 B)
+# 当前任务:L4 —— 决定逐项 `index`/`value` 的上浮边界(§11 B)
 
-**依据**:§11 B 的 L3(原 §2);§10「可靠性矩阵回归」§3/§6 与 §10「P5 收口」§2 的登记:
-`projection.rs` 写 `TaskVars.sealed` 时恒为 `String::new()`,聚合也不持久化 sealed 快照 ——
-`sealed` 只在一次 effect 解析时按模型/authority 计算(`Context::resolve_sealed` →
-`Scope::set_sealed`),因此不是可恢复的 run 状态。本条要么实现(聚合持久化 sealed 或让投影
-携带),要么把它写成永久已知边界。二选一,不混做。
+**依据**:§11 B 的 L4(原 §7b);§10「Feature B 完成」§4 的登记:参数式 fan-out 把
+`index`/`value` 写成模板 execution 自己的 scope 变量(因此 `${{ value }}` 可用),而
+completed execution 的非引擎变量会沿 `PropagateTask` 折进父作用域 —— 于是它们出现在
+祖先作用域与 run 的 outputs(`examples/approve` 的 outputs 里就有 `index`/`value`)。legacy 把
+这两者放在 act 的 options(不是 task data),没有这一路上浮。本条要么给逐项绑定一个
+不参与折叠的载体,要么把它写成永久已知边界。二选一,不混做。
 
-**目标**:先核实现状(sealed 的计算点、写入点、读取点;`vars.sealed` 的消费者;重启/恢复/
-`proc:get` 对 sealed 的可见性),然后**明确选择其一**,把选择、理由与影响面写进 §10「L3 完成」。
+**目标**:先核实现状(`param_fanout_children` 写入点、`PropagateTask`/scope 折叠规则、
+`scope_vars`/`outputs`/消息与 `proc:get` 的可见性、重启/恢复后是否仍可见),然后**明确选择
+其一**,把选择、理由与影响面写进 §10「L4 完成」。
 
 1. 若选“写成永久已知边界”:
-   - 在设计/`lib.rs`/相关 API doc 写清:sealed 是 per-effect 的授权解析结果,不进入持久化读模型;
-     恢复后的 run 不重建历史 sealed 快照;哪些 API 因此回答空/不可得。
-   - 对 `projection.rs` 恒写空串的 `TaskVars.sealed` 给出决定(保留现状并在文档标明 / 停止写空串
-     而字段保留);行格式不能改。
+   - 在设计/相关 API doc 写清:`index`/`value` 是逐项 execution 的普通 scope 变量,会随
+     非引擎变量一起上浮;哪些读面(outputs/祖先 scope/消息)因此能看到它们,以及为什么
+     不改(与 legacy options 语义的差异是有意保留还是已知偏差)。
+   - 不改行格式、消息 payload 或 `ProcSnapshot` 的既有语义,只登记。
 2. 若选“实现”:
-   - 二选一并说明为什么:(a) 聚合持久化 sealed 快照;(b) 投影携带 sealed。改持久化格式必须按
-     既有 codec 版本/upcast 规则,不允许静默改字段语义;golden/row 断言与 CHANGELOG 同步。
-   - 恢复路径必须从所选载体重建 sealed;`proc:get`/相关读 API 的行为要有测试;不引入 `unsafe`,
-     不顺手改 outbox/aggregate/recovery 的其他语义。
+   - 说明载体选择(例如 scope 变量上的“不折叠”标记、execution 专属元数据、或映射到 act
+     options),以及为什么它不会破坏 `${{ value }}`/`${{ index }}` 的求值与恢复路径。
+   - 恢复/重放必须仍能从持久化聚合理出同一绑定;`outputs`/`proc:get`/消息的可见性要有
+     测试;不引入 `unsafe`,不顺手改 outbox/aggregate/recovery 的其他语义。
+   - 若动持久化格式或公开面,按既有 codec/upcast 规则,golden/row 断言与 CHANGELOG 同步。
 
 **边界**
 
-- 只做 L3;不提前做 §11 B 的 L4-L7,不顺手改 `procs`/`tasks`/`vars` 行表的去留(§10 已登记为待决)。
+- 只做 L4;不提前做 §11 B 的 L5-L7,不顺手改 `procs`/`tasks`/`vars` 行表的去留(§10 已登记为待决)。
+- 不顺手改节点寻址/action target(§10「Feature B 完成」§4 的相邻边界;需要时另立任务)。
 - 生产代码与文档分开提交;探针/临时插桩不提交。
 
 **验收**
 
-- 选择与理由、影响面写入 §10「L3 完成」;若实现,相关行为有测试;若写边界,文档明确。
+- 选择与理由、影响面写入 §10「L4 完成」;若实现,相关行为有测试;若写边界,文档明确。
 - 视改动面按 §11.C 跑 `-p acts --lib --tests` 与受影响的 per-crate 套件;
   `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
 - 若改持久化格式或公开面:CHANGELOG 记 BREAKING;不改 manifest 就不跑 `cargo deny`。
-- §10 写「L3 完成」并更新 §11 B 状态;§12 原地指向下一项(L4)。
+- §10 写「L4 完成」并更新 §11 B 状态;§12 原地指向下一项(L5)。
 
 # 限制与约束
 
-- **先读**:§10「可靠性矩阵回归」§3/§6、§10「P5 收口」§2、§10「L12 完成」;
-  `scheduler/shell/projection.rs` 的 `TaskVars.sealed` 写点、`scheduler/shell/context.rs` 的
-  `resolve_sealed`、`scheduler/shell/scope.rs` 的 `set_sealed`/`sealed`、`store/data/task.rs` 的字段、
-  `shell/read_model.rs` 与 `proc:get` 的读面。
+- **先读**:§10「Feature B 完成」§4、§10「L3 完成」;
+  `scheduler/shell/mod.rs` 的 `param_fanout_children`/`scope_vars`、
+  `scheduler/core/plan/**` 的 `PropagateTask` 折叠规则、`scheduler/shell/projection.rs` 的
+  `scope_data`、`model/info.rs`/`export/executor` 的 outputs 与 `proc:get` 读面。
 - 遵守 §11.C 门禁;改到 store/CLI/server 面时跑完整 per-crate 套件;不改 manifest 就不跑 `cargo deny`。
 - 探针与临时插桩不提交;生产代码与文档分开提交,提交前过 §11.C 门禁。
 ```

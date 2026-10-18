@@ -782,6 +782,39 @@ graph LR
 A11 的存储目标是“恢复所需的最小状态”,不是历史归档;终态且全部投递/结算后回收,回收后 PID 可复用,
 旧 pid 的迟到消息/重复执行由业务系统去重。
 
+### 3.11 `sealed` 的边界(L3,2026-10-19)
+
+**决定:写成永久已知边界,不把 sealed 持久化。** §11 B 的 L3 二选一,这里明确取“边界”。
+
+**事实(代码位置)**
+
+- **计算**:`scheduler/shell/context.rs::resolve_sealed` 在 effect 的 `prepare` 里工作。`scheduler/shell/mod.rs::scope_spec`
+  给出 acting execution 的 vars、run 的 owner、declaring model;`resolve_sealed` 用这些参数求 scope、校验
+  `ScopePolicy`,再从 `SnapshotStore`(内存缓存)取值并写 `ScopeTask::set_sealed`。
+- **写入点**:只有内存 `ScopeTask.sealed`。`scheduler/shell/projection.rs` 写 `TaskVars.sealed` 时恒为 `String::new()`;
+  聚合(`ProcessSnapshot`)没有 sealed 区。
+- **读取点**:`env/functions.rs` 的 `$target.key` 经 `ScopeTask::sealed` 读;`resolve_sealed` 自身用
+  `sealed`/`has_sealed_local` 防止同一次 prepare 重复 seal。`proc:get`/`scheduler/shell/read_model.rs` 只读
+  `TaskVars.data`,`TaskInfo` 没有 sealed 字段。
+- **恢复**:重启/恢复不重建历史 sealed;下一个 effect 的 prepare 从 feed 重建的缓存重新解析。
+
+**为什么不实现**
+
+- sealed 只是 effect 执行前的一次授权/数据解析输入。effect 一旦提交,其 params/outputs 已在聚合里,历史 sealed
+  不再被任何路径读取。
+- 快照缓存本身明确是内存态,durability 来自 bus;把 sealed 写进 L8 的 append-only 聚合会新增持久化形状、
+  codec/upcast 与 golden 断言,却不改变已提交 effect 的结果;把 `PerProc` 的旧 “lineage pin” 跨重启保留,
+  还会让可能已过期的租户/权限数据继续生效。
+- `proc:get` 没有 sealed 列;要让投影携带它,得同时改聚合与行格式,而消费者为零。
+
+**影响面 / 回答口径**
+
+- `proc:get` 与读模型:不暴露 sealed(本来就没有该字段),任务的 `data` 不变。
+- `TaskVars.sealed`:保留字段并继续写空串,`vars` 行格式与 `v` 不变;老库行仍按 `#[serde(default)]` 解码。
+- `SnapshotPolicy::PerProc`/`PerTask`:在 kernel 的 headless effect 里都等价于“每个 effect prepare 解析一次”;
+  不存在跨 effect / 跨重启的 lineage pin。公开文档已按这个口径改写。
+- predicate:该 seam 不调用 `prepare`,所以不 seal;谓词里的 `$target.key` 解析为空(既有行为,仅登记)。
+
 ---
 
 ## 4. 实施计划(提交切分)
