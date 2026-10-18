@@ -59,6 +59,34 @@ impl Store {
         self.collection()
     }
 
+    /// The read model's conditional write (A5): apply `row` only when its
+    /// source revision is newer than the stored row's (equal only when
+    /// `allow_equal` asks for an explicit repair). See
+    /// [`KvCollection::write_if_newer`] for the compare-and-swap.
+    pub(crate) async fn write_projection<T, R, F>(
+        &self,
+        row: &T,
+        revision: F,
+        allow_equal: bool,
+    ) -> Result<super::ConditionalWrite>
+    where
+        T: DbCollectionIden
+            + Serialize
+            + DeserializeOwned
+            + Send
+            + Sync
+            + Clone
+            + Debug
+            + PartialEq
+            + 'static,
+        R: Ord,
+        F: Fn(&T) -> Option<R>,
+    {
+        KvCollection::<T>::new(&T::iden(), self.kv.clone())
+            .write_if_newer(row, revision, allow_equal)
+            .await
+    }
+
     pub fn packages(&self) -> Arc<dyn DbCollection<Item = data::Package>> {
         self.collection()
     }
@@ -1091,6 +1119,7 @@ mod tests {
             env: "{}".to_string(),
             err: None,
             removable: false,
+            source_revision: String::new(),
             v: 0,
         };
         store.procs().create(&proc).await.unwrap();
@@ -1232,6 +1261,7 @@ mod tests {
                 env: "{}".to_string(),
                 err: None,
                 removable: false,
+                source_revision: String::new(),
                 v: 0,
             })
             .await
@@ -1254,6 +1284,7 @@ mod tests {
                     start_time: now,
                     end_time: 0,
                     timestamp: now,
+                    source_revision: String::new(),
                     v: 0,
                 })
                 .await
@@ -1786,6 +1817,7 @@ mod tests {
             env: "{}".to_string(),
             err: None,
             removable: false,
+            source_revision: String::new(),
             v: 0,
         };
         // ids may contain `-` (e.g. user-supplied process ids): the index

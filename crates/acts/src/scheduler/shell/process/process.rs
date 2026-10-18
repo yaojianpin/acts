@@ -481,6 +481,7 @@ impl Process {
             env: self.env().to_string(),
             err: self.err().map(|err| err.to_string()),
             removable: false,
+            source_revision: String::new(),
             v: data::Proc::version(),
         })
     }

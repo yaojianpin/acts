@@ -88,6 +88,7 @@ macro_rules! gen_store_tests {
                 err: None,
                 removable: false,
                 v: 0,
+                source_revision: String::new(),
             }
         }
 
@@ -496,6 +497,7 @@ macro_rules! gen_store_tests {
                 err: None,
                 removable: false,
                 v: 0,
+                source_revision: String::new(),
             };
 
             store.procs().create(&proc).await.expect("create process");
@@ -523,6 +525,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     removable: false,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.procs().create(&proc).await.expect("create process");
             }
@@ -563,6 +566,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     removable: false,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.procs().create(&proc).await.expect("create process");
             }
@@ -603,6 +607,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     removable: false,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.procs().create(&proc).await.expect("create process");
             }
@@ -621,6 +626,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     removable: false,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.procs().create(&proc).await.expect("create process");
             }
@@ -656,6 +662,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     removable: false,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.procs().create(&proc).await.expect("create process");
             }
@@ -739,6 +746,7 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 err: None,
                 v: 0,
+                source_revision: String::new(),
             };
 
             store.tasks().create(&task).await.expect("create task");
@@ -771,6 +779,7 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 err: None,
                 v: 0,
+                source_revision: String::new(),
             };
 
             store.tasks().create(&task).await.expect("create task");
@@ -804,6 +813,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     err: None,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -848,6 +858,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     err: None,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -892,6 +903,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     err: None,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -914,6 +926,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     err: None,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -952,6 +965,7 @@ macro_rules! gen_store_tests {
                     timestamp: timestamp(),
                     err: None,
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -997,6 +1011,7 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 err: None,
                 v: 0,
+                source_revision: String::new(),
             };
 
             store.tasks().create(&task).await.expect("create task");
@@ -1034,6 +1049,7 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 err: None,
                 v: 0,
+                source_revision: String::new(),
             };
 
             store.tasks().create(&task).await.expect("create task");
@@ -1780,6 +1796,7 @@ macro_rules! gen_store_tests {
                 data: json!({"a": 1, "name": "x"}).to_string(),
                 sealed: json!({"profile": {"scope": "workflow"}}).to_string(),
                 v: 0,
+                source_revision: String::new(),
             };
             store.vars().create(&vars).await.expect("create task vars");
 
@@ -1805,6 +1822,7 @@ macro_rules! gen_store_tests {
                     data: json!({"tid": tid}).to_string(),
                     sealed: String::new(),
                     v: 0,
+                    source_revision: String::new(),
                 };
                 store.vars().create(&vars).await.expect("create task vars");
             }
@@ -1817,6 +1835,7 @@ macro_rules! gen_store_tests {
                 data: "{}".to_string(),
                 sealed: String::new(),
                 v: 0,
+                source_revision: String::new(),
             };
             store.vars().create(&other).await.expect("create task vars");
 
@@ -1848,6 +1867,7 @@ macro_rules! gen_store_tests {
                 data: json!({"a": 1}).to_string(),
                 sealed: String::new(),
                 v: 0,
+                source_revision: String::new(),
             };
             store.vars().create(&vars).await.expect("create task vars");
 
@@ -1880,6 +1900,7 @@ macro_rules! gen_store_tests {
                 data: json!({"a": 1}).to_string(),
                 sealed: String::new(),
                 v: 0,
+                source_revision: String::new(),
             };
             store.vars().create(&vars).await.expect("create task vars");
 
@@ -1905,6 +1926,7 @@ macro_rules! gen_store_tests {
                 data: json!({"a": 1}).to_string(),
                 sealed: String::new(),
                 v: 0,
+                source_revision: String::new(),
             };
             store.vars().create(&vars).await.expect("create task vars");
 
@@ -1939,6 +1961,7 @@ macro_rules! gen_store_tests {
                 err: None,
                 removable: false,
                 v: 0,
+                source_revision: String::new(),
             };
             store.procs().create(&proc).await.expect("create proc");
 
@@ -1978,6 +2001,7 @@ macro_rules! gen_store_tests {
                 timestamp: timestamp(),
                 err: None,
                 v: 0,
+                source_revision: String::new(),
             };
             store.tasks().create(&task).await.expect("create task");
 

@@ -122,7 +122,7 @@ pub(crate) use message::MessageForwarder;
 pub(crate) use model::ProcessSpec;
 pub(crate) use predicate::EnginePredicateRunner;
 pub(crate) use process::{Process, Task};
-pub(crate) use projection::RowProjector;
+pub(crate) use projection::{ProjectionMetrics, RowProjector};
 
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;
@@ -300,6 +300,10 @@ pub(crate) struct KernelHost {
     ready: Arc<tokio::sync::Notify>,
     /// The first recovery pass repairs derived indexes from the aggregates.
     boot_reconciled: Arc<std::sync::atomic::AtomicBool>,
+    /// The read model's boot catch-up completed. A failed scan (the store
+    /// could not list the aggregates) is retried on the next recovery pass;
+    /// per-pid projection failures are queued and retried independently.
+    projection_booted: Arc<std::sync::atomic::AtomicBool>,
     ready_metrics: Arc<parking_lot::Mutex<ReadyMetrics>>,
     /// One async lock per pid shared by a start and the terminal cleanup. The
     /// aggregate is the pid's durable existence record: a start checks it and
@@ -493,12 +497,6 @@ fn resume_operation(
     }
 }
 
-/// Whether every execution of the run settled. A settled run has no later
-/// commit to re-derive a row a failed write left behind.
-fn all_terminal(snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot) -> bool {
-    !snapshot.tasks.is_empty() && snapshot.tasks.values().all(|task| task.state.is_terminal())
-}
-
 /// The default outbox transport: it logs each record and confirms it — what a
 /// host with nothing attached (the kernel's own tests, and any embedder that
 /// only wants the durable aggregate) does. The serving host replaces it with
@@ -554,6 +552,7 @@ impl KernelHost {
                 timer_poll_ms: timer_poll_ms.max(1),
                 ready: Arc::new(tokio::sync::Notify::new()),
                 boot_reconciled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                projection_booted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 ready_metrics: Arc::new(parking_lot::Mutex::new(ReadyMetrics::default())),
                 lifecycle_locks: Arc::new(
                     parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -662,68 +661,225 @@ impl KernelHost {
     }
 
     /// Project one committed snapshot into the legacy rows, when a projector
-    /// is attached. The rows are a derived read model: a store failure is
-    /// reported and dropped, never propagated into the operation — the next commit
-    /// re-derives them from the aggregate.
-    async fn project(&self, snapshot: &ProcessSnapshot) {
+    /// is attached. Returns whether the rows are now current: `true` also
+    /// when no projector is attached (there is no read model to wait for).
+    ///
+    /// A store failure is reported and never propagated into the operation,
+    /// but it is *not* ignored: the run enters the durable repair queue and
+    /// the caller must not let an external observer (a lifecycle event, the
+    /// outbox transport) see this commit first. `false` means exactly that —
+    /// the repair pass will retry, and the outbox records stay `Pending` until
+    /// it succeeds.
+    async fn project(&self, snapshot: &ProcessSnapshot) -> bool {
         let projector = self.projection.read().clone();
         let Some(projector) = projector else {
-            return;
+            return true;
         };
         if let Err(error) = projector.project(snapshot).await {
-            if all_terminal(snapshot) {
-                // The run's last commit is also its last chance to derive the
-                // rows: the write-behind failure a flush reports is only
-                // visible to a later projection, and a terminal run has no
-                // later commit. Clear this run's claims and re-derive the same
-                // snapshot once.
+            // The run's last commit is also its last chance to derive the
+            // rows without a later commit. Clear this run's claims and
+            // re-derive the same version once (the durable revision guard
+            // still refuses an older projection).
+            if run_settled(snapshot) {
                 projector.forget_run(&snapshot.process_id);
-                if let Err(retry) = projector.project(snapshot).await {
-                    tracing::warn!(
+                match projector.project_repair(snapshot).await {
+                    Ok(_) => {
+                        projector.finish_repair(&snapshot.process_id);
+                        return true;
+                    }
+                    Err(retry) => tracing::warn!(
                         pid = %snapshot.process_id,
                         error = %retry,
-                        "settled row projection repair failed; the sweeper retries the proc row"
-                    );
+                        "settled row projection repair failed; the repair queue retries it"
+                    ),
                 }
-                return;
+            } else {
+                tracing::warn!(
+                    pid = %snapshot.process_id,
+                    error = %error,
+                    "row projection failed; the repair queue will retry it"
+                );
             }
-            tracing::warn!(
-                pid = %snapshot.process_id,
-                error = %error,
-                "row projection failed; the next commit re-derives the rows"
-            );
+            projector.enqueue_repair(&snapshot.process_id);
+            return false;
         }
+        projector.finish_repair(&snapshot.process_id);
+        true
     }
 
     /// Project only the executions one commit touched (plus the proc row): the
-    /// read model's rows for the rest of the run cannot have changed.
+    /// read model's rows for the rest of the run cannot have changed. Returns
+    /// [`Self::project`]'s "rows are current" flag.
     async fn project_touched(
         &self,
         snapshot: &ProcessSnapshot,
         touched: &std::collections::BTreeSet<String>,
-    ) {
+    ) -> bool {
         let projector = self.projection.read().clone();
         let Some(projector) = projector else {
-            return;
+            return true;
         };
         if let Err(error) = projector.project_nodes(snapshot, Some(touched)).await {
-            if all_terminal(snapshot) {
+            if run_settled(snapshot) {
                 projector.forget_run(&snapshot.process_id);
-                if let Err(retry) = projector.project(snapshot).await {
-                    tracing::warn!(
+                match projector.project_repair(snapshot).await {
+                    Ok(_) => {
+                        projector.finish_repair(&snapshot.process_id);
+                        return true;
+                    }
+                    Err(retry) => tracing::warn!(
                         pid = %snapshot.process_id,
                         error = %retry,
-                        "settled row projection repair failed; the sweeper retries the proc row"
+                        "settled row projection repair failed; the repair queue retries it"
+                    ),
+                }
+            } else {
+                tracing::warn!(
+                    pid = %snapshot.process_id,
+                    error = %error,
+                    "row projection failed; the repair queue will retry it"
+                );
+            }
+            projector.enqueue_repair(&snapshot.process_id);
+            return false;
+        }
+        projector.finish_repair(&snapshot.process_id);
+        true
+    }
+
+    /// The attached read model, if any.
+    pub(crate) fn projector(&self) -> Option<Arc<projection::RowProjector>> {
+        self.projection.read().clone()
+    }
+
+    /// The read model's counters and repair backlog.
+    pub(crate) fn projection_metrics(&self) -> projection::ProjectionMetrics {
+        self.projection
+            .read()
+            .as_ref()
+            .map_or_else(Default::default, |projector| projector.metrics())
+    }
+
+    /// Project one run from its current aggregate as an explicit repair and
+    /// report whether the rows are current. Returns `true` when the aggregate
+    /// is gone (nothing to project).
+    async fn repair_projection(&self, process_id: &str) -> bool {
+        let projector = self.projection.read().clone();
+        let Some(projector) = projector else {
+            return true;
+        };
+        let queued = projector.is_repair_pending(process_id);
+        match self.load(process_id).await {
+            Ok(Some(loaded)) => match projector.project_repair(&loaded.snapshot).await {
+                Ok(_) => {
+                    projector.finish_repair(process_id);
+                    if queued {
+                        projector.note_repaired();
+                    }
+                    // A commit whose projection failed withheld its lifecycle
+                    // event (see `dispatch`); the repair is where the
+                    // observer gets to see the now-projected state.
+                    self.report_lifecycle(&loaded.snapshot);
+                    true
+                }
+                Err(error) => {
+                    projector.enqueue_repair(process_id);
+                    tracing::warn!(
+                        pid = %process_id,
+                        error = %error,
+                        "row projection repair failed; the queue retries it"
+                    );
+                    false
+                }
+            },
+            Ok(None) => {
+                projector.finish_repair(process_id);
+                true
+            }
+            Err(error) => {
+                projector.enqueue_repair(process_id);
+                tracing::warn!(
+                    pid = %process_id,
+                    error = %error,
+                    "row projection repair failed; the queue retries it"
+                );
+                false
+            }
+        }
+    }
+
+    /// Retry one bounded batch of queued repairs. Runs from the recovery pass,
+    /// never on a shortened tick: the queue is the durable aggregate set, and
+    /// a failed run stays queued until it projects.
+    async fn repair_projections(&self) {
+        const REPAIR_BATCH: usize = 32;
+        let Some(projector) = self.projection.read().clone() else {
+            return;
+        };
+        for process_id in projector.pending_repairs(REPAIR_BATCH) {
+            self.repair_projection(&process_id).await;
+        }
+    }
+
+    /// One boot pass: re-project every aggregate, so a database whose rows
+    /// lagged (a crash between commit and projection, an older acts version)
+    /// converges before the driver serves work.
+    ///
+    /// This is incremental by construction: every row carries its
+    /// `source_revision`, and the conditional write skips rows already at the
+    /// aggregate's version. The scan is linear in the aggregate set, once per
+    /// host — never in the tick count.
+    async fn catch_up_projections(&self) -> bool {
+        let Some(projector) = self.projection.read().clone() else {
+            return true;
+        };
+        let process_ids = match self.processes.process_ids().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(error = %error, "projection boot catch-up could not list aggregates");
+                return false;
+            }
+        };
+        let mut applied = 0usize;
+        for process_id in process_ids {
+            match self.load(&process_id).await {
+                Ok(Some(loaded)) => match projector.project_repair(&loaded.snapshot).await {
+                    Ok(report) => {
+                        applied += report.applied;
+                        if report.applied > 0 {
+                            projector.note_repaired();
+                        }
+                        projector.finish_repair(&process_id);
+                    }
+                    Err(error) => {
+                        projector.enqueue_repair(&process_id);
+                        tracing::warn!(
+                            pid = %process_id,
+                            error = %error,
+                            "projection boot catch-up failed; queued for repair"
+                        );
+                    }
+                },
+                Ok(None) => {
+                    projector.finish_repair(&process_id);
+                }
+                Err(error) => {
+                    projector.enqueue_repair(&process_id);
+                    tracing::warn!(
+                        pid = %process_id,
+                        error = %error,
+                        "projection boot catch-up could not load an aggregate"
                     );
                 }
-                return;
             }
-            tracing::warn!(
-                pid = %snapshot.process_id,
-                error = %error,
-                "row projection failed; the next commit re-derives the rows"
+        }
+        if applied > 0 {
+            tracing::info!(
+                runs = applied,
+                "read model caught up from the durable aggregates"
             );
         }
+        true
     }
 
     /// Serialize a start and the cleanup of the same pid (see
@@ -812,35 +968,14 @@ impl KernelHost {
         }
     }
 
-    /// Re-project one process's proc row from its durable aggregate (the
-    /// sweeper's repair pass: a run whose last operation committed before its
-    /// records were delivered only becomes `removable` once they are).
-    ///
-    /// The proc row may re-run at the same aggregate version: `removable`
-    /// also depends on channel delivery rows, which are outside that version.
-    pub(crate) async fn refresh_projection(&self, process_id: &str) {
-        let projector = self.projection.read().clone();
-        let Some(projector) = projector else {
-            return;
-        };
-        match self.load(process_id).await {
-            Ok(Some(loaded)) => {
-                projector.forget_proc(process_id);
-                if let Err(error) = projector.project_proc_row(&loaded.snapshot).await {
-                    tracing::warn!(
-                        pid = %process_id,
-                        error = %error,
-                        "row projection refresh failed; the next commit re-derives the rows"
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(
-                pid = %process_id,
-                error = %error,
-                "row projection refresh failed; the next commit re-derives the rows"
-            ),
-        }
+    /// Re-project one process from its durable aggregate (the sweeper's
+    /// repair pass, and the test seam that re-derives rows a run's own
+    /// commits did not). A run whose last operation committed before its
+    /// records were delivered only becomes `removable` once they are, so the
+    /// whole run is re-projected — tasks first, the proc row last — at the
+    /// same aggregate version. Returns whether the rows are current.
+    pub(crate) async fn refresh_projection(&self, process_id: &str) -> bool {
+        self.repair_projection(process_id).await
     }
 
     /// Re-project one process's row only: the deliveries just settled, so the
@@ -853,19 +988,25 @@ impl KernelHost {
         match self.load(process_id).await {
             Ok(Some(loaded)) => {
                 if let Err(error) = projector.project_proc_row(&loaded.snapshot).await {
+                    projector.enqueue_repair(process_id);
                     tracing::warn!(
                         pid = %process_id,
                         error = %error,
-                        "proc row projection failed; the next commit re-derives it"
+                        "proc row projection failed; queued for repair"
                     );
+                } else {
+                    projector.finish_repair(process_id);
                 }
             }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(
-                pid = %process_id,
-                error = %error,
-                "proc row projection refresh failed"
-            ),
+            Ok(None) => projector.finish_repair(process_id),
+            Err(error) => {
+                projector.enqueue_repair(process_id);
+                tracing::warn!(
+                    pid = %process_id,
+                    error = %error,
+                    "proc row projection refresh failed; queued for repair"
+                );
+            }
         }
     }
 
@@ -900,10 +1041,13 @@ impl KernelHost {
             return;
         };
         let root_state = snapshot.tasks.get(&root).map(|task| task.state);
-        let all_terminal = !snapshot.tasks.is_empty()
-            && snapshot.tasks.values().all(|task| task.state.is_terminal());
+        // `run_settled` is the slot/lifecycle view (task terminality only).
+        // The read model's `projection_settled` is deliberately stronger; a
+        // lifecycle event is emitted when the run is no longer in flight, not
+        // when its rows may be reclaimed.
+        let no_longer_in_flight = run_settled(snapshot);
         let mut reported = self.reported.lock();
-        if all_terminal {
+        if no_longer_in_flight {
             if !reported.finished.insert(snapshot.process_id.clone()) {
                 return;
             }
@@ -2477,6 +2621,20 @@ impl KernelHost {
                 self.ready.notify_one();
             }
         }
+        // The read model's boot pass: rows carry their source aggregate
+        // revision, so this projects every aggregate once and writes only the
+        // rows that lag. A per-pid failure is queued and retried below; a scan
+        // that could not even list the aggregates is retried on the next
+        // recovery pass (not on a shorter tick).
+        if !self
+            .projection_booted
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && self.catch_up_projections().await
+        {
+            self.projection_booted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.repair_projections().await;
         let mut cursor = None;
         loop {
             let page = self
@@ -2754,6 +2912,16 @@ impl KernelHost {
         let now = SystemClock.now_ms();
         let mut delivered = 0usize;
         let mut settled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // Pids whose rows this pass verified current. The normal path already
+        // projected before it delivered; this pass also serves records a
+        // failed/withheld projection left `Pending` (and records another
+        // instance committed), so it re-projects the run before any external
+        // consumer can see the message.
+        let mut projected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // Pids whose projection failed in this pass: their records stay
+        // `Pending`, and retrying the projection for every record of the run
+        // would only multiply a store outage.
+        let mut deferred: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut cursor = None;
         loop {
             let page = self
@@ -2766,6 +2934,18 @@ impl KernelHost {
             }
             for record in page.records {
                 let process_id = record.id.process_id.clone();
+                if deferred.contains(&process_id) {
+                    continue;
+                }
+                if !projected.contains(&process_id) {
+                    if !self.repair_projection(&process_id).await {
+                        // The rows are still behind; leave every record of
+                        // this run `Pending` for the next pass.
+                        deferred.insert(process_id.clone());
+                        continue;
+                    }
+                    projected.insert(process_id.clone());
+                }
                 if self.dispatch_outbox_record(record, now).await? {
                     delivered += 1;
                     settled.insert(process_id);

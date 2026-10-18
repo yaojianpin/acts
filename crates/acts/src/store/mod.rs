@@ -325,6 +325,20 @@ pub trait KvStore: Send + Sync {
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
+/// Outcome of a conditional projection write
+/// ([`crate::store::Store::write_projection`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConditionalWrite {
+    /// The incoming row's source revision was newer and the write committed.
+    Applied,
+    /// The stored row already holds exactly the incoming row; nothing was
+    /// written.
+    Unchanged,
+    /// The stored row's source revision is at least as new (or the caller
+    /// supplied no revision); the write was refused.
+    Stale,
+}
+
 /// One collection of documents, each with an id and the index rows derived
 /// from its indexed fields.
 ///

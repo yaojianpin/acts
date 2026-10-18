@@ -1,7 +1,8 @@
 use super::map_db_err;
 use crate::store::{
-    DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore, OrderBy, PageData,
-    Query, ScanOperation, ScanOptions, Sort, StoreBatchOp, query::FilterType,
+    ConditionalWrite, DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore,
+    OrderBy, PageData, Query, ScanOperation, ScanOptions, Sort, StoreBatchOp, StoreGuard,
+    query::FilterType,
 };
 use crate::utils::consts::{KEY_SEP, KEY_SEP_SUCC};
 use crate::{ActError, Result};
@@ -1100,6 +1101,99 @@ where
             }
         }
         Ok(None)
+    }
+}
+
+/// How often a projection write re-reads after a concurrent writer moved the
+/// row between the read and the guarded batch. A few losses are a normal race
+/// (two instances over one database); a run of them is damage, and the caller
+/// must see an error rather than spin.
+const CONDITIONAL_WRITE_ATTEMPTS: usize = 8;
+
+impl<T> KvCollection<T>
+where
+    T: DbCollectionIden
+        + Serialize
+        + DeserializeOwned
+        + Send
+        + Sync
+        + Clone
+        + Debug
+        + PartialEq
+        + 'static,
+{
+    /// The read model's conditional write (A5): store `row` only when its
+    /// source revision is strictly newer than the stored row's (or when
+    /// `allow_equal` is set, for an explicit repair at the same aggregate
+    /// version).
+    ///
+    /// The compare happens under the document lock and the write's guard
+    /// re-checks the exact bytes the decision was based on, so a projection
+    /// that stalled after reading an older row can never overwrite a newer
+    /// one — not in this process and not across processes sharing the store.
+    /// A failed guard re-reads and decides again (the newer writer won).
+    ///
+    /// `revision` reads the row's durable token; `None` means the row carries
+    /// no revision (a pre-A5 row), which is older than every aggregate
+    /// version. Rows whose stored/incoming bodies are identical are not
+    /// rewritten.
+    pub(crate) async fn write_if_newer<R, F>(
+        &self,
+        row: &T,
+        revision: F,
+        allow_equal: bool,
+    ) -> crate::Result<ConditionalWrite>
+    where
+        R: Ord,
+        F: Fn(&T) -> Option<R>,
+    {
+        let json = serde_json::to_value(row).map_err(map_db_err)?;
+        let id = extract_id(&json)?;
+        let key = self.data_key(&id);
+        let incoming = revision(row);
+        for _ in 0..CONDITIONAL_WRITE_ATTEMPTS {
+            let _lock = lock_docs([key.clone()]).await;
+            let stored_bytes = self.kv.one(&key).await?;
+            let stored = match &stored_bytes {
+                Some(bytes) => {
+                    let json: JsonValue = serde_json::from_slice(bytes).map_err(map_db_err)?;
+                    Some(T::upcast(json)?)
+                }
+                None => None,
+            };
+            let Some(incoming) = incoming.as_ref() else {
+                return Ok(ConditionalWrite::Stale);
+            };
+            if let Some(stored) = &stored {
+                // An identical body needs no write, and saying so is more
+                // useful than reporting the equal revision as a refusal.
+                if stored == row {
+                    return Ok(ConditionalWrite::Unchanged);
+                }
+                let newer = match revision(stored) {
+                    // The stored row predates the revision protocol: any
+                    // committed aggregate is newer than it.
+                    None => true,
+                    Some(stored) => *incoming > stored || (allow_equal && *incoming == stored),
+                };
+                if !newer {
+                    return Ok(ConditionalWrite::Stale);
+                }
+            }
+            let ops = self.update_ops_json(&json).await?;
+            let guard = match stored_bytes {
+                Some(bytes) => StoreGuard::holds(key.clone(), bytes),
+                None => StoreGuard::absent(key.clone()),
+            };
+            if self.kv.batch(&ops, &[guard]).await? {
+                return Ok(ConditionalWrite::Applied);
+            }
+            // A writer outside this process moved the row between our read
+            // and the batch. Re-read under the lock and decide again.
+        }
+        Err(ActError::Store(format!(
+            "projection write for {key:?} kept losing its guard"
+        )))
     }
 }
 

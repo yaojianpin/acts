@@ -26,6 +26,12 @@ pub struct Task {
     pub start_time: i64,
     pub end_time: i64,
     pub timestamp: i64,
+    /// The aggregate version this row was projected from (A5), in the
+    /// `"<graph>.<process>.<operations>"` encoding of `ProcessVersion`.
+    /// Missing on pre-A5 rows (decoded as an empty string, older than every
+    /// aggregate).
+    #[serde(default)]
+    pub source_revision: String,
     pub v: i32,
 }
 
@@ -83,6 +89,10 @@ pub struct TaskVars {
     pub data: String,
     #[serde(default)]
     pub sealed: String,
+    /// The aggregate version this row was projected from (A5); see
+    /// [`Task::source_revision`].
+    #[serde(default)]
+    pub source_revision: String,
     pub v: i32,
 }
 

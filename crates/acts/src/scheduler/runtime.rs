@@ -25,7 +25,7 @@ use parking_lot::RwLock;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{runtime::Handle, time};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -426,6 +426,13 @@ impl Runtime {
         *self.cleanup_metrics.lock()
     }
 
+    /// The read model's counters and repair backlog (A5): rows applied,
+    /// writes refused as stale, projection failures, repaired runs, and the
+    /// gauge of runs whose rows are currently behind their aggregate.
+    pub fn projection_metrics(&self) -> crate::scheduler::shell::ProjectionMetrics {
+        self.kernel.projection_metrics()
+    }
+
     pub fn config(&self) -> &Arc<Config> {
         &self.config
     }
@@ -563,8 +570,60 @@ impl Runtime {
     /// The read model for one process. There is no resident object — a
     /// process's own record is the aggregate document and the rows are its
     /// projection, read straight from the store.
+    ///
+    /// The rows are projected from the aggregate, and a read is a *strong*
+    /// read with respect to that projection: if the proc row's
+    /// `source_revision` is behind the durable aggregate (a failed projection,
+    /// a crash between commit and projection, an older database), the
+    /// aggregate is re-projected synchronously before the rows are loaded.
+    /// The aggregate is the authority; the rows never decide anything on
+    /// their own. A repair that fails is queued and reported, and the read
+    /// still returns the best row the store holds — callers can observe the
+    /// gap through [`Self::projection_metrics`].
     pub async fn proc(self: &Arc<Self>, pid: &str) -> Result<Option<Arc<Process>>> {
+        self.refresh_read_model(pid).await;
         self.store().load_proc(pid, self).await
+    }
+
+    /// The on-demand half of the projection protocol (see [`Self::proc`]).
+    async fn refresh_read_model(&self, pid: &str) {
+        let Some(projector) = self.kernel.projector() else {
+            return;
+        };
+        let snapshot = match self.kernel.snapshot(pid).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(pid, error = %error, "read model refresh could not load the aggregate");
+                return;
+            }
+        };
+        let row_version = match self.store().procs().find_opt(pid).await {
+            Ok(Some(row)) => {
+                crate::scheduler::core::model::transition_plan::ProcessVersion::decode(
+                    &row.source_revision,
+                )
+            }
+            Ok(None) => None,
+            Err(error) => {
+                warn!(pid, error = %error, "read model refresh could not read the proc row");
+                return;
+            }
+        };
+        if row_version.is_some_and(|version| version >= snapshot.version) {
+            return;
+        }
+        match projector.project_repair(&snapshot).await {
+            Ok(_) => projector.finish_repair(pid),
+            Err(error) => {
+                projector.enqueue_repair(pid);
+                warn!(
+                    pid,
+                    error = %error,
+                    "read model refresh failed; serving the rows already stored and queued a repair"
+                );
+            }
+        }
     }
 
     #[instrument(skip(self, action), fields(pid = %action.pid, tid = %action.tid, event = ?action.event))]

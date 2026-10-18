@@ -23,6 +23,37 @@ pub(crate) struct ProcessVersion {
     pub(crate) operations: u64,
 }
 
+impl ProcessVersion {
+    /// The durable read-model token: `"<graph>.<process>.<operations>"`.
+    ///
+    /// Every projected row stores this string as its `source_revision`; the
+    /// store's conditional write parses it back and applies the row only when
+    /// the incoming version is strictly newer. The fields are decimal and the
+    /// derived `Ord` is lexicographic, so the string form uses the same order
+    /// (the components are compared as numbers after parsing, never as text).
+    pub(crate) fn encode(&self) -> String {
+        format!("{}.{}.{}", self.graph, self.process, self.operations)
+    }
+
+    /// Parse a `source_revision` token. `None` for a missing/invalid/legacy
+    /// token (rows written before A5 carry no revision): such a row is older
+    /// than any committed aggregate version.
+    pub(crate) fn decode(raw: &str) -> Option<Self> {
+        let mut parts = raw.split('.');
+        let graph = parts.next()?.parse().ok()?;
+        let process = parts.next()?.parse().ok()?;
+        let operations = parts.next()?.parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            graph,
+            process,
+            operations,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TaskCreate {
     pub(crate) task: TaskId,
@@ -351,5 +382,25 @@ mod tests {
             p.validate(),
             Err(PlanError::InvalidOutbox(OutboxError::PayloadTooLarge))
         );
+    }
+
+    #[test]
+    fn the_durable_version_token_round_trips_and_orders() {
+        let low = ProcessVersion {
+            graph: 1,
+            process: 2,
+            operations: 3,
+        };
+        let high = ProcessVersion {
+            graph: 1,
+            process: 2,
+            operations: 4,
+        };
+        assert_eq!(ProcessVersion::decode(&low.encode()), Some(low.clone()));
+        assert!(low < high);
+        assert_eq!(ProcessVersion::decode(""), None);
+        assert_eq!(ProcessVersion::decode("1.2"), None);
+        assert_eq!(ProcessVersion::decode("1.2.3.4"), None);
+        assert_eq!(ProcessVersion::decode("1.x.3"), None);
     }
 }

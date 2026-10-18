@@ -8048,3 +8048,433 @@ async fn messages_are_visible_only_after_the_projection() {
         "a message saw the proc row missing: {observed:?}"
     );
 }
+
+/// A store that injects a newer row between an older conditional write's read
+/// and its guarded batch: on the first guarded batch touching `key`, it stores
+/// `value` under that key (the write a second instance would have committed),
+/// then lets the older batch run. The guard must refuse it, and the projector
+/// must re-read and report the row stale. This is the one interleaving the
+/// in-process document lock cannot produce; the store guard is what covers it.
+struct GatedKv {
+    inner: MemoryStore,
+    gate: parking_lot::Mutex<Option<(String, Vec<u8>)>>,
+    entered: tokio::sync::Notify,
+}
+
+impl GatedKv {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryStore::new(),
+            gate: parking_lot::Mutex::new(None),
+            entered: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn arm(&self, key: String, value: Vec<u8>) {
+        *self.gate.lock() = Some((key, value));
+    }
+
+    async fn wait_entered(&self) {
+        self.entered.notified().await;
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStore for GatedKv {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::StoreBatchOp],
+        guards: &[crate::StoreGuard],
+    ) -> Result<bool> {
+        let inject = {
+            let mut gate = self.gate.lock();
+            match gate.as_ref() {
+                Some((key, _))
+                    if ops.iter().any(
+                        |op| matches!(op, crate::StoreBatchOp::Put { key: written, .. } if written == key),
+                    ) =>
+                {
+                    gate.take()
+                }
+                _ => None,
+            }
+        };
+        if let Some((key, value)) = inject {
+            // A concurrent instance's newer projection lands first.
+            self.inner.put(&key, value).await?;
+            self.entered.notify_one();
+        }
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::store::ScanOptions,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// A store that refuses every guarded batch touching a read-model row while
+/// armed — an outage of the projection path, not of the aggregate.
+struct FailingRowsKv {
+    inner: MemoryStore,
+    armed: AtomicBool,
+}
+
+impl FailingRowsKv {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryStore::new(),
+            armed: AtomicBool::new(false),
+        })
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn disarm(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+    }
+}
+
+fn is_row_key(key: &str) -> bool {
+    ["procs", "tasks", "vars"]
+        .iter()
+        .any(|prefix| key.starts_with(&format!("{prefix}-")))
+}
+
+#[async_trait::async_trait]
+impl KvStore for FailingRowsKv {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::StoreBatchOp],
+        guards: &[crate::StoreGuard],
+    ) -> Result<bool> {
+        if self.armed.load(Ordering::SeqCst)
+            && ops.iter().any(|op| match op {
+                crate::StoreBatchOp::Put { key, .. } | crate::StoreBatchOp::Delete { key } => {
+                    is_row_key(key)
+                }
+            })
+        {
+            return Err(crate::ActError::Store(
+                "injected projection row failure".into(),
+            ));
+        }
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::store::ScanOptions,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// A5: the durable per-row revision, not the in-process claim table, decides.
+///
+/// The instrumented store commits a newer row between the older projection's
+/// read and its guarded batch — the interleaving the in-process document lock
+/// cannot produce and a second instance can. The old batch's guard must fail,
+/// the re-read must see the newer revision, and the row must stay newer.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_projection_cannot_overwrite_a_newer_one() {
+    const PID: &str = "p-projection-cas";
+    let gated = GatedKv::new();
+    let kv: Arc<dyn KvStore> = gated.clone();
+    let store = Arc::new(crate::store::Store::new(kv));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-projection-cas")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    let base = spec.seed_snapshot().unwrap();
+    let root = base
+        .tasks
+        .keys()
+        .find(|id| id.node.as_str() == crate::utils::consts::TASK_ROOT_TID)
+        .expect("the seed's root")
+        .clone();
+    let mut mid = base.clone();
+    mid.version.process += 1;
+    mid.tasks.get_mut(&root).unwrap().state = TaskState::Running;
+    let mut new = base.clone();
+    new.version.process += 2;
+    new.tasks.get_mut(&root).unwrap().state = TaskState::Completed;
+
+    // The baseline row (version 1.0.0).
+    RowProjector::new(store.clone(), writer.clone(), None)
+        .project(&base)
+        .await
+        .unwrap();
+    let wire = root.wire(PID);
+    let row_id = crate::utils::Id::new(PID, &wire).id();
+    let base_row = store.tasks().find_opt(&row_id).await.unwrap().unwrap();
+    assert_eq!(base_row.source_revision, base.version.encode());
+
+    // The row a concurrent, newer projection would have committed.
+    let mut newer = base_row.clone();
+    newer.source_revision = new.version.encode();
+    newer.state = "completed".into();
+    gated.arm(
+        format!("tasks-id-{row_id}"),
+        serde_json::to_vec(&newer).unwrap(),
+    );
+
+    // A fresh projector has no claim for this row: it reads the baseline and
+    // reaches its guarded batch. The store writes `newer` first, then runs
+    // the older guarded batch (which must fail).
+    let probe = RowProjector::new(store.clone(), writer.clone(), None);
+    let report = probe.project(&mid).await.unwrap();
+    assert!(
+        report.stale > 0,
+        "the older projection must be refused by the store guard: {report:?}"
+    );
+    gated.wait_entered().await;
+
+    let row = store.tasks().find_opt(&row_id).await.unwrap().unwrap();
+    assert_eq!(row.source_revision, new.version.encode());
+    assert_eq!(row.state, "completed", "the older row must not win");
+
+    // A restart has no in-process claims at all: the persisted revision is
+    // still enough to refuse the older snapshot.
+    let restarted = RowProjector::new(store.clone(), writer, None);
+    restarted.project(&mid).await.unwrap();
+    let row = store.tasks().find_opt(&row_id).await.unwrap().unwrap();
+    assert_eq!(row.source_revision, new.version.encode());
+    assert_eq!(row.state, "completed");
+    assert!(
+        restarted.metrics().stale > 0,
+        "with no claim table the store guard is the only guard"
+    );
+}
+
+/// A5: a restart re-projects from the persisted revisions — a row that lagged
+/// behind its aggregate is repaired by the boot catch-up; a row already at the
+/// aggregate's version is left unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_catches_up_only_the_rows_that_lag() {
+    const PID: &str = "p-projection-restart";
+    let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let store = Arc::new(crate::store::Store::new(kv.clone()));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_row_projector(Arc::new(RowProjector::new(
+        store.clone(),
+        writer.clone(),
+        None,
+    )));
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-projection-restart")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    let current = snapshot.version.encode();
+    let s1_id = crate::utils::Id::new(PID, &tid_of(PID, "s1", 0)).id();
+    let mut row = store.tasks().find_opt(&s1_id).await.unwrap().unwrap();
+    assert_eq!(row.source_revision, current);
+    // Simulate a crash between a commit and its projection: the row is stale
+    // and reads a state the aggregate left behind.
+    row.state = "running".into();
+    row.source_revision = "1.0.0".into();
+    store.tasks().update(&row).await.unwrap();
+
+    // A fresh host over the same store: no in-process projection claims.
+    let (restarted, _wake) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    restarted.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
+    restarted.recover(SystemClock.now_ms()).await.unwrap();
+
+    let row = store.tasks().find_opt(&s1_id).await.unwrap().unwrap();
+    assert_eq!(
+        row.source_revision, current,
+        "the boot catch-up must restore the row's source revision"
+    );
+    assert_eq!(row.state, "completed");
+    let metrics = restarted.projection_metrics();
+    assert_eq!(
+        metrics.lag, 0,
+        "a successful catch-up leaves no repair queued"
+    );
+    assert!(
+        metrics.repaired > 0,
+        "the boot catch-up counts the run it repaired: {metrics:?}"
+    );
+}
+
+/// A5: a projection failure is queued, withholds the completion event, and is
+/// repaired by the recovery pass — after which the observer sees the row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projection_failure_is_repaired_before_the_completion_event() {
+    const PID: &str = "p-projection-repair";
+    let stored = FailingRowsKv::new();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let store = Arc::new(crate::store::Store::new(kv.clone()));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let seen = completed.clone();
+    host.attach_lifecycle_sink(Box::new(move |_, event| {
+        if event == ProcessEvent::Completed {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    // Take the boot pass before the rows exist, so the later repair goes
+    // through the repair queue rather than the boot catch-up.
+    host.recover(SystemClock.now_ms()).await.unwrap();
+
+    stored.arm();
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-projection-repair")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        0,
+        "a completion event must not overtake its rows"
+    );
+    let metrics = host.projection_metrics();
+    assert!(
+        metrics.failed > 0,
+        "the failure must be counted: {metrics:?}"
+    );
+    assert!(
+        metrics.lag > 0,
+        "the run must be queued for repair: {metrics:?}"
+    );
+
+    stored.disarm();
+    host.recover(SystemClock.now_ms()).await.unwrap();
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        1,
+        "the repaired projection releases the withheld completion event"
+    );
+    let metrics = host.projection_metrics();
+    assert!(metrics.repaired > 0, "{metrics:?}");
+    assert_eq!(metrics.lag, 0, "{metrics:?}");
+    let proc = store.procs().find_opt(PID).await.unwrap().unwrap();
+    let aggregate = host.snapshot(PID).await.unwrap().unwrap();
+    assert_eq!(proc.source_revision, aggregate.version.encode());
+}
+
+/// A5: the query API is a strong read. A proc row left behind its aggregate
+/// (a failed projection, a crash between commit and projection) is repaired
+/// before the row is served, and the returned process reflects the aggregate.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_proc_read_reprojects_a_lagging_row() {
+    let mut config = crate::Config::default();
+    config.data.tick_interval_secs = Some(1);
+    let engine = crate::Engine::builder()
+        .set_config(&config)
+        .start()
+        .await
+        .unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
+    engine.channel().on_complete(move |_| {
+        let done = done.clone();
+        async move { done.close() }
+    });
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-strong-read")
+        .with_step(|step| step.with_id("s1"));
+    let runtime = engine.runtime();
+    let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
+    let pid = proc.id().to_string();
+    tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+        .await
+        .expect("the run never finished");
+
+    let snapshot = runtime.kernel().snapshot(&pid).await.unwrap().unwrap();
+    let current = snapshot.version.encode();
+    let mut row = runtime
+        .store()
+        .procs()
+        .find_opt(&pid)
+        .await
+        .unwrap()
+        .unwrap();
+    row.state = "running".into();
+    row.source_revision = "1.0.0".into();
+    runtime.store().procs().update(&row).await.unwrap();
+
+    let live = runtime.proc(&pid).await.unwrap().expect("the proc row");
+    assert_eq!(
+        live.state(),
+        crate::LegacyTaskState::Completed,
+        "the strong read must serve the aggregate's state"
+    );
+    let restored = runtime
+        .store()
+        .procs()
+        .find_opt(&pid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        restored.source_revision, current,
+        "the strong read must restore the row's source revision"
+    );
+    assert_eq!(runtime.projection_metrics().lag, 0);
+    engine.close().await;
+}

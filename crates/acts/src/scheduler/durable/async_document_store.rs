@@ -567,6 +567,18 @@ impl AsyncProcessRepository {
         Ok(false)
     }
 
+    /// Every durable process id, in key order. The boot catch-up of the read
+    /// model (A5) walks this list once per host; it is the durable repair
+    /// queue's authoritative membership (the in-memory queue is only a
+    /// convenience view rebuilt from it).
+    pub(crate) async fn process_ids(&self) -> Result<Vec<String>, AsyncRepositoryError> {
+        let mut ids = Vec::new();
+        for (key, _) in self.store.scan_prefix(PROCESS_KEY_PREFIX).await? {
+            ids.push(decode_process_key(&key)?);
+        }
+        Ok(ids)
+    }
+
     /// Repair every aggregate's derived indexes. One boot pass: the scan is
     /// linear in the aggregate set, never in the number of ticks.
     pub(crate) async fn repair_all_ready(

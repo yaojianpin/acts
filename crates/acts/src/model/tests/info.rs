@@ -56,6 +56,7 @@ fn model_info_proc() {
         env: "".to_string(),
         err: None,
         removable: false,
+        source_revision: String::new(),
         v: 0,
     };
     let info: ProcInfo = proc.into();
@@ -93,6 +94,7 @@ fn model_info_task() {
         end_time: 0,
         timestamp: 0,
         err: None,
+        source_revision: String::new(),
         v: 0,
     };
     let info: TaskInfo = task.clone().into();
@@ -209,6 +211,7 @@ fn model_info_proc_arr_to_value() {
         env: "".to_string(),
         err: None,
         removable: false,
+        source_revision: String::new(),
         v: 0,
     };
     let info: ProcInfo = proc.into();
@@ -260,6 +263,7 @@ fn model_info_task_arr_to_value() {
         end_time: 0,
         timestamp: 0,
         err: None,
+        source_revision: String::new(),
         v: 0,
     };
     let info: TaskInfo = task.clone().into();

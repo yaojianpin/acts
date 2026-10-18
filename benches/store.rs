@@ -32,6 +32,7 @@ fn make_proc(id: &str, mid: &str, i: u64) -> Proc {
         env: "{}".to_string(),
         err: None,
         removable: false,
+        source_revision: String::new(),
         v: 0,
     }
 }

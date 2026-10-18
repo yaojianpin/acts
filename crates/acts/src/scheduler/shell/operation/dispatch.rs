@@ -199,7 +199,7 @@ impl KernelHost {
         // any external observer sees the commit: the lifecycle events and the
         // outbox transport below.
         let phase = operation_trace::start();
-        match projection {
+        let projected = match projection {
             Projection::Whole => self.project(&loaded.snapshot).await,
             Projection::Touched => {
                 let touched: std::collections::BTreeSet<String> = plan
@@ -217,25 +217,40 @@ impl KernelHost {
                             .map(|write| write.scope.wire(&loaded.snapshot.process_id)),
                     )
                     .collect();
-                self.project_touched(&loaded.snapshot, &touched).await;
+                self.project_touched(&loaded.snapshot, &touched).await
             }
-        }
+        };
         operation_trace::end(operation_trace::PROJECT, phase);
-        // The run's lifecycle, from the freshly committed state: a start while
-        // it is alive, one terminal event once every execution settled. A
-        // closed sink or an absent one makes this a no-op.
-        let phase = operation_trace::start();
-        self.report_lifecycle(&loaded.snapshot);
-        operation_trace::end(operation_trace::LIFECYCLE, phase);
-        // The commit's own outbox records are now visible to the transport —
-        // after the aggregate commit and after the projection — and their
-        // outcomes are persisted in one batch confirmation. A record the
-        // confirmation could not settle stays `Pending`; the outbox pass owns
-        // the retry.
-        let phase = operation_trace::start();
-        self.deliver_committed_outbox(&mut loaded, &receipt.new_outbox)
-            .await;
-        operation_trace::end(operation_trace::DELIVER, phase);
+        // A6/A5: an external observer — the lifecycle sink and the outbox
+        // transport — sees a commit only after its rows are current. If the
+        // projection failed, the run is in the repair queue and this commit's
+        // records stay `Pending`: the recovery pass repairs the rows, and the
+        // outbox pass projects again before it delivers. This is the strong
+        // ordering contract; a reader can therefore never observe a message
+        // or completion event whose rows are still behind (except through a
+        // direct row read during the failure window, which reports its own
+        // lag).
+        if projected {
+            // The run's lifecycle, from the freshly committed state: a start
+            // while it is alive, one terminal event once every execution
+            // settled. A closed sink or an absent one makes this a no-op.
+            let phase = operation_trace::start();
+            self.report_lifecycle(&loaded.snapshot);
+            operation_trace::end(operation_trace::LIFECYCLE, phase);
+            // The commit's own outbox records are now visible to the
+            // transport — after the aggregate commit and after the projection
+            // — and their outcomes are persisted in one batch confirmation. A
+            // record the confirmation could not settle stays `Pending`; the
+            // outbox pass owns the retry.
+            let phase = operation_trace::start();
+            self.deliver_committed_outbox(&mut loaded, &receipt.new_outbox)
+                .await;
+            operation_trace::end(operation_trace::DELIVER, phase);
+        } else if !receipt.new_outbox.is_empty() {
+            // Keep the deliverable work visible to the outbox pass (the
+            // records are already `Pending`; the pass re-reads them).
+            self.deliver.notify_one();
+        }
         // This operation may have settled the run: its slot goes back to the parked
         // queue right here, so the run that has waited longest starts now
         // instead of on the driver's next tick. The run is the one this operation

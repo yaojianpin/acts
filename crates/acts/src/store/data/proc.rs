@@ -22,6 +22,16 @@ pub struct Proc {
     /// before this field existed keep loading.
     #[serde(default)]
     pub removable: bool,
+    /// The aggregate version this row was projected from (A5), in the
+    /// `"<graph>.<process>.<operations>"` encoding of `ProcessVersion`.
+    ///
+    /// The projection writes a row only when its source revision is strictly
+    /// newer than the stored one (equal only for an explicit repair), so the
+    /// field is the durable half of the read model's compare-and-swap. Rows
+    /// written before the protocol have no field and decode as an empty
+    /// string, which the projector treats as older than every aggregate.
+    #[serde(default)]
+    pub source_revision: String,
     pub v: i32,
 }
 

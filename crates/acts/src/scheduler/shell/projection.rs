@@ -24,10 +24,56 @@
 //! `end_time`, since the surviving instance is running again.
 //!
 //! Nothing here is authoritative: a projection failure is reported by the
-//! caller and never fails the operation (the rows are re-derived from the aggregate
-//! on the next commit), and `removable` — set only once every execution is
-//! terminal *and* every outbox record delivered — is what hands the rows (and
-//! the run's directory) to the legacy sweeper.
+//! caller and never fails the operation, and `removable` — set only once every
+//! execution is terminal *and* every outbox record delivered — is what hands
+//! the rows (and the run's directory) to the legacy sweeper.
+//!
+//! # Version protocol (A5)
+//!
+//! Every row persists the aggregate version it was projected from in
+//! `source_revision`, the `"<graph>.<process>.<operations>"` encoding of
+//! [`ProcessVersion`] (a pre-A5 row has no field and decodes as `None`, older
+//! than every aggregate). Writes are store-level conditional writes
+//! ([`Store::write_projection`]): a row applies only when its source revision
+//! is strictly newer than the stored row's. The compare and the write commit
+//! as one guarded batch under the document lock, so a projection that stalled
+//! after reading an older row can never overwrite a newer one — in this
+//! process or across instances sharing the store. The in-process
+//! [`RowProjector::projected`] map remains only as a fast path; it is no
+//! longer the guard.
+//!
+//! Two explicit repair modes are the only way to write at an *equal*
+//! revision: [`RowProjector::project_repair`] (boot catch-up / the durable
+//! repair queue) and [`RowProjector::project_proc_row`] (`removable` also
+//! depends on channel delivery rows outside the aggregate version). Both read
+//! the same aggregate version, so they can only change derived facts
+//! (`removable`, timings that are preserved anyway) — never move a row back
+//! to an older state.
+//!
+//! The durable repair queue is the aggregate set itself: a row that lags is
+//! detectable from its persisted revision, so a restart re-scans the
+//! aggregates (one boot pass, linear in the number of runs, never in ticks)
+//! and re-projects only what is behind. Failures are also queued in memory
+//! (one entry per pid, bounded by the aggregate set) and retried by the
+//! recovery pass. [`ProjectionMetrics`] exposes the backlog/age gauges and
+//! the applied/stale/failed/repaired counters.
+//!
+//! Ordering contract: a commit's external observers (the lifecycle sink and
+//! the outbox transport) run only after its rows are current. If a projection
+//! fails, the dispatch skips both, the run is queued for repair, and the
+//! outbox records stay `Pending` until the retry pass projects the run again.
+//!
+//! Read contract: the read model is never consulted by Core or Recovery for
+//! an authoritative decision (the aggregate is the only truth). The query API
+//! (`Runtime::proc` / `proc:get`) is a *strong* read: it re-projects the
+//! aggregate when the proc row's `source_revision` is behind, and otherwise
+//! serves the rows. A failed strong read serves the stored rows and leaves
+//! the repair queued; [`ProjectionMetrics::lag`] reports the gap.
+//!
+//! The two terminal predicates are deliberately distinct:
+//! [`super::facts::run_settled`] (task terminality — the run holds no admission
+//! slot) and [`projection_settled`] (tasks + outbox + operations — the rows may
+//! be reclaimed).
 
 use super::{facts::node_facts, model_of, root_variable};
 use crate::{
@@ -41,7 +87,7 @@ use crate::{
             view::NodeTree,
         },
     },
-    store::{DbCollection, DbCollectionIden, Store, data},
+    store::{ConditionalWrite, DbCollectionIden, Store, data},
     utils::consts,
 };
 
@@ -61,6 +107,64 @@ const AUTO_VAR: &str = "auto";
 /// The kernel's error variables (the naming the failure operations commit).
 const ERROR_CODE_VAR: &str = "error.code";
 const ERROR_MESSAGE_VAR: &str = "error.message";
+
+/// What one projection pass wrote, by conditional-write outcome.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ProjectionReport {
+    pub(crate) applied: usize,
+    pub(crate) unchanged: usize,
+    pub(crate) stale: usize,
+}
+
+impl ProjectionReport {
+    fn record(&mut self, outcome: ConditionalWrite) {
+        match outcome {
+            ConditionalWrite::Applied => self.applied += 1,
+            ConditionalWrite::Unchanged => self.unchanged += 1,
+            ConditionalWrite::Stale => self.stale += 1,
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.applied += other.applied;
+        self.unchanged += other.unchanged;
+        self.stale += other.stale;
+    }
+}
+
+/// The read model's observable state (A5).
+///
+/// `lag` and `oldest_lag_age_ms` are gauges: the runs currently queued for
+/// repair (a projection failed and the rows may be behind their aggregate).
+/// The counters accumulate for the host's lifetime: rows applied, rows that
+/// were already identical, writes refused because a newer projection won
+/// (`stale`), projection failures, and runs repaired by the catch-up pass.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProjectionMetrics {
+    /// Runs with a pending durable repair (rows behind their aggregate).
+    pub lag: usize,
+    /// Age of the oldest pending repair, in milliseconds.
+    pub oldest_lag_age_ms: Option<i64>,
+    /// Rows committed by a projection.
+    pub applied: u64,
+    /// Rows whose conditional write found the stored row identical.
+    pub unchanged: u64,
+    /// Writes refused because the stored row was at least as new.
+    pub stale: u64,
+    /// Projection passes that failed and were queued for repair.
+    pub failed: u64,
+    /// Runs whose queued repair later projected successfully.
+    pub repaired: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ProjectionCounters {
+    applied: u64,
+    unchanged: u64,
+    stale: u64,
+    failed: u64,
+    repaired: u64,
+}
 
 /// Materializes the legacy rows of one aggregate.
 #[derive(Clone)]
@@ -102,6 +206,19 @@ pub(crate) struct RowProjector {
     /// projection could recreate rows behind `RemoveProc`.
     process_locks:
         Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Read-model counters (see [`ProjectionMetrics`]).
+    counters: Arc<parking_lot::Mutex<ProjectionCounters>>,
+    /// The durable repair queue's in-memory view: one entry per pid whose
+    /// rows may be behind its aggregate, with the instant the repair was
+    /// first noticed.
+    ///
+    /// The queue is *derived*, not authoritative: a restart loses the map and
+    /// the boot catch-up rebuilds it from the aggregate set (every aggregate
+    /// is re-projected; rows already at the aggregate's version are
+    /// `Unchanged`). It is bounded by the number of live aggregates — one
+    /// entry per pid, never one per failure — and the driver retries a bounded
+    /// batch per recovery pass.
+    repairs: Arc<parking_lot::Mutex<std::collections::BTreeMap<String, i64>>>,
 }
 
 impl RowProjector {
@@ -117,6 +234,110 @@ impl RowProjector {
             projected: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             reclaimed: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
             process_locks: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            counters: Arc::new(parking_lot::Mutex::new(ProjectionCounters::default())),
+            repairs: Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new())),
+        }
+    }
+
+    /// Note that a run's rows may be behind its aggregate; the driver retries
+    /// it from [`Self::pending_repairs`]. Idempotent per pid and bounded by
+    /// the aggregate set (see [`Self::repairs`]).
+    pub(crate) fn enqueue_repair(&self, process_id: &str) {
+        self.repairs
+            .lock()
+            .entry(process_id.to_string())
+            .or_insert_with(crate::utils::time::time_millis);
+    }
+
+    /// The run is no longer behind (a projection succeeded, or its aggregate
+    /// was reclaimed).
+    pub(crate) fn finish_repair(&self, process_id: &str) {
+        self.repairs.lock().remove(process_id);
+    }
+
+    /// Whether the run is currently queued for repair.
+    pub(crate) fn is_repair_pending(&self, process_id: &str) -> bool {
+        self.repairs.lock().contains_key(process_id)
+    }
+
+    /// One bounded batch of runs to retry, oldest first.
+    pub(crate) fn pending_repairs(&self, limit: usize) -> Vec<String> {
+        let repairs = self.repairs.lock();
+        let mut entries: Vec<(i64, &String)> =
+            repairs.iter().map(|(pid, since)| (*since, pid)).collect();
+        entries.sort_unstable();
+        entries
+            .into_iter()
+            .take(limit)
+            .map(|(_, pid)| pid.clone())
+            .collect()
+    }
+
+    /// Count a run the driver repaired.
+    pub(crate) fn note_repaired(&self) {
+        self.counters.lock().repaired += 1;
+    }
+
+    /// The read model's counters and repair backlog.
+    pub(crate) fn metrics(&self) -> ProjectionMetrics {
+        let counters = *self.counters.lock();
+        let repairs = self.repairs.lock();
+        let now = crate::utils::time::time_millis();
+        ProjectionMetrics {
+            lag: repairs.len(),
+            oldest_lag_age_ms: repairs
+                .values()
+                .min()
+                .map(|since| now.saturating_sub(*since)),
+            applied: counters.applied,
+            unchanged: counters.unchanged,
+            stale: counters.stale,
+            failed: counters.failed,
+            repaired: counters.repaired,
+        }
+    }
+
+    /// The aggregate version a row was projected from, or `None` for a row
+    /// written before the protocol.
+    fn row_version(raw: &str) -> Option<ProcessVersion> {
+        ProcessVersion::decode(raw)
+    }
+
+    fn record(&self, report: ProjectionReport) {
+        let mut counters = self.counters.lock();
+        counters.applied += report.applied as u64;
+        counters.unchanged += report.unchanged as u64;
+        counters.stale += report.stale as u64;
+    }
+
+    fn note_failure(&self) {
+        self.counters.lock().failed += 1;
+    }
+
+    /// The store-level conditional write (A5), with the projector's counters.
+    async fn write<T, F>(&self, row: &T, revision: F, allow_equal: bool) -> Result<ConditionalWrite>
+    where
+        T: DbCollectionIden
+            + serde::Serialize
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + Clone
+            + std::fmt::Debug
+            + PartialEq
+            + 'static,
+        F: Fn(&T) -> Option<ProcessVersion>,
+    {
+        match self
+            .store
+            .write_projection(row, revision, allow_equal)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.note_failure();
+                Err(error)
+            }
         }
     }
 
@@ -142,6 +363,7 @@ impl RowProjector {
             .lock()
             .retain(|key, _| !key.starts_with(&prefix));
         self.reclaimed.lock().insert(process_id.to_string());
+        self.finish_repair(process_id);
     }
 
     /// Clear a reclaimed pid's tombstone: a new run is starting under it.
@@ -168,24 +390,19 @@ impl RowProjector {
         }
     }
 
-    fn claim(&self, snapshot: &ProcessSnapshot, row: &str) -> bool {
+    fn claim(&self, snapshot: &ProcessSnapshot, row: &str, allow_equal: bool) -> bool {
         let mut projected = self.projected.lock();
         let key = format!("{pid}\u{1f}{row}", pid = snapshot.process_id);
         match projected.get(&key) {
-            Some(newest) if *newest >= snapshot.version => false,
+            // An explicit repair may re-project the same aggregate version
+            // (the durable revision guard still refuses anything older).
+            Some(newest) if *newest > snapshot.version => false,
+            Some(newest) if *newest == snapshot.version && !allow_equal => false,
             _ => {
                 projected.insert(key, snapshot.version.clone());
                 true
             }
         }
-    }
-
-    /// Drop the proc row's version claim so the sweeper can re-evaluate
-    /// `removable` at the same aggregate version. A newer projection that
-    /// already ran keeps its claim, so the repair cannot move the row back.
-    pub(crate) fn forget_proc(&self, process_id: &str) {
-        let key = format!("{process_id}\u{1f}proc");
-        self.projected.lock().remove(&key);
     }
 
     /// Drop every projection claim of one run so a settled snapshot may be
@@ -211,9 +428,21 @@ impl RowProjector {
 
     /// Project the whole process (proc row, task rows, vars rows) from the
     /// committed snapshot. Idempotent: projecting the same snapshot twice
-    /// writes the same rows.
-    pub(crate) async fn project(&self, snapshot: &ProcessSnapshot) -> Result<()> {
-        self.project_nodes(snapshot, None).await
+    /// writes the same rows, and a row already at the snapshot's revision is
+    /// `Unchanged`.
+    pub(crate) async fn project(&self, snapshot: &ProcessSnapshot) -> Result<ProjectionReport> {
+        self.project_inner(snapshot, None, false).await
+    }
+
+    /// Re-project a whole run as an explicit repair: task/vars rows may be
+    /// written at the same aggregate revision (the durable revision guard
+    /// still refuses anything older), and the proc row's `removable` flag is
+    /// re-derived. The boot catch-up and the repair queue use this.
+    pub(crate) async fn project_repair(
+        &self,
+        snapshot: &ProcessSnapshot,
+    ) -> Result<ProjectionReport> {
+        self.project_inner(snapshot, None, true).await
     }
 
     /// Project the proc row plus the named instances' rows; `None` projects
@@ -225,18 +454,28 @@ impl RowProjector {
         &self,
         snapshot: &ProcessSnapshot,
         instances: Option<&std::collections::BTreeSet<String>>,
-    ) -> Result<()> {
+    ) -> Result<ProjectionReport> {
+        self.project_inner(snapshot, instances, false).await
+    }
+
+    async fn project_inner(
+        &self,
+        snapshot: &ProcessSnapshot,
+        instances: Option<&std::collections::BTreeSet<String>>,
+        allow_equal: bool,
+    ) -> Result<ProjectionReport> {
         let _guard = self.process_lock(&snapshot.process_id).lock_owned().await;
         if self.is_reclaimed(&snapshot.process_id) {
-            return Ok(());
+            return Ok(ProjectionReport::default());
         }
         let Some(model) = model_of(snapshot)? else {
             // An aggregate seeded before the model fact existed: nothing to
             // project the rows from.
-            return Ok(());
+            return Ok(ProjectionReport::default());
         };
         let mut tree = NodeTree::new();
         tree.load(&model)?;
+        let mut report = ProjectionReport::default();
 
         // The proc row is derived from the root task's state. Whenever it is
         // projected, project the root task row too: otherwise a commit that
@@ -256,52 +495,76 @@ impl RowProjector {
             {
                 continue;
             }
-            if !self.claim(snapshot, &wire) {
+            if !self.claim(snapshot, &wire, allow_equal) {
                 continue;
             }
-            if let Err(error) = self.project_task(snapshot, &tree, task_id, &wire).await {
-                // The claim may not outlive a write that never landed — the
-                // next projection of this version (a retry, a later flush)
-                // must be allowed to write the row.
-                self.release(snapshot, &wire);
-                return Err(error);
+            match self
+                .project_task(snapshot, &tree, task_id, &wire, allow_equal)
+                .await
+            {
+                Ok(rows) => report.merge(rows),
+                Err(error) => {
+                    // The claim may not outlive a write that never landed —
+                    // the next projection of this version (a retry, a later
+                    // flush) must be allowed to write the row.
+                    self.release(snapshot, &wire);
+                    self.record(report);
+                    return Err(error);
+                }
             }
         }
         // The proc row is the summary row: write it last so a reader that sees
         // the terminal proc state can also see the task rows it summarizes.
-        if self.claim(snapshot, "proc")
-            && let Err(error) = self.project_proc(snapshot, &model).await
-        {
-            self.release(snapshot, "proc");
-            return Err(error);
+        if self.claim(snapshot, "proc", allow_equal) {
+            match self.project_proc(snapshot, &model, allow_equal).await {
+                Ok(rows) => report.merge(rows),
+                Err(error) => {
+                    self.release(snapshot, "proc");
+                    self.record(report);
+                    return Err(error);
+                }
+            }
         }
-        Ok(())
+        self.record(report);
+        Ok(report)
     }
 
     /// Project only the process row: what the outbox's settling pass needs
-    /// (the `removable` flag), with nothing else changed.
-    pub(crate) async fn project_proc_row(&self, snapshot: &ProcessSnapshot) -> Result<()> {
+    /// (the `removable` flag), with nothing else changed. The row may be
+    /// rewritten at the same aggregate revision because `removable` also
+    /// depends on channel delivery rows outside that version.
+    pub(crate) async fn project_proc_row(
+        &self,
+        snapshot: &ProcessSnapshot,
+    ) -> Result<ProjectionReport> {
         let _guard = self.process_lock(&snapshot.process_id).lock_owned().await;
         if self.is_reclaimed(&snapshot.process_id) {
-            return Ok(());
+            return Ok(ProjectionReport::default());
         }
         let Some(model) = model_of(snapshot)? else {
-            return Ok(());
+            return Ok(ProjectionReport::default());
         };
-        if self.claim(snapshot, "proc")
-            && let Err(error) = self.project_proc(snapshot, &model).await
-        {
-            self.release(snapshot, "proc");
-            return Err(error);
+        let mut report = ProjectionReport::default();
+        if self.claim(snapshot, "proc", true) {
+            match self.project_proc(snapshot, &model, true).await {
+                Ok(rows) => report.merge(rows),
+                Err(error) => {
+                    self.release(snapshot, "proc");
+                    self.record(report);
+                    return Err(error);
+                }
+            }
         }
-        Ok(())
+        self.record(report);
+        Ok(report)
     }
 
     async fn project_proc(
         &self,
         snapshot: &ProcessSnapshot,
         model: &crate::model::Workflow,
-    ) -> Result<()> {
+        allow_equal: bool,
+    ) -> Result<ProjectionReport> {
         let Some(root) = snapshot
             .tasks
             .keys()
@@ -309,7 +572,7 @@ impl RowProjector {
             .min_by_key(|id| id.generation)
             .cloned()
         else {
-            return Ok(());
+            return Ok(ProjectionReport::default());
         };
         let state = snapshot
             .tasks
@@ -321,6 +584,7 @@ impl RowProjector {
         let existing = collection.find_opt(&snapshot.process_id).await?;
         let now = crate::utils::time::time_millis();
         let row = data::Proc {
+            source_revision: snapshot.version.encode(),
             id: snapshot.process_id.clone(),
             state: proc_state(state).into(),
             mid: model.id.clone(),
@@ -342,7 +606,16 @@ impl RowProjector {
             removable: self.removable(snapshot).await?,
             v: data::Proc::version(),
         };
-        write(&collection, existing.as_ref(), &row).await
+        let mut report = ProjectionReport::default();
+        let outcome = self
+            .write(
+                &row,
+                |row: &data::Proc| Self::row_version(&row.source_revision),
+                allow_equal,
+            )
+            .await?;
+        report.record(outcome);
+        Ok(report)
     }
 
     /// Whether the sweeper may delete the run: every execution settled, every
@@ -353,7 +626,7 @@ impl RowProjector {
     /// barriered first: a delivery row the transport queued this instant must
     /// be seen, or the sweeper would delete behind it.
     async fn removable(&self, snapshot: &ProcessSnapshot) -> Result<bool> {
-        if !settled(snapshot) {
+        if !projection_settled(snapshot) {
             return Ok(false);
         }
         self.writer.flush_pid(&snapshot.process_id).await?;
@@ -393,7 +666,8 @@ impl RowProjector {
         tree: &NodeTree,
         task_id: &TaskId,
         wire: &str,
-    ) -> Result<()> {
+        allow_equal: bool,
+    ) -> Result<ProjectionReport> {
         let task = snapshot
             .tasks
             .get(task_id)
@@ -418,7 +692,7 @@ impl RowProjector {
                 node = node_id,
                 "row projection: model has no node; task row skipped"
             );
-            return Ok(());
+            return Ok(ProjectionReport::default());
         };
 
         // The row and the node's message share one derivation (C8b): the row
@@ -431,6 +705,7 @@ impl RowProjector {
         let existing = collection.find_opt(&row_id).await?;
         let now = crate::utils::time::time_millis();
         let row = data::Task {
+            source_revision: snapshot.version.encode(),
             id: row_id.clone(),
             pid: snapshot.process_id.clone(),
             tid: wire.to_string(),
@@ -465,7 +740,21 @@ impl RowProjector {
             timestamp: stamp(existing.as_ref().map(|row| row.timestamp), now),
             v: data::Task::version(),
         };
-        write(&collection, existing.as_ref(), &row).await?;
+        let mut report = ProjectionReport::default();
+        let task_outcome = self
+            .write(
+                &row,
+                |row: &data::Task| Self::row_version(&row.source_revision),
+                allow_equal,
+            )
+            .await?;
+        report.record(task_outcome);
+        // `Stale` means a newer projection already wrote this row. Its scope
+        // row is at least as new too, so leave both alone: only the winning
+        // projection may settle the task's deliveries.
+        if task_outcome == ConditionalWrite::Stale {
+            return Ok(report);
+        }
 
         // A task that just turned terminal settles its channel deliveries —
         // the legacy writer's close. An un-acked delivery of a finished task
@@ -484,11 +773,10 @@ impl RowProjector {
 
         let data = scope_data(snapshot, task_id);
         if data.is_empty() {
-            return Ok(());
+            return Ok(report);
         }
-        let collection = self.store().vars();
-        let existing = collection.find_opt(&row_id).await?;
         let row = data::TaskVars {
+            source_revision: snapshot.version.encode(),
             id: row_id.clone(),
             pid: snapshot.process_id.clone(),
             tid: wire.to_string(),
@@ -498,7 +786,15 @@ impl RowProjector {
             sealed: String::new(),
             v: data::TaskVars::version(),
         };
-        write(&collection, existing.as_ref(), &row).await
+        let vars_outcome = self
+            .write(
+                &row,
+                |row: &data::TaskVars| Self::row_version(&row.source_revision),
+                allow_equal,
+            )
+            .await?;
+        report.record(vars_outcome);
+        Ok(report)
     }
 }
 
@@ -516,13 +812,22 @@ pub(crate) fn env_map(snapshot: &ProcessSnapshot) -> Result<Vec<(String, serde_j
         .collect())
 }
 
-/// Whether the sweeper may delete the run: every execution settled, every
-/// outbox record delivered and every operation retired. A record the transport
-/// could not classify (`DeliveryUnknown`, `Quarantined`) or an operation that
-/// still needs an owner (`EffectUnknown`, `Quarantined`, schedulable work)
-/// keeps the rows alive for reconciliation, exactly like an open legacy
-/// delivery row.
-pub(crate) fn settled(snapshot: &ProcessSnapshot) -> bool {
+/// Whether the **read model** may be handed to the sweeper: every execution
+/// terminal, every outbox record delivered and every operation retired.
+///
+/// This is deliberately stronger than [`super::facts::run_settled`], which
+/// only looks at task terminality and decides whether the run still holds an
+/// admission slot. The two are different questions:
+///
+/// - `run_settled` — the run has no more work to drive; its slot is free.
+/// - `projection_settled` (this function) — the rows may be deleted, because
+///   no message can still be produced and no operation still needs an owner.
+///
+/// A record the transport could not classify (`DeliveryUnknown`,
+/// `Quarantined`) or an operation that still needs one (`EffectUnknown`,
+/// `Quarantined`, schedulable work) keeps the rows alive for reconciliation,
+/// exactly like an open legacy delivery row.
+pub(crate) fn projection_settled(snapshot: &ProcessSnapshot) -> bool {
     snapshot.is_reclaimable()
 }
 
@@ -617,42 +922,6 @@ fn stamp(existing: Option<i64>, now: i64) -> i64 {
         Some(value) if value > 0 => value,
         _ => now,
     }
-}
-
-/// Upsert one projected row: replace an existing document, create a missing
-/// one — and skip the write when the stored document is already identical.
-///
-/// An operation re-projects the rows it touched even when their content did not move
-/// (the root's proc row changes only when the run starts and when it settles,
-/// while a task row repeats a state it already carries), and every write also
-/// writes the row's index keys. The projected row is compared against the one
-/// just read, so an unchanged operation costs reads instead of writes.
-async fn write<T>(
-    collection: &Arc<dyn DbCollection<Item = T>>,
-    existing: Option<&T>,
-    row: &T,
-) -> Result<()>
-where
-    T: DbCollectionIden
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + Send
-        + Sync
-        + Clone
-        + std::fmt::Debug
-        + PartialEq
-        + 'static,
-{
-    match existing {
-        Some(current) if current == row => {}
-        Some(_) => {
-            collection.update(row).await?;
-        }
-        None => {
-            collection.create(row).await?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

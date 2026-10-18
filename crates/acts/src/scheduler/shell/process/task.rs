@@ -297,6 +297,7 @@ impl Task {
             end_time: self.end_time(),
             timestamp: self.timestamp,
             err: self.err().map(|err| err.to_string()),
+            source_revision: String::new(),
             v: data::Task::version(),
         })
     }
@@ -311,6 +312,7 @@ impl Task {
             tid: self.id.clone(),
             data: self.data().to_string(),
             sealed: self.sealed_data.read().to_string(),
+            source_revision: String::new(),
             v: data::TaskVars::version(),
         })
     }
