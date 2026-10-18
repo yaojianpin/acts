@@ -70,6 +70,64 @@ pub(super) enum Slot {
     Direct,
 }
 
+/// A4's single-writer turn over one pid: the command-lane guard a command
+/// holds across its claim, its plan and its commit — released for exactly one
+/// window, the external effect itself.
+///
+/// The lane is what keeps two plans of one process from racing on the same
+/// revision: phases 1, 3 and 4 run inside the turn, so the next command of the
+/// same pid always loads the state this one committed. Phase 2 hands the lane
+/// back before `EffectRunner::run` and retakes it right after, so an effect
+/// never serializes the process's other commands — and a command that advanced
+/// the aggregate while the effect was in flight makes the effect's commit lose
+/// its guard, which is exactly the `EffectUnknown` boundary A1a/A1c own. What
+/// the lane cannot see — a crash between claim and commit, a lease expiry,
+/// another instance — stays fenced by the aggregate's revision guards.
+pub(super) struct CommandLane {
+    host: KernelHost,
+    process_id: String,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl CommandLane {
+    /// Acquire the pid's command lane and hold it.
+    pub(super) async fn hold(host: &KernelHost, process_id: &str) -> Self {
+        let guard = host.lock_command_lane(process_id).await;
+        Self {
+            host: host.clone(),
+            process_id: process_id.to_string(),
+            guard: Some(guard),
+        }
+    }
+
+    /// A lane that belongs to no command: the fold plans its scratch
+    /// operations inside the producing command's own turn (see
+    /// `fold_internal`) and they never run an effect, so they hold no lane of
+    /// their own. `release`/`resume` on it would be a bug — only `run` uses
+    /// those, and the fold never calls `run`.
+    pub(super) fn detached(host: &KernelHost) -> Self {
+        Self {
+            host: host.clone(),
+            process_id: String::new(),
+            guard: None,
+        }
+    }
+
+    /// Hand the lane back for the external effect. Nothing may be awaited
+    /// between this and [`Self::resume`] — the window is the effect itself.
+    pub(super) fn release(&mut self) {
+        self.guard = None;
+    }
+
+    /// Retake the lane the effect released; commands of the same pid that
+    /// decided in the meantime are what a lost plan-commit guard now means.
+    pub(super) async fn resume(&mut self) {
+        if self.guard.is_none() {
+            self.guard = Some(self.host.lock_command_lane(&self.process_id).await);
+        }
+    }
+}
+
 /// Phase 1's pre-claim view of one operation: the identity, the state it was
 /// read from and the clock the operation runs on. A kind's pre-claim policy may look
 /// at the aggregate, but it must not write anything — the claim has not been
@@ -98,8 +156,10 @@ pub(super) struct Claimed {
 impl Claimed {
     /// The claimed operation as phases 2 and 3 read it: the identity, the
     /// claim, the authoritative snapshot, and the execution the operation
-    /// names (absent for an operation whose execution a decision removed).
-    pub(super) fn operation(&self) -> Operation<'_> {
+    /// names (absent for an operation whose execution a decision removed) —
+    /// plus the command lane this operation's effect phase may temporarily
+    /// release (A4, [`CommandLane`]).
+    pub(super) fn operation<'a>(&'a self, lane: &'a mut CommandLane) -> Operation<'a> {
         let task_id = self.id.task.clone();
         let task = self.snapshot.tasks.get(&task_id);
         Operation {
@@ -109,6 +169,7 @@ impl Claimed {
             task,
             snapshot: &self.snapshot,
             now_ms: self.now_ms,
+            lane,
         }
     }
 }
@@ -122,6 +183,10 @@ pub(super) struct Operation<'a> {
     pub(super) task: Option<&'a crate::scheduler::core::commit::aggregate::TaskSnapshot>,
     pub(super) snapshot: &'a crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     pub(super) now_ms: i64,
+    /// The command lane this operation's pid is decided under (A4). A kind
+    /// whose phase 2 crosses the external-effect boundary releases it for the
+    /// effect and resumes after; everything else leaves it held.
+    pub(super) lane: &'a mut CommandLane,
 }
 
 /// Phase 2's product: what running one operation decided. Each variant is the
@@ -174,7 +239,7 @@ pub(super) trait ActOperation: Send + Sync {
 
     /// Phase 2: the operation's own work, reported as the outcome phase 3
     /// folds into the operation's plan.
-    async fn run(&self, host: &KernelHost, operation: &Operation<'_>) -> Result<Outcome>;
+    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome>;
 
     /// Phase 3: the durable next plan of one outcome. [`Outcome::Nothing`]
     /// never reaches here — that operation has no plan at all.
@@ -210,6 +275,12 @@ impl KernelHost {
     /// operation, a run parked by the slot cap, or a timer with nothing due.
     pub(in crate::scheduler::shell) async fn execute_one(&self, id: &OperationId) -> Result<bool> {
         operation_trace::operation();
+        // A4: this turn holds the pid's command lane — claim, plan and commit
+        // decide inside it, so no client action or recovery disposition of
+        // the same run plans beside this operation on the same revision. The
+        // lane is released only around the external effect (see
+        // [`CommandLane`]); every early return below drops it.
+        let mut lane = CommandLane::hold(self, &id.process_id).await;
         // Phase 1 — prepare: the slot policy, the kind's pre-claim check, the
         // claim. `None` is "nothing to drive", never an error.
         let Some(claimed) = self.prepare(id, Slot::Policy).await? else {
@@ -221,12 +292,12 @@ impl KernelHost {
                 claimed.kind
             ))
         })?;
-        let operation = claimed.operation();
+        let mut operation = claimed.operation(&mut lane);
         // Phases 2 and 3 — perform and plan: the kind's own work and the
         // transition that work implies. One timer covers both, exactly the
         // span the pre-split `PLAN` stage measured.
         let phase = operation_trace::start();
-        let outcome = driver.run(self, &operation).await?;
+        let outcome = driver.run(self, &mut operation).await?;
         let effect_started = outcome.ran_external_effect();
         if matches!(outcome, Outcome::Nothing) {
             operation_trace::end(operation_trace::PLAN, phase);
@@ -292,10 +363,11 @@ impl KernelHost {
                 return Ok(false);
             }
         };
+        let mut lane = CommandLane::hold(self, &id.process_id).await;
         let Some(claimed) = self.prepare_reconciliation(id).await? else {
             return Ok(false);
         };
-        let operation = claimed.operation();
+        let operation = claimed.operation(&mut lane);
         let plan = match ApplyAction
             .next(self, &operation, Outcome::Effect(effect))
             .await
@@ -330,6 +402,10 @@ impl KernelHost {
             return Ok(false);
         };
         let attempt = *attempt;
+        // A4: the re-queue is a command of the same pid — it takes the lane,
+        // while the caller's revision guard stays the fence against a state
+        // that moved since the observation was taken.
+        let _lane = self.lock_command_lane(&operation.id.process_id).await;
         let (evolved, _) = self
             .operation_event(
                 &operation.id,

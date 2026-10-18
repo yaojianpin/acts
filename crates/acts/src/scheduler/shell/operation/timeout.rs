@@ -279,7 +279,7 @@ impl ActOperation for DispatchTimeout {
     /// The round, decided again against the authoritative post-claim snapshot:
     /// a decision that landed between the preflight and the claim leaves the
     /// timer with nothing to do, and the operation then has nothing to commit.
-    async fn run(&self, host: &KernelHost, operation: &Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
         Ok(
             match host
                 .timeout_round(

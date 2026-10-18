@@ -94,11 +94,37 @@ impl KernelHost {
             .processes
             .commit_transition(&plan, SystemClock.now_ms(), self.timer_poll_ms)
             .await
-            .map_err(repository_error)?
+            .map_err(repository_error)
         {
-            crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Committed { receipt, loaded }
-            | crate::scheduler::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { receipt, loaded } => (receipt, loaded),
-            crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict { .. } => {
+            Err(error) => {
+                // The domain refused the plan against the fresh aggregate —
+                // a writer committed between this operation's claim and its
+                // commit (with the command lane (A4), that writer ran in this
+                // operation's effect window). The plan did not commit, and an
+                // operation whose effect already started must never go back
+                // to the retry queue: it takes the same `EffectUnknown`
+                // classification a lost store guard gets above. Effect-free
+                // operations keep the error as-is: the callers' retry paths
+                // (the client action loop, the ready pass) own them.
+                if effect_started && is_conflict(&error) {
+                    if let Err(mark_error) = self.mark_effect_unknown(claimed).await {
+                        tracing::warn!(
+                            id = ?id,
+                            error = %mark_error,
+                            "marking an effect-unknown operation failed; its lease expiry will decide it"
+                        );
+                    }
+                    return Err(conflict(format!(
+                        "commit conflict after an external effect on operation {id:?}; manual reconciliation required"
+                    )));
+                }
+                return Err(error);
+            }
+            Ok(
+                crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Committed { receipt, loaded }
+                | crate::scheduler::durable::async_document_store::TransitionCommitOutcome::AlreadyCommitted { receipt, loaded },
+            ) => (receipt, loaded),
+            Ok(crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict { .. }) => {
                 // A conflict applies nothing, so the *plan* definitely did not
                 // commit. An external effect is different: phase 2 may already
                 // have run it. Retrying such an operation would repeat the

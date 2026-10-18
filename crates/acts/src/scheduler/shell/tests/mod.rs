@@ -316,6 +316,70 @@ impl KvStore for ConflictKv {
     }
 }
 
+/// Counts compare-and-swap losses on one process's aggregate: every `batch`
+/// that guards the process key and is refused. Under the command lane (A4) the
+/// normal path produces none — each in-process writer of a pid holds its lane,
+/// so a refused guard means two writers raced for the same revision.
+struct GuardCountingKv {
+    inner: MemoryStore,
+    process_key: String,
+    guard_misses: AtomicUsize,
+}
+
+impl GuardCountingKv {
+    fn new(process_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryStore::new(),
+            process_key: crate::scheduler::durable::document_store::process_key(process_id)
+                .expect("a process id the aggregate key derives from"),
+            guard_misses: AtomicUsize::new(0),
+        })
+    }
+
+    fn guard_misses(&self) -> usize {
+        self.guard_misses.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStore for GuardCountingKv {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::StoreBatchOp],
+        guards: &[crate::StoreGuard],
+    ) -> Result<bool> {
+        let applied = self.inner.batch(ops, guards).await?;
+        if !applied && guards.iter().any(|guard| guard.key == self.process_key) {
+            self.guard_misses.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(applied)
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::ScanOptions,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
 #[tokio::test]
 async fn a_full_wake_queue_does_not_delay_the_ready_record() {
     let (host, _wake_rx) = KernelHost::in_memory();
@@ -1187,6 +1251,354 @@ async fn a_non_idempotent_effect_can_be_resolved_not_applied() {
     let keys = keys.lock();
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0], keys[1], "the retry kept the stable key");
+}
+
+/// A4: concurrent client actions on one execution decide exactly once. Every
+/// racer takes the pid's command lane in turn, so exactly one decision
+/// commits on its first attempt and every loser is answered with the refusal
+/// the moved state earned — never a compare-and-swap conflict, never a
+/// re-plan. The instrumented store pins the stronger claim: not one aggregate
+/// guard was refused, i.e. no two plans were ever formed from the same
+/// revision.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_client_actions_decide_exactly_once_under_the_lane() {
+    const PID: &str = "p-lane-clients";
+    let stored = GuardCountingKv::new(PID);
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, usize::MAX, MAX_NODE_RUN_TIMES, 800);
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-lane-clients")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    // Stop right before the step's auto-completion operation: `s1` is Running
+    // and its decision is open to the clients below.
+    let _pending_auto = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+
+    let racers: Vec<(ActionKind, Vec<(String, String)>)> = vec![
+        (ActionKind::Complete, Vec::new()),
+        (ActionKind::Complete, Vec::new()),
+        (ActionKind::Complete, Vec::new()),
+        (ActionKind::Complete, Vec::new()),
+        (
+            ActionKind::Fail {
+                code: "E1".into(),
+                message: "boom".into(),
+            },
+            Vec::new(),
+        ),
+        (
+            ActionKind::Fail {
+                code: "E2".into(),
+                message: "boom".into(),
+            },
+            Vec::new(),
+        ),
+        // No forward package work to rewind (the refusal the legacy guard
+        // gives), and no `to` to rewind to: both must be refused as domain
+        // decisions, never as conflicts.
+        (ActionKind::Cancel, Vec::new()),
+        (ActionKind::Back, Vec::new()),
+    ];
+    let mut clients = Vec::new();
+    for (kind, inputs) in racers {
+        let host = host.clone();
+        let pid = PID.to_string();
+        let tid = tid_of(PID, "s1", 0);
+        clients.push(tokio::spawn(async move {
+            host.apply_action(&pid, &tid, kind, inputs).await
+        }));
+    }
+    let mut successes = 0usize;
+    for client in clients {
+        match client.await.unwrap() {
+            Ok(()) => successes += 1,
+            Err(error) => assert!(
+                !is_conflict(&error),
+                "a loser must be refused as a decision, not as a conflict: {error}"
+            ),
+        }
+    }
+    assert_eq!(successes, 1, "exactly one decision commits");
+    assert_eq!(
+        host.action_replans(),
+        0,
+        "the lane serializes the racers: no re-plan on the normal path"
+    );
+    assert_eq!(
+        stored.guard_misses(),
+        0,
+        "no two plans of this pid were formed from the same revision"
+    );
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    let decided = state_of(&snapshot, "s1");
+    assert!(
+        matches!(decided, TaskState::Completed | TaskState::Failed),
+        "the winning decision decided the execution: {decided:?}"
+    );
+    let decisions = snapshot
+        .operations
+        .values()
+        .filter(|record| record.id.task.node.as_str() == "s1")
+        .filter(|record| {
+            record.kind == crate::scheduler::core::model::operation::OperationKind::ApplyAction
+        })
+        .count();
+    assert_eq!(
+        decisions, 2,
+        "the pending auto completion plus exactly one client decision"
+    );
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert_all_terminal(&host, PID).await;
+}
+
+/// A4: the lane is per pid and no lane is held across an effect. Two runs'
+/// step effects meet at a two-party barrier — impossible if either run's lane
+/// (or one global driver lock) were held while the effect runs — and both
+/// operations then commit.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn effects_of_different_runs_overlap_outside_the_lanes() {
+    const A: &str = "p-lane-a";
+    const B: &str = "p-lane-b";
+    struct BarrierRunner {
+        entered: Arc<AtomicUsize>,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+    #[async_trait::async_trait]
+    impl effects::EffectRunner for BarrierRunner {
+        async fn resolve(
+            &self,
+            _request: &effects::EffectRequest,
+        ) -> crate::Result<effects::ResolvedEffect> {
+            Ok(effects::ResolvedEffect {
+                params: serde_json::json!({ "n": 2 }),
+                options: serde_json::Value::Null,
+            })
+        }
+
+        async fn run(
+            &self,
+            _request: effects::EffectRequest,
+            _key: crate::scheduler::core::model::effect::EffectKey,
+        ) -> Result<effects::EffectOutcome> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.barrier.wait().await;
+            Ok(effects::EffectOutcome::from_outputs(crate::Vars::new()))
+        }
+    }
+    let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let runner = Arc::new(BarrierRunner {
+        entered: Arc::new(AtomicUsize::new(0)),
+        barrier: Arc::new(tokio::sync::Barrier::new(2)),
+    });
+    // Two slots: both runs are in flight at once — the parallelism this test
+    // measures (the shared effect harness caps at one run).
+    let (host, mut wake_rx) = KernelHost::new(kv, 2, MAX_NODE_RUN_TIMES, 800);
+    host.attach_effect_runner(runner.clone());
+    let engine = crate::Engine::builder().start().await.unwrap();
+    let package = engine.runtime().package().clone();
+    let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-lane-parallel")
+        .with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_SET,
+                crate::Vars::new().with("n", 2),
+            )
+        });
+    for pid in [A, B] {
+        let spec = ProcessSpec::from_workflow(pid, &workflow, &run_as).unwrap();
+        host.start_process(&spec).await.unwrap();
+    }
+    // Drive everything except the two steps' effect operations.
+    let mut applies = Vec::new();
+    while applies.len() < 2 {
+        let id = wake_rx
+            .try_recv()
+            .expect("both runs expose their step effect operation");
+        let snapshot = host.snapshot(&id.process_id).await.unwrap().unwrap();
+        let is_step_effect = id.task.node.as_str() == "s1"
+            && snapshot.operations.get(&id).map(|record| record.kind)
+                == Some(crate::scheduler::core::model::operation::OperationKind::ApplyAction);
+        if is_step_effect {
+            applies.push(id);
+        } else {
+            host.execute_one(&id).await.unwrap();
+        }
+    }
+    let (first, second) = (host.clone(), host.clone());
+    let (op_a, op_b) = (applies[0].clone(), applies[1].clone());
+    let raced = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let a = tokio::spawn(async move { first.execute_one(&op_a).await });
+        let b = tokio::spawn(async move { second.execute_one(&op_b).await });
+        (a.await.unwrap(), b.await.unwrap())
+    })
+    .await
+    .expect("the two effects must overlap: a lane held across an effect serializes runs");
+    assert!(raced.0.unwrap() && raced.1.unwrap(), "both operations ran");
+    assert_eq!(runner.entered.load(Ordering::SeqCst), 2);
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert!(host.process_completed(A).await.unwrap());
+    assert!(host.process_completed(B).await.unwrap());
+    engine.close().await;
+}
+
+/// A4: the lane is released for the effect window, and what that window costs
+/// is exactly the A1a/A1c boundary. While the step's effect is in flight, a
+/// client completes the same execution (impossible if the driver held the
+/// lane); the effect's plan commit then loses its guard, the operation lands
+/// `EffectUnknown`, recovery reports the manual reconciliation, and the
+/// effect is never re-run.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn an_effect_releases_the_lane_for_a_concurrent_decision() {
+    const PID: &str = "p-lane-effect-window";
+    struct GateRunner {
+        calls: Arc<AtomicUsize>,
+        entered: tokio::sync::Notify,
+        open: parking_lot::Mutex<bool>,
+        released: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl effects::EffectRunner for GateRunner {
+        async fn resolve(
+            &self,
+            _request: &effects::EffectRequest,
+        ) -> crate::Result<effects::ResolvedEffect> {
+            Ok(effects::ResolvedEffect {
+                params: serde_json::json!({ "n": 2 }),
+                options: serde_json::Value::Null,
+            })
+        }
+
+        async fn run(
+            &self,
+            _request: effects::EffectRequest,
+            _key: crate::scheduler::core::model::effect::EffectKey,
+        ) -> Result<effects::EffectOutcome> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_waiters();
+            while !*self.open.lock() {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(10),
+                    self.released.notified(),
+                )
+                .await;
+            }
+            Ok(effects::EffectOutcome::from_outputs(crate::Vars::new()))
+        }
+    }
+    let stored = GuardCountingKv::new(PID);
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let runner = Arc::new(GateRunner {
+        calls: Arc::new(AtomicUsize::new(0)),
+        entered: tokio::sync::Notify::new(),
+        open: parking_lot::Mutex::new(false),
+        released: tokio::sync::Notify::new(),
+    });
+    let (host, mut wake_rx) = effect_kernel(kv, runner.clone());
+    let engine = crate::Engine::builder().start().await.unwrap();
+    let package = engine.runtime().package().clone();
+    let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-lane-effect-window")
+        .with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_SET,
+                crate::Vars::new().with("n", 2),
+            )
+        });
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &run_as).unwrap();
+    host.start_process(&spec).await.unwrap();
+    let apply = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+    let driving_host = host.clone();
+    let driving = apply.clone();
+    let driver = tokio::spawn(async move { driving_host.execute_one(&driving).await });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while runner.calls.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the effect never started"
+        );
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            runner.entered.notified(),
+        )
+        .await;
+    }
+
+    // The same pid's client decision proceeds while the effect runs — the
+    // proof the lane was handed back for the effect window.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        host.apply_action(PID, &tid_of(PID, "s1", 0), ActionKind::Complete, Vec::new()),
+    )
+    .await
+    .expect("a command of the same pid must proceed while its effect runs")
+    .unwrap();
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert_eq!(
+        state_of(&snapshot, "s1"),
+        TaskState::Completed,
+        "the concurrent decision landed"
+    );
+
+    *runner.open.lock() = true;
+    runner.released.notify_waiters();
+    let error = driver
+        .await
+        .unwrap()
+        .expect_err("the effect's late plan commit must lose its guard");
+    assert!(
+        error.to_string().contains("conflict"),
+        "the driver reports the lost compare-and-swap: {error}"
+    );
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[&apply].state,
+            OperationState::EffectUnknown { .. }
+        ),
+        "an already-run effect is never retried automatically: {:?}",
+        snapshot.operations[&apply].state
+    );
+    assert_eq!(
+        runner.calls.load(Ordering::SeqCst),
+        1,
+        "the effect ran exactly once"
+    );
+
+    // A1a/A1c semantics unchanged: recovery surfaces the manual
+    // reconciliation, and the operator's resolve is itself a lane command —
+    // it answers (here honestly refusing to replay a completion onto an
+    // execution the client already completed) instead of deadlocking.
+    let report = host.recover(SystemClock.now_ms()).await.unwrap();
+    assert!(
+        report.reconciliation_required.contains(&apply),
+        "the unknown effect needs a human: {report:?}"
+    );
+    let unknowns = host.effect_unknowns(PID).await.unwrap();
+    assert_eq!(unknowns.len(), 1);
+    let resolved = host
+        .resolve_effect_by_key(
+            PID,
+            &unknowns[0].key,
+            crate::EffectResolution::Applied {
+                outputs: crate::Vars::new(),
+            },
+        )
+        .await;
+    assert!(
+        resolved.is_err(),
+        "the decision already completed the execution; a replayed completion cannot re-complete it"
+    );
+    assert_eq!(
+        runner.calls.load(Ordering::SeqCst),
+        1,
+        "resolving never re-runs the effect"
+    );
+    engine.close().await;
 }
 
 /// The slot cap (`Config::cache_cap`): with one slot the first run owns it, the

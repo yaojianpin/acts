@@ -66,7 +66,7 @@ impl ActOperation for ExecuteTask {
         Ok(Precheck::Proceed)
     }
 
-    async fn run(&self, host: &KernelHost, operation: &Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
         let snapshot = operation.snapshot;
         let task_id = &operation.task_id;
         let task = operation.task;

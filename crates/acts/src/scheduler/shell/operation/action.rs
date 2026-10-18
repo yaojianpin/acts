@@ -1094,7 +1094,7 @@ impl ActOperation for ApplyAction {
         Ok(Precheck::Proceed)
     }
 
-    async fn run(&self, host: &KernelHost, operation: &Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
         let snapshot = operation.snapshot;
         let task_id = &operation.task_id;
         let task = operation
@@ -1157,7 +1157,17 @@ impl ActOperation for ApplyAction {
                         // this operation reuses this exact key.
                         let key =
                             crate::scheduler::core::model::effect::EffectKey::of(operation.id);
-                        match runner.run(request, key).await {
+                        // A4: the effect runs outside the pid's command lane —
+                        // a slow effect must not serialize the run's other
+                        // commands. The lane is retaken the moment it returns;
+                        // a command that committed in the window makes this
+                        // operation's plan commit lose its guard, and that
+                        // loss is the A1a `EffectUnknown` boundary — never a
+                        // reason to run the effect again.
+                        operation.lane.release();
+                        let ran = runner.run(request, key).await;
+                        operation.lane.resume().await;
+                        match ran {
                             Ok(outcome) => Effect::Completed(Some(outcome)),
                             // A package error takes the failure path, where a
                             // step declaring `catches` keeps running and

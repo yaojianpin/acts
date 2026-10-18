@@ -159,7 +159,7 @@ impl ActOperation for PropagateTask {
     }
 
     /// Nothing runs: the plan is the whole operation.
-    async fn run(&self, _host: &KernelHost, _operation: &Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, _host: &KernelHost, _operation: &mut Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 

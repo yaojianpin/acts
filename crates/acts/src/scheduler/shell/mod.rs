@@ -126,9 +126,11 @@ pub(crate) use projection::RowProjector;
 
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;
-/// How many times a client action re-plans after losing a compare-and-swap:
-/// the serving loop commits operations of the same aggregate concurrently, so a
-/// client's plan can go stale before its commit. A retry re-reads the
+/// How many times a client action re-plans after losing a compare-and-swap.
+/// The per-pid command lane (A4) serializes every in-process writer of one
+/// run, so the normal path never exhausts — or starts — this loop; it stays as
+/// the net for an out-of-lane writer (a guarded cleanup batch, another
+/// instance) that moved the aggregate under the attempt. A retry re-reads the
 /// snapshot; the action then either applies or is legitimately refused.
 const ACTION_ATTEMPTS: usize = 8;
 const DELIVERY_LEASE_MS: i64 = 30_000;
@@ -307,6 +309,22 @@ pub(crate) struct KernelHost {
     /// a start of the same pid.
     lifecycle_locks:
         Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// The per-pid command lane (A4): one single-writer turn per process for
+    /// every command that decides state — the driver's operations, a client
+    /// action's intent→claim→plan→commit, and recovery's mutating
+    /// dispositions. Distinct pids have distinct lanes and stay parallel, and
+    /// the lane is never held across an external effect (see
+    /// [`operation::CommandLane`]). Revision guards remain the fence for what
+    /// the lane cannot see: crash recovery, lease takeover and cross-instance
+    /// writers.
+    command_lanes:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// How many times a client action re-planned after losing a
+    /// compare-and-swap (A4). The command lane serializes the normal path, so
+    /// a non-zero value means an out-of-lane writer (a guarded cleanup batch,
+    /// another instance) moved the aggregate under a client — the retries the
+    /// loop remains as a net for.
+    action_replans: Arc<std::sync::atomic::AtomicU64>,
     /// Pids whose authoritative batch succeeded but whose row/workdir cleanup
     /// has not: a start must wait for the retry even though the aggregate is
     /// already gone. Cleared when the residue is removed.
@@ -540,6 +558,8 @@ impl KernelHost {
                 lifecycle_locks: Arc::new(
                     parking_lot::Mutex::new(std::collections::HashMap::new()),
                 ),
+                command_lanes: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+                action_replans: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 reclaiming: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
             }),
             wake_rx,
@@ -722,6 +742,36 @@ impl KernelHost {
                 .clone()
         };
         lock.lock_owned().await
+    }
+
+    /// Take the pid's command lane (A4, see [`Self::command_lanes`]): the
+    /// single-writer turn every state-deciding command of one process holds
+    /// while it claims, plans and commits. The lane is per pid — distinct
+    /// processes never queue behind each other — and no code path holds it
+    /// across an external effect, a transport delivery or an executor
+    /// observation. It is never nested with [`Self::lock_lifecycle`] or
+    /// [`Self::lock_projection`]: cleanup takes those two and deliberately
+    /// fences itself with the aggregate's revision guard instead of the lane.
+    pub(crate) async fn lock_command_lane(
+        &self,
+        process_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lane = {
+            let mut lanes = self.command_lanes.lock();
+            lanes
+                .entry(process_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lane.lock_owned().await
+    }
+
+    /// How many client-action re-plans a lost compare-and-swap forced (A4).
+    /// The lane keeps the normal path at zero; the counter is the metric that
+    /// proves an out-of-lane writer, not the driver, moved the aggregate.
+    pub(crate) fn action_replans(&self) -> u64 {
+        self.action_replans
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Mark that a pid's aggregate was deleted and its residue is still being
@@ -1306,14 +1356,17 @@ impl KernelHost {
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
     ) -> Result<()> {
-        // The serving loop commits operations of the same aggregate concurrently, so
-        // a client's plan can go stale before its commit. A retry re-plans
-        // against the fresh snapshot: the action either applies or is
-        // legitimately refused — and a refusal is never retried. The retry
-        // pins the intent's identity (see [`ActionIntent`]) and consults it
-        // first: an attempt that committed its intent and then lost the
-        // completion compare-and-swap must report success, never a refusal
-        // caused by the state its own commit moved.
+        // The pid's command lane (A4) serializes this attempt against the
+        // driver's operations and every other client of the same run, so the
+        // normal path commits on the first attempt. The loop below stays as
+        // the net for what the lane cannot see — an out-of-lane writer (a
+        // guarded cleanup batch, another instance) moving the aggregate under
+        // the attempt: a retry re-plans against the fresh snapshot, the action
+        // either applies or is legitimately refused, and a refusal is never
+        // retried. The retry pins the intent's identity (see [`ActionIntent`])
+        // and consults it first: an attempt that committed its intent and then
+        // lost the completion compare-and-swap must report success, never a
+        // refusal caused by the state its own commit moved.
         let mut pinned: Option<ActionIntent> = None;
         let mut attempt = 0;
         loop {
@@ -1338,18 +1391,21 @@ impl KernelHost {
                             ActionResume::Retry => {}
                         }
                     }
-                    // Two clients acting on one execution mint their operation
-                    // ids from the same snapshot, so a tight retry loop has
-                    // each attempt invalidate the other's plan (and both can
-                    // exhaust the attempts as spurious failures). A short pause
-                    // lets the racing decision land: the next attempt plans
-                    // against the state it left and answers with the refusal
-                    // the loser actually earned.
+                    // Two clients no longer race on one revision (the lane
+                    // serializes them), but the racing *decision* still
+                    // exists: the winner's commit is what stale this
+                    // attempt's guard. A short pause lets that decision
+                    // settle; the next attempt plans against the state it
+                    // left and answers with the refusal the loser actually
+                    // earned.
+                    self.action_replans
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                     tracing::debug!(
                         pid = %process_id,
                         tid = %node,
                         attempt,
+                        replans = self.action_replans(),
                         "action lost a compare-and-swap; re-planning"
                     );
                     attempt += 1;
@@ -1576,6 +1632,9 @@ impl KernelHost {
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
     ) -> Result<ActionResume> {
+        // A4: the release below is a command on the same pid — it takes the
+        // lane; the operation revision it carries stays the fence.
+        let _lane = self.lock_command_lane(&intent.operation.process_id).await;
         let Some(snapshot) = self.load(&intent.operation.process_id).await? else {
             return Ok(ActionResume::Retry);
         };
@@ -1629,6 +1688,13 @@ impl KernelHost {
         inputs: Vec<(String, String)>,
         pinned: &mut Option<ActionIntent>,
     ) -> Result<()> {
+        // A4: the whole attempt — load, preflight, durable intent, claim,
+        // plan, commit — holds the pid's command lane, so the driver's
+        // operation and every other client of the same run decide against the
+        // state this attempt commits, never beside it on the same revision.
+        // The effect phase releases the lane exactly like the driver's (see
+        // `operation::CommandLane`).
+        let mut lane = operation::CommandLane::hold(self, process_id).await;
         let snapshot = self
             .load(process_id)
             .await?
@@ -1751,8 +1817,8 @@ impl KernelHost {
         };
         let driver = operation::driver(OperationKind::ApplyAction)
             .expect("ApplyAction is a driven operation kind");
-        let claimed_operation = claimed.operation();
-        let (plan, effect_started) = match driver.run(self, &claimed_operation).await {
+        let mut claimed_operation = claimed.operation(&mut lane);
+        let (plan, effect_started) = match driver.run(self, &mut claimed_operation).await {
             Ok(outcome) => {
                 let effect_started = outcome.ran_external_effect();
                 (
@@ -2440,14 +2506,23 @@ impl KernelHost {
                         report.awaiting_owner.push(operation.id);
                     }
                     RecoveryDisposition::ReclaimExpired => {
-                        match self
-                            .operation_event(
+                        // A4: the reclaim is a command of the same pid — it
+                        // takes the lane, held for the event alone: the
+                        // reconciliation the event's outcome can ask for
+                        // re-acquires the lane itself (`converge`/`retry`),
+                        // and the lane is not reentrant. The revision guard
+                        // the event carries stays the fence against a claim
+                        // that moved since the scan.
+                        let reclaimed = {
+                            let _lane = self.lock_command_lane(&operation.id.process_id).await;
+                            self.operation_event(
                                 &operation.id,
                                 operation.revision,
                                 OperationEvent::ReleaseExpiredClaim { now_ms },
                             )
                             .await
-                        {
+                        };
+                        match reclaimed {
                             Ok((reclaimed, _)) => match reclaimed.state {
                                 OperationState::RetryScheduled { .. } => {
                                     report.reclaimed.push(reclaimed.id.clone());
@@ -2488,6 +2563,9 @@ impl KernelHost {
                             OperationState::Committed(commit) => commit.clone(),
                             _ => continue,
                         };
+                        // A4: same as the reclaim — a command of this pid
+                        // under the lane, fenced by the revision it carries.
+                        let _lane = self.lock_command_lane(&operation.id.process_id).await;
                         match self
                             .operation_event(
                                 &operation.id,
@@ -2628,6 +2706,11 @@ impl KernelHost {
     /// claim was lost or the record was no longer dispatchable.
     async fn dispatch_outbox_record(&self, record: OutboxRecord, now: i64) -> Result<bool> {
         let claim = delivery_claim(&record, now);
+        // A4: the claim and the outcome are two guarded aggregate writes of
+        // this record's pid, so each takes the command lane — never across the
+        // transport's synchronous call, exactly like an effect. The record's
+        // revision stays the fence against a writer the lane cannot see.
+        let lane = self.lock_command_lane(&record.id.process_id).await;
         let claimed = match self
             .processes
             .evolve_outbox(
@@ -2648,11 +2731,15 @@ impl KernelHost {
                 return Ok(false);
             }
         };
+        drop(lane);
         let event = {
             let outcome = self.transport.write().deliver(&claimed);
             outcome_event(&claim, outcome, now)
         };
         let delivered = matches!(&event, OutboxEvent::ConfirmDelivered { .. });
+        // A4: the outcome write is a second command of the same pid — the
+        // lane is retaken for it, after the transport's synchronous call.
+        let _lane = self.lock_command_lane(&record.id.process_id).await;
         self.processes
             .evolve_outbox(&record.id, claimed.revision, event)
             .await

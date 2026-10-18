@@ -163,6 +163,10 @@ impl KernelHost {
             };
             let local = {
                 let task_id = id.task.clone();
+                // A4: the scratch view plans inside the producing command's
+                // own lane (the fold never runs an effect), so the synthetic
+                // operation carries a detached lane of its own.
+                let mut detached = CommandLane::detached(self);
                 let operation = Operation {
                     id: &id,
                     claim: &claim,
@@ -170,6 +174,7 @@ impl KernelHost {
                     task: scratch.tasks.get(&task_id),
                     snapshot: &scratch,
                     now_ms,
+                    lane: &mut detached,
                 };
                 driver.next(self, &operation, Outcome::Planned).await?
             };
