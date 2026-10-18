@@ -4059,6 +4059,90 @@ cargo fmt --all -- --check -> OK
 
 ---
 
+### L8 完成(2026-10-18):整包聚合 → head + base + append-only 变更日志
+
+**任务**:§11 B 的 L8 —— 消掉“每次提交重写整个聚合文档”。§5i 的 30 步/93 hop 形状里,
+`kernel/aggregates` 写了 14.7 MB(占全部字节的 92%),5.6 次写/hop,字节随 run 长度线性增长。
+
+**形态决定(写进本节,后续格式变更沿用)**
+
+选 **append-only 变更日志 + 阈值压缩**,不选按 task/operation 分片:
+分片要在每次 load 解码 O(run) 个小文档,每个都带 envelope SHA-256;日志族只保留一份整包 base,
+普通 commit 只 encode 变更记录,load 也只多解码至多 32 个小 entry。文档族:
+
+| 文档 | key | payload | 写入时机 |
+|---|---|---|---|
+| head | `kernel/aggregates/{hex(pid)}` | `ACTSPH4` + pid + `ProcessVersion` + epoch + `[base_seq,next_seq)` | **每次 commit** |
+| base | `{head}/base` | `ACTSPB4` + `base_seq` + V3 snapshot | create / 迁移 / 每 32 个 commit 的压缩 |
+| log | `{head}/log/{seq:020}` | `ACTSPL4` + pid + seq + 本 commit 变更的 task/variable/operation/outbox 记录 | 普通 commit |
+
+- head 仍是原 process key,CAS/存在性语义不变;base/log 在 `{head}/` 下,进程普查用
+  `is_process_head_key` 过滤,只有 head 代表一个 run。
+- `epoch` 每次写都 +1(即使 outbox 确认不改 domain version),所以 head 字节始终是版本守卫。
+- base payload 带 `base_seq`:读到的 base 与 head 的窗口不一致 = 撕裂读,load 重读而不是损坏。
+- 一次 commit 仍是一个原子 guarded batch:head exact + recovery/outbox/ready 索引 + recovery entries
+  的 guard 全部保留;普通 commit 还 `require_absent` 新 log key。压缩 commit 在**同一批**里写新 base、
+  删旧 window、写新 head。
+
+**恢复等价**
+
+`ProcessSnapshot` = base snapshot + 按 seq 升序 apply `[base_seq,next_seq)` 的 log entries
+(entry 携带完整记录,不是 mutation script;no commit deletes a record — A11 整族回收)。
+窗口外的 entry(并发 append 落进来的)忽略;窗口内缺 entry 是损坏。旧 V2/V3 整包文档照旧可读。
+
+**版本与 codec**
+
+- `AGGREGATE_SCHEMA_VERSION = 2`,`LEGACY_AGGREGATE_SCHEMA_VERSION = 1`;envelope decode 接受两者,
+  新文档只由 `ProcessLogCodec`(内部 `SnapshotCodecV4` + V3 record layout)产出,repository 不拼字节。
+- V3 record layout 未动:task/variable/operation/outbox 的编码原样复用(`Writer::{task_record,
+  variable_record,outbox_record}` 与 V3 共用),V2/V3 payload golden 不变。
+- `ProcessEnvelope::seal` 仍是 legacy 测试夹具;**生产写路径只有 `seal_v2`**,每个文档一次 SHA-256(P2 的结论)。
+
+**迁移**
+
+- 打开旧库时 **load 懒迁移**:读到 schema 1 → 解出 snapshot → 一个 guarded batch 写新 head + base
+  (guard 旧 head exact),索引字节不动。旧库崩溃在批前 = 旧文档完整;批后 = 新族完整。
+- 迁移失败(store error)不阻断读取:load 返回 legacy snapshot,下次 load 重试;若调用方在该状态直接
+  commit,`install_aggregate` 的 rebase 分支在业务提交里完成同样的升级。
+- guard 冲突 → 重读;重复迁移幂等。迁移测试覆盖:V2 payload、V3 payload、store error、lost guard、
+  第二次 load 不重写、迁移后 snapshot 与旧读路径值相等。
+
+**golden(有意重冻结,书面理由)**
+
+L8 改的是**文档族 framing**,不是记录布局:V3 payload golden(`502 B / 4887924d…`)和 canonical commit
+digest(`a47d4bd4…`)都未变。新冻结的是 `document.rs::family_wire_format_matches_golden_fingerprint`:
+head `149 B / 0b0c06f9…`、base `431 B / 0696f88f…`、log `395 B / 1531ee23…`(同一 fixture、epoch=7、
+seq=0)。以后任何 framing 变更必须同时改该测试与 CHANGELOG,不能静默漂移。
+
+**量化(同一 §10「P1 完成」探针形状:release、内存 store、30 步线性 workflow、31 tasks)**
+
+| 轮次 | operations | commits | 聚合文档写 | 聚合字节 | B/commit | 最大单 commit | wall | ms/commit |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 62 | 187 | 374 | 205,207 | 1,097.4 | 25,008 | 158.3 ms | 0.846 |
+| 1 | 62 | 187 | 374 | 205,207 | 1,097.4 | 25,008 | 146.6 ms | 0.784 |
+| 2 | 62 | 187 | 374 | 205,207 | 1,097.4 | 25,008 | **144.1 ms** | **0.771** |
+
+- commit 数与 P2 完全一致(187),operation 数 62,聚合终态 31 tasks / 62 operations / 93 outbox:
+  **行为面没有变化**。
+- 改前(§10「P2 完成」同形状):每个 commit 一次整包 encode + 写,终态文档 50,249 B;
+  best ms/commit 1.875。即使按“每次都写终态大小”的保守下界也是 187 × 50,249 ≈ **9.4 MB**;
+  §5i 的 93-hop 形状实测 **14.7 MB**。改后总量 **205,207 B**,且 374 次写里 187 次是 head、
+  182 次是普通 log entry、5 次是压缩 base(max 25,008 B)——**普通 commit 不再随 run 长度线性增长**。
+- encode 次数 = 2 个文档/commit(head + entry),但每次只 encode 变更记录;整包 encode 只在
+  压缩/建库/迁移时发生(187 个 commit 里 5 次)。与 P2 的“1 次整包 encode/commit”相比,
+  `ms/commit` best 1.875 → **0.771**(本机同探针;环境漂移口径见 §10「P1 完成」)。
+- 探针与计时插桩未提交(临时 `l8_probe` 已删)。
+
+**门禁**
+
+- `cargo test -p acts --lib --tests` = **958 passed**(2 个既有 reliability 夹具有两处 key-family 假设随
+  新族更新:subflow 的 run 普查/前缀只认 head;进程普查同理)。
+- `cargo test -p acts-store --features sled,sqlite,postgres`:**mem 94 / sqlite 97 / sled 96 / postgres 96 /
+  engine_sqlite 2 全绿**(本机 Postgres 5433 可用;真后端套件全部跑到)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
+- 未改 manifest,未跑 `cargo deny`。不改摘要算法、effect/outbox payload 与顺序、A4/A5/A8/A9/A10/A11 语义;
+  不引入 `unsafe`。
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4081,7 +4165,7 @@ cargo fmt --all -- --check -> OK
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1、P2 已完成(§10「P1 完成」「P2 完成」),下一执行项为 §11 B 的 L8**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2、L8 已完成(§10「P1 完成」「P2 完成」「L8 完成」),下一执行项为 §11 B 的 L9**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4127,7 +4211,7 @@ cargo fmt --all -- --check -> OK
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1、P2 已完成,§12 当前指向 L8(持久化格式变更,需单独立项)。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L8 已完成,§12 当前指向 L9。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
@@ -4139,7 +4223,7 @@ cargo fmt --all -- --check -> OK
 | **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | 未做,**低优先**:§10「P6-1」已证与 hop 吞吐无关(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义 |
 | **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
 | **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
-| **L8** | **减字节:整包聚合 → 拆分文档 / append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**,必须单独立项(迁移 + golden fingerprint 更新);与 C5 的 codec V3 **是同一批格式工作** ⇒ 建议与 C5 合并排期 | 原 §1.b③ / §1.b(i)② / §1.b(iii) | **未做;§12 当前项**。现状:每 hop 整包工作量 = 3 decode + 2 encode 一个随 run 增长的聚合 |
+| **L8** | **减字节:整包聚合 → append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**:head + base + 每 commit 的变更日志;阈值(32)压缩;懒迁移旧 V2/V3;golden 重冻结 + CHANGELOG BREAKING | 原 §1.b③ / §1.b(i)② / §1.b(iii) | **已做(§10「L8 完成」)**。验收:同一探针 187 commits 聚合写 205,207 B 总量 / 1,097 B/commit(改前每 commit 一个整包文档,终态 50,249 B;§5i 形状 14.7 MB),普通 commit 只写 head+一个变更 entry,每 32 个 commit 才写一次 base;旧 V2/V3 迁移/中断重入/guard 冲突/reclaim 全绿;golden 新族 fingerprint 冻结;`-p acts --lib --tests` 绿 |
 | **L9** | **退役 Phase 0:删动态 act 死簇与 legacy 事件面** —— `Context::build_acts`/`dyn_build_act`/`NodeTree::append_node`、`package/core/{block,parallel,sequence}.rs` 的三个调用点;`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;确认零调用的 `Process`/`Task` 方法(`create_task`/`print`/`into_data`/`task_by_*`、`unique_id`/`into_data_vars`/`is_vars_dirty` 等) | 设计 §3.7(d)⑤ + 2026-10-17 评估 | 未做。**零行为变更**(headless tree 的产物本来就被 `effects::run` 丢弃,`projection` 从 durable model 重建);验收:生产侧 `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` = 0,`-p acts` 全绿,行/消息/`tree_output` 不变 |
 | **L10** | **退役 Phase 1:headless scope 去 `Process`/`Task`** —— `ScopeSpec` 已是完整输入,换成 `ScopeTask`(node content + data + sealed + cancel)+ `Scope`(pid/env/owner/workdir);替换 `scope.rs:47-87`,保留包实际用到的 `task.{pid,id,options,node,data}` 与 `proc.{id,owner_scope,env,workdir,set_data}` | 设计 §3.7(d)① | 未做;前置 L9。验收:effect/predicate/package 套件全绿;每 hop 不再建 `Process`+`NodeTree`(收益按 P1 口径量);`Context` 的包 API 名字不变或按 BREAKING 记录 |
 | **L11** | **退役 Phase 2:model 直出 view** —— `Workflow::valid`/`tree_output` 与投影 `node_data` 直接走 `Workflow`/`Step`/`Branch`(逐字保持行与树输出);删 `NodeTree`/`Node`;`NodeData`/`NodeContent` 持久化形状保留 | 设计 §3.7(d)③ | 未做;前置 L10。验收:`sch_tree_output_is_byte_stable` 563-byte、`model:get fmt=tree`、`node_data` 逐字、投影行格式不变 |
@@ -4203,54 +4287,48 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:L8 —— 减字节:整包聚合 → 拆分文档 / append-only 操作日志(§11 B,第二波,接 P2)
+# 当前任务:L9 —— 退役 Phase 0:删动态 act 死簇与 legacy 事件面(§11 B,第二波,接 L8)
 
-**依据**:§11 B 的 L8;§5h/§5i 的写入画像(30 步 run:写 16.0 MB,其中 14.7 MB 是
-`kernel/aggregates`;5.6 次聚合写/hop,字节随 run 长度线性增长);§10「P1 完成」的每跳画像
-(整包 encode/decode/apply = 66–80%)。P2 已把每次聚合 encode 的 SHA-256 降到一次;本笔要消掉的是
-“每次提交重写整个聚合文档”。
+**依据**:§11 B 的 L9;设计 `KERNEL_REFACTOR_DESIGN.md` §3.7(d)⑤ + 2026-10-17 评估。
+C8c 已取证:headless tree 的产物被 `effects::run` 丢弃,`projection` 从 durable model 重建 ⇒
+`Context::build_acts`/`dyn_build_act`/`NodeTree::append_node` 这一簇每 hop 跑了但不生效。
 
-**目标**:普通 commit 不再写/编码 O(run 长度)的整包聚合;持久化格式升级必须带迁移、golden 重冻结与
-CHANGELOG BREAKING,且行为/消息/行投影/恢复语义逐字不变。
+**目标**:零行为变更地删除 Phase 0 的动态 act 死簇与 legacy 事件面;行投影、消息、`tree_output`、
+完成/错误逐字不变。
 
 **本笔内容**
 
-1. 先定拆分形态并写进 §10:append-only 操作日志(按 operation 追加 + 阈值/终态压缩)或按
-   task/operation 分片文档。约束:一次 commit 仍是一个原子 guarded batch;恢复能从新文档族重建与今天
-   等价的 `ProcessSnapshot`;reclaim(A11)仍能整族删除。
-2. 版本与 codec:升 `AGGREGATE_SCHEMA_VERSION`(或引入新文档版本);新格式只由
-   `ProcessDocumentCodec`/`SnapshotCodec` 产出,repository 不得自行拼字节;V2/V3 旧文档继续可读。
-3. 迁移:打开旧库时懒迁移或一次性重写;迁移必须幂等、可在崩溃后重入,不得留下半迁移文档;
-   不要求历史归档。写迁移测试:旧 V2/V3 文档 → 新格式 → 恢复出的 snapshot 与旧读路径等价。
-4. golden:这是有意的格式变更,重冻结 fingerprint 并写书面理由;行为面(消息、行、`tree_output`、
-   完成/错误)保持逐字不变。
-5. 量化:同一 §10「P1 完成」探针(release、内存 store)记录聚合写字节/commit、encode 次数与
-   ms/commit;用 store 计数证明普通 commit 不再重写整个聚合。
+1. 删动态 act 簇:`Context::build_acts`、`dyn_build_act`、`NodeTree::append_node`,以及
+   `package/core/{block,parallel,sequence}.rs` 的三个调用点(先确认调用链只通向被丢弃的产物)。
+2. 删 legacy 事件面:`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;
+   若某个名字仍被 channel 适配器或公开 API 使用,保留但写明调用方,不要连带删活件。
+3. 清理已证零调用的 `Process`/`Task` 方法(`create_task`、`print`、`into_data`、`task_by_*`、
+   `unique_id`、`into_data_vars`、`is_vars_dirty` 等):逐项 `grep` 确认零调用再删;被测试使用的
+   夹具方法按测试需要保留。
+4. 每删一簇先跑 `-p acts` 的对应套件,证明没有行为面变化;不引入新抽象、不改持久化格式。
 
 **边界**
 
-- 不改摘要算法;不改 effect/outbox payload 与顺序;不改 A4/A5/A8/A9/A10/A11 语义;
-  不以缩短 tick 或跳过校验制造吞吐;不引入 `unsafe`。
-- 不改 manifest 就不跑 `cargo deny`;探针与计时插桩不提交;生产代码与文档分开提交。
-- 迁移失败必须保持旧库可读(未迁移文档不破坏读取),不得静默丢弃聚合字段。
+- 零行为变更;不改 effect/outbox payload 与顺序;不改 A3/A4/A5/A9/A10/A11 语义;不引入 `unsafe`。
+- 不删仍被生产路径调用的函数;拿不准就保留并记录证据。
+- 不改 manifest 就不跑 `cargo deny`;探针/临时插桩不提交;生产代码与文档分开提交。
 
 **验收**
 
-- 同一探针:普通 commit 的聚合写字节不再随 run 长度线性增长(或 encode 成本显著下降),并记录前后数值
-  与探针形状;
-- 恢复等价:旧 V2/V3 文档、迁移中断/重入、并发 guard 冲突、A11 reclaim 全绿;
+- `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` 生产侧 = 0
+  (测试夹具/注释除外,逐条说明);
+- `-p acts` 的 `--lib --tests` 全绿;行投影、消息、`tree_output` 的既有逐字断言不变;
 - `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`;
-  `cargo test -p acts --lib --tests` + `cargo test -p acts-store --features sled,sqlite,postgres` 全绿
-  (真后端需要本地 Postgres 5433;不可用就写明未跑);
-- CHANGELOG BREAKING;§10 写「L8 完成」并更新 §11 B 状态;§12 原地指向下一项。
+- §10 写「L9 完成」并更新 §11 B 状态;§12 原地指向下一项。
 
 # 限制与约束
 
-- **先读**:§10「P1 完成」「P2 完成」、§11 B L8、§5h/§5i/§5l、
-  `crates/acts/src/scheduler/durable/{document,envelope,snapshot_codec,document_store,async_document_store}.rs`、
-  `document_store.rs::build_{create,replace,outbox_confirm,reclaim}_transaction`、A11 的回收路径、现有 golden 测试。
-- 遵守 §11.C 门禁;动到 durable/store 面时跑 `-p acts` 全套 + `-p acts-store` 的 sled/sqlite/postgres;
+- **先读**:§10「C8c 完成」「L8 完成」、§11 B L9、设计 §3.7(d)⑤;
+  `crates/acts/src/scheduler/shell/{context,model,effects}.rs`、
+  `crates/acts/src/scheduler/core/model/view/**`、`packages/acts-package-*/src` 的 `build_acts` 调用点、
+  `Emitter`/`TaskExtra` 定义与调用方、`Process`/`Task` 的候选死方法。
+- 遵守 §11.C 门禁;改动只在 `acts` 与包内时跑 `-p acts` 全套 + 受影响包的 per-crate 套件;
   不改 manifest 就不跑 `cargo deny`。
-- 探针与计时插桩不提交;生产代码与文档分开提交,提交前过 §11.C 门禁。
+- 探针与临时插桩不提交;生产代码与文档分开提交,提交前过 §11.C 门禁。
 ```
 
