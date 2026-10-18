@@ -2987,6 +2987,87 @@ cargo fmt --check -> OK
   生命周期锁串行:start 先建出新 aggregate 时,cleanup 读到的就不是 `Absent`,而是这个非终态
   新 run,因此 `Retained`,不会删除它的行;cleanup 先完成时,start 随后从空 aggregate 开始。
 
+### A1b 完成(2026-10-18):outbox 提交后发送 + 每 operation 一笔批量确认
+
+**任务**:§11 D 的 A1b(P0)。“消息先于 aggregate commit 可见”的窗口来自 `dispatch` 在 plan commit
+之前调用 `deliver_plan`,把 transport 确认的 receipt 随提交直接写成 `Delivered`。本笔把发送移到提交
+之后,并把一个 operation 的全部新记录放进**同一笔**确认提交;per-record claim/confirm 试点
+(§10「A1b 试点回退」)没有恢复。
+
+**事实与契约**
+
+- `deliver_plan` 与 `OutboxIntent.receipt` 删除。plan commit(`advance_transition`)现在只把每条
+  outbox 记录写成 `Pending`;提交失败(guard/CAS/存储错误)不产生任何外部消息。
+- `dispatch` 的提交后顺序:plan commit → wake 新 operation(内部加速)→ `project`/`project_touched`
+  (proc/task/vars)→ lifecycle 上报 → transport 发送本 plan 的新记录 → **一次**
+  `confirm_outbox_batch` → 槽位结算。lifecycle 事件语义未变,只是排到投影之后,保证任何外部观察者
+  都能先读到行。
+- `deliver_committed_outbox` 只发送 `receipt.new_outbox` 里仍为 `Pending` 的记录(`AlreadyCommitted`
+  或并发 pass 已推进的记录跳过);它把 claim 与 transport 结果在**内存中**按现有状态机组合成
+  `OutboxConfirmation`,交给 `AsyncProcessRepository::confirm_outbox_batch`。后者直接复用 plan commit
+  写出的 exact bytes(不再重新 `load`),对每条记录校验 revision、在已提交 snapshot 上应用事件,
+  再用专用 guarded batch(`build_outbox_confirm_transaction`)一次提交 aggregate + outbox 索引;
+  确认不改变 operation,所以 recovery/ready 索引只作为 guard,不重写。**一个 operation 至多一笔
+  确认提交**,与记录条数无关。`TransitionCommitOutcome` 因此带回 `LoadedProcess`,正常路径少一次
+  聚合/索引读与 decode。
+- 结果落盘沿用现有语义:确认成功的记录 `Delivered`;`RetryAt` 回到带 `available_at_ms` 的 `Pending`;
+  `OutcomeUnknown` → `DeliveryUnknown`;`Quarantine` → `Quarantined`。`OutboxIndex` 由同一次
+  `replace` 从新 snapshot 重算。
+- 确认提交丢失 guard(`Conflict`)时整批不写,记录保持 `Pending`;`deliver` 通知立即唤醒 outbox pass,
+  pass 重投并最终确认。这是 at-least-once 的既有重复窗口,不是新语义;幂等收敛留给 A1c。
+  记录 revision 已被并发 pass 移动时该条跳过,由持有者收敛。
+- retry pass(`dispatch_outbox`/`dispatch_outbox_record`)保持原有的 per-record claim+confirm;
+  它只处理异常/重投,不承担正常路径。tick 未缩短。
+- A11 判定未改:`ProcessSnapshot::is_reclaimable()` 仍要求 outbox 全部 `Delivered`。确认前 run 因
+  `Pending`/`DeliveryUnknown`/`Quarantined` 被保留;确认后 cleanup 的 `refresh_projection` 重算
+  `removable` 并回收。正常路径不额外投影一次 proc 行,该修复仍由 cleanup 的
+  `unmarked_settled_procs` 负责。
+
+**测试**(`crates/acts/src/scheduler/shell/tests/mod.rs`)
+
+- `an_outbox_message_waits_for_its_aggregate_commit`:注入 plan commit 失败(store 在
+  `CommitPrepared` 后的 aggregate batch 返回错误)⇒ transport 0 次、aggregate 无 outbox 记录。
+- `one_operation_confirms_all_its_records_in_one_commit`:instrumented store 统计
+  “新增 outbox 的 plan commit 数”与“同版本的 outbox 变更 batch 数”;线性 3 节点全程二者相等、
+  确认条数等于新增条数、每条只发送一次,且全部 `Delivered`。per-record claim+confirm 会让确认数
+  成倍增加,此断言直接挡住回归。
+- `a_commit_with_two_records_confirms_them_in_one_commit`:一笔 plan 写两条记录 ⇒ 恰好一笔确认
+  batch、该 batch 推进两条、outbox 索引键删除。
+- `a_lost_confirmation_is_redelivered_without_losing_the_message`:确认 batch 返回 guard 失败 ⇒ 记录
+  `Pending`;手动 outbox pass 重投一次并全部 `Delivered`(记录既有 at-least-once 重复)。
+- `partial_delivery_failures_are_persisted_and_keep_the_run`:同批分别落 `Pending{RetryAt}`、
+  `DeliveryUnknown`、`Quarantined`;outbox 索引仍带 deferred `Pending` 与 `DeliveryUnknown`、
+  不再有 `Claimed`;`is_reclaimable()` 为 false,`reclaim_process` 返回 `Retained`。
+- `messages_are_visible_only_after_the_projection`:transport 在 `deliver` 时检查 store 已写入 proc
+  行;每次投递均为 true。
+- 既有 outbox/recovery/A11/reliability 套件全绿(见下)。A11 的两个 cleanup 用例改为等待
+  `is_reclaimable()` 而不是仅等 task 终态:`process_completed` 只证明执行已终态,确认提交可能
+  紧随其后;等待 A11 谓词消除了这个时序窗口。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 900 passed, 0 failed, 1 ignored (524.75s)
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> EXIT 0
+cargo fmt --check -> OK
+examples/simple: debug 13.0-13.7s / release 1.48-1.70s
+A11 baseline f5f62bc(same machine, worktree): debug 9.8-11.8s / release 1.16-1.33s
+```
+
+吞吐口径:`examples/simple` 的固定成本是“有 outbox 的 operation 多一笔确认提交”(与记录条数无关);
+per-record 试点在同一循环上是 >20s(debug)。本笔没有恢复该写放大,也没有把消息延迟转嫁给 tick。
+完整 `-p acts` 套件的墙钟受本机并发构建影响(同一提交的多次运行在 265-525s 之间),不作为阈值。
+
+**已知边界**
+
+- 正常路径固定多出一笔确认提交(有 outbox 的 operation);这是“提交后才可见”的代价,但不再随
+  outbox 条数增长,也没有 per-record 的 claim/confirm 写放大。
+- 确认失败后的重投会再次调用 transport:at-least-once 的既有契约;稳定幂等键与可查询 observation
+  属于 A1c,本笔不改变 channel 的 ack/delivery 行语义。
+- commit 之后、投影之前进程崩溃时,retry pass 仍可能先于一次完整的行投影发送消息;这是 A5
+  逐行 generation/补投影协议的边界,A1b 只保证正常路径的 project→transport 顺序。
+- 未引入独立 outbox log;批量确认在现有 aggregate + 派生索引上完成。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3003,10 +3084,10 @@ cargo fmt --check -> OK
 > 再做其他工作(**第二波 = P1 性能画像 + L\* 遗留,可与彼此交错**)。
 >
 > **2026-10-17 用户裁决(架构优先)**:在第一波之后、第二波之前插入**第三波 = A1→A11 架构修正**。
-> A1a 已完成;A2(durable ready queue)已完成(§10);A11(终态回收 + PID 复用)已完成(§10)。
-> A1b 的 per-record claim/confirm 试点因写放大回退(需批量 confirm/独立 outbox 后再做);
-> **当前执行项是 A1b(批量确认;§11 D 标 P0)**,须按批量版设计,不得原样重试 per-record 变体。
-> 其后为 A1c → A3/A4/A5 → A6 → A7/A8/A9/A10。第二波 P1/L* **暂缓,不删除**。
+> A1a 已完成;A2(durable ready queue)已完成(§10);A11(终态回收 + PID 复用)已完成(§10);
+> A1b(提交后发送 + 每 operation 一笔批量确认)已完成(§10「A1b 完成」)。
+> **当前执行项是 A1c(effect 幂等协议;§11 D 标 P1)**。
+> 其后为 A3/A4/A5 → A6 → A7/A8/A9/A10。第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -3085,13 +3166,14 @@ cargo fmt --check -> OK
 > **effect/commit 顺序、正常路径的活性来源、同一 Process 的写者模型、投影协议、Shell 仍承担状态机语义、
 > 以及终态 ProcessSnapshot/投影/索引的回收与 PID 复用**。
 > 执行顺序:**A1a → A2 → A11 → A1b(批量 confirm) → A1c → A3/A4/A5 → A6 → A7/A8/A9/A10**。
-> A1a 已完成并单独记录在 §10;A1b 的 per-record 试点已回退(见 §10「A1b 试点回退」),**不得原样重试**。
+> A1a/A2/A11/A1b 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
+> 正常路径不得恢复 per-record claim/confirm。
 > 第二波 P1/L* 暂缓,不删除。
 
 | 编号 | 任务 | 审计条目 | 优先级 | 依赖 | 状态 / 验收 |
 |---|---|---|---|---|---|
 | **A1a** | effect 边界分类:包 effect 后丢失 CAS/`next` 失败 → `MarkEffectUnknown`,不释放 claim 自动重试;客户端动作路径同处理 | #2 | **P0** | — | **已做(§10「A1a 完成」)**。验收:effect 后冲突为 `EffectUnknown`,recovery 只报 `ManualReconciliation`,不 wake |
-| **A1b** | outbox 提交后发送:plan 先写 `Pending`;**批量确认本 operation 的新记录**(或把 outbox 状态移出 aggregate);投影先于外部消息;删除前置直发快路径。**per-record claim/confirm 变体已回退,不得原样重试** | #2 | **P0** | A1a;批量确认设计 | **试点回退(2026-10-17,§10)**。验收:消息不在 aggregate commit 前可见;每 operation 最多一笔确认提交;loop/吞吐不退化;at-least-once 不变 |
+| **A1b** | outbox 提交后发送:plan 先写 `Pending`;**批量确认本 operation 的新记录**(或把 outbox 状态移出 aggregate);投影先于外部消息;删除前置直发快路径。**per-record claim/confirm 变体已回退,不得原样重试** | #2 | **P0** | A1a;批量确认设计 | **已做(§10「A1b 完成」)**。验收:消息不在 aggregate commit 前可见;每 operation 最多一笔确认提交;loop/吞吐不退化;at-least-once 不变。正常路径 `deliver_committed_outbox` + `confirm_outbox_batch`;retry pass 仍 per-record |
 | **A1c** | effect 幂等协议:稳定 idempotency key + 可查询 observation;非幂等 effect 只走 manual reconciliation;补齐人工处理闭环 | #2 | P1 | A1b(批量) | 未做。验收:可证明幂等的 effect 才允许自动重试;恢复不重复外部副作用 |
 | **A2** | durable ready queue:业务提交内写 ready 索引;`try_send` 只做加速;driver 从 ready 取到期操作;recovery 只做异常兜底;修 recovery 分页每页全扫的 $O(N^2)$ | #1 | **P0** | —(与 A1b 的 store schema 改动需协调) | **已做(§10「A2 完成」)**。验收:队列满不导致下一跳等 tick;recovery 扫描量与异常操作数相关;idle timer/parked run 不进热 ready 集合;冷启动/缺 ready 记录可从 aggregate 修复 |
 | **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | 未做。验收:线性 3 节点不再产生 9 次 claim/commit;行为、消息、行投影逐字不变 |
@@ -3104,15 +3186,15 @@ cargo fmt --check -> OK
 | **A10** | 拆分控制面调度器:timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair 独立 interval/backoff/budget/指标;禁止用统一缩短 tick 解决延迟 | #10 | P2 | A2 | 未做。验收:调整 recovery 频率不影响 timer/outbox;各循环有独立健康/积压指标 |
 | **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index + ready index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | **已做(§10「A11 完成」)**。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删。**pid 存在性只看 aggregate**(行/`ops` 不参与);start 与 cleanup 共用 per-pid 生命周期锁。A5 的完整投影 generation 协议仍未做,本笔以 pid 墓碑收窄清理后的旧投影重写窗口 |
 
-**A1/A2/A11 的边界**:A1a 只关闭“effect 已执行后自动重试”的重复路径;A1b(批量确认)才关闭 outbox 的提交前可见性,
-**per-record claim/confirm 试点已回退**(写放大不可接受)。A1c 才提供可自动重试的幂等协议。
+**A1/A2/A11 的边界**:A1a 只关闭“effect 已执行后自动重试”的重复路径;A1b(批量确认)已关闭 outbox 的提交前可见性,
+**per-record claim/confirm 试点保持回退**(写放大不可接受)。A1c 才提供可自动重试的幂等协议。
 A2 只把正常活性从 recovery 扫描移开,不改变 recovery 的异常兜底职责;**A11 已把 `ready` index 与
 aggregate/recovery/outbox 一起原子回收**(A11 完成)。
 A11 只回收**已完成且投递结算完毕**的 run;`EffectUnknown`、`Quarantined`、`DeliveryUnknown`、
 未结算 delivery、未决 operation 一律保留。
 A11 的存储语义是“恢复所需的最小状态”,不是历史归档;PID 复用只在回收完成后放行,旧 pid 迟到消息由业务去重。
-A1b 落地后 outbox 记录会先以 `Pending` 提交、再由 dispatcher 批量确认,因此 A11 的“全部 `Delivered` 才回收”
-判定天然把“已提交但未投递”的 run 保留在存储中;A1b 不得绕过该判定。
+A1b 已落地:outbox 记录先以 `Pending` 提交、再由 dispatcher 在投影后批量确认,因此 A11 的
+“全部 `Delivered` 才回收”判定天然把“已提交但未投递”的 run 保留在存储中;该判定未被绕过。
 **不要把“缩短 tick”当作活性手段** —— 正常活性来自 durable ready 记录;tick 只决定 ready 轮询、定时器
 cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,单页不再全扫索引。
 
@@ -3123,76 +3205,72 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A1b —— outbox 提交后发送 + 批量确认(§11 D,P0)
+# 当前任务:A1c —— effect 幂等协议(§11 D,P1)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A1b 行、§10「A1b 试点回退」「A11 完成」;
-`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A1b。A1a、A2、A11 已完成。当前 outbox 仍是**提交前发送**:
-`dispatch` 在 plan commit 之前调用 `deliver_plan`,确认成功的记录以 `OutboxIntent.receipt` 随 commit
-直接写成 `Delivered`,未确认的记录写成 `Pending` 由 tick 的 outbox pass 重试。A1b 要关闭这个
-“消息先于 aggregate commit 可见”的窗口;per-record claim/confirm 试点已因写放大回退(§10),**不得原样重试**。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A1c 行、§10「A1a 完成」「A1b 完成」;
+`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A1/A1c。A1a 已把 effect 后的 CAS 冲突与 `next` 失败落到
+`EffectUnknown`,recovery 只报 `ManualReconciliation`,不自动重试;A1b 已把 outbox 改成提交后发送
+并每 operation 一笔批量确认。当前缺口:包 effect 没有稳定 idempotency key,也没有可查询的
+observation,所以 `EffectUnknown` 只能人工处理,任何自动重试都可能重复外部副作用。
 
-**目标**:一个 operation 的业务消息只在它的 aggregate commit 之后才对外可见;正常路径每个 operation
-**至多一笔**确认提交(不是每条 outbox record 一笔);投影先于外部消息;at-least-once 与现有 channel
-契约不变;A11 的“全部 `Delivered` 才回收”判定继续成立。
+**目标**:可证明幂等的 effect 在崩溃/未知后可以安全重试或直接判定完成;不能证明的仍停在人工协调;
+恢复不重复外部副作用;A1b 的 outbox 提交后发送与 at-least-once 契约不变。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 先画清 `deliver_plan`、`OutboxIntent`/`receipt`、`dispatch` 的 commit→project→wake 顺序、
-     `dispatch_outbox`/`dispatchable_outbox_page`、`evolve_outbox`、`OutboxIndex` 与 A11 的
-     `is_reclaimable`(outbox 必须全 `Delivered`)。
-   - 目标顺序:plan commit(新记录 `Pending`)→ 投影 → 外部发送 → **一次批量确认提交**。
-     提交失败的 operation 不产生任何外部消息。
-   - 正常路径删除前置直发快路径(`deliver_plan` 与 `OutboxIntent.receipt` 的提交前语义);
-     retry pass 仍负责重投与异常确认,但不得退化成 per-record claim+confirm 的正常路径。
-2. **批量确认**
-   - 一次发送产生的多条记录,用**同一笔** aggregate commit 从 `Pending`/`Claimed` 推进到
-     `Delivered`(可携带每条的 receipt/失败态);每 operation 最多一笔确认提交。
-   - 确认提交必须带 aggregate exact-bytes/版本 guard;CAS 失败时记录保持 `Pending`/可重投,
-     由 outbox pass 或 recovery 收敛,不得丢消息、不得二次外部副作用。
-   - 部分发送失败:同一批里成功的写 `Delivered`,失败的按现有 `RetryAt`/`DeliveryUnknown`/
-     `Quarantine` 语义落盘;仍是一笔提交。
-   - outbox record 的 payload/topic/顺序与 channel 契约不变;`OutboxIndex` 投影随新状态更新。
-3. **投影顺序**
-   - 外部消息的消费者在看到消息时必须能读到对应 aggregate 与投影行:先 `project`(proc/task/vars),
-     再调用 transport。lifecycle 事件仍按现有语义,不新增第二种“完成”真值。
-4. **调度与兼容**
-   - `Runtime::init_cleanup_timer` 与 A11 回收不受影响:确认前 run 因 outbox 非 `Delivered` 被保留,
-     确认后由 cleanup 回收;清理批不得删除仍 `Pending`/`Claimed`/`DeliveryUnknown` 的记录。
-   - 不缩短 tick,不把“消息延迟”转嫁给 tick;正常路径由 commit 后立即触发的 outbox pass 驱动。
-5. **测试**
-   - 一个 operation 的消息在其 aggregate commit 前不可见(注入 commit 失败:transport 未被调用);
-     提交后消费者收到消息时 aggregate/投影行已存在。
-   - 一个 operation 携带多条 outbox record 时,正常路径只产生**一笔**确认提交(store 写入计数),
-     全部 `Delivered`;不得回归 per-record claim/confirm。
-   - CAS 失败的确认提交不丢消息:记录仍可被 outbox pass 重投并最终 `Delivered`;at-least-once 保持。
-   - 部分失败记录按 `RetryAt`/`DeliveryUnknown`/`Quarantine` 落盘,run 不被 A11 回收。
-   - 现有 outbox/recovery/A11/reliability 套件保持绿;`examples/simple` 量级无吞吐退化。
+   - 先画清 `OperationState::EffectUnknown` 的产生点(A1a 的 `mark_effect_unknown`)、
+     `ClaimAndPrepare`/`ApplyAction`、`shell/effects.rs` 的 `EffectRunner`/`PackageEffectRunner`、
+     `OperationEvent::MarkEffectUnknown`、recovery 的 `ManualReconciliation` 分类与当前人工出口
+     (health/日志/指标,无复位 API)。
+   - idempotency key 必须稳定、可重建、跨重启一致:至少由 pid/task/generation/operation 身份派生,
+     在 effect **之前**随 claim/prepare 落盘;重规划、重试、重启复用同一 key,不得使用随机 id。
+   - effect observation 必须可查询:transport/executor 暴露按 key 查询“是否已执行/结果”的接口;
+     `EffectUnknown` 的恢复先查 observation,再决定完成/重试/人工。
+2. **幂等分级**
+   - 包/effect 显式声明是否幂等(或提供 observation 证明);只有可证明幂等的 effect 才允许自动
+     重试或按 observation 直接完成。
+   - 非幂等 effect 保持 `EffectUnknown -> ManualReconciliation`;补齐人工处置闭环(可查询、
+     可显式 resolve applied/not-applied,并写入 durable 事实),不得静默自动推进。
+   - 不把 channel 的 at-least-once 语义误用到包 effect。
+3. **恢复**
+   - `EffectUnknown`:observation 证明 applied ⇒ 收敛为已完成,不再执行;observation 证明 not-applied
+     且 effect 幂等 ⇒ 重新入队;不确定或非幂等 ⇒ 继续人工,不自动 wake。
+   - 同一 key 的重复执行必须被 executor 去重或可观察;CAS 丢失后的重规划不得生成新 key。
+4. **测试**
+   - 稳定 key:崩溃前后、CAS 后重规划、重启后同一 operation 的 key 不变。
+   - observation applied:恢复不再次调用 effect,operation/run 收敛,external call 计数不增。
+   - 非幂等:不自动重试,进入 `ManualReconciliation`;人工 resolve 后收敛且可重启恢复。
+   - 幂等重试:executor 以同 key 去重,只产生一次外部副作用(计数断言)。
+   - A1a/A1b/outbox/reliability/A11 套件保持绿。
 
 **边界**
 
-- 不改消息 payload/topic、不改 channel 的 ack/delivery 行语义;不做 A1c 的幂等 effect 协议。
-- 不允许“每条记录一次 claim + 一次 confirm”的正常路径;per-record 试点实现不得原样恢复。
-- 不做独立 outbox log 的大迁移,除非批量确认无法满足验收(需先说明并单独设计)。
-- 不改 A11 的回收条件;确认提交必须让记录变成 `Delivered`,而不是绕过 `is_reclaimable`。
+- 不改消息 payload/topic、channel ack/delivery 行语义与 outbox 顺序;不做 A3/A4 的 lane/折叠。
+- 不改 A11 回收条件:`EffectUnknown`/`Quarantined` 仍保留;确认完成的 effect 才允许 run 回收。
+- 不引入分布式事务或跨进程 exactly-once;自动重试只覆盖能证明幂等的 effect。
+- 不缩短 tick,不把恢复延迟转嫁为更频繁的扫描。
 
 **验收**
 
-- 消息不在 aggregate commit 前可见;每 operation 至多一笔确认提交;loop/吞吐不退化;at-least-once 不变;
-- 先投影后消息;CAS 丢失可重投且不产生第二次外部副作用;
-- `cargo test -p acts --lib --tests` 与 reliability/outbox 套件绿;
-- 写 §10「A1b 完成」,§11 D 状态更新,§12 原地指向 A1c(effect 幂等协议)。
+- 可证明幂等的 effect 才允许自动重试;恢复不重复外部副作用(计数/observation 证据);
+- 非幂等 effect 只能人工协调,且人工处置可持久化、可跨重启;
+- idempotency key 在重试/重启后稳定,不存在随机 key;
+- `cargo test -p acts --lib --tests` 与 reliability/effect/outbox 套件绿;
+- 写 §10「A1c 完成」,§11 D 状态更新,§12 原地指向下一项(A3/A4/A5)。
 
 # 限制与约束
 
-- **先读**:§11 D、§10「A1b 试点回退」「A2 完成」「A11 完成」、设计 §3.10 A1b/§3.5、
-  `shell/mod.rs` 的 `deliver_plan`/`dispatch_outbox`、`shell/operation/dispatch.rs`、
-  `core/outbox/**`、`document_store.rs` 的 replace transaction。
-- 不改业务流程/消息 payload/outbox 顺序语义;确认提交必须带 aggregate guard。
+- **先读**:§11 D、§10「A1a 完成」「A1b 完成」、设计 §3.10 A1/A1c、
+  `shell/operation/{action,dispatch,prepare}.rs`、`shell/effects.rs`、`core/model/operation.rs`、
+  `core/commit/aggregate/{commit,snapshot}.rs`、`core/recovery/planner.rs`、
+  `shell/tests/mod.rs` 的 A1a 冲突用例。
+- 不改业务流程/消息 payload/outbox 顺序;effect 重试必须携带同一稳定 key。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-提交后发送 + 每 operation 一笔批量确认 + 投影先于消息 + 回归测试 → 更新 §10/§11/§12。
+稳定 idempotency key + 可查询 observation + 幂等 effect 的自动收敛/非幂等的人工闭环 + 回归测试
+→ 更新 §10/§11/§12。
 ```
 

@@ -65,10 +65,11 @@
 
 | 事实 | 位置 |
 |---|---|
-| **已经"马上发"**:`deliver_plan` 在提交**之前**发本 plan 的 outbox 记录;transport 确认的 receipt 随提交落成 `Delivered`;未确认才 notify driver 的重试 pass | `shell/mod.rs:907-958`、`aggregate.rs:459-472`、`deliver: Arc<Notify>` `shell/mod.rs:150-159` |
+| **A1b 前(历史)**:`deliver_plan` 在提交**之前**发本 plan 的 outbox 记录;transport 确认的 receipt 随提交落成 `Delivered`;未确认才 notify driver 的重试 pass | `shell/mod.rs:907-958`(C7 时点) |
+| **A1b 起(当前)**:plan commit 写 `Pending` → 投影 → transport → **一笔** batch confirmation(`confirm_outbox_batch`);guard 失败保持 `Pending`,retry pass 重投 | `shell/operation/dispatch.rs`、`shell/mod.rs` `deliver_committed_outbox`、`durable/document_store.rs` `build_outbox_confirm_transaction` |
 | tick 只是重试网:`dispatch_outbox` 扫派生索引 → 认领 → 发 → 落结果 | `shell/mod.rs:4609-4750`、`runtime.rs:512-514` |
 | **outbox 不写 `messages`/`deliveries` 行**:行只由 ack 通道(`on_message` → `store_delivery`)写。没有订阅者时,"马上发出去"在存储里不留痕 | `export/channel.rs:321-336`、`runtime.rs:187-189` |
-| 语义是 at-least-once:deliver 与 commit 之间崩溃 ⇒ 重发(与 effect seam 同一窗口) | `shell/mod.rs:917-928` 注释 |
+| 语义是 at-least-once:发送后、确认前崩溃,或确认丢失 guard ⇒ 记录保持 `Pending`,outbox pass 重发 | `shell/mod.rs` `deliver_committed_outbox` / `dispatch_outbox`、`notes §10「A1b 完成」` |
 
 ### 1.6 存储键面(为什么 id 的字符集不是审美问题)
 
@@ -278,9 +279,9 @@ pub(crate) struct OperationId {                              // task_id 换类�
 
 ### 3.5 投递(第 ⑤ 条;2026-10-17 C7 定稿,**同日被 A1b 取代**)
 
-> **2026-10-17 更新**:下面的第 1 条是 C7 时点的现状,不再是终态。A1b(§3.10)把投递移到提交之后:
-> 记录先提交为 `Pending`,再由 outbox dispatcher 发送并**批量确认**;投影先于外部消息。
-> per-record claim/confirm 试点已回退(写放大不可接受),不得原样重试。
+> **2026-10-17 更新,2026-10-18 落地**:下面的第 1 条是 C7 时点的现状,不再是终态。A1b(§3.10)已把投递移到
+> 提交之后:记录先提交为 `Pending`,投影后由 transport 发送,再由**一笔** batch confirmation 落结果;
+> per-record claim/confirm 试点保持回退(写放大不可接受),不得原样重试。
 > 保留本节是为了记录当时的 at-least-once 决策与“无 handler 不留行”边界;实现以 A1b 的批量版为准。
 
 两条边界都是**契约**,不是实现细节;本笔零代码,以下引用均以 C7 提交状态为准:
@@ -469,6 +470,10 @@ Command
   消息仍是 at-least-once,但消费者不会再在提交前看到消息。
   **per-record claim/confirm 试点已回退(2026-10-17)**:每条记录两笔 aggregate commit,11 次循环 >20s,
   写放大不可接受。不得原样重试;批量确认或独立 outbox log 是前置设计。
+  **落地(2026-10-18,详见 notes §10「A1b 完成」)**:plan commit 只写 `Pending`;`dispatch` 在投影后
+  把本 operation 的新记录交给 transport,并用 plan commit 写出的 exact bytes 做一次
+  `build_outbox_confirm_transaction`(只重写 aggregate + outbox index,recovery/ready 仅作 guard)。
+  retry pass 仍按记录 claim+confirm,只负责重投与异常确认。
 - **A1c**:为可自动重试的 effect 引入稳定 idempotency key 与可查询的 effect observation;
   不能证明幂等的 effect 只走 `EffectUnknown -> ManualReconciliation`,并补齐人工处理闭环。
   自动重试只允许用于已证明幂等的 effect。
