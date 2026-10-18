@@ -4003,6 +4003,62 @@ cargo fmt --all -- --check -> OK
 
 ---
 
+### P2 完成(2026-10-18):聚合文档编码只算一次 SHA-256
+
+**任务**:§11 B 的 P2 —— `ProcessDocumentCodec::encode` 对同一 payload 做两次 SHA-256
+(`ProcessEnvelope::seal` 一次、`ProcessEnvelope::encode` 的 `validate` 再一次)。去掉重复的一次,
+不改持久化格式、字节或摘要。
+
+**改动**(生产代码)
+
+- `ProcessEnvelope::seal(payload) -> Result<Vec<u8>, EnvelopeError>` 现在一步产出持久化文档:摘要只算
+  一次并写进 header。旧的 `ProcessEnvelope::encode(&self)`(先 `validate` 再序列化)删除,写路径因此只有
+  **一个哈希点**,也不再存在“构造错摘要再编码写出”的入口。
+- `ProcessEnvelope::decode` 不变:`validate` 仍把 header 摘要与读到的 payload 对比。
+  `AGGREGATE_SCHEMA_VERSION`、magic、header 布局、摘要算法、聚合/索引字节均未动。
+- `ProcessDocumentCodec::encode` 改为 `ProcessEnvelope::seal(payload)?`;`document.rs` / `envelope.rs`
+  的测试同步改用 `seal`。审计结论:仓库内没有“手工构造错摘要再期望 `encode` 拒绝”的用例。
+- 新增测试:`tampered_digest_is_rejected_by_decode`(payload 完好、header 摘要被改 → `DigestMismatch`)、
+  `document_encoding_is_byte_stable`(同一 snapshot 两次 encode 字节相等;header 摘要 == payload 摘要)。
+
+**探针形状**(临时,交付前已删;与 §10「P1 完成」同形)
+
+- 30 步 engine workflow + `examples/simple`(`input=10`),每次 fresh `Engine`(release、内存 store)。
+  `CountingStore` 统计含 `kernel/aggregates/` put 的 guarded batch(commit)与聚合文档写(encode 次数),
+  保留写过的最大聚合文档;`on_complete` 信号结束,2 ms × 3 quiet drain。
+- 直接计时:同一 snapshot 上交错跑新路径(`ProcessDocumentCodec::encode`)与旧两步路径
+  (seal + `validate` 再哈希 + 序列化)各 40 轮,取中位数;两者产出的字节逐字节相等(探针内断言)。
+- 命令:`cargo test --release -p acts --lib perf_probe -- --nocapture --ignored --test-threads=1`。
+
+**结果(release,内存 store;每轮 commit 数不变:engine 187、simple 295,`aggregate_writes == commits`
+即每次 commit 恰好一次 encode)**
+
+| 形状 | 聚合 / payload | `document.encode` best(改前 → 改后) | 新旧交错省(中位,范围) | ms/commit best(改前 → 改后) |
+|---|---|---:|---:|---:|
+| engine 30 步 | 50,249 / 50,167 B | 0.930 → 0.757 ms | **0.41 ms**(0.26–0.46) | 2.039 → 1.875(**−8.1%**) |
+| simple | 89,694 / 89,612 B | 1.819 → 1.287 ms | **0.58 ms**(0.34–0.67) | 2.752 → 2.373(**−13.8%**) |
+
+- 省下的就是一次 payload SHA-256:P1 微基准 `envelope.encode` 为 0.291/0.411 ms,本次新旧交错中位
+  0.41/0.58 ms 同量级(9 轮/形状,含两次负载尖峰 0.83/1.19)。`document.encode` 的 best-of 也落在
+  同一量级(−0.17/−0.53 ms)。
+- 端到端 wall 的噪声仍大:改后 15 轮 engine 为 350.7–722.1 ms、simple 为 699.9–1,215.7 ms(同构建、
+  同探针,波动 ≈2×);因此只取 best-of-N 作对照,并把 commit 数/per-call 当主证据。P1 的
+  `[INFERENCE] −0.49/−0.67 ms/op(−12.7%/−17.0%)` 在本机无法端到端分辨;每次 commit 一次 encode ⇒
+  每 commit 直接省一次哈希,与表中 −8.1%/−13.8% 的 best ms/commit 同向。
+- 可选第 4 项(跳过未变化的派生索引编码)**未做**:本笔不改事务/guard 语义,索引编码份额小;若要继续,
+  应在 L5/L8 里先量。
+
+**门禁与边界**
+
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check` 绿;
+  `cargo test -p acts --lib --tests` = **952 passed**(该 crate 无独立 integration test 目录)。
+  改动只在 `acts` 的 durable codec,不涉及 store/channel/package/server 面,故未跑其余 per-crate 套件;
+  未改 manifest,未跑 `cargo deny`。
+- 不改持久化格式/版本/摘要算法,不迁移旧库,不引入 `unsafe`;不改 effect/outbox payload 与顺序,
+  不改 A4/A5/A8/A9/A10/A11 语义;不以缩短 tick 或跳过校验制造吞吐。探针与计时插桩未提交。
+
+---
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4025,7 +4081,7 @@ cargo fmt --all -- --check -> OK
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1 已完成(§10「P1 完成」),当前执行项为 §11 B 的 P2**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2 已完成(§10「P1 完成」「P2 完成」),下一执行项为 §11 B 的 L8**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4071,11 +4127,11 @@ cargo fmt --all -- --check -> OK
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1 已完成,§12 当前指向 P2(下一笔性能工作)。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2 已完成,§12 当前指向 L8(持久化格式变更,需单独立项)。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
-| **P2** | **整包编码只算一次 SHA-256**(无格式变更):`ProcessDocumentCodec::encode` 现在 `seal` 一次、`encode.validate` 再一次;去掉重复的一次。可选:跳过未变化的派生索引文档编码(先量)。 | §10「P1 完成」 | 未做。验收:同一探针 `agg.encode`/`confirm.encode` ms/call 降 ≈一次 `envelope.encode`,wall/commit 降 10–20%;持久化字节/摘要不变;`-p acts --lib --tests` 全绿 + clippy/fmt |
+| **P2** | **整包编码只算一次 SHA-256**(无格式变更):`ProcessDocumentCodec::encode` 现在 `seal` 一次、`encode.validate` 再一次;去掉重复的一次。可选:跳过未变化的派生索引文档编码(先量)。 | §10「P1 完成」 | **已做(§10「P2 完成」)**。验收:同一探针每次 encode 省一次 SHA-256(新旧交错中位 0.41/0.58 ms = 一次 `envelope.encode` 量级),commit 数不变(187/295)、best ms/commit −8.1%/−13.8%;聚合字节/摘要不变(交错断言 + 单测);`-p acts --lib --tests` 952 绿 + clippy/fmt。可选的索引降频未做(本笔不碰事务/guard) |
 | **L1** | 删死掉的 `ops` 族(**BREAKING**):`Store::ops()`/`StoreIden::Ops`/`store/data/op.rs` + `remove_proc_rows` 家族清单那一行;先决定老库 `ops-*` 孤儿行的处理(接受 / 保留只删不建 / 一次性清理) | 原 §5 | 未做。验收:生产侧 `grep` 为 0 + 全量门禁绿 + CHANGELOG BREAKING |
 | **L2** | 聚合文档回收/归档:~~先定保留策略 / pid 复用语义 / 历史取舍~~ **已由 A11 取代**。A11 明确:存储只服务恢复,终态且消息全部投递/结算后回收;不做历史归档;回收后 PID 可复用,旧 pid 重复执行由业务系统负责 | 原 §6;2026-10-17 用户裁决 | **被 A11 取代**(设计见 `KERNEL_REFACTOR_DESIGN.md` §3.10);不再单独执行 |
 | **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | 未做(现状 = 写成边界) |
@@ -4083,7 +4139,7 @@ cargo fmt --all -- --check -> OK
 | **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | 未做,**低优先**:§10「P6-1」已证与 hop 吞吐无关(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义 |
 | **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
 | **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
-| **L8** | **减字节:整包聚合 → 拆分文档 / append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**,必须单独立项(迁移 + golden fingerprint 更新);与 C5 的 codec V3 **是同一批格式工作** ⇒ 建议与 C5 合并排期 | 原 §1.b③ / §1.b(i)② / §1.b(iii) | 未做。现状:每 hop 整包工作量 = 3 decode + 2 encode 一个随 run 增长的聚合 |
+| **L8** | **减字节:整包聚合 → 拆分文档 / append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**,必须单独立项(迁移 + golden fingerprint 更新);与 C5 的 codec V3 **是同一批格式工作** ⇒ 建议与 C5 合并排期 | 原 §1.b③ / §1.b(i)② / §1.b(iii) | **未做;§12 当前项**。现状:每 hop 整包工作量 = 3 decode + 2 encode 一个随 run 增长的聚合 |
 | **L9** | **退役 Phase 0:删动态 act 死簇与 legacy 事件面** —— `Context::build_acts`/`dyn_build_act`/`NodeTree::append_node`、`package/core/{block,parallel,sequence}.rs` 的三个调用点;`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;确认零调用的 `Process`/`Task` 方法(`create_task`/`print`/`into_data`/`task_by_*`、`unique_id`/`into_data_vars`/`is_vars_dirty` 等) | 设计 §3.7(d)⑤ + 2026-10-17 评估 | 未做。**零行为变更**(headless tree 的产物本来就被 `effects::run` 丢弃,`projection` 从 durable model 重建);验收:生产侧 `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` = 0,`-p acts` 全绿,行/消息/`tree_output` 不变 |
 | **L10** | **退役 Phase 1:headless scope 去 `Process`/`Task`** —— `ScopeSpec` 已是完整输入,换成 `ScopeTask`(node content + data + sealed + cancel)+ `Scope`(pid/env/owner/workdir);替换 `scope.rs:47-87`,保留包实际用到的 `task.{pid,id,options,node,data}` 与 `proc.{id,owner_scope,env,workdir,set_data}` | 设计 §3.7(d)① | 未做;前置 L9。验收:effect/predicate/package 套件全绿;每 hop 不再建 `Process`+`NodeTree`(收益按 P1 口径量);`Context` 的包 API 名字不变或按 BREAKING 记录 |
 | **L11** | **退役 Phase 2:model 直出 view** —— `Workflow::valid`/`tree_output` 与投影 `node_data` 直接走 `Workflow`/`Step`/`Branch`(逐字保持行与树输出);删 `NodeTree`/`Node`;`NodeData`/`NodeContent` 持久化形状保留 | 设计 §3.7(d)③ | 未做;前置 L10。验收:`sch_tree_output_is_byte_stable` 563-byte、`model:get fmt=tree`、`node_data` 逐字、投影行格式不变 |
@@ -4147,50 +4203,54 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:P2 —— 聚合文档编码只算一次 SHA-256(§11 B,第二波,接 P1)
+# 当前任务:L8 —— 减字节:整包聚合 → 拆分文档 / append-only 操作日志(§11 B,第二波,接 P2)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 B 的 P2;§10「P1 完成」的 release 画像(30 步、47,959 B 聚合:
-3.84 ms/op / 2.28 ms/commit;`examples/simple`、85,226 B:3.97 ms/op / 2.42 ms/commit)。P1 结论:
-plan/记账逻辑 ≤6%,整包 encode/decode/apply 占 66–80%;其中每次 `ProcessDocumentCodec::encode` 对
-同一 payload 做**两次 SHA-256**(`ProcessEnvelope::seal` 一次、`ProcessEnvelope::encode` 的
-`validate` 再一次)。微基准(release):`seal` 0.318/0.406 ms、`envelope.encode` 0.291/0.411 ms
-(47,877/85,144 B payload)。
+**依据**:§11 B 的 L8;§5h/§5i 的写入画像(30 步 run:写 16.0 MB,其中 14.7 MB 是
+`kernel/aggregates`;5.6 次聚合写/hop,字节随 run 长度线性增长);§10「P1 完成」的每跳画像
+(整包 encode/decode/apply = 66–80%)。P2 已把每次聚合 encode 的 SHA-256 降到一次;本笔要消掉的是
+“每次提交重写整个聚合文档”。
 
-**目标**:让 `ProcessDocumentCodec::encode` 的 payload 只被哈希一次;**不改持久化格式、字节或摘要**。
+**目标**:普通 commit 不再写/编码 O(run 长度)的整包聚合;持久化格式升级必须带迁移、golden 重冻结与
+CHANGELOG BREAKING,且行为/消息/行投影/恢复语义逐字不变。
 
 **本笔内容**
 
-1. 收敛 `ProcessEnvelope` 的 seal 路径:`seal` 计算摘要后,`encode` 不再对同一 payload 重算;
-   `decode` 的摘要校验保留。形态自选(如 `seal` 交出已封 envelope,或 `encode` 自己算摘要),
-   但**只允许一个哈希点**;不得引入 `unsafe`,不得静默跳过 `decode` 校验。
-2. 审计所有 `ProcessEnvelope::{seal,encode,decode}` 的构造/调用点(含测试):任何“手工构造错摘要
-   再期望 `encode` 拒绝”的用例改用 `decode` 覆盖,或保留一个显式 `validate` 测试。
-3. 记录改动前后的 per-encode 成本与端到端 ms/commit;预期 [INFERENCE]:engine −0.49 ms/op
-   (−12.7%)、simple −0.67 ms/op(−17.0%),按 1.68/1.64 次 encode per attempt。
-4. 可选:跳过未变化的派生索引文档编码;先量,它们只占 `agg.encode` 的小头。不做也行,不得为此
-   改事务/guard 语义。
+1. 先定拆分形态并写进 §10:append-only 操作日志(按 operation 追加 + 阈值/终态压缩)或按
+   task/operation 分片文档。约束:一次 commit 仍是一个原子 guarded batch;恢复能从新文档族重建与今天
+   等价的 `ProcessSnapshot`;reclaim(A11)仍能整族删除。
+2. 版本与 codec:升 `AGGREGATE_SCHEMA_VERSION`(或引入新文档版本);新格式只由
+   `ProcessDocumentCodec`/`SnapshotCodec` 产出,repository 不得自行拼字节;V2/V3 旧文档继续可读。
+3. 迁移:打开旧库时懒迁移或一次性重写;迁移必须幂等、可在崩溃后重入,不得留下半迁移文档;
+   不要求历史归档。写迁移测试:旧 V2/V3 文档 → 新格式 → 恢复出的 snapshot 与旧读路径等价。
+4. golden:这是有意的格式变更,重冻结 fingerprint 并写书面理由;行为面(消息、行、`tree_output`、
+   完成/错误)保持逐字不变。
+5. 量化:同一 §10「P1 完成」探针(release、内存 store)记录聚合写字节/commit、encode 次数与
+   ms/commit;用 store 计数证明普通 commit 不再重写整个聚合。
 
 **边界**
 
-- 不改持久化格式、`AGGREGATE_SCHEMA_VERSION`、摘要算法、聚合/索引字节;不迁移旧库。
-- 不改 effect/outbox payload、outbox 顺序、A4/A5/A8/A9/A10/A11 语义;不以缩短 tick 或跳过校验制造吞吐。
-- 不用 debug 数据做结论;性能口径一律 release + 内存 store,与 §10「P1 完成」同探针形状
-  (`cargo test --release -p acts --lib perf_probe ...`,探针临时、提交前删除)。
+- 不改摘要算法;不改 effect/outbox payload 与顺序;不改 A4/A5/A8/A9/A10/A11 语义;
+  不以缩短 tick 或跳过校验制造吞吐;不引入 `unsafe`。
+- 不改 manifest 就不跑 `cargo deny`;探针与计时插桩不提交;生产代码与文档分开提交。
+- 迁移失败必须保持旧库可读(未迁移文档不破坏读取),不得静默丢弃聚合字段。
 
 **验收**
 
-- 同一探针:`agg.encode`/`confirm.encode` ms/call 降幅 ≈ 一次 `envelope.encode`;wall/commit 降
-  10–20%(环境噪声内以 per-call 与 commit 计数为主);
-- 聚合文档字节与摘要不变(单测:同一 snapshot encode 前后字节相等/摘要稳定);
-- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`、
-  `cargo test -p acts --lib --tests` 全绿;
-- §10 写「P2 完成」并更新 §11 B 状态;§12 原地指向下一项(默认下一步为 L8 拆文档/append-only)。
+- 同一探针:普通 commit 的聚合写字节不再随 run 长度线性增长(或 encode 成本显著下降),并记录前后数值
+  与探针形状;
+- 恢复等价:旧 V2/V3 文档、迁移中断/重入、并发 guard 冲突、A11 reclaim 全绿;
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`;
+  `cargo test -p acts --lib --tests` + `cargo test -p acts-store --features sled,sqlite,postgres` 全绿
+  (真后端需要本地 Postgres 5433;不可用就写明未跑);
+- CHANGELOG BREAKING;§10 写「L8 完成」并更新 §11 B 状态;§12 原地指向下一项。
 
 # 限制与约束
 
-- **先读**:§10「P1 完成」的探针形状与数值、§11 B P2;`crates/acts/src/scheduler/durable/{document,envelope}.rs`、
-  `document_store.rs::build_replace_transaction`、`build_outbox_confirm_transaction`。
-- 遵守 §11.C 门禁;动到 durable/序列化面时按需跑 `-p acts` 全套;不改 manifest 就不跑 `cargo deny`。
+- **先读**:§10「P1 完成」「P2 完成」、§11 B L8、§5h/§5i/§5l、
+  `crates/acts/src/scheduler/durable/{document,envelope,snapshot_codec,document_store,async_document_store}.rs`、
+  `document_store.rs::build_{create,replace,outbox_confirm,reclaim}_transaction`、A11 的回收路径、现有 golden 测试。
+- 遵守 §11.C 门禁;动到 durable/store 面时跑 `-p acts` 全套 + `-p acts-store` 的 sled/sqlite/postgres;
+  不改 manifest 就不跑 `cargo deny`。
 - 探针与计时插桩不提交;生产代码与文档分开提交,提交前过 §11.C 门禁。
 ```
 
