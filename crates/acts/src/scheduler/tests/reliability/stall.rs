@@ -754,9 +754,10 @@ async fn a_cut_swept_across_a_completion_converges_at_every_write_boundary() {
 }
 
 /// The completion operation's own commits: the intent, the claim, and the effect
-/// (which closes the operation with it). Cutting the commit *after* them is the
-/// propagation's claim.
-const COMPLETION_COMMITS: usize = 3;
+/// (which closes the operation with it). The propagation the completion used to
+/// seed as a separate operation is folded into that effect commit (A3), so
+/// there is no fourth operation commit to cut.
+const COMPLETION_COMMITS: usize = 2;
 
 async fn cut_sweep_inner() {
     for refused_commit in 0..=COMPLETION_COMMITS {

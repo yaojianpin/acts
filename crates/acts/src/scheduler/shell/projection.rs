@@ -188,6 +188,23 @@ impl RowProjector {
         self.projected.lock().remove(&key);
     }
 
+    /// Drop every projection claim of one run so a settled snapshot may be
+    /// re-projected at the same version.
+    ///
+    /// The projection's writes go through the write-behind queue, so a failed
+    /// row write is only visible to the *next* projection at a newer version
+    /// (a failed row's claim would otherwise outlive it). A folded plan can be
+    /// the run's last commit — the propagation that used to re-project the row
+    /// is now in the same batch — and a terminal run has no newer version left
+    /// to heal it, so the caller clears the run's claims once and re-projects
+    /// the same terminal snapshot.
+    pub(crate) fn forget_run(&self, process_id: &str) {
+        let prefix = format!("{process_id}\u{1f}");
+        self.projected
+            .lock()
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
     fn store(&self) -> Arc<Store> {
         self.store.clone()
     }

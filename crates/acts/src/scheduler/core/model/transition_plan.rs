@@ -98,6 +98,16 @@ impl TransitionPlan {
             }
             if create.initial_state != TaskState::Created
                 && create.initial_state != TaskState::Ready
+                // A pure-internal cascade folded into the creator's own plan
+                // decides an execution the same batch creates (an unselected
+                // branch entering the skip cascade, an aborted running
+                // successor). The aggregate never observes the intermediate
+                // state the separate operation would have written, so the
+                // execution is born in the state the cascade decided.
+                && !matches!(
+                    create.initial_state,
+                    TaskState::Skipped | TaskState::Aborted
+                )
             {
                 return Err(PlanError::InvalidInitialState(
                     create.task.clone(),

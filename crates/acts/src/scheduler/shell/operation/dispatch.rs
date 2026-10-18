@@ -61,6 +61,34 @@ impl KernelHost {
         effect_started: bool,
     ) -> Result<()> {
         let id = &claimed.id;
+        // Fold every pure-internal hand-off this operation's plan created
+        // (`PropagateTask`/`SkipTask`/`AbortTask`/`ReenterTask`) into this same
+        // transition. A plan the fold cannot merge is committed as it is and
+        // leaves those operations durable for the ready queue, exactly as they
+        // were driven before the fold — an effect that already ran must never
+        // be made retryable because an internal cascade could not be planned.
+        let plan = if plan
+            .operations
+            .iter()
+            .any(|intent| super::fold::folds_into_plan(intent.kind))
+        {
+            match self
+                .fold_internal(&claimed.snapshot, plan.clone(), claimed.now_ms)
+                .await
+            {
+                Ok(folded) => folded,
+                Err(error) => {
+                    tracing::debug!(
+                        id = ?id,
+                        error = %error,
+                        "folding the plan's internal operations failed; leaving them durable"
+                    );
+                    plan
+                }
+            }
+        } else {
+            plan
+        };
         let phase = operation_trace::start();
         let (receipt, mut loaded) = match self
             .processes

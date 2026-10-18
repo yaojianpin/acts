@@ -44,10 +44,24 @@ impl ActionPlanner {
             .sequence
             .checked_add(1)
             .ok_or(CommandError::SequenceOverflow)?;
-        let operation_kind = if matches!(command.action, ActionKind::Back) {
-            OperationKind::ApplyAction
+        // A decision hands its propagation to the planner's pure hand-off,
+        // which the committing operation folds into its own transition. `Back`
+        // has nothing to propagate: it closes the source generation (`Backed`)
+        // and its re-entry is the `ReenterTask` the deciding call plans two
+        // sequences on (the slot the propagation hand-off would have taken is
+        // kept, so the rewind's outbox key does not move).
+        let operations = if matches!(command.action, ActionKind::Back) {
+            Vec::new()
         } else {
-            OperationKind::PropagateTask
+            vec![OperationIntent {
+                id: OperationId {
+                    process_id: command.process_id.clone(),
+                    task: command.task.clone(),
+                    sequence: next_sequence,
+                },
+                kind: OperationKind::PropagateTask,
+                ready_at_ms: None,
+            }]
         };
         let plan = TransitionPlan {
             process_id: command.process_id.clone(),
@@ -61,15 +75,7 @@ impl ActionPlanner {
             }],
             variable_writes: writes,
             source_operation: Some(command.source_operation.clone()),
-            operations: vec![OperationIntent {
-                id: OperationId {
-                    process_id: command.process_id.clone(),
-                    task: command.task.clone(),
-                    sequence: next_sequence,
-                },
-                kind: operation_kind,
-                ready_at_ms: None,
-            }],
+            operations,
             outbox: vec![OutboxIntent {
                 key: format!(
                     "action:{}:{}:{}:{}",

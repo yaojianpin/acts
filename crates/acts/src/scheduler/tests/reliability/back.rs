@@ -185,10 +185,11 @@ async fn has_unsettled_operation(engine: &Engine, pid: &str, tid: &str) -> bool 
         .any(|operation| operation.id.task.node.as_str() == node && !operation.is_terminal())
 }
 
-/// How many `ReenterTask` operations the aggregate holds for one node: the
-/// durable rewind a `Back` created. A re-applied `Back` would show up here as
-/// a second one.
-async fn rewind_operations(engine: &Engine, pid: &str, tid: &str) -> usize {
+/// Whether the aggregate still holds a pure-internal hand-off: the
+/// `PropagateTask`/`SkipTask`/`AbortTask`/`ReenterTask` operations A3 folds
+/// into the commit that produced them. A rewind's fresh generations are the
+/// durable proof; a surviving hand-off would be a second durable step.
+async fn pure_operations(engine: &Engine, pid: &str) -> usize {
     let snapshot = engine
         .runtime()
         .kernel()
@@ -196,12 +197,17 @@ async fn rewind_operations(engine: &Engine, pid: &str, tid: &str) -> usize {
         .await
         .unwrap()
         .expect("the aggregate exists");
-    let node = super::node_of(&snapshot, pid, tid);
     snapshot
         .operations
         .values()
         .filter(|operation| {
-            operation.kind == OperationKind::ReenterTask && operation.id.task.node.as_str() == node
+            matches!(
+                operation.kind,
+                OperationKind::PropagateTask
+                    | OperationKind::SkipTask
+                    | OperationKind::AbortTask
+                    | OperationKind::ReenterTask
+            )
         })
         .count()
 }
@@ -333,9 +339,9 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
         "the replayed back must close the waiting source generation Backed"
     );
     assert_eq!(
-        rewind_operations(&reloaded, &pid, "step2").await,
-        1,
-        "exactly one durable rewind, never a second"
+        pure_operations(&reloaded, &pid).await,
+        0,
+        "the rewind is folded into the deciding commit, never a second durable hand-off"
     );
     assert!(
         !has_unsettled_operation(&reloaded, &pid, "step2").await,
@@ -414,9 +420,9 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
         "a refused back must not rewind"
     );
     assert_eq!(
-        rewind_operations(&engine, &pid, "step2").await,
+        pure_operations(&engine, &pid).await,
         0,
-        "a refused back must not create a rewind"
+        "a refused back must not create a folded hand-off"
     );
 
     // the healed retry lands one rewind, observed on the redo's own `Created`
@@ -442,9 +448,9 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
         "the rewind's forward chain must be recreated exactly once"
     );
     assert_eq!(
-        rewind_operations(&engine, &pid, "step2").await,
-        1,
-        "one rewind operation, never a second"
+        pure_operations(&engine, &pid).await,
+        0,
+        "the rewind is folded into the healed deciding commit"
     );
 
     finish_by_hand(&engine, &pid).await;
@@ -535,9 +541,9 @@ async fn a_duplicate_back_is_refused_without_a_second_rewind_inner() {
         "the forward chain must be recreated exactly once"
     );
     assert_eq!(
-        rewind_operations(&engine, &pid, "step2").await,
-        1,
-        "the duplicate may not add a second rewind"
+        pure_operations(&engine, &pid).await,
+        0,
+        "the duplicate may not add a second concrete rewind"
     );
 
     finish_by_hand(&engine, &pid).await;
@@ -629,9 +635,9 @@ async fn back_racing_complete_converges_on_one_terminal_decision_inner() {
             "round {round}: the forward chain recreated iff the back won"
         );
         assert_eq!(
-            rewind_operations(&engine, &pid, "step2").await,
-            usize::from(rewound),
-            "round {round}: one rewind operation iff the back won"
+            pure_operations(&engine, &pid).await,
+            0,
+            "round {round}: a rewind is folded into its deciding commit, never a second hand-off"
         );
 
         finish_by_hand(&engine, &pid).await;

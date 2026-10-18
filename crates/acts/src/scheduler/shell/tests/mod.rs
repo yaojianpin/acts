@@ -79,6 +79,26 @@ async fn assert_all_terminal(host: &KernelHost, pid: &str) {
     }
 }
 
+/// No pure-internal hand-off survives a run: propagation, joins, the deadness
+/// cascade and a rewind are folded into the commit that decided them (A3), so
+/// the aggregate holds only the start, decision/effect and timer operations.
+fn assert_no_folded_operations(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+) {
+    for (id, record) in &snapshot.operations {
+        assert!(
+            matches!(
+                record.kind,
+                crate::scheduler::core::model::operation::OperationKind::ExecuteTask
+                    | crate::scheduler::core::model::operation::OperationKind::ApplyAction
+                    | crate::scheduler::core::model::operation::OperationKind::DispatchTimeout
+            ),
+            "operation {id:?} is a folded hand-off: {:?}",
+            record.kind
+        );
+    }
+}
+
 #[tokio::test]
 async fn linear_process_runs_to_completion_and_delivers_outbox() {
     let (host, mut wake_rx) = KernelHost::in_memory();
@@ -91,12 +111,18 @@ async fn linear_process_runs_to_completion_and_delivers_outbox() {
     let spec = ProcessSpec::linear("p1", "root", &["a", "b"]);
     host.start_process(&spec).await.unwrap();
     let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
-    // 3 nodes x (execute + action + propagate) hops, root included.
-    assert_eq!(report.executed, 9, "nine hops expected: {report:?}");
+    // 3 nodes x (start + completion) operations. The propagation each
+    // completion implies is folded into the completion's own commit, so the
+    // run no longer claims a third operation per node: one claim and one plan
+    // commit per surviving operation.
+    assert_eq!(report.executed, 6, "six hops expected: {report:?}");
     assert_eq!(report.retried, 0);
     assert_all_terminal(&host, "p1").await;
 
     let snapshot = host.snapshot("p1").await.unwrap().unwrap();
+    // No pure-internal operation survives the fold: the chain is the starts
+    // and completions only.
+    assert_no_folded_operations(&snapshot);
     // started x3 + completed x3 + propagated x3.
     assert_eq!(snapshot.outbox.len(), 9);
 
@@ -476,6 +502,112 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
     assert!(
         host.process_completed(PID).await.unwrap(),
         "the re-driven hop must settle the run"
+    );
+}
+
+/// A completion and the propagation it implies are one transition after A3:
+/// the successor's `Created → Ready`, its `ExecuteTask` and the `propagate:`
+/// record ride the completion's own commit. A lost compare-and-swap must
+/// therefore apply *nothing* of them — no half-admitted successor, no
+/// orphaned propagation record — and the effect-free completion goes back to
+/// the retry queue, exactly like the pre-fold conflict path.
+#[tokio::test]
+async fn a_folded_completion_loses_its_commit_without_splitting_the_propagation() {
+    const PID: &str = "p-fold-conflict";
+    let root = crate::scheduler::core::model::task_graph::TaskId::new("root", 0).unwrap();
+    let only = crate::scheduler::core::model::task_graph::TaskId::new("only", 0).unwrap();
+    let start = OperationId {
+        process_id: PID.into(),
+        task: root.clone(),
+        sequence: 0,
+    };
+    let completion = OperationId {
+        process_id: PID.into(),
+        task: root.clone(),
+        sequence: 1,
+    };
+    let stored = ConflictKv::new(PID);
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let spec = ProcessSpec::linear(PID, "root", &["only"]);
+    host.start_process(&spec).await.unwrap();
+    // The start commits normally and seeds the completion; the completion is
+    // the operation whose plan now also carries the propagation.
+    assert!(host.execute_one(&start).await.unwrap());
+    stored.arm(completion.clone());
+
+    let hop_host = host.clone();
+    let hop_operation = completion.clone();
+    let hop = tokio::spawn(async move { hop_host.execute_one(&hop_operation).await });
+    stored.wait_parked().await;
+    let current = host.snapshot(PID).await.unwrap().expect("aggregate exists");
+    let rival = TransitionPlan {
+        process_id: PID.into(),
+        expected: current.version.clone(),
+        task_creates: Vec::new(),
+        state_changes: Vec::new(),
+        variable_writes: vec![VariableWrite {
+            scope: root.clone(),
+            name: "rival.marker".into(),
+            value: "1".into(),
+        }],
+        source_operation: None,
+        operations: Vec::new(),
+        outbox: Vec::new(),
+    };
+    host.processes
+        .commit_transition(&rival, SystemClock.now_ms(), host.timer_poll_ms())
+        .await
+        .unwrap();
+    stored.release();
+    hop.await
+        .unwrap()
+        .expect_err("a lost compare-and-swap must surface as a conflict");
+
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            snapshot.operations[&completion].state,
+            OperationState::RetryScheduled { .. }
+        ),
+        "the effect-free completion hands its claim back: {:?}",
+        snapshot.operations[&completion].state
+    );
+    assert_eq!(
+        snapshot.tasks[&only].state,
+        crate::scheduler::core::model::task_graph::TaskState::Created,
+        "a lost commit may not half-admit the successor"
+    );
+    let propagate = format!("propagate:{PID}:root:0:");
+    assert_eq!(
+        snapshot
+            .outbox
+            .keys()
+            .filter(|id| id.key.starts_with(&propagate))
+            .count(),
+        0,
+        "a lost commit may not leave the propagation record either"
+    );
+
+    let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+    assert_eq!(
+        report.retried, 0,
+        "the released completion must claim cleanly on its next drive: {report:?}"
+    );
+    assert!(host.process_completed(PID).await.unwrap());
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    assert_eq!(
+        snapshot.tasks[&only].state,
+        crate::scheduler::core::model::task_graph::TaskState::Completed
+    );
+    assert_eq!(
+        snapshot
+            .outbox
+            .keys()
+            .filter(|id| id.key.starts_with(&propagate))
+            .count(),
+        1,
+        "the propagation lands exactly once on the retry"
     );
 }
 
@@ -1100,11 +1232,13 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
         host.start_process(&spec).await.unwrap();
     }
 
-    // The only slot is `cap-a`'s: four of its six hops run here (its fifth
-    // settles the run), and the two runs behind it never move.
-    let report = host.run_until_quiescent(&mut wake_rx, 4).await.unwrap();
+    // The only slot is `cap-a`'s: three of its four hops run here (the fourth
+    // settles the run), and the two runs behind it never move. The propagation
+    // is folded into each completion's commit, so a two-node run is four
+    // operations, not six.
+    let report = host.run_until_quiescent(&mut wake_rx, 3).await.unwrap();
     assert_eq!(
-        report.executed, 4,
+        report.executed, 3,
         "only the admitted run may hop: {report:?}"
     );
     assert_eq!(*started.lock(), vec!["cap-a".to_string()]);
@@ -1113,13 +1247,13 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
         assert_parked(&host, &store, pid).await;
     }
 
-    // The remaining hops of `cap-a` settle it; the freed slot admits `cap-b`,
+    // The remaining hop of `cap-a` settles it; the freed slot admits `cap-b`,
     // whose settlement admits `cap-c` — each one immediately, without waiting
     // for a tick.
     let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     assert_eq!(
-        report.executed, 14,
-        "two hops left of `cap-a` plus six each for the two admitted runs: {report:?}"
+        report.executed, 9,
+        "one hop left of `cap-a` plus four each for the two admitted runs: {report:?}"
     );
     assert_eq!(
         *started.lock(),
@@ -3800,6 +3934,7 @@ async fn kernel_catch_runs_the_selected_handler_on_error() {
     let kernel_engine = run_catch_engine(PID, Some("err1"), &workflow()).await;
     let host = kernel_engine.runtime().kernel().clone();
     let snapshot = wait_kernel_settled(&host, PID).await;
+    assert_no_folded_operations(&snapshot);
 
     // The `$ecode()`-selected handler subtree ran its msg step; the
     // unselected branch does not exist in this workflow.
@@ -4532,7 +4667,11 @@ async fn run_branched(workflow: &crate::model::Workflow, pid: &str) -> Snapshot 
     host.start_process(&spec).await.unwrap();
     let report = host.run_until_quiescent(&mut wake_rx, 500).await.unwrap();
     assert_eq!(report.retried, 0, "every hop must land: {report:?}");
-    host.snapshot(pid).await.unwrap().unwrap()
+    let snapshot = host.snapshot(pid).await.unwrap().unwrap();
+    // The fan-out's unselected branches, their cascade and the join are all
+    // in the commits that decided them; nothing internal is left to drive.
+    assert_no_folded_operations(&snapshot);
+    snapshot
 }
 
 /// A branch whose `if` holds runs its subtree; the `else` sibling is one
@@ -5345,12 +5484,11 @@ fn tasks_of(snapshot: &Snapshot, task: &str) -> Vec<u64> {
 }
 
 /// A rewind is part of the decision that asks for it: the `Cancel`'s own
-/// atomic commit closes the source generation, pins the target fact and
-/// creates the `ReenterTask` operation whose hop plans the fresh
-/// generations. Recovery alone drives that hop — the property that makes
-/// the rewind survive a lost compare-and-swap or a crash between the
-/// decision and the re-entry (the host used to plan it inline, after the
-/// commit, where both failures lost it).
+/// atomic commit closes the source generation, pins the target fact and — since
+/// A3 folds the pure `ReenterTask` hand-off — creates the fresh generations and
+/// their start operation in that same commit. Recovery alone no longer has to
+/// drive a second hop; a crash before the commit loses the whole decision, and
+/// a crash after it cannot lose the rewind.
 #[tokio::test]
 async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
     const PID: &str = "p-cancel-durable";
@@ -5381,17 +5519,15 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
     host.apply_action(PID, &tid_of(PID, "s1", 0), ActionKind::Cancel, Vec::new())
         .await
         .unwrap();
-    // Durable before any hop ran: the decision closed the source, pinned
-    // the rewind target and created the operation that plans it.
+    // Durable before any hop ran: the decision closed the source, pinned the
+    // rewind target and planned the re-entry inside its own commit.
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    let source = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     assert_eq!(
-        state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::task_graph::TaskState::Backed
+        snapshot.tasks[&source].state,
+        crate::scheduler::core::model::task_graph::TaskState::Backed,
+        "the deciding commit closes the source generation"
     );
-    let source = crate::scheduler::core::model::task_graph::TaskId {
-        node: crate::scheduler::core::model::model_graph::NodeId::parse("s1").unwrap(),
-        generation: 0,
-    };
     assert_eq!(
         snapshot
             .variables
@@ -5400,23 +5536,44 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
         Some("s1"),
         "the deciding commit pins the target the rewind re-enters"
     );
-    let rewind = snapshot
+    assert_eq!(
+        tasks_of(&snapshot, "s1"),
+        vec![0, 1],
+        "the deciding commit creates the re-entered generation"
+    );
+    assert_eq!(
+        state_of(&snapshot, "s1"),
+        crate::scheduler::core::model::task_graph::TaskState::Ready,
+        "the re-entered generation is ready for its start"
+    );
+    let rewind_start = snapshot
         .operations
         .iter()
-        .find(|(_, operation)| operation.kind == OperationKind::ReenterTask)
-        .map(|(id, operation)| (id.clone(), operation.state.clone()));
-    let (rewind_id, rewind_state) = rewind.expect("the deciding commit creates the rewind");
+        .find(|(id, _)| id.task.node.as_str() == "s1" && id.task.generation == 1)
+        .map(|(_, operation)| operation.kind);
+    assert_eq!(
+        rewind_start,
+        Some(OperationKind::ExecuteTask),
+        "the folded re-entry hands the new generation to the ordinary start"
+    );
     assert!(
-        matches!(
-            rewind_state,
-            crate::scheduler::core::model::operation::OperationState::Pending
-        ),
-        "the rewind starts pending: recovery owns it until it commits, got {rewind_state:?}"
+        !snapshot.operations.values().any(|operation| matches!(
+            operation.kind,
+            OperationKind::ReenterTask
+                | OperationKind::PropagateTask
+                | OperationKind::SkipTask
+                | OperationKind::AbortTask
+        )),
+        "no pure-internal operation may survive the deciding commit: {:?}",
+        snapshot
+            .operations
+            .values()
+            .map(|operation| operation.kind)
+            .collect::<Vec<_>>()
     );
 
-    // No wake survives from the deciding call: the rewind below is driven
-    // by the recovery scan, exactly like a rewind whose deciding call died
-    // before it could dispatch anything.
+    // No wake survives from the deciding call: the rewind's start is driven by
+    // the durable ready record, exactly like a run a crash left undecided.
     while wake_rx.try_recv().is_ok() {}
     host.tick(SystemClock.now_ms()).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
@@ -5432,18 +5589,15 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
         crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the redone step waits on its own act again"
     );
-    let rewind = snapshot
-        .operations
-        .get(&rewind_id)
-        .expect("the rewind exists");
     assert!(
-        matches!(
-            rewind.state,
-            crate::scheduler::core::model::operation::OperationState::Committed(_)
-                | crate::scheduler::core::model::operation::OperationState::Completed(_)
-        ),
-        "the rewind hop carried its own commit, got {:?}",
-        rewind.state
+        !snapshot.operations.values().any(|operation| matches!(
+            operation.kind,
+            OperationKind::ReenterTask
+                | OperationKind::PropagateTask
+                | OperationKind::SkipTask
+                | OperationKind::AbortTask
+        )),
+        "the rewind's start and completion are the only durable operations"
     );
 }
 

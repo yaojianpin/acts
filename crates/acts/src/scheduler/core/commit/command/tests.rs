@@ -115,8 +115,10 @@ fn back_closes_current_generation_without_reopening_it() {
     let plan =
         ActionPlanner::plan(&snapshot(TaskState::Waiting), &command(ActionKind::Back)).unwrap();
     assert_eq!(plan.state_changes[0].to, TaskState::Backed);
-    assert_eq!(plan.operations[0].kind, OperationKind::ApplyAction);
-    assert_eq!(plan.operations[0].id.task.generation, 2);
+    // The rewind is a pure hand-off the deciding operation folds into its own
+    // commit; a `Back` has no flow to propagate, so no follow-up operation is
+    // left in the ready queue.
+    assert!(plan.operations.is_empty());
 }
 
 #[test]

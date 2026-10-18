@@ -475,6 +475,12 @@ fn resume_operation(
     }
 }
 
+/// Whether every execution of the run settled. A settled run has no later
+/// commit to re-derive a row a failed write left behind.
+fn all_terminal(snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot) -> bool {
+    !snapshot.tasks.is_empty() && snapshot.tasks.values().all(|task| task.state.is_terminal())
+}
+
 /// The default outbox transport: it logs each record and confirms it — what a
 /// host with nothing attached (the kernel's own tests, and any embedder that
 /// only wants the durable aggregate) does. The serving host replaces it with
@@ -645,6 +651,22 @@ impl KernelHost {
             return;
         };
         if let Err(error) = projector.project(snapshot).await {
+            if all_terminal(snapshot) {
+                // The run's last commit is also its last chance to derive the
+                // rows: the write-behind failure a flush reports is only
+                // visible to a later projection, and a terminal run has no
+                // later commit. Clear this run's claims and re-derive the same
+                // snapshot once.
+                projector.forget_run(&snapshot.process_id);
+                if let Err(retry) = projector.project(snapshot).await {
+                    tracing::warn!(
+                        pid = %snapshot.process_id,
+                        error = %retry,
+                        "settled row projection repair failed; the sweeper retries the proc row"
+                    );
+                }
+                return;
+            }
             tracing::warn!(
                 pid = %snapshot.process_id,
                 error = %error,
@@ -665,6 +687,17 @@ impl KernelHost {
             return;
         };
         if let Err(error) = projector.project_nodes(snapshot, Some(touched)).await {
+            if all_terminal(snapshot) {
+                projector.forget_run(&snapshot.process_id);
+                if let Err(retry) = projector.project(snapshot).await {
+                    tracing::warn!(
+                        pid = %snapshot.process_id,
+                        error = %retry,
+                        "settled row projection repair failed; the sweeper retries the proc row"
+                    );
+                }
+                return;
+            }
             tracing::warn!(
                 pid = %snapshot.process_id,
                 error = %error,

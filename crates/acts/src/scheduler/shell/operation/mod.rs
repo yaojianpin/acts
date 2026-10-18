@@ -30,6 +30,7 @@
 mod action;
 mod cascade;
 mod dispatch;
+mod fold;
 mod prepare;
 mod propagate;
 mod reentry;
