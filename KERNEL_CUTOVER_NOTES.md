@@ -3166,6 +3166,106 @@ cargo fmt --all --check -> OK
   第二个 key,并在 observation 证明 not-applied 时才自动重试。
 - `EffectUnknown`/`Quarantined` 的 run 仍永久保留(直到人工 resolve),A11 回收条件未变。
 
+### A3 完成(2026-10-18):纯内部 operation 折叠进产生它们的 plan
+
+**任务**:§11 D 的 A3(P1)。A1a/A1c 已给出 effect 边界与 `EffectUnknown` 语义,A2 已把正常活性移到 durable
+ready queue,A11 已给出回收边界。本笔只处理一个缺口:线性链为纯内部传播、join、branch 选择与终态推导
+单独创建 durable operation,把一次可由产生者一次算完的 transition 放大成
+“创建 -> 提交 -> wake -> 出队 -> claim -> load -> plan -> commit -> close”。
+
+**事实与契约**
+
+- 旧链(线性 3 节点 = 9 个 operation):每个节点 `ExecuteTask`(seq n)提交后创建 `ApplyAction`(seq n+1);
+  `ApplyAction` 的完成计划(或客户端动作的 `ActionPlanner`)创建 `PropagateTask`(seq n+2);`PropagateTask`
+  再写后继 `Created -> Ready` + `ExecuteTask`,并顺带算 join/catch-join、upward walk 与终态。fan-out 的
+  未选中分支创建 `SkipTask`,死源传播可再创建 `SkipTask`/`AbortTask`,`Cancel`/`Back` 创建 `ReenterTask`。
+  这些 operation 的 phase 2 都只是 snapshot 本身(`Outcome::Planned`),工作全在 phase 3 的计划里。
+- `TransitionPlan` 已能在一个 commit 里携带 `task_creates`/`state_changes`/`variable_writes`/`operations`/
+  `outbox`/`source_operation`;commit 在同一 atomic batch 里关闭 source operation,并写后继 ready 记录。
+  所以折叠不需要新持久化语义,只需要一个**带 pending delta 的读取视图**来跑那些纯计划。
+- 保留的 durable 边界:`ExecuteTask`(guard/package 解析/新 execution 的开始)、`ApplyAction`(客户端决策
+  的 replay 或包 effect)、`DispatchTimeout`(时钟等待)。`EffectKey` 仍由承载 effect 的 `ApplyAction`
+  operation 身份派生,本笔未动。`ApplyAction` 仍是 start→completion/decision 的 durable 单位,包括
+  package-less 节点;本笔删除的只是纯 hand-off,不是这个边界。
+- 身份/消息契约:`PropagateTask`/`SkipTask`/`AbortTask`/`ReenterTask` 只作为 scratch 里的占位记录保留,
+  因此 `next_operation_sequence`、折叠计划新建的 operation id、`propagate:`/`skipped:`/`reenter:`
+  outbox key 与旧的分次提交逐字一致。最终 aggregate 不落这些 operation 记录;outbox topic/payload/相对
+  顺序不变。`Back` 原本由 `ActionPlanner` 创建的 +1 空 `ApplyAction`(没有 action fact,只写一条空
+  `completed:` 标记)不再创建;`ReenterTask` 仍在 source+2,rewind 的 key 不变。
+- `TaskCreate` 现在允许终态初值(`Skipped`/`Aborted`):同一批创建、又被折叠级联决定的分支在执行出生时
+  就是级联状态,aggregate 不观察中间态,commit 也不再收到“对同批创建的任务做 state change”的非法计划。
+
+**实现**(`shell/operation/fold.rs`,`dispatch` 在 commit 前调用)
+
+- **快速路径**:计划里没有纯 hand-off 时不复制 snapshot、不进入 fold(启动、包 effect、timer round 的
+  常见计划都走这里)。
+- **scratch**:复制 claim 时的 snapshot,应用本计划的 creates/state changes/variable writes/operation
+  占位;之后每个折叠计划先应用到 scratch,再合并进最终计划。revision 与 process counters 不推进,生成的
+  state change 仍以 claim 前 revision 为 `expected_revision`。
+- **工作队列**:按 `plan.operations` 顺序 FIFO;每个纯 intent 用其自身身份(合成 claim,只为 outbox key)
+  调用现有 driver 的 `next(Outcome::Planned)`;它新产生的纯 intent 入队,边界 intent 留在最终计划。
+  重复 intent 同 kind 幂等跳过,不同 kind 报错。
+- **合并**:对同批创建任务的终态决定改写 `TaskCreate.initial_state`,并丢弃该任务已排队的 start;重复
+  state change/variable write 按“后写胜”合并;outbox 追加。合并后 `validate()` 一次。
+- **失败原子性**:fold 任一步计划失败时,`dispatch` 提交**原计划**,纯 operation 仍按旧路径落盘并由
+  ready queue 驱动 —— 已执行的 effect 不会因为一个内部级联算不出来而被标成可重试;effect-free 的 CAS
+  失败仍走 A1a 的释放/重规划。
+- **旧库**:四个 kind 的持久化词汇与 driver 都保留。旧 aggregate 里 pending 的纯 operation 仍能被驱动;
+  它新产生的 hand-off 在 `dispatch` 里折叠。
+- **终态行修复**:fold 后的决策提交可能是 run 的最后一笔,旧链里“下一笔 propagation 提交”对写失败行的
+  自然重投影没有了。`project`/`project_touched` 在 snapshot 全部终态且投影报错时,清掉该 run 的投影
+  claims(`RowProjector::forget_run`)并重投影同一终态 snapshot 一次。这是重试,不是 A5 的版本协议。
+
+**测试**
+
+- `linear_process_runs_to_completion_and_delivers_outbox`:3 节点 `report.executed` 从 **9 → 6**
+  (每节点 start + completion),outbox 仍 9 条,aggregate 无任何纯 kind;`assert_no_folded_operations`
+  同时用于 branch 套件、catch 套件和 linear。
+- 新增 `a_folded_completion_loses_its_commit_without_splitting_the_propagation`:完成计划带着后继
+  `Created -> Ready` + `ExecuteTask` + `propagate:` 记录一起丢失 CAS ⇒ 后继仍 `Created`、无
+  `propagate:` 记录、completion `RetryScheduled`;重驱动后一次落齐。
+- `a_cancel_carries_its_rewind_in_the_deciding_commit` 改为断言 rewind 的新 generation、其 `ExecuteTask`
+  与 target fact **都在决策提交里**(不再有 pending `ReenterTask`);reliability/back 的四条 cell 改为断言
+  零纯 operation,仍以 generation 数守住“恰好一次”;stall 的 completion cut sweep 从 0..=3 收为 0..=2。
+- 既有 branch/join/catch/next/terminal 行为用例全部保持;A1a/A1b/A1c/outbox/reliability/A11 套件绿。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 911 passed, 0 failed, 1 ignored (292.12s, final)
+cargo test -p acts --lib a_folded_completion_loses_its_commit_without_splitting_the_propagation -> 1 passed
+cargo test -p acts --lib scheduler::tests::reliability::back:: -> 4 passed
+cargo test -p acts --lib branched_step -> 4 passed
+cargo test -p acts --lib kernel_catch_ -> 3 passed
+cargo test -p acts --lib a_cancel_carries_its_rewind_in_the_deciding_commit -> 1 passed
+cargo test -p acts --lib a_run_beyond_the_cache_cap_parks_until_a_slot_frees -> 1 passed
+cargo test -p acts --lib a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweeps -> 1 passed
+cargo test -p acts --lib a_failed_projection_keeps_the_decision_and_never_resurrects_the_act -> 1 passed
+cargo test -p acts --lib a_cut_swept_across_a_completion_converges_at_every_write_boundary -> 1 passed
+cargo test -p acts --lib one_operation_confirms_all_its_records_in_one_commit -> 1 passed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all --check -> OK
+```
+
+门禁外:`acts-acl`、`acts-expr --all-features`、`acts-cli`、`acts-channel`、`acts-store --features sled,sqlite`、
+`acts-package-http/state/javascript` 绿;`acts-package-shell` 除 A2 已登记的
+`the_inputs_of_the_act_embed_in_the_script`(`$inputs().data` 为 null,base 同样失败)外绿。
+`acts-server` 仍因链接期 `os error 1455`(页面文件不足)无法
+编译,同 A2 登记。`acts-plugin-grpc`/`acts-plugin-web` 各有两个 slow-subscriber cell 超时;已在 base
+`683f282` 的干净 worktree 上复现同样失败,与本笔无关,按已知非本笔登记。`acts-channel` 的 NATS 套件、
+`acts-store --features postgres`、`acts-plugin-nats`/`acts-package-nats` 需要本机未启动的
+NATS(4222)/Postgres(5433),未运行。
+
+**边界/剩余**
+
+- 折叠把纯 operation 的 outbox 记录移进产生它们的提交;内部记录(`propagate`/`skipped`/`reenter`/`fanout`)
+  不映射成外部 `Message`,外部消息的集合、topic、payload 与提交内相对顺序不变。join/终态完成消息随触发它
+  的提交一起落盘,不再晚一个 operation;最终行/生命周期事件由既有 golden 用例逐字钉住。
+- 本笔不做 A4 的 per-pid command lane、不做 A5 的 projection 版本协议;`forget_run` 的重投影只用于
+  已终态 snapshot,不改变 A5 的“旧投影不能覆盖新投影”缺口定义。
+- 保持 A11 回收判定不变:折叠不产生额外 non-terminal operation,也不把 `EffectUnknown`/`Quarantined`
+  变成可自动推进。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3184,8 +3284,8 @@ cargo fmt --all --check -> OK
 > **2026-10-17 用户裁决(架构优先)**:在第一波之后、第二波之前插入**第三波 = A1→A11 架构修正**。
 > A1a 已完成;A2(durable ready queue)已完成(§10);A11(终态回收 + PID 复用)已完成(§10);
 > A1b(提交后发送 + 每 operation 一笔批量确认)已完成(§10「A1b 完成」);
-> A1c(effect 幂等协议)已完成(§10「A1c 完成」)。
-> **当前执行项是 A3(折叠纯内部 hop;§11 D 标 P1)**,其后 A4 → A5 → A6 → A7/A8/A9/A10。
+> A1c(effect 幂等协议)已完成(§10「A1c 完成」);A3(折叠纯内部 hop)已完成(§10「A3 完成」)。
+> **当前执行项是 A4(每 Process 单写者 command lane;§11 D)**,其后 A5 → A6 → A7/A8/A9/A10。
 > 第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
@@ -3276,7 +3376,7 @@ cargo fmt --all --check -> OK
 | **A1b** | outbox 提交后发送:plan 先写 `Pending`;**批量确认本 operation 的新记录**(或把 outbox 状态移出 aggregate);投影先于外部消息;删除前置直发快路径。**per-record claim/confirm 变体已回退,不得原样重试** | #2 | **P0** | A1a;批量确认设计 | **已做(§10「A1b 完成」)**。验收:消息不在 aggregate commit 前可见;每 operation 最多一笔确认提交;loop/吞吐不退化;at-least-once 不变。正常路径 `deliver_committed_outbox` + `confirm_outbox_batch`;retry pass 仍 per-record |
 | **A1c** | effect 幂等协议:稳定 idempotency key + 可查询 observation;非幂等 effect 只走 manual reconciliation;补齐人工处理闭环 | #2 | P1 | A1b(批量) | **已做(§10「A1c 完成」)**。验收:`EffectKey` 由 operation 身份纯函数派生(重规划/重试/重启不变);`EffectRunner::observe` 的 `Applied`/`Failed` 直接重放、`NotApplied`+幂等声明才重新入队、其余人工;`Engine::effect_unknowns`/`resolve_effect` 提供可持久化的人工闭环;恢复不重复调用 effect |
 | **A2** | durable ready queue:业务提交内写 ready 索引;`try_send` 只做加速;driver 从 ready 取到期操作;recovery 只做异常兜底;修 recovery 分页每页全扫的 $O(N^2)$ | #1 | **P0** | —(与 A1b 的 store schema 改动需协调) | **已做(§10「A2 完成」)**。验收:队列满不导致下一跳等 tick;recovery 扫描量与异常操作数相关;idle timer/parked run 不进热 ready 集合;冷启动/缺 ready 记录可从 aggregate 修复 |
-| **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | 未做。验收:线性 3 节点不再产生 9 次 claim/commit;行为、消息、行投影逐字不变 |
+| **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | **已做(§10「A3 完成」)**。验收:线性 3 节点 claim/commit 从 9 降到 6(`ExecuteTask` + `ApplyAction`,无纯 hand-off 落盘);branch/join/catch/next/终态与 skip/abort 级联、rewind 都在产生者提交内折叠;行为、消息、行投影、lifecycle 不变;fold 失败回退原计划,effect/CAS 语义不退 |
 | **A4** | 每 Process 单写者 command lane:正常/客户端动作/恢复 command 串行决定状态;effect 可并发;observation 回 lane;CAS 只做恢复/fencing | #4 | P1 | A2 | 未做。验收:同一 pid 无并行 plan 竞争;正常路径不触发 `ACTION_ATTEMPTS`;不同 pid 仍并行 |
 | **A5** | projection 正式协议:每行持久化 `source_aggregate_revision`;store-level 条件写;启动增量补投影;repair queue;API lag/强读 aggregate;lifecycle 后置或显式契约 | #5 | P1 | — | 未做。验收:旧投影不能覆盖新投影;重启不丢版本;消息/完成事件消费者能看到对应行 |
 | **A6** | Shell 变薄:Core 输出完整 `Decision`(aggregate changes/operations/effect intents/outbox/timers/process status/admission directives);Shell 只做 IO/commit/execute | #6 | P1 | A3/A4/A5 | 未做。验收:settle/lifecycle/admission 规则进入 Core 或 policy;新增 operation 不再改四处 |
@@ -3307,85 +3407,74 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A3 —— 折叠纯内部 hop(§11 D,P1)
+# 当前任务:A4 —— 每 Process 单写者 command lane(§11 D,P1)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A3 行、§10「A1a 完成」「A2 完成」「A11 完成」
-「A1b 完成」「A1c 完成」;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A3。A1c 已给出稳定 effect key、
-executor observation 与人工闭环;A2 已把正常活性移到 durable ready queue;A11 已给出 operation
-retire/回收边界。当前缺口:线性 3 节点流程产生 9 个 operation(每节点 `ExecuteTask + ApplyAction +
-PropagateTask`),每个 operation 独立 claim/commit,纯内部传播、join、branch 选择、终态推导被放大成
-“创建 -> 提交 -> wake -> 出队 -> claim -> load -> plan -> commit -> close”。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A4 行、§10「A1a 完成」「A1c 完成」「A2 完成」
+「A3 完成」「A11 完成」;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A4。当前缺口:driver 的 `serve` 串行执行
+ready operation,但 `apply_action` 在客户端任务上并发提交;同一 aggregate 的 client action 之间、以及与
+driver/恢复之间靠 revision/CAS + `ACTION_ATTEMPTS=8` 重规划。A1a 只保证 effect 后冲突不再自动重试,
+A1c 只把已执行 effect 的冲突落到人工/observation;正常路径仍可能两个 plan 基于同一 revision 竞争,
+`ACTION_ATTEMPTS` 仍可能触发,effect 已执行而提交冲突的窗口仍存在。
 
-**目标**:Planner 在一次调用中运行到**下一个外部边界**;以下不创建独立 durable operation:
-branch/if 选择、内部变量变换、next 计算、join/catch-join 计算、终态推导;纯传播、纯级联
-(skip/abort 的后续传播)在完成/失败的同一提交内折叠。保留 durable operation 的边界:external
-action、timer、message、subflow、human task、跨进程 command、不能原子化的 effect。
-`ApplyAction` 只在承载外部 effect 时保留;没有 effect 的 client decision 可与后续内部传播合并。
-代码量不是目标:少一次 claim/commit 与少一次 load/plan 才是。
+**目标**:每个 pid 一个 command lane。正常 operation、client action、recovery command 都作为 command
+进入该 lane;lane 串行决定状态变更。外部 effect 可并发执行,executor observation 再入 lane。revision/CAS
+保留,但只用于崩溃恢复、lease 接管与跨实例 fencing,不再是正常并发控制的主要手段。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 先画清一条线性流程当前的 operation 链:谁创建下一个 operation、`TransitionPlan` 在一次
-     commit 里能携带什么(`task_creates`/`state_changes`/`variable_writes`/`operations`/`outbox`/
-     `source_operation`)、`dispatch` 的投影/投递/唤醒顺序、ready 记录与 recovery 的分工。
-   - 找出真正的外部边界:effect(`EffectRunner`)、timer(`DispatchTimeout`)、message/IRQ、
-     subflow/trigger、client action 的 durable intent、跨 pid 命令、A1c 的 `EffectUnknown` 语义。
-     这些边界仍必须是独立 operation。
-   - 明确身份/消息契约:折叠不得改变 `OperationId` 的 pid/node/generation/sequence 规则,
-     不得改变 effect key(A1c 的 `EffectKey` 必须继续由承载 effect 的那个 operation 派生);
-     不得改变 outbox key/topic/payload、lifecycle 事件、行投影的字段与顺序。
-2. **折叠**
-   - 把 `PropagateTask`/`SkipTask`/`AbortTask`/`ReenterTask` 这类纯内部 operation 的工作移入产生
-     它们的那个 plan:一次 plan 直接写后继 `Created -> Ready`、`ExecuteTask`、join 判定、终态与
-     必要的 outbox,而不是先落一个 propagation operation 再 claim 它。
-   - branch/if、join/catch-join、next/终态推导在 planner 内一次算完;只有任务真正要跨外部边界
-     时才产生新的 durable operation。
-   - 无 external effect 的 client decision 可以在同一提交里折叠其后的内部传播;有 effect 的
-     仍走 `ApplyAction`(effect 前 `ClaimAndPrepare`、effect 后同一提交关闭 operation)。
-   - 折叠后每个被关闭的 operation 仍在同一 atomic batch 里带 `source_operation`;失败不得留下
-     半折叠状态。CAS 丢失的 effect-free 重试路径保持 A1a 的语义。
-3. **恢复/活性**
-   - ready 记录仍由产生操作的同一提交写入;不得靠 tick 补齐正常路径。
-   - recovery 只处理异常;折叠不得把 `EffectUnknown`/`Quarantined` 变成可自动推进。
-   - A11 的回收判定(`Pending`/`RetryScheduled`/`Claimed`/`CommitPrepared`/`Committed`/
-     `EffectUnknown`/`Quarantined` 任一存在不可回收)不得放宽。
-4. **测试**
-   - 线性 3 节点不再产生 9 次 claim/commit:用 store 计数或 operation 数为断言,证明
-     `ExecuteTask`/`PropagateTask` 的 claim 次数下降;行为、消息、行投影逐字不变(既有 golden/
-     reliability 用例)。
-   - branch/join/catch/next/terminal 的折叠路径各有一条行为回归;失败原子性(effect 后丢失 CAS、
-     折叠 plan 冲突)与恢复语义不退。
-   - A1a/A1b/A1c/outbox/reliability/A11 套件保持绿。
+   - 画清现有并发路径:driver(`serve`/`drive_ready`/`execute_one`)、client(`apply_action`/
+     `resume_action_intent`/`ACTION_ATTEMPTS` 循环)、recovery(`recover`/`reclaim`/`converge_observed_effect`/
+     `retry_unknown_effect`/`resolve_effect`)、cleanup(`lock_lifecycle`)的写入顺序与锁。
+   - 明确 command 的边界:claim/prepare/plan/commit 在 lane 内;effect(`EffectRunner::run`)在 lane 外;
+     `EffectRunner::observe`/人工 resolve 以 command 回到 lane。A1a 的 `EffectUnknown`、A1c 的 effect key/
+     observation、A1b 的提交后发送/批量确认、A2 的 ready 记录、A3 的折叠计划、A11 的回收判定不得改语义。
+   - 明确锁/身份:lane 按 pid;不同 pid 并行;lane 不能跨 await 持有 effect(否则 effect 被串行化);
+     lane 与 A11 的 lifecycle/projection 锁必须有固定顺序、无死锁;revision/CAS 仍守住跨实例与恢复。
+2. **lane**
+   - 为每个 pid 实现单写者 command lane(进程内 actor/串行队列或 per-pid async mutex,按现有结构选最小实现);
+     正常 operation 的 claim→plan→commit、client action 的 intent→claim→plan→commit、recovery 的
+     reclaim/finalize/converge 都经 lane。
+   - effect 前释放 lane:claim 之后、`run` 之前;effect 完成后以 observation/结果重新入 lane 做 next+commit。
+     effect 期间若 lane 被其他 command 推进,CAS 冲突按 A1a/A1c 分类,不得重跑 effect。
+   - `ACTION_ATTEMPTS` 循环在正常路径不再触发;保留为恢复/冲突兜底并加断言/指标。
+3. **测试**
+   - 同一 pid 并发 client actions(Complete/Cancel/Back/Fail)与 driver 同跑:恰好一个决策提交,loser
+     被明确拒绝;无两个 plan 基于同一 revision 竞争(用 CAS 冲突计数或 instrumented store 断言)。
+   - 不同 pid 的 operation/effect 仍并行(lane 不全局串行;effect 不被 lane 串行)。
+   - effect 后冲突按 A1a/A1c 语义:`EffectUnknown`/observation 收敛不回归;人工 resolve 经 lane 生效。
+   - A1a/A1b/A1c/A2/A3/A11/outbox/reliability 套件绿。
+4. **恢复/活性**
+   - lane 是进程内正常并发控制;崩溃/重启/租约过期仍由 recovery 以 CAS 接管;
+   - lane 不得成为回收/清理的死锁源;A11 的 PID 复用与 lifecycle 锁顺序保持;
+   - 不建议靠缩短 tick 或更多 recovery 扫描规避 lane 排队。
 
 **边界**
 
-- 不做 A4 的 per-pid command lane,不做 A5 的 projection 版本协议;不改 channel ack/delivery 行语义。
-- 不改消息 payload/topic、outbox 顺序与 A1b 的提交后发送/批量确认。
-- 不缩短 tick;不把活性转嫁给更频繁的 recovery 扫描。
-- 不引入新的持久化格式;不动 `EffectKey` 的派生规则。
-- 保持 `EffectUnknown -> ManualReconciliation` 的人工闭环与 A1c 的 observation 自动收敛。
+- 不做 A5 的 projection 版本协议、不做 A6 的 Core Decision、不做 A7 的 Recovery Unified Command;
+- 不改 channel ack/delivery 行语义、消息 payload/topic、A1b 的提交后发送/批量确认;
+- 不引入新的持久化格式;不改 `EffectKey` 派生;不缩短 tick;不把活性转嫁 recovery 扫描;
+- 保持 `EffectUnknown -> ManualReconciliation` 与 A1c 的 observation 自动收敛。
 
 **验收**
 
-- 线性 3 节点的 claim/commit 次数显著下降(不再 9 次),operation 链不再为纯内部传播单独落盘;
-- 行为、消息、行投影、lifecycle 逐字不变;失败原子性与恢复语义不退;
+- 同一 pid 不再有两个 plan 同时基于同一 revision 竞争;`ACTION_ATTEMPTS` 在正常路径不触发;
+- 不同 pid 仍并行;effect 执行不被 lane 串行化;effect 后冲突/恢复语义不退;
 - `cargo test -p acts --lib --tests` 与 reliability/effect/outbox/A11 套件绿;
-- 写 §10「A3 完成」,§11 D 状态更新,§12 原地指向下一项(A4)。
+- 写 §10「A4 完成」,§11 D 状态更新,§12 原地指向下一项(A5)。
 
 # 限制与约束
 
-- **先读**:§11 D、§10「A1a 完成」「A1b 完成」「A1c 完成」「A2 完成」「A11 完成」、设计 §3.10 A3、
-  `shell/operation/{mod,task,propagate,cascade,action,dispatch,prepare}.rs`、
-  `core/model/transition_plan.rs`、`core/commit/aggregate/commit.rs`、
-  `core/plan/**`(`propagation`/`container`/`generation`/`branch`/`timeout`)、
-  `core/ready.rs`、`shell/tests/mod.rs` 的 operation 链/冲突用例。
+- **先读**:§11 D、§10「A1a 完成」「A1c 完成」「A2 完成」「A3 完成」「A11 完成」、设计 §3.10 A4、
+  `shell/mod.rs`(`serve`/`drive_ready`/`apply_action`/`resume_action_intent`/`recover`)、
+  `shell/operation/{mod,dispatch,prepare}.rs`、`core/commit/{aggregate,command}/**`、`core/ready.rs`、
+  `shell/tests/mod.rs` 的 conflict/concurrency 用例、`scheduler/tests/reliability/{action,cancel,back,next}.rs`。
 - 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-纯内部 operation 折叠进产生它们的 plan + claim/commit 计数断言 + 行为/消息/投影不变回归
+per-pid command lane + CAS 冲突/`ACTION_ATTEMPTS` 断言 + 跨 pid 并行与 effect 并发回归
 → 更新 §10/§11/§12。
 ```
 

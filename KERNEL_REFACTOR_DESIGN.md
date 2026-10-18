@@ -531,6 +531,15 @@ parked run 由 driver 在准入检查失败后把 ready 记录推迟一个 poll�
 
 **验收**:线性 3 节点不再产生 9 次 claim/commit;现有行为、消息、行投影逐字不变;失败原子性与恢复语义不退。
 
+**落地(2026-10-18,详见 notes §10「A3 完成」)**:新增 `shell/operation/fold.rs`;`dispatch` 在 plan
+commit 前把 `PropagateTask`/`SkipTask`/`AbortTask`/`ReenterTask` 在 FIFO 中逐个重规划到同一
+`TransitionPlan`。折叠以 claim 时 snapshot + pending delta 的 scratch 读取,纯 intent 仍作为 scratch
+占位保留,所以 `next_operation_sequence`、新建 operation id 与 `propagate:`/`skipped:`/`reenter:`
+outbox key 不变。同批创建又被级联决定的分支直接以终态出生。`ExecuteTask`/`ApplyAction`/
+`DispatchTimeout` 仍是 durable 边界;`EffectKey`、A1b 提交后发送、A2 ready 记录与 A11 回收判定未动。
+折叠任一步无法计划时回退为原计划(纯 operation 仍可 durable 驱动),effect 后的失败分类不变。
+线性 3 节点由 9 个 operation 降为 6 个(start + completion)。
+
 #### A4 — 每 Process 单写者 command lane
 
 **现状**:driver 的 `serve` 串行执行 operation,但客户端动作路径在独立任务上并发提交;同一 aggregate 的
