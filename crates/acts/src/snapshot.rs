@@ -2,33 +2,42 @@
 //!
 //! External systems feed versioned key-value snapshots into the engine
 //! through [`SnapshotManager`] (the write path: a gRPC/NATS/Kafka adapter,
-//! or an embedder calling `engine.snapshot()` directly). At each task's
-//! prepare the scheduler reads the local snapshot for the task's scope and
-//! seals it — `resolve` never performs network I/O, so remote latency and
-//! outages stay out of the scheduling hot path.
+//! or an embedder calling `engine.snapshot()` directly). At each effect
+//! prepare the scheduler reads the local snapshot for the acting
+//! execution's scope and seals it — `resolve` never performs network I/O,
+//! so remote latency and outages stay out of the scheduling hot path.
 //!
 //! Feeds stamp a monotonic `rev` per scope. `upsert` applies a value only
 //! when its revision is newer than the cached one, so a delayed retry, an
 //! out-of-order bus delivery, or a race between two feeds can never roll a
 //! scope back to an older value.
 //!
-//! Two policies control *when* the cache value is frozen into a task's
-//! sealed data:
+//! Two policies keep the legacy vocabulary for *when* the cache value is
+//! resolved. In the kernel both resolve at each effect prepare: each effect
+//! builds a fresh headless scope, so a value is never carried from one
+//! prepare to the next (see [`SnapshotPolicy`]).
 //!
-//! - [`SnapshotPolicy::PerProc`] (default): seal once per task lineage — the
-//!   first task whose ancestor chain has no sealed value resolves, later
-//!   tasks inherit the pinned value. A retried task keeps its first value.
-//!   Use when the scope is fixed for the whole process (tenant, env, …).
-//! - [`SnapshotPolicy::PerTask`]: every task re-reads the cache at its own
-//!   prepare, so each new task sees the latest value. A retried task still
-//!   keeps the value it first sealed (determinism across replay). Use when
-//!   the scope varies inside one process (project/unit per step) or a step
-//!   must observe recent external changes.
+//! ## Sealed values are per effect, not durable run state
 //!
-//! Snapshots are in-memory only. Per-process pinned values are durable via
-//! the task's sealed vars row; durability of the snapshot itself comes from
-//! the message bus (compacted topic / JetStream / watch) that rebuilds this
-//! cache after a restart.
+//! Sealing is the effect seam's authorization and data-resolution step, not
+//! a recoverable part of a run. The value lives only in the headless
+//! `ScopeTask` of that evaluation:
+//!
+//! - The aggregate (`ProcessSnapshot`) carries no sealed area, and the
+//!   projected `TaskVars` row keeps its fixed shape with an empty `sealed`
+//!   field. `proc:get` has no sealed column and answers only the task's
+//!   `data`.
+//! - A restarted or resumed run does not rebuild the sealed values an
+//!   earlier effect saw. The next effect resolves from the snapshot cache as
+//!   rebuilt by the feeds; outputs and params an effect already committed
+//!   are in the aggregate and are never sealed again.
+//! - Branch predicates evaluate without `Context::prepare`, so a
+//!   `$target.key` read there resolves to nothing; only the effect seam
+//!   seals.
+//!
+//! Snapshots are in-memory only. Durability of the cache comes from the
+//! message bus (compacted topic / JetStream / watch) that rebuilds it after
+//! a restart — never from the sealed vars row.
 //!
 //! Caches stay bounded by configuration: feeds should `remove()` a scope
 //! when the source deletes it (tombstone), and [`SnapshotOptions::ttl_secs`]
@@ -45,15 +54,22 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// When a snapshot value is frozen into the task's sealed data.
+/// When a snapshot value is resolved into the preparing scope.
+///
+/// The kernel's effect seam prepares a fresh headless scope per effect, so
+/// both variants are observably "resolve once at this prepare": a value is
+/// not pinned across effects, retries or a restart. The names remain for
+/// configuration compatibility; see the [module docs](self) for why sealed
+/// data is not durable run state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotPolicy {
-    /// Seal once per task lineage (first resolver run); descendants inherit
-    /// the pinned value — frozen for the whole process.
+    /// The legacy "seal once per task lineage" policy. A headless effect
+    /// scope has no durable lineage, so it resolves once for that effect's
+    /// prepare — the same observable rule as [`SnapshotPolicy::PerTask`].
     #[default]
     PerProc,
-    /// Every task reads the latest cache value at its own prepare.
+    /// Resolve the latest cache value at this prepare (one per effect).
     PerTask,
 }
 
@@ -67,6 +83,8 @@ pub const MAX_TTL_SECS: u64 = i64::MAX as u64 / 1000;
 /// Registration options of a snapshot-backed sealed-data target.
 #[derive(Debug, Clone)]
 pub struct SnapshotOptions {
+    /// When a value is resolved. Both variants resolve at each effect
+    /// prepare in the kernel; see [`SnapshotPolicy`].
     pub policy: SnapshotPolicy,
     /// Task param names whose values join with `/` into this target's scope
     /// key. Empty: one global scope per target.
@@ -265,8 +283,9 @@ fn is_expired_at(ttl_ms: u64, timestamp: i64, now: i64) -> bool {
 /// Write/read handle of the snapshot caches, obtained via [`Engine::snapshot`](crate::Engine::snapshot).
 ///
 /// Feed adapters (message channels) call [`upsert`](Self::upsert) /
-/// [`remove`](Self::remove) when data arrives; the scheduler reads the same
-/// store at each task prepare. `upsert` auto-registers the target with
+/// [`remove`](Self::remove) when data arrives; the effect seam reads the
+/// same store at each prepare. Sealing is per effect and never persisted —
+/// see the [module docs](self). `upsert` auto-registers the target with
 /// default options when it does not exist yet, so a feed never drops data on
 /// an unregistered name — register explicitly first when a non-default
 /// policy or scope keys are needed. `remove` acts on an existing target

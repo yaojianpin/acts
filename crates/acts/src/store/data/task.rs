@@ -77,9 +77,10 @@ impl Task {
 /// state transitions never rewrite variable bytes (and a variable write
 /// never needs to touch another task's row). One row per task scope, keyed by
 /// the same composite `pid + tid` id as its [`Task`] row; `data` holds the
-/// task's own variable scope, `sealed` the resolver-written sealed scope.
-/// Rows are written when a scope's vars actually change and are dropped with
-/// the process.
+/// task's own variable scope. `sealed` stays in the fixed row shape but the
+/// kernel writes it empty: snapshot-backed sealed data is resolved per effect
+/// and is not durable run state. Rows are written when a scope's vars actually
+/// change and are dropped with the process.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct TaskVars {
     pub id: String,
@@ -87,6 +88,11 @@ pub struct TaskVars {
     pub tid: String,
     #[serde(default)]
     pub data: String,
+    /// Retained for the fixed `vars` row shape and pre-kernel rows; the
+    /// projection always writes an empty string. A snapshot seal is the
+    /// effect seam's per-evaluation authorization/data resolution, not a
+    /// recoverable run state, and no read API (`proc:get`, the read model)
+    /// consumes this field.
     #[serde(default)]
     pub sealed: String,
     /// The aggregate version this row was projected from (A5); see

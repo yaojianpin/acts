@@ -777,6 +777,8 @@ impl RowProjector {
             data: serde_json::Value::Object(data).to_string(),
             // The aggregate carries no sealed scope: a snapshot seal is a
             // per-effect resolution, not durable run state (see `effects`).
+            // The field stays in the fixed row shape and is written empty on
+            // purpose; no reader consumes it (`proc:get` answers `data`).
             sealed: String::new(),
             v: data::TaskVars::version(),
         };

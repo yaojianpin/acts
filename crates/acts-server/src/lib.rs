@@ -319,10 +319,11 @@ lease = true
 # lease_owner = "acts-1"
 
 # snapshot-backed sealed-data targets.
-# Data is fed through the web/grpc/nats snapshot APIs and sealed into tasks
-# at their prepare under each target's policy:
-#   policy     per_proc (default) = one value frozen per process lineage
-#              per_task           = every task reads the latest value
+# Data is fed through the web/grpc/nats snapshot APIs and resolved into the
+# headless scope of each effect at its prepare. A seal is per effect and is
+# not durable run state (it is not recovered after a restart):
+#   policy     per_proc (default) = resolve at this effect's prepare
+#              per_task           = resolve at this effect's prepare
 #   scope      task param names whose values join with '/' into the scope
 #              key (default: one global scope per target)
 #   on_missing skip (default) | error
@@ -710,9 +711,9 @@ pub struct SnapshotConfig {
     /// target name — the sealed-data name the scheduler injects into task
     /// env as `$<name>` (e.g. `profile`, `secrets`).
     pub name: String,
-    /// when the cache value is frozen into task sealed data
-    /// (`per_proc` default: once per task lineage; `per_task`: every task
-    /// re-reads the latest value at its prepare).
+    /// when the cache value is resolved into the preparing scope. Both
+    /// variants resolve once at each effect prepare in the kernel: the seal
+    /// is per effect and is not durable run state (see `SnapshotPolicy`).
     #[serde(default)]
     pub policy: SnapshotPolicy,
     /// task param names whose values join with `/` into this target's scope

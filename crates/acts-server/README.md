@@ -196,8 +196,9 @@ retry timer re-sends them when the client subscribes again.
 
 `[[snapshot]]` entries (see the default config) pre-register
 snapshot-backed sealed-data targets: data fed through the snapshot APIs is
-sealed into tasks at their prepare under each target's
-`policy`/`scope`/`on_missing`/`ttl` settings.
+sealed into the headless scope of each effect at its prepare, under each
+target's `policy`/`scope`/`on_missing`/`ttl` settings. A seal is per effect
+and is not durable run state — it is not recovered after a restart.
 
 ## Build & run (development)
 

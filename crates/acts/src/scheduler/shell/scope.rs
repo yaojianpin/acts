@@ -10,6 +10,11 @@
 //! node's content and one map of variables. [`ScopeTask`]
 //! holds exactly that (plus the cancellation token) and [`Scope`] the run
 //! identity, env and directory, so an effect/predicate hop builds no tree.
+//!
+//! The sealed map [`ScopeTask::set_sealed`] fills is per evaluation: it is
+//! resolved at an effect's prepare and dropped with this scope. It is never
+//! written to the aggregate or projected into a row; see the `snapshot`
+//! module docs for the durability boundary.
 
 use crate::{
     NodeKind, Result, ScopePolicy, Vars, Workflow,
@@ -143,6 +148,7 @@ pub struct ScopeTask {
     pub id: String,
     node: Arc<ScopeNode>,
     data: crate::ShareLock<Vars>,
+    /// Snapshot data sealed for this evaluation only; never persisted.
     sealed: crate::ShareLock<Vars>,
     state: LegacyTaskState,
     start_time: i64,

@@ -152,12 +152,22 @@ impl Context {
         self.task().cancellation_token()
     }
 
+    /// Seed this evaluation's inputs and resolve snapshot-backed sealed data.
+    ///
+    /// Both writes land in the headless scope only; nothing here is part of
+    /// the run's durable state.
     pub async fn prepare(&self) -> Result<()> {
         self.init_vars(&self.task());
         self.resolve_sealed().await?;
         Ok(())
     }
 
+    /// Resolve snapshot-backed sealed data for this effect prepare.
+    ///
+    /// The result lives only in the headless [`ScopeTask`]. It is never
+    /// written to the aggregate or the `vars` row, and a restart/retry
+    /// re-resolves from the in-memory snapshot cache instead of restoring an
+    /// earlier seal. See the `snapshot` module docs for the boundary.
     pub async fn resolve_sealed(&self) -> Result<()> {
         // Snapshot-backed sealed data — a local cache read only. Feeds
         // (gRPC/NATS/Kafka adapters or embedders calling
@@ -175,14 +185,14 @@ impl Context {
         for (name, store) in snapshots {
             let task = self.task();
             let options = &store.options;
-            // per-proc: freeze on the first lineage seal; every descendant
-            // inherits the pinned value (sealed() walks the parent chain,
-            // so a resumed/retried task also keeps its first value)
+            // A value already resolved on this headless task wins: one
+            // prepare never re-seals a target it sealed itself. The kernel
+            // builds a fresh scope per effect, so `PerProc` has no durable
+            // lineage to inherit from — see `snapshot`'s module docs.
             if options.policy == SnapshotPolicy::PerProc && task.sealed(&self.proc, &name).is_some()
             {
                 continue;
             }
-            // retry determinism: this task row already carries a value
             if task.has_sealed_local(&name) {
                 continue;
             }
