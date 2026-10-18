@@ -14,7 +14,7 @@
 //!
 //! The runner drives the package through a *headless* scope: the acting
 //! node's content, its data/sealed values and the run's env, with no
-//! `Process` or `NodeTree`. Packages read the context they always read — the params
+//! `Process` or node tree. Packages read the context they always read — the params
 //! resolve through the same `fill_params` path — and nothing the headless
 //! scope touches is durably written: outputs come back as values and land
 //! in the aggregate through the operation's own plan.

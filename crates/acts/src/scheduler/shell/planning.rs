@@ -165,9 +165,9 @@ pub(super) fn walk_step<'a>(
 ) -> Option<ContainerShape<'a>> {
     if step.id == target {
         // Only the step's *branches* are a fan-out. Its `catches` are not: the
-        // legacy tree builds them as `NodeOutputKind::Catch` children, which
-        // `Node::children()` (Normal kind) does not return, so a successful
-        // completion never runs into them — only `Step::on_error` dispatches
+        // legacy tree built them as catch-kind children, which the normal-child
+        // walk did not return, so a successful completion never ran into them —
+        // only `Step::on_error` dispatches
         // them, on the failure path (the completion operation's catch fan-out).
         return model::step_branches(step).map(ContainerShape::Branches);
     }

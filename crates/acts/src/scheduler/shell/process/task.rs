@@ -2,7 +2,7 @@ use crate::{
     Error, NodeKind, ShareLock, Variant, Vars,
     scheduler::{
         Runtime,
-        core::model::{legacy_task_state::LegacyTaskState, view::Node},
+        core::model::{legacy_task_state::LegacyTaskState, view::NodeData},
         shell::{Context, Process},
     },
     utils::{self, consts},
@@ -53,13 +53,13 @@ pub struct Task {
     // parent tid
     parent: ShareLock<Option<String>>,
 
-    node: Arc<Node>,
+    node: NodeData,
 
     runtime: Arc<Runtime>,
 }
 
 impl Task {
-    pub fn new(proc: &Arc<Process>, tid: &str, node: Arc<Node>, rt: &Arc<Runtime>) -> Self {
+    pub fn new(proc: &Arc<Process>, tid: &str, node: NodeData, rt: &Arc<Runtime>) -> Self {
         Self {
             pid: proc.id().to_string(),
             id: tid.to_string(),
@@ -85,7 +85,7 @@ impl Task {
         &self.runtime
     }
 
-    pub fn node(&self) -> &Arc<Node> {
+    pub fn node(&self) -> &NodeData {
         &self.node
     }
 

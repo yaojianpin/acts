@@ -1,144 +1,7 @@
-use super::{
-    node::{Node, NodeContent, NodeOutputKind},
-    node_tree::NodeTree,
-};
 use crate::{
-    ActError, Branch, Result, Step, Workflow,
+    Branch, Step, Workflow,
     utils::{longid, shortid},
 };
-use std::sync::Arc;
-
-pub(crate) fn build_owned_workflow(mut workflow: Workflow, tree: &mut NodeTree) -> Result<()> {
-    let level = 0;
-
-    assign_ids(&mut workflow);
-
-    let workflow = Arc::new(workflow);
-    let data = NodeContent::Workflow(workflow.clone());
-    let root = tree.make(&data.id(), data, level)?;
-
-    let mut prev = root.clone();
-    for step in workflow.steps.iter() {
-        build_step(
-            step,
-            tree,
-            &root,
-            &mut prev,
-            level + 1,
-            NodeOutputKind::Normal,
-        )?;
-    }
-
-    tree.model = workflow;
-    tree.set_root(&root);
-
-    Ok(())
-}
-
-pub fn build_step(
-    step: &Step,
-    tree: &mut NodeTree,
-    parent: &Arc<Node>,
-    prev: &mut Arc<Node>,
-    level: usize,
-    typ: NodeOutputKind,
-) -> Result<()> {
-    if step.next.is_some() && step.r#while.is_some() {
-        return Err(ActError::Runtime(format!(
-            "step '{}' cannot combine 'while' with 'next': a while loop always flows to the next declared step when its condition fails",
-            step.id
-        )));
-    }
-    let data = NodeContent::Step(step.clone());
-    let node = tree.make(&data.id(), data, level)?;
-
-    if node.level == prev.level {
-        prev.link_chain(&node);
-    } else {
-        node.set_parent_in(typ, parent);
-    }
-
-    match &step.next {
-        Some(next) => match &tree.node(next) {
-            Some(next) => {
-                node.set_next(next, false);
-            }
-            None => {
-                return Err(ActError::Runtime(format!(
-                    "found next node error by '{next}'",
-                )));
-            }
-        },
-        None => {
-            if !step.branches.is_empty() {
-                let mut branch_prev = node.clone();
-                for branch in step.branches.iter() {
-                    build_branch(branch, tree, &node, &mut branch_prev, level + 1)?;
-                }
-            }
-        }
-    }
-
-    if !step.catches.is_empty() {
-        let mut catch_prev = node.clone();
-        for catch in step.catches.iter() {
-            build_step(
-                catch,
-                tree,
-                &node,
-                &mut catch_prev,
-                level + 1,
-                NodeOutputKind::Catch,
-            )?;
-        }
-    }
-    if !step.timeouts.is_empty() {
-        let mut timeout_prev = node.clone();
-        for timeout in step.timeouts.iter() {
-            build_step(
-                timeout,
-                tree,
-                &node,
-                &mut timeout_prev,
-                level + 1,
-                NodeOutputKind::Timeout,
-            )?;
-        }
-    }
-
-    // create a step chain from the step array
-    *prev = node;
-
-    Ok(())
-}
-
-pub fn build_branch(
-    branch: &Branch,
-    tree: &mut NodeTree,
-    parent: &Arc<Node>,
-    prev: &mut Arc<Node>,
-    level: usize,
-) -> Result<()> {
-    let data = NodeContent::Branch(branch.clone());
-    let node = tree.make(&data.id(), data, level)?;
-    node.set_parent(parent);
-
-    let mut step_prev = node.clone();
-    for step in branch.steps.iter() {
-        build_step(
-            step,
-            tree,
-            &node,
-            &mut step_prev,
-            level + 1,
-            NodeOutputKind::Normal,
-        )?;
-    }
-
-    *prev = node;
-
-    Ok(())
-}
 
 /// Assign the ids the model does not declare, before the model is shared as an
 /// immutable `Arc` or carried into the aggregate:
@@ -148,11 +11,11 @@ pub fn build_branch(
 /// - an unnamed step, branch, catch handler or timeout branch gets a fresh
 ///   short id.
 ///
-/// The tree build ([`NodeTree::load`]) and the kernel import
-/// (`shell::model::ProcessSpec::from_workflow`) are the two callers: both need
-/// the same pass, and both need it before anything derives node ids from the
-/// model. The import calls it on a copy, so the caller's model stays untouched
-/// and the assigned ids are what land in the aggregate's durable model.
+/// The model validators (`Workflow::valid`/`tree_output`) and the kernel import
+/// (`shell::model::ProcessSpec::from_workflow`) share this one pass: all need it
+/// before anything derives node ids from the model. They run it on a copy, so the
+/// caller's model stays untouched and the assigned ids are what land in the
+/// aggregate's durable model.
 pub(crate) fn assign_ids(workflow: &mut Workflow) {
     if workflow.id.is_empty() {
         workflow.id = longid();

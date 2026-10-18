@@ -54,7 +54,7 @@ pub use self::shell::Context;
 
 pub(crate) use self::core::model::{
     legacy_task_state::LegacyTaskState,
-    view::{Node, NodeContent, NodeData, NodeKind, NodeTree},
+    view::{NodeContent, NodeData, NodeKind, assign_ids},
 };
 pub(crate) use self::core::plan::cron::Cron;
 pub(crate) use self::runtime::Runtime;

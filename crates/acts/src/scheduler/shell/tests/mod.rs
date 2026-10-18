@@ -4619,9 +4619,9 @@ async fn kernel_catch_runs_the_selected_handler_on_error() {
 }
 
 /// A successful completion does **not** run into a step's `catches`: the
-/// legacy tree builds them as `NodeOutputKind::Catch` children, which
-/// `Node::children()` (Normal kind) does not return, so
-/// `check_in_children` never visits them — only `Step::on_error`
+/// legacy tree built them as catch-kind children, which the normal-child
+/// walk did not return, so `check_in_children` never visited them — only
+/// `Step::on_error`
 /// dispatches handlers, on the failure path. Both engines therefore finish
 /// the step and the run with no handler task at all, which is what the fold
 /// comparison pins (it is compared end to end because no handler exists to

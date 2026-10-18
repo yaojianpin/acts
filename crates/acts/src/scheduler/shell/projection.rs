@@ -85,7 +85,6 @@ use crate::{
             legacy_task_state::LegacyTaskState,
             task_graph::{TaskId, TaskState},
             transition_plan::ProcessVersion,
-            view::NodeTree,
         },
     },
     store::{ConditionalWrite, DbCollectionIden, Store, data},
@@ -474,8 +473,7 @@ impl RowProjector {
             // project the rows from.
             return Ok(ProjectionReport::default());
         };
-        let mut tree = NodeTree::new();
-        tree.load(&model)?;
+        let model = model.prepared()?;
         let mut report = ProjectionReport::default();
 
         // The proc row is derived from the root task's state. Whenever it is
@@ -500,7 +498,7 @@ impl RowProjector {
                 continue;
             }
             match self
-                .project_task(snapshot, &tree, task_id, &wire, allow_equal)
+                .project_task(snapshot, &model, task_id, &wire, allow_equal)
                 .await
             {
                 Ok(rows) => report.merge(rows),
@@ -664,7 +662,7 @@ impl RowProjector {
     async fn project_task(
         &self,
         snapshot: &ProcessSnapshot,
-        tree: &NodeTree,
+        model: &crate::model::Workflow,
         task_id: &TaskId,
         wire: &str,
         allow_equal: bool,
@@ -678,12 +676,7 @@ impl RowProjector {
         // legacy row already had (`tid = "$"`, `node_data.id = <model id>`
         // for the root).
         let node_id = task_id.node.as_str();
-        let node = if node_id == consts::TASK_ROOT_TID {
-            tree.root()
-        } else {
-            tree.node(node_id)
-        };
-        let Some(node) = node else {
+        let Some(node) = model.node_data(node_id) else {
             // An execution whose model node is gone can only come from a
             // corrupt aggregate; the rows are re-derived on the next commit,
             // so the projection reports and skips it rather than failing the
@@ -700,7 +693,7 @@ impl RowProjector {
         // takes the declaration's kind — a `uses` step stays "step" here even
         // though the message vocabulary names it an act — and the name both
         // carry (the root's is the workflow's `model.name`).
-        let facts = node_facts(&tree.model, node_id);
+        let facts = node_facts(model, node_id);
         let row_id = crate::utils::Id::new(&snapshot.process_id, wire).id();
         let collection = self.store().tasks();
         let existing = collection.find_opt(&row_id).await?;

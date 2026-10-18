@@ -6,7 +6,7 @@
 //! kernel's row projection; nothing here drives a run.
 use crate::{
     ActError, Error, Result, Vars, Workflow,
-    scheduler::{LegacyTaskState, Node, NodeData, Runtime},
+    scheduler::{LegacyTaskState, NodeData, Runtime},
     store::{Store, query::*},
     utils,
 };
@@ -15,9 +15,9 @@ use tracing::debug;
 
 impl Store {
     /// Rebuild one process from its durable rows: the proc row, every task row
-    /// of the process (recreating the dynamic act nodes the tree no longer
-    /// holds), and each task's vars row. `None` when the process has no row —
-    /// a settled run whose rows the sweeper already reclaimed.
+    /// of the process (each task's node comes from its own persisted
+    /// `node_data`), and each task's vars row. `None` when the process has no
+    /// row — a settled run whose rows the sweeper already reclaimed.
     pub async fn load_proc(
         &self,
         pid: &str,
@@ -80,59 +80,39 @@ impl Store {
         let query = Query::new().filter(Filter::and().expr(Expr::eq("pid", proc.id())));
         let tasks = collection.query_all(&query).await?;
 
-        // phase 1 + 2: load tasks and register dynamic nodes into the tree
-        // map so node links (parent/prev/next) can be resolved afterwards,
-        // then rebuild the dynamic node graph. The tree guard is scoped to
-        // these synchronous phases — the vars attach below awaits.
-        {
-            let tree = &proc.tree();
-            let mut dyn_nodes: Vec<(Arc<Node>, NodeData)> = Vec::new();
-            for t in tasks {
-                let data: NodeData = serde_json::from_str(&t.node_data)
-                    .map_err(|err| ActError::Store(err.to_string()))?;
-                let node = match tree.node(&data.id) {
-                    Some(node) => node,
-                    None => {
-                        let node = tree.get_or_make(&data.id, data.content.clone(), data.level)?;
-                        dyn_nodes.push((node.clone(), data));
-                        node
-                    }
-                };
-
-                let state: LegacyTaskState = t.state.into();
-                let mut task = crate::scheduler::Task::new(proc, &t.tid, node, rt);
-                task.set_pure_state(state.clone());
-                task.set_start_time(t.start_time);
-                task.set_end_time(t.end_time);
-                task.timestamp = t.timestamp;
-                if let Some(prev) = &t.prev {
-                    task.set_prev(prev);
-                }
-
-                if let Some(parent) = &t.parent {
-                    task.set_parent(parent);
-                }
-
-                // resume next tasks
-                for next in t.next.iter() {
-                    task.set_next(next);
-                }
-
-                if let Some(err) = t.err {
-                    let err: Error = serde_json::from_str(&err)
-                        .map_err(|err| ActError::Store(err.to_string()))?;
-                    task.set_pure_err(&err)
-                }
-                proc.push_task(Arc::new(task))?;
+        // The row carries the node's persisted shape, so a task is rebuilt
+        // from its own `node_data` — no model lookup and no live node graph.
+        for t in tasks {
+            let node: NodeData = serde_json::from_str(&t.node_data)
+                .map_err(|err| ActError::Store(err.to_string()))?;
+            let state: LegacyTaskState = t.state.into();
+            let mut task = crate::scheduler::Task::new(proc, &t.tid, node, rt);
+            task.set_pure_state(state.clone());
+            task.set_start_time(t.start_time);
+            task.set_end_time(t.end_time);
+            task.timestamp = t.timestamp;
+            if let Some(prev) = &t.prev {
+                task.set_prev(prev);
             }
 
-            for (node, data) in dyn_nodes.iter() {
-                node.restore_links(data, tree);
+            if let Some(parent) = &t.parent {
+                task.set_parent(parent);
             }
-            dyn_nodes
-        };
 
-        // phase 3: attach each task scope's persisted vars (its own data and
+            // resume next tasks
+            for next in t.next.iter() {
+                task.set_next(next);
+            }
+
+            if let Some(err) = t.err {
+                let err: Error =
+                    serde_json::from_str(&err).map_err(|err| ActError::Store(err.to_string()))?;
+                task.set_pure_err(&err)
+            }
+            proc.push_task(Arc::new(task))?;
+        }
+
+        // attach each task scope's persisted vars (its own data and
         // sealed rows) onto the restored tasks — scope vars live in the vars
         // collection, keyed by the same composite id as the lifecycle row
         let vars = self.vars();

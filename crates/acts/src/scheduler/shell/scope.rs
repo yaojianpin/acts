@@ -6,9 +6,9 @@
 //! own directory. The scope is never admitted, never persisted, and never
 //! touches the aggregate: the caller turns what it read into plan values.
 //!
-//! The carrier is deliberately not a [`Process`]/[`Task`] pair: those own a
-//! whole [`NodeTree`](crate::scheduler::NodeTree) and a task graph, while the
-//! two seams read one node's content and one map of variables. [`ScopeTask`]
+//! The carrier is deliberately not a [`Process`]/[`Task`] pair: those carried a
+//! whole node tree and a task graph, while the two seams read one node's content
+//! and one map of variables. [`ScopeTask`]
 //! holds exactly that (plus the cancellation token) and [`Scope`] the run
 //! identity, env and directory, so an effect/predicate hop builds no tree.
 
@@ -54,7 +54,7 @@ pub(crate) struct ScopeSpec {
 ///
 /// It answers the legacy `Process` surface the evaluation seams read — the
 /// run id, its env (`$env` + the engine-private keys), the owner authority
-/// and the workdir — without a [`NodeTree`](crate::scheduler::NodeTree). A
+/// and the workdir — without a node tree. A
 /// context built from a loaded read-model process (`Process::create_context`)
 /// keeps delegating to that process; the headless path never has one.
 pub struct Scope {
@@ -432,7 +432,7 @@ impl ScopeTask {
 
 /// Build the headless scope: the run's env (owner, directory, durable env
 /// map), the acting node's content and the acting execution's variables — no
-/// `Process`, no `NodeTree`, no task graph.
+/// `Process`, no node tree, no task graph.
 pub(crate) fn headless_scope(
     runtime: &Arc<Runtime>,
     spec: &ScopeSpec,
@@ -477,10 +477,10 @@ pub(crate) fn headless_scope(
     Ok((scope, task, ctx))
 }
 
-/// The node content the legacy `NodeTree` would hold for `target`, resolved
-/// straight from the declaring model.
+/// The node content the legacy tree build would have held for `target`,
+/// resolved straight from the declaring model.
 ///
-/// It is the same map the tree build makes: the workflow id, every step
+/// It is the same map the tree build made: the workflow id, every step
 /// (top-level, branch, catch and timeout — recursively), and every branch
 /// the build would enter (only when its step declares no `next`, the legacy
 /// rule). The durable model is the imported one, whose ids and constraints

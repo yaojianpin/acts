@@ -1,7 +1,7 @@
 use crate::{
     Error, NodeKind, Result, ShareLock, Vars, Workflow,
     scheduler::{
-        core::model::{legacy_task_state::LegacyTaskState, view::NodeTree},
+        core::model::legacy_task_state::LegacyTaskState,
         shell::{Context, Task, task_tree::TaskTree},
     },
     utils::{self, consts},
@@ -14,7 +14,7 @@ use std::{fmt, sync::Arc};
 #[derive(Clone)]
 pub struct Process {
     id: String,
-    tree: ShareLock<NodeTree>,
+    model: ShareLock<Workflow>,
     tasks: ShareLock<TaskTree>,
     state: ShareLock<LegacyTaskState>,
     start_time: ShareLock<i64>,
@@ -45,10 +45,9 @@ impl Process {
     }
 
     pub fn new_with_timestamp(pid: &str, timestamp: i64) -> Arc<Self> {
-        let tree = NodeTree::new();
         Arc::new(Process {
             id: pid.to_string(),
-            tree: Arc::new(RwLock::new(tree)),
+            model: Arc::new(RwLock::new(Workflow::default())),
             state: Arc::new(RwLock::new(LegacyTaskState::None)),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
@@ -73,28 +72,23 @@ impl Process {
     }
 
     pub fn load(&self, model: &Workflow) -> Result<()> {
-        let tree = &mut self.tree.write();
-        tree.load(model)
+        *self.model.write() = model.prepared()?;
+        Ok(())
     }
 
     pub(crate) fn load_owned(&self, model: Workflow) -> Result<()> {
-        let tree = &mut self.tree.write();
-        tree.load_owned(model)
+        *self.model.write() = model.prepared()?;
+        Ok(())
     }
 
     pub(crate) fn load_with_vars(&self, model: &Workflow, vars: &Vars) -> Result<()> {
         let mut model = model.clone();
         model.set_vars(vars);
-        let tree = &mut self.tree.write();
-        tree.load_owned(model)
-    }
-
-    pub fn tree(&self) -> parking_lot::RwLockReadGuard<'_, NodeTree> {
-        self.tree.read()
+        self.load_owned(model)
     }
 
     pub(crate) fn with_model<T>(&self, f: impl FnOnce(&Workflow) -> T) -> T {
-        f(&self.tree().model)
+        f(&self.model.read())
     }
 
     pub fn state(&self) -> LegacyTaskState {
