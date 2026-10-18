@@ -1,4 +1,5 @@
 use crate::Workflow;
+use crate::export::RunHandle;
 use crate::scheduler::Process;
 use crate::utils::consts;
 use crate::{
@@ -31,8 +32,13 @@ impl ProcessExecutor {
         }
     }
 
+    /// Start a deployed model and return its durable handle.
+    ///
+    /// The run is registered in the aggregate before this returns, so
+    /// [`RunHandle::wait`](crate::RunHandle::wait) observes every terminal
+    /// state — including one reached before a channel handler subscribed.
     #[instrument(skip(self, options), fields(mid = %mid))]
-    pub async fn start(&self, mid: &str, options: Vars) -> Result<String> {
+    pub async fn start(&self, mid: &str, options: Vars) -> Result<RunHandle> {
         self.principal.check(START)?;
         // The run inherits the caller's authority — the snapshot scopes it may
         // read and the workdir root its directory is made under — and never a
@@ -53,7 +59,7 @@ impl ProcessExecutor {
         mid: &str,
         mut options: Vars,
         owner: &crate::ScopePolicy,
-    ) -> Result<String> {
+    ) -> Result<RunHandle> {
         // The authority travels inside the start options (set here, never
         // accepted from them) and is popped by `Runtime::start` so it cannot
         // leak into the workflow's user vars.
@@ -70,16 +76,18 @@ impl ProcessExecutor {
             )));
         }
         let proc = self.runtime.start(&workflow, options).await?;
-        Ok(proc.id().to_string())
+        Ok(RunHandle::new(&self.runtime, proc.id().to_string()))
     }
 
+    /// Start a model given inline and return its durable handle (see
+    /// [`Self::start`]).
     #[instrument(skip(self, model, options), fields(fmt = %fmt))]
     pub async fn start_from_model(
         &self,
         model: &str,
         fmt: &str,
         mut options: Vars,
-    ) -> Result<String> {
+    ) -> Result<RunHandle> {
         self.principal.check(START_FROM_MODEL)?;
         options.set(consts::PROC_OWNER, self.principal.scope_policy());
         let workflow = match fmt {
@@ -91,7 +99,19 @@ impl ProcessExecutor {
         }?;
         self.principal.check_rn(&workflow.rn)?;
         let proc = self.runtime.start(&workflow, options).await?;
-        Ok(proc.id().to_string())
+        Ok(RunHandle::new(&self.runtime, proc.id().to_string()))
+    }
+
+    /// A durable handle to an existing run, by pid — the restart path.
+    ///
+    /// A handle is only the identity: nothing is loaded here, and a handle
+    /// for a pid this runtime cannot see fails on [`RunHandle::wait`] rather
+    /// than at construction. Checked as [`GET`], since waiting reads the same
+    /// run facts `proc:get` exposes.
+    #[instrument(skip(self))]
+    pub fn handle(&self, pid: &str) -> Result<RunHandle> {
+        self.principal.check(GET)?;
+        Ok(RunHandle::new(&self.runtime, pid.to_string()))
     }
 
     #[instrument(skip(self, q))]

@@ -22,8 +22,8 @@ async fn main() -> Result<()> {
         .model()
         .deploy(&workflow, None)
         .await?;
-    executor.proc().start(&workflow.id, Vars::new()).await?;
 
+    let run_executor = executor.clone();
     engine.channel().on_message(move |e| {
         let client = client.clone();
         let executor = executor.clone();
@@ -47,6 +47,8 @@ async fn main() -> Result<()> {
             s.close();
         }
     });
+
+    run_executor.proc().start(&workflow.id, Vars::new()).await?;
     sig.recv().await;
 
     Ok(())

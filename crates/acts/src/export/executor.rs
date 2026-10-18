@@ -364,7 +364,9 @@ mod tests {
                 ),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .pid()
+            .to_string();
 
         let proc = executor
             .proc()

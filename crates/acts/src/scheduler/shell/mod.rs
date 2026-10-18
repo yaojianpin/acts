@@ -334,6 +334,12 @@ pub(crate) struct KernelHost {
     /// has not: a start must wait for the retry even though the aggregate is
     /// already gone. Cleared when the residue is removed.
     reclaiming: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    /// One-shot wakeups for durable run handles (`RunHandle::wait`): a pid's
+    /// entry is taken and notified when a commit settles the run, or when
+    /// reclamation removes its durable record. The wake is only an
+    /// accelerator — a waiter always re-reads the aggregate, which is the
+    /// truth — so a missed notification costs latency, never correctness.
+    settled: Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>>,
 }
 
 /// Which engine event a run's lifecycle report is: the driver's mirror of the
@@ -801,6 +807,7 @@ impl KernelHost {
                 command_lanes: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
                 action_replans: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 reclaiming: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
+                settled: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             }),
             wake_rx,
         )
@@ -2639,6 +2646,9 @@ impl KernelHost {
             reported.started.remove(process_id);
             reported.finished.remove(process_id);
         }
+        // A handle still waiting on the reclaimed run must not wait forever:
+        // its re-read finds no aggregate and reports the PID as gone.
+        self.notify_settled(process_id);
         let projector = self.projection.read().clone();
         if let Some(projector) = projector {
             projector.forget_process(process_id);
@@ -2661,6 +2671,32 @@ impl KernelHost {
             .snapshot(process_id)
             .await?
             .is_some_and(|snapshot| decision::run_settled(&snapshot)))
+    }
+
+    /// The wakeup a durable run handle registers before re-reading the
+    /// aggregate (see [`crate::RunHandle::wait`]).
+    ///
+    /// The entry is per pid and taken by [`Self::notify_settled`], so a waiter
+    /// that arrives after the settle gets a fresh entry and sees the terminal
+    /// aggregate on its own re-read: the notification only ever shortens the
+    /// wait, it never carries the outcome.
+    pub(crate) fn run_waiter(&self, process_id: &str) -> Arc<tokio::sync::Notify> {
+        self.settled
+            .lock()
+            .entry(process_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Wake every handle waiting on `process_id`: the run's commit settled it
+    /// (its aggregate is durable and readable) or its durable record was
+    /// reclaimed. Taking the entry keeps the map bounded by pids actually
+    /// being waited on.
+    fn notify_settled(&self, process_id: &str) {
+        let waiter = self.settled.lock().remove(process_id);
+        if let Some(waiter) = waiter {
+            waiter.notify_waiters();
+        }
     }
 
     /// Ask the executor for its proof about one `EffectUnknown` operation

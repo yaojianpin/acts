@@ -240,6 +240,13 @@ impl KernelHost {
         new_outbox: &[crate::scheduler::core::outbox::records::OutboxId],
     ) -> Result<()> {
         let phase = operation_trace::start();
+        // A run handle waits on the aggregate, not on the lifecycle event:
+        // the commit that settled the run is already durable and readable
+        // here, so wake every waiter now. The projection below can withhold
+        // the lifecycle event; it cannot withhold the run's terminal state.
+        if decision.settlement.run {
+            self.notify_settled(&loaded.snapshot.process_id);
+        }
         let projected = match projection {
             Projection::Whole => self.project(&loaded.snapshot).await,
             Projection::Touched => {

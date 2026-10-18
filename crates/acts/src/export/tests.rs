@@ -134,7 +134,9 @@ async fn engine_executor_start_with_pid() {
     let result = executor.proc().start(&workflow.id, options).await;
     assert!(result.is_ok());
 
-    assert_eq!(result.unwrap(), "123");
+    let start = result.unwrap();
+
+    assert_eq!(start.pid(), "123");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1230,7 +1232,9 @@ async fn export_executor_agent_actions_are_refused_not_downgraded() {
         .proc()
         .start(&model.id, Vars::new().with("uid", "u1"))
         .await
-        .unwrap();
+        .unwrap()
+        .pid()
+        .to_string();
 
     for (name, result) in [
         (
@@ -1673,6 +1677,8 @@ async fn start_owned(engine: &Engine, mid: &str, caller: &crate::Principal) -> S
         .start(mid, Vars::new())
         .await
         .unwrap()
+        .pid()
+        .to_string()
 }
 
 /// Two subscribers name the same client id: the subject namespaces the channel
@@ -2802,4 +2808,254 @@ async fn export_trigger_custom_kind_package() {
         .await
         .unwrap();
     assert!(ret.unwrap().get::<String>("pid").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// A9 — durable run handles
+// ---------------------------------------------------------------------------
+
+/// A run that finishes before any subscription can still be waited on: the
+/// handle takes its answer from the aggregate, so the check-subscribe race is
+/// not a race at all.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_handle_waits_for_a_short_run_started_with_no_subscriber() {
+    let engine = Engine::builder().start().await.unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let mid = utils::longid();
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_step(|step| step.with_id("done"));
+    executor.model().deploy(&model, None).await.unwrap();
+
+    let run = executor.proc().start(&mid, Vars::new()).await.unwrap();
+    assert!(!run.pid().is_empty());
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), run.wait())
+        .await
+        .expect("a durable wait must not depend on a channel subscription")
+        .unwrap();
+    assert_eq!(outcome, crate::RunOutcome::Completed);
+    engine.close().await;
+}
+
+/// An already-settled run answers `wait` immediately, and a rebuilt handle
+/// (the same pid, no start) gives the same answer.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_handle_returns_the_terminal_outcome_of_a_finished_run() {
+    let engine = Engine::builder().start().await.unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let mid = utils::longid();
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_step(|step| step.with_id("done"));
+    executor.model().deploy(&model, None).await.unwrap();
+
+    let done = engine.signal(());
+    let signal = done.clone();
+    engine.channel().on_complete(move |_| {
+        let signal = signal.clone();
+        async move { signal.close() }
+    });
+
+    let run = executor.proc().start(&mid, Vars::new()).await.unwrap();
+    let pid = run.pid().to_string();
+    tokio::time::timeout(std::time::Duration::from_secs(10), done.recv())
+        .await
+        .expect("the run completes");
+
+    assert_eq!(
+        run.wait().await.unwrap(),
+        crate::RunOutcome::Completed,
+        "the started handle answers from the settled aggregate"
+    );
+    assert_eq!(
+        executor.proc().handle(&pid).unwrap().wait().await.unwrap(),
+        crate::RunOutcome::Completed,
+        "the same pid rebuilds the same answer"
+    );
+    engine.close().await;
+}
+
+/// A failed root's durable error facts are what `wait` reports — the same
+/// `error.code`/`error.message` the lifecycle directive carries.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_handle_reports_a_failed_root_error_facts() {
+    let engine = Engine::builder().start().await.unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let mid = utils::longid();
+    let model = Workflow::new().with_id(&mid).with_step(|step| {
+        step.with_id("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    executor.model().deploy(&model, None).await.unwrap();
+
+    let created = engine.signal(String::new());
+    let signal = created.clone();
+    engine.channel().on_message(move |e| {
+        let signal = signal.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                signal.send(e.tid.clone());
+            }
+        }
+    });
+
+    let run = executor.proc().start(&mid, Vars::new()).await.unwrap();
+    let tid = tokio::time::timeout(std::time::Duration::from_secs(10), created.recv())
+        .await
+        .expect("the act is created");
+
+    executor
+        .act()
+        .fail(
+            run.pid(),
+            &tid,
+            Vars::new().with("ecode", "E1").with("message", "boom"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), run.wait())
+        .await
+        .expect("the failed run settles")
+        .unwrap();
+    assert_eq!(
+        outcome,
+        crate::RunOutcome::Errored {
+            code: "E1".into(),
+            message: "boom".into(),
+        }
+    );
+    engine.close().await;
+}
+
+/// A non-completed, non-failed terminal root is `Terminated`.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_handle_reports_a_terminated_root() {
+    let engine = Engine::builder().start().await.unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let mid = utils::longid();
+    let model = Workflow::new().with_id(&mid).with_step(|step| {
+        step.with_id("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    executor.model().deploy(&model, None).await.unwrap();
+
+    let created = engine.signal(String::new());
+    let signal = created.clone();
+    engine.channel().on_message(move |e| {
+        let signal = signal.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                signal.send(e.tid.clone());
+            }
+        }
+    });
+
+    let run = executor.proc().start(&mid, Vars::new()).await.unwrap();
+    let tid = tokio::time::timeout(std::time::Duration::from_secs(10), created.recv())
+        .await
+        .expect("the act is created");
+    executor
+        .act()
+        .abort(run.pid(), &tid, Vars::new())
+        .await
+        .unwrap();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), run.wait())
+        .await
+        .expect("the aborted run settles")
+        .unwrap();
+    assert_eq!(outcome, crate::RunOutcome::Terminated);
+    engine.close().await;
+}
+
+/// The handle survives a restart: a run waiting on an act is closed with the
+/// old engine, reopened over the same store, and its handle — rebuilt from the
+/// pid alone — stays pending until the act is completed through the new
+/// engine.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_handle_waits_across_a_restart_on_the_same_pid() {
+    let store: Arc<dyn crate::KvStore> = Arc::new(crate::store::MemoryStore::new());
+    let engine = Engine::builder()
+        .set_store(store.clone())
+        .start()
+        .await
+        .unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let mid = utils::longid();
+    let model = Workflow::new().with_id(&mid).with_step(|step| {
+        step.with_id("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    executor.model().deploy(&model, None).await.unwrap();
+
+    let created = engine.signal(String::new());
+    let signal = created.clone();
+    engine.channel().on_message(move |e| {
+        let signal = signal.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                signal.send(e.tid.clone());
+            }
+        }
+    });
+
+    let run = executor.proc().start(&mid, Vars::new()).await.unwrap();
+    let pid = run.pid().to_string();
+    let tid = tokio::time::timeout(std::time::Duration::from_secs(10), created.recv())
+        .await
+        .expect("the act is created");
+
+    // Crash/restart over the same store. The new engine has no in-memory
+    // subscription for this run; the handle is rebuilt from the pid alone.
+    engine.close().await;
+    let engine = Engine::builder().set_store(store).start().await.unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let run = executor.proc().handle(&pid).unwrap();
+
+    let mut waiting = {
+        let run = run.clone();
+        tokio::spawn(async move { run.wait().await })
+    };
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err(),
+        "the recovered run is still waiting on its act, not settled"
+    );
+
+    executor
+        .act()
+        .complete(&pid, &tid, Vars::new())
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .expect("the recovered run settles")
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome, crate::RunOutcome::Completed);
+    engine.close().await;
+}
+
+/// A handle for a pid with no durable record is refused at `wait`, not at
+/// construction: rebuilding a handle is just naming the run.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_handle_for_an_absent_pid_reports_it_gone() {
+    let engine = Engine::builder().start().await.unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    let run = executor.proc().handle("never-started").unwrap();
+    let error = run.wait().await.unwrap_err();
+    assert!(
+        error.to_string().contains("not present"),
+        "expected a gone-run error, got: {error}"
+    );
+    engine.close().await;
 }

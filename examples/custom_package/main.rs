@@ -28,7 +28,6 @@ async fn main() -> acts::Result<()> {
         .deploy(&workflow, None)
         .await?;
 
-    executor.proc().start(&workflow.id, vars).await?;
     let chan = engine.channel();
 
     chan.on_complete(move |e| {
@@ -50,6 +49,7 @@ async fn main() -> acts::Result<()> {
             s2.close();
         }
     });
+    executor.proc().start(&workflow.id, vars).await?;
     sig.recv().await;
 
     Ok(())

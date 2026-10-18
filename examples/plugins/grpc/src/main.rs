@@ -19,12 +19,6 @@ async fn main() -> Result<()> {
         .deploy(&workflow, None)
         .await
         .expect("deploy model");
-    executor
-        .proc()
-        .start(&workflow.id, Vars::new())
-        .await
-        .expect("start workflow");
-
     engine.channel().on_complete(move |e| {
         let s = s.clone();
         async move {
@@ -51,6 +45,11 @@ async fn main() -> Result<()> {
     });
 
     println!("gRPC server running on 127.0.0.1:10080 (set [grpc].host to serve remote callers)...");
+    executor
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .expect("start workflow");
     sig.recv().await;
 
     Ok(())

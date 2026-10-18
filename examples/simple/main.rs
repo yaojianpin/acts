@@ -16,7 +16,6 @@ async fn main() -> Result<()> {
 
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());
-    executor.proc().start(&workflow.id, vars).await?;
 
     engine.channel().on_error(move |e| {
         let s1 = s1.clone();
@@ -37,6 +36,7 @@ async fn main() -> Result<()> {
             s2.close();
         }
     });
+    executor.proc().start(&workflow.id, vars).await?;
     sig.recv().await;
 
     Ok(())

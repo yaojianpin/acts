@@ -181,6 +181,44 @@ pub(crate) fn lifecycle(snapshot: &ProcessSnapshot) -> Option<LifecycleDirective
     Some(LifecycleDirective::Completed)
 }
 
+/// The terminal outcome a settled run reports to its [`RunHandle`].
+///
+/// Derived from the same facts as [`lifecycle`]: a failed root carries the
+/// durable `error.code`/`error.message` the upward walk copied into its scope;
+/// a terminal root that is neither completed nor failed (aborted, cancelled,
+/// skipped, removed) is `Terminated`. `None` while the run is still in flight.
+///
+/// [`RunHandle`]: crate::RunHandle
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunOutcome {
+    /// Every execution settled and the root completed.
+    Completed,
+    /// Every execution settled and the root failed.
+    Errored { code: String, message: String },
+    /// Every execution settled and the root reached another terminal state.
+    Terminated,
+}
+
+/// The run's terminal outcome, or `None` while it is still in flight.
+///
+/// The one rule a durable wait needs: [`run_settled`] first (the same
+/// settlement [`LifecycleDirective`] reports), then the root's own facts. A
+/// waiter never re-derives a state machine from operations or rows.
+pub(crate) fn run_outcome(snapshot: &ProcessSnapshot) -> Option<RunOutcome> {
+    if !run_settled(snapshot) {
+        return None;
+    }
+    match lifecycle(snapshot) {
+        Some(LifecycleDirective::Errored { code, message }) => {
+            Some(RunOutcome::Errored { code, message })
+        }
+        _ if ProcessStatus::of(snapshot) == ProcessStatus::Terminated => {
+            Some(RunOutcome::Terminated)
+        }
+        _ => Some(RunOutcome::Completed),
+    }
+}
+
 /// The root execution of an aggregate: the `$` node's earliest generation —
 /// the generation a re-entry never removes.
 pub(crate) fn root_task(snapshot: &ProcessSnapshot) -> Option<TaskId> {

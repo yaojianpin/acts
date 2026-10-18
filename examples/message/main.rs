@@ -15,8 +15,6 @@ async fn main() -> Result<()> {
         .deploy(&workflow, None)
         .await?;
 
-    executor.proc().start(&workflow.id, Vars::new()).await?;
-
     // channel messages will store in db
     engine
         .channel_with_options(&ChannelOptions {
@@ -37,6 +35,7 @@ async fn main() -> Result<()> {
             s.close();
         }
     });
+    executor.proc().start(&workflow.id, Vars::new()).await?;
     sig.recv().await;
 
     Ok(())

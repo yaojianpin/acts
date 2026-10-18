@@ -210,7 +210,7 @@ pub async fn start(engine: &Engine, principal: &Principal, mid: &str) -> String 
     let mut last = None;
     for _ in 0..5 {
         match executor.proc().start(mid, Vars::new()).await {
-            Ok(pid) => return pid,
+            Ok(run) => return run.pid().to_string(),
             Err(err) => {
                 last = Some(err);
                 tokio::time::sleep(Duration::from_millis(20)).await;

@@ -45,9 +45,11 @@ mod tests;
 // layers are private, so this list *is* the contract: a consumer that cannot
 // find a name here was reaching into a layer.
 //
-// `Context` is the one name the crate re-exports publicly (`acts::Context`);
-// the rest are crate-internal surface.
+// `Context` and `RunOutcome` are the names the crate re-exports publicly
+// (`acts::Context`, `acts::RunOutcome`); the rest are crate-internal surface.
 
+pub use self::core::decision::RunOutcome;
+pub(crate) use self::core::decision::run_outcome;
 pub use self::shell::Context;
 
 pub(crate) use self::core::model::{

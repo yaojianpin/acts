@@ -53,12 +53,6 @@ async fn main() -> Result<()> {
         .deploy(&workflow, None)
         .await
         .expect("deploy model");
-    executor
-        .proc()
-        .start(&workflow.id, Vars::new())
-        .await
-        .expect("start workflow");
-
     engine.channel().on_complete(move |e| {
         let s = s.clone();
         async move {
@@ -83,6 +77,11 @@ async fn main() -> Result<()> {
             s.close();
         }
     });
+    executor
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .expect("start workflow");
     sig.recv().await;
 
     Ok(())
