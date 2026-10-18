@@ -6,18 +6,14 @@
 //! own directory. The scope is never admitted, never persisted, and never
 //! touches the aggregate: the caller turns what it read into plan values.
 //!
-//! The carrier is deliberately not a [`Process`]/[`Task`] pair: those carried a
-//! whole node tree and a task graph, while the two seams read one node's content
-//! and one map of variables. [`ScopeTask`]
+//! The carrier is deliberately not a process/task pair: the two seams read one
+//! node's content and one map of variables. [`ScopeTask`]
 //! holds exactly that (plus the cancellation token) and [`Scope`] the run
 //! identity, env and directory, so an effect/predicate hop builds no tree.
 
 use crate::{
     NodeKind, Result, ScopePolicy, Vars, Workflow,
-    scheduler::{
-        LegacyTaskState, NodeContent, Runtime,
-        shell::{Context, Process, Task},
-    },
+    scheduler::{LegacyTaskState, NodeContent, Runtime, shell::Context},
     utils::{self, consts},
 };
 
@@ -52,77 +48,47 @@ pub(crate) struct ScopeSpec {
 
 /// The lightweight process-side view a headless scope needs.
 ///
-/// It answers the legacy `Process` surface the evaluation seams read — the
-/// run id, its env (`$env` + the engine-private keys), the owner authority
-/// and the workdir — without a node tree. A
-/// context built from a loaded read-model process (`Process::create_context`)
-/// keeps delegating to that process; the headless path never has one.
+/// It answers the evaluation seams' process surface — the run id, its env
+/// (`$env` + the engine-private keys), the owner authority and the workdir —
+/// without a node tree or a task graph.
 pub struct Scope {
     id: String,
     env: crate::ShareLock<Vars>,
-    source: Option<Arc<Process>>,
 }
 
 impl Scope {
-    /// A headless scope: the run id plus the env the seam seeded (owner,
+    /// The headless scope: the run id plus the env the seam seeded (owner,
     /// workdir, durable env map).
     pub(crate) fn headless(id: &str, env: Vars) -> Arc<Self> {
         Arc::new(Self {
             id: id.to_string(),
             env: Arc::new(RwLock::new(env)),
-            source: None,
-        })
-    }
-
-    /// The read-model compatibility view: a context built from a loaded
-    /// `Process` sees the process's own env and task rows.
-    pub(crate) fn from_process(process: &Arc<Process>) -> Arc<Self> {
-        Arc::new(Self {
-            id: process.id().to_string(),
-            env: Arc::new(RwLock::new(Vars::new())),
-            source: Some(process.clone()),
         })
     }
 
     pub fn id(&self) -> &str {
-        match &self.source {
-            Some(process) => process.id(),
-            None => &self.id,
-        }
+        &self.id
     }
 
     pub fn env(&self) -> Vars {
-        match &self.source {
-            Some(process) => process.env(),
-            None => self.env.read().clone(),
-        }
+        self.env.read().clone()
     }
 
     pub fn with_env<T, F: FnOnce(&Vars) -> T>(&self, f: F) -> T
     where
         T: for<'de> serde::Deserialize<'de> + Clone,
     {
-        match &self.source {
-            Some(process) => process.with_env(f),
-            None => f(&self.env.read()),
-        }
+        f(&self.env.read())
     }
 
     pub fn with_env_mut<F: FnOnce(&mut Vars)>(&self, f: F) {
-        match &self.source {
-            Some(process) => process.with_env_mut(f),
-            None => f(&mut self.env.write()),
-        }
+        f(&mut self.env.write());
     }
 
     /// The owner's snapshot scope authority (the legacy `PROC_OWNER`).
     pub(crate) fn owner_scope(&self) -> ScopePolicy {
-        match &self.source {
-            Some(process) => process.owner_scope(),
-            None => self
-                .with_env(|env| env.get::<ScopePolicy>(consts::PROC_OWNER))
-                .unwrap_or_default(),
-        }
+        self.with_env(|env| env.get::<ScopePolicy>(consts::PROC_OWNER))
+            .unwrap_or_default()
     }
 
     /// The process's own directory (`<workdir>/<pid>`), or `None` when the
@@ -131,43 +97,10 @@ impl Scope {
         self.with_env(|env| env.get::<std::path::PathBuf>(consts::PROC_WORKDIR))
     }
 
-    /// The legacy `Process::set_data` write (`$set_process_var`). The
-    /// headless scope has no root task, so the write lands nowhere — the
-    /// same thing the legacy headless process did; a read-model context
-    /// delegates to the process it was built from.
-    pub fn set_data(&self, vars: &Vars) {
-        if let Some(process) = &self.source {
-            process.set_data(vars);
-        }
-    }
-
-    /// Every read-model task whose predicate holds (declaration order, then
-    /// start time — the legacy `Process::find_tasks` order).
-    pub fn find_tasks(&self, predicate: impl Fn(&Arc<ScopeTask>) -> bool) -> Vec<Arc<ScopeTask>> {
-        let Some(process) = &self.source else {
-            return Vec::new();
-        };
-        process
-            .find_tasks(|task| predicate(&ScopeTask::from_task(task.clone())))
-            .into_iter()
-            .map(ScopeTask::from_task)
-            .collect()
-    }
-
-    pub fn tasks(&self) -> Vec<Arc<ScopeTask>> {
-        let Some(process) = &self.source else {
-            return Vec::new();
-        };
-        process
-            .tasks()
-            .into_iter()
-            .map(ScopeTask::from_task)
-            .collect()
-    }
-
-    pub fn task(&self, tid: &str) -> Option<Arc<ScopeTask>> {
-        self.source.as_ref()?.task(tid).map(ScopeTask::from_task)
-    }
+    /// The `$set_process_var` write. The headless scope has no root task, so
+    /// the write lands nowhere — what an effect scope writes is folded into
+    /// the operation's commit, and the aggregate is the record.
+    pub fn set_data(&self, _vars: &Vars) {}
 }
 
 /// The node content a headless task needs: exactly what the legacy `Task`
@@ -201,10 +134,10 @@ impl ScopeNode {
 
 /// The lightweight task-side view a headless scope needs.
 ///
-/// It is equivalent to the `Task` surface the seams read: `pid`/`id`,
+/// It is equivalent to the task surface the seams read: `pid`/`id`,
 /// `options`/`node`/`params`, `data` and `sealed`, the cancellation token,
-/// and the small read helpers (`inputs`, `outputs`, `find`, `parent`). No
-/// task graph, no runtime handle, no snapshot/restore surface.
+/// and the small read helpers (`inputs`, `outputs`, `find`). No task graph,
+/// no runtime handle, no snapshot/restore surface.
 pub struct ScopeTask {
     pub pid: String,
     pub id: String,
@@ -215,10 +148,6 @@ pub struct ScopeTask {
     start_time: i64,
     end_time: i64,
     cancel: CancellationToken,
-    /// The read-model compatibility view (`Process::create_context`): the
-    /// wrapped task owns the data, sealed values and lineage; the headless
-    /// path has none.
-    source: Option<Arc<Task>>,
 }
 
 impl ScopeTask {
@@ -241,34 +170,7 @@ impl ScopeTask {
             start_time: 0,
             end_time: 0,
             cancel: runtime.shutdown_token().child_token(),
-            source: None,
         })
-    }
-
-    /// The read-model compatibility view: delegates every mutable read to the
-    /// task a loaded `Process` owns, so an existing context keeps observing
-    /// its process's live data.
-    pub(crate) fn from_task(task: Arc<Task>) -> Arc<Self> {
-        let node = Arc::new(ScopeNode::new(
-            task.node().id(),
-            task.node().content.clone(),
-        ));
-        Arc::new(Self {
-            pid: task.pid.clone(),
-            id: task.id.clone(),
-            node,
-            data: Arc::new(RwLock::new(Vars::new())),
-            sealed: Arc::new(RwLock::new(Vars::new())),
-            state: task.state(),
-            start_time: task.start_time(),
-            end_time: task.end_time(),
-            cancel: task.cancellation_token(),
-            source: Some(task),
-        })
-    }
-
-    fn source<'a>(&'a self, scope: &'a Arc<Scope>) -> Option<(&'a Arc<Task>, &'a Arc<Process>)> {
-        Some((self.source.as_ref()?, scope.source.as_ref()?))
     }
 
     pub fn node(&self) -> &Arc<ScopeNode> {
@@ -276,28 +178,17 @@ impl ScopeTask {
     }
 
     pub fn data(&self) -> Vars {
-        match &self.source {
-            Some(task) => task.data(),
-            None => self.data.read().clone(),
-        }
+        self.data.read().clone()
     }
 
-    pub fn set_data_with<F: Fn(&mut Vars)>(&self, f: F) {
-        match &self.source {
-            Some(task) => task.set_data_with(f),
-            None => f(&mut self.data.write()),
-        }
+    pub fn set_data_with<F: FnOnce(&mut Vars)>(&self, f: F) {
+        f(&mut self.data.write());
     }
 
     pub fn set_data(&self, vars: &Vars) {
-        match &self.source {
-            Some(task) => task.set_data(vars),
-            None => {
-                let mut data = self.data.write();
-                for (name, value) in vars.iter() {
-                    data.set(name, value);
-                }
-            }
+        let mut data = self.data.write();
+        for (name, value) in vars.iter() {
+            data.set(name, value);
         }
     }
 
@@ -306,67 +197,30 @@ impl ScopeTask {
     }
 
     pub(crate) fn set_sealed(&self, name: &str, value: Vars) {
-        match &self.source {
-            Some(task) => task.set_sealed(name, value),
-            None => {
-                self.sealed.write().set(name, value);
-            }
-        }
+        self.sealed.write().set(name, value);
     }
 
     pub(crate) fn has_sealed_local(&self, name: &str) -> bool {
-        match &self.source {
-            Some(task) => task.has_sealed_local(name),
-            None => self.sealed.read().get_value(name).is_some(),
-        }
+        self.sealed.read().get_value(name).is_some()
     }
 
-    pub fn sealed(&self, scope: &Arc<Scope>, name: &str) -> Option<Vars> {
-        match self.source(scope) {
-            Some((task, process)) => task.sealed(process, name),
-            None => self.sealed.read().get::<Vars>(name),
-        }
+    pub fn sealed(&self, _scope: &Arc<Scope>, name: &str) -> Option<Vars> {
+        self.sealed.read().get::<Vars>(name)
     }
 
-    pub fn find<T>(&self, scope: &Arc<Scope>, name: &str) -> Option<T>
+    pub fn find<T>(&self, _scope: &Arc<Scope>, name: &str) -> Option<T>
     where
         T: DeserializeOwned + std::fmt::Debug + Clone,
     {
-        match self.source(scope) {
-            Some((task, process)) => task.find(process, name),
-            None => self.data().get(name),
-        }
+        self.data().get(name)
     }
 
-    pub fn parent(&self, scope: &Arc<Scope>) -> Option<Arc<ScopeTask>> {
-        match self.source(scope) {
-            Some((task, process)) => task.parent(process).map(ScopeTask::from_task),
-            None => None,
-        }
-    }
-
-    fn prev_id(&self) -> Option<String> {
-        match &self.source {
-            Some(task) => task.prev_id(),
-            None => None,
-        }
+    pub fn parent(&self, _scope: &Arc<Scope>) -> Option<Arc<ScopeTask>> {
+        None
     }
 
     pub fn inputs(&self, ctx: &Context) -> Vars {
-        let mut inputs = Vars::new();
-        if let Some(prev) = self.prev_id()
-            && let Some(prev_task) = ctx.proc.task(&prev)
-        {
-            // The previous scope's outputs are read in its own context: the
-            // exposes/expressions it fills are its own.
-            let prev_ctx =
-                Context::from_scope(ctx.runtime.clone(), ctx.proc.clone(), prev_task.clone());
-            for (k, v) in prev_task.outputs(&prev_ctx).iter() {
-                inputs.set(k, v.clone());
-            }
-        }
-        let vars = utils::fill_inputs(&self.node.content.vars(), ctx);
-        inputs.extend(vars)
+        utils::fill_inputs(&self.node.content.vars(), ctx)
     }
 
     pub fn outputs(&self, ctx: &Context) -> Vars {
@@ -403,22 +257,14 @@ impl ScopeTask {
     }
 
     pub fn state(&self) -> LegacyTaskState {
-        match &self.source {
-            Some(task) => task.state(),
-            None => self.state.clone(),
-        }
+        self.state.clone()
     }
 
     pub fn cost(&self) -> i64 {
-        match &self.source {
-            Some(task) => task.cost(),
-            None => {
-                if self.state.is_completed() {
-                    return self.end_time - self.start_time;
-                }
-                utils::time::time_millis() - self.start_time
-            }
+        if self.state.is_completed() {
+            return self.end_time - self.start_time;
         }
+        utils::time::time_millis() - self.start_time
     }
 
     pub fn is_kind(&self, kind: NodeKind) -> bool {

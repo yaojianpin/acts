@@ -102,26 +102,11 @@ impl NodeContent {
             _ => serde_json::Value::Null,
         }
     }
-
-    pub fn r#if(&self) -> Option<String> {
-        match self {
-            NodeContent::Step(node) => node.r#if.clone(),
-            NodeContent::Branch(node) => node.r#if.clone(),
-            NodeContent::Act(node) => node.r#if.clone(),
-            _ => None,
-        }
-    }
-
-    pub fn set_if(&mut self, v: Option<String>) {
-        match self {
-            NodeContent::Step(node) => node.r#if = v,
-            NodeContent::Branch(node) => node.r#if = v,
-            NodeContent::Act(node) => node.r#if = v,
-            _ => {}
-        }
-    }
 }
 
+// The accessors here are the read-model test surface (`scheduler/shell/tests`,
+// reliability matrix); the production row projection reads the fields.
+#[cfg_attr(not(test), allow(dead_code))]
 impl NodeData {
     pub fn id(&self) -> &str {
         &self.id
@@ -129,10 +114,6 @@ impl NodeData {
 
     pub fn kind(&self) -> NodeKind {
         self.content.kind()
-    }
-
-    pub fn name(&self) -> String {
-        self.content.name()
     }
 
     /// The row's persisted JSON (`serde_json`, field order as declared).

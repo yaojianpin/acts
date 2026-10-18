@@ -16,9 +16,9 @@
 //! - `durable/` — byte-level persistence, the only layer that may name
 //!   `crate::store` (and only in its declared adapter).
 //! - `shell/` — the async shell: the operation driver plus its parts (`effects`,
-//!   `facts`, `message`, `planning`, `predicate`, `projection`, `scope`,
-//!   `action`, `errors`, `model`, `context`, `health`, `validation`, `process`,
-//!   `task_tree`, `tests`). Unconstrained by design: it is the only place
+//!   `facts`, `message`, `planning`, `predicate`, `projection`, `read_model`,
+//!   `scope`, `action`, `errors`, `model`, `context`, `health`, `validation`,
+//!   `tests`). Unconstrained by design: it is the only place
 //!   allowed to touch `tokio`, the engine and the store handle.
 //!
 //! The layers are private: nothing outside this module addresses them by path,
@@ -58,6 +58,8 @@ pub(crate) use self::core::model::{
 };
 pub(crate) use self::core::plan::cron::Cron;
 pub(crate) use self::runtime::Runtime;
-pub(crate) use self::shell::{Process, Scope, ScopeTask, Task};
+#[cfg(test)]
+pub(crate) use self::shell::{ProcRead, ScopeSpec, TaskRow, headless_scope, read_context};
+pub(crate) use self::shell::{Scope, ScopeTask};
 
 pub(crate) use self::runtime::prepare_workdir;

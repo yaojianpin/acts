@@ -116,10 +116,9 @@ mod model;
 mod operation;
 mod planning;
 mod predicate;
-mod process;
 mod projection;
+mod read_model;
 mod scope;
-mod task_tree;
 pub(crate) mod validation;
 
 use self::model::task_graph;
@@ -129,9 +128,13 @@ pub(crate) use effects::PackageEffectRunner;
 pub(crate) use message::MessageForwarder;
 pub(crate) use model::ProcessSpec;
 pub(crate) use predicate::EnginePredicateRunner;
-pub(crate) use process::{Process, Task};
 pub(crate) use projection::{ProjectionMetrics, RowProjector};
+pub(crate) use read_model::{ProcRead, load as load_proc_rows};
+#[cfg(test)]
+pub(crate) use read_model::{TaskRow, context as read_context};
 pub(crate) use scope::{Scope, ScopeTask};
+#[cfg(test)]
+pub(crate) use scope::{ScopeSpec, headless_scope};
 
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;

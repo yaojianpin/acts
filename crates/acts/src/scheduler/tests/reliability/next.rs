@@ -321,8 +321,11 @@ async fn wait_rows_finished(engine: &Engine, pid: &str, nodes: &[&str]) {
                     // the same convergence
                     None => true,
                     Some(proc) => {
-                        let mut tids: Vec<String> =
-                            proc.tasks().iter().map(|task| task.id.clone()).collect();
+                        let mut tids: Vec<String> = proc
+                            .tasks()
+                            .iter()
+                            .map(|task| task.tid().to_string())
+                            .collect();
                         tids.sort();
                         proc.state().is_biz_success()
                             && tids == expected

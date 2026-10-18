@@ -72,11 +72,11 @@ impl EventExecutor {
                 } else {
                     params.clone()
                 };
-                let proc = self
+                let pid = self
                     .runtime
                     .start(&workflow, self.start_options(payload_to_vars(payload)?))
                     .await?;
-                Ok(Some(Vars::new().with(consts::PROCESS_ID, proc.id())))
+                Ok(Some(Vars::new().with(consts::PROCESS_ID, pid)))
             }
             Some(TriggerKind::Chat) => {
                 let workflow = self.workflow(&event).await?;
@@ -89,11 +89,11 @@ impl EventExecutor {
                 if let Some(v) = payload.as_str() {
                     start_params.set(consts::ACT_PARAMS_KEY, v);
                 }
-                let proc = self
+                let pid = self
                     .runtime
                     .start(&workflow, self.start_options(start_params))
                     .await?;
-                Ok(Some(Vars::new().with(consts::PROCESS_ID, proc.id())))
+                Ok(Some(Vars::new().with(consts::PROCESS_ID, pid)))
             }
             Some(TriggerKind::Hook) => {
                 let workflow = self.workflow(&event).await?;

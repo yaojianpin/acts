@@ -790,13 +790,13 @@ async fn a_run_that_cannot_seal_fails_instead_of_waiting() {
         .start(&workflow, Vars::new().with("pid", &pid))
         .await
         .unwrap();
-    assert_eq!(started.id(), pid);
+    assert_eq!(started, pid);
 
     // The run settles (no client ever answers) and the failing act carries
     // the refusal.
     let mut settled = false;
     for _ in 0..200 {
-        let run = engine.runtime().proc(&pid).await.unwrap();
+        let run = engine.runtime().read_proc(&pid).await.unwrap();
         if let Some(run) = run
             && run.state().is_error()
         {
@@ -808,7 +808,7 @@ async fn a_run_that_cannot_seal_fails_instead_of_waiting() {
             for (tid, err) in run
                 .tasks()
                 .iter()
-                .map(|task| (task.id.clone(), task.err()))
+                .map(|task| (task.tid().to_string(), task.err()))
                 .collect::<Vec<_>>()
             {
                 assert!(

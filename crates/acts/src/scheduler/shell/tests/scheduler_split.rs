@@ -127,8 +127,7 @@ async fn the_runtime_wires_the_configured_loops_independently() {
         .await
         .unwrap();
     let runtime = engine.runtime();
-    let proc = runtime.start(&timed_workflow(), Vars::new()).await.unwrap();
-    let pid = proc.id().to_string();
+    let pid = runtime.start(&timed_workflow(), Vars::new()).await.unwrap();
 
     let mut fired = false;
     for _ in 0..500 {

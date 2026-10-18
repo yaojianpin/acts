@@ -3,7 +3,6 @@ use crate::{
     scheduler::NodeData, store::data,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PackageInfo {
@@ -209,24 +208,6 @@ impl From<data::Task> for TaskInfo {
 impl From<&data::Task> for TaskInfo {
     fn from(t: &data::Task) -> Self {
         t.clone().into()
-    }
-}
-
-impl From<&Arc<crate::scheduler::Task>> for TaskInfo {
-    fn from(t: &Arc<crate::scheduler::Task>) -> Self {
-        Self {
-            id: t.id.clone(),
-            prev: t.prev_id(),
-            name: t.node().content.name(),
-            pid: t.pid.clone(),
-            nid: t.node().id().to_string(),
-            r#type: t.node().kind().to_string(),
-            state: t.state().into(),
-            data: t.data().to_string(),
-            start_time: t.start_time(),
-            end_time: t.end_time(),
-            timestamp: t.timestamp,
-        }
     }
 }
 

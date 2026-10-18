@@ -1,6 +1,5 @@
 use crate::Workflow;
 use crate::export::RunHandle;
-use crate::scheduler::Process;
 use crate::utils::consts;
 use crate::{
     ActError, ModelInfo, Principal, ProcInfo, Result, TaskInfo, Vars, query::Query,
@@ -75,8 +74,8 @@ impl ProcessExecutor {
                 workflow.rn
             )));
         }
-        let proc = self.runtime.start(&workflow, options).await?;
-        Ok(RunHandle::new(&self.runtime, proc.id().to_string()))
+        let pid = self.runtime.start(&workflow, options).await?;
+        Ok(RunHandle::new(&self.runtime, pid))
     }
 
     /// Start a model given inline and return its durable handle (see
@@ -98,8 +97,8 @@ impl ProcessExecutor {
             ))),
         }?;
         self.principal.check_rn(&workflow.rn)?;
-        let proc = self.runtime.start(&workflow, options).await?;
-        Ok(RunHandle::new(&self.runtime, proc.id().to_string()))
+        let pid = self.runtime.start(&workflow, options).await?;
+        Ok(RunHandle::new(&self.runtime, pid))
     }
 
     /// A durable handle to an existing run, by pid — the restart path.
@@ -123,25 +122,26 @@ impl ProcessExecutor {
     #[instrument(skip(self))]
     pub async fn get(&self, pid: &str) -> Result<ProcInfo> {
         self.principal.check(GET)?;
+        // The row query answers with the stored task rows; a missing proc row
+        // is the same store error it has always been.
         let proc = self.runtime.store().procs().find(pid).await?;
         let mut info: ProcInfo = (&proc).into();
 
-        if let Some(proc) = self.runtime.proc(pid).await? {
-            let mut tasks: Vec<TaskInfo> = proc.tasks().iter().map(TaskInfo::from).collect();
-
-            tasks.sort_by_key(|a| a.timestamp);
+        if let Some(read) = self.runtime.read_proc(pid).await? {
+            let tasks: Vec<TaskInfo> = read
+                .tasks()
+                .iter()
+                .map(|task| {
+                    let mut info = TaskInfo::from(task.row());
+                    // The scope vars live in the paired vars row; the
+                    // lifecycle row alone leaves this blank.
+                    info.data = task.data().to_string();
+                    info
+                })
+                .collect();
             info.tasks = tasks;
         }
 
         Ok(info)
-    }
-
-    /// The live process object behind a pid, for the embedder that wants to
-    /// walk its tree. Checked as [`GET`]: it hands out the same row's data,
-    /// only in its resident form.
-    #[instrument(skip(self))]
-    pub async fn get_process(&self, pid: &str) -> Result<Option<Arc<Process>>> {
-        self.principal.check(GET)?;
-        self.runtime.proc(pid).await
     }
 }

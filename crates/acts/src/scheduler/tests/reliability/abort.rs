@@ -186,8 +186,8 @@ async fn act_error_variables(engine: &Engine, pid: &str, tid: &str) -> Vec<Strin
 /// The row is captured by the poll itself, so the value returned is the one that
 /// read terminal (the run's rows cannot be reclaimed before its deliveries land
 /// on a tick).
-async fn wait_rows_terminal(engine: &Engine, pid: &str) -> Arc<Process> {
-    let seen: std::sync::Mutex<Option<Arc<Process>>> = std::sync::Mutex::new(None);
+async fn wait_rows_terminal(engine: &Engine, pid: &str) -> Arc<ProcRead> {
+    let seen: std::sync::Mutex<Option<Arc<ProcRead>>> = std::sync::Mutex::new(None);
     let what = format!("the rows of {pid} to show no non-terminal task");
     poll_until_dumped(
         &what,
@@ -350,7 +350,7 @@ async fn an_abort_on_a_waiting_act_decides_the_act_and_the_run_inner() {
         .tasks()
         .iter()
         .filter(|t| !t.state().is_completed())
-        .map(|t| format!("{}:{}", t.id, t.state()))
+        .map(|t| format!("{}:{}", t.tid(), t.state()))
         .collect();
     assert!(
         unfinished.is_empty(),
@@ -814,7 +814,7 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
             .tasks()
             .iter()
             .filter(|t| !t.state().is_completed())
-            .map(|t| format!("{}:{}", t.id, t.state()))
+            .map(|t| format!("{}:{}", t.tid(), t.state()))
             .collect();
         assert!(
             unfinished.is_empty(),
@@ -832,7 +832,7 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
         );
         let rows: Vec<String> = tasks_of(&proc, "step2")
             .iter()
-            .map(|t| format!("{}:{}", t.id, t.state()))
+            .map(|t| format!("{}:{}", t.tid(), t.state()))
             .collect();
         assert_eq!(
             rows,
@@ -973,7 +973,7 @@ async fn an_abort_racing_a_completion_converges_on_one_terminal_decision_inner()
             .tasks()
             .iter()
             .filter(|t| !t.state().is_completed())
-            .map(|t| format!("{}:{}", t.id, t.state()))
+            .map(|t| format!("{}:{}", t.tid(), t.state()))
             .collect();
         assert!(
             unfinished.is_empty(),

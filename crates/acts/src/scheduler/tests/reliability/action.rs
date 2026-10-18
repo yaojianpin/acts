@@ -494,7 +494,7 @@ async fn racing_completes_converge_on_one_decision_and_one_effect_inner() {
             .tasks()
             .iter()
             .filter(|task| !task.state().is_completed())
-            .map(|task| format!("{}:{}", task.id, task.state()))
+            .map(|task| format!("{}:{}", task.tid(), task.state()))
             .collect();
         assert!(
             unfinished.is_empty(),

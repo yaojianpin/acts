@@ -12,7 +12,7 @@ use crate::{
     env::Environment,
     event::{Emitter, ProcessGate},
     scheduler::shell::{
-        KernelSchedule, Process,
+        KernelSchedule, ProcRead,
         health::{LoopGuard, SchedulerHealth},
         validation::SchemaCache,
     },
@@ -484,11 +484,7 @@ impl Runtime {
     /// Deployments that run multiple runtime instances against one store must
     /// enforce external pid uniqueness at their boundary.
     #[instrument(skip(self, model, options), fields(mid = %model.id, name = %model.name))]
-    pub async fn start(
-        self: &Arc<Self>,
-        model: &Workflow,
-        mut options: Vars,
-    ) -> Result<Arc<Process>> {
+    pub async fn start(self: &Arc<Self>, model: &Workflow, mut options: Vars) -> Result<String> {
         debug!("process starting");
 
         let mut proc_id = utils::longid();
@@ -546,8 +542,12 @@ impl Runtime {
                 })?;
         }
 
-        let proc = Process::new(&proc_id);
-        proc.load_with_vars(model, &options)?;
+        // The run's declaration is validated before anything durable exists:
+        // the legacy start validated it while loading its process, and the
+        // kernel import must refuse the same malformed models (ids, `next`
+        // targets, triggers, `rn`) rather than seed an aggregate.
+        model.valid()?;
+
         // The process directory root comes from the engine config, never from
         // the request: a caller can neither name the directory nor place a
         // run outside it. The directory lives exactly as long as the
@@ -555,18 +555,13 @@ impl Runtime {
         // start that never became durable removes it itself (see
         // `Cache::abandon`).
         if let Some(root) = self.config.workdir() {
-            let dir = prepare_workdir(&root, &proc_id)?;
-            proc.set_workdir(&dir);
-        }
-        if let Some(owner) = &owner {
-            proc.set_owner_scope(owner);
+            prepare_workdir(&root, &proc_id)?;
         }
 
         // The kernel owns the run: the aggregate is its record from here on.
-        // The `Process` built above is only the handle this call returns for
-        // the caller's own use (its id); nothing keeps it resident, and the
-        // durable read model arrives with the row projection. The model facts,
-        // the run's authority and its start inputs all seed the aggregate.
+        // The model facts, the run's authority and its start inputs all seed
+        // the aggregate; nothing is kept resident, and the durable read model
+        // arrives with the row projection.
         let package = self.package.clone();
         let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
         // An unimportable model is refused here, not silently skipped.
@@ -575,7 +570,7 @@ impl Runtime {
             .with_vars(&options);
         self.kernel.start_process(&spec).await?;
         info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
-        Ok(proc)
+        Ok(proc_id)
     }
 
     /// The kernel host — the engine. The driver tests read it to inspect an
@@ -599,12 +594,12 @@ impl Runtime {
     /// their own. A repair that fails is queued and reported, and the read
     /// still returns the best row the store holds — callers can observe the
     /// gap through [`Self::projection_metrics`].
-    pub async fn proc(self: &Arc<Self>, pid: &str) -> Result<Option<Arc<Process>>> {
+    pub(crate) async fn read_proc(self: &Arc<Self>, pid: &str) -> Result<Option<ProcRead>> {
         self.refresh_read_model(pid).await;
-        self.store().load_proc(pid, self).await
+        crate::scheduler::shell::load_proc_rows(&self.store(), pid).await
     }
 
-    /// The on-demand half of the projection protocol (see [`Self::proc`]).
+    /// The on-demand half of the projection protocol (see [`Self::read_proc`]).
     async fn refresh_read_model(&self, pid: &str) {
         let Some(projector) = self.kernel.projector() else {
             return;
@@ -827,7 +822,7 @@ impl Runtime {
         }));
         // The read model: every commit re-materializes the legacy
         // proc/task/vars rows from the aggregate, so the row-reading APIs
-        // (`proc:get`/`task:get`/`msg:ls`, `Runtime::proc`) and the sweeper
+        // (`proc:get`/`task:get`/`msg:ls`, `Runtime::read_proc`) and the sweeper
         // (which reclaims a settled run's rows and directory) see the
         // kernel's runs exactly like the legacy engine's.
         host.attach_row_projector(Arc::new(crate::scheduler::shell::RowProjector::new(
@@ -1213,8 +1208,7 @@ impl crate::package::ActPackageRuntime for Arc<Runtime> {
     }
 
     async fn start(&self, model: &Workflow, options: Vars) -> Result<String> {
-        let proc = Runtime::start(self, model, options).await?;
-        Ok(proc.id().to_string())
+        Runtime::start(self, model, options).await
     }
 }
 

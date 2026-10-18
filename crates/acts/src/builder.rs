@@ -121,7 +121,7 @@ impl EngineBuilder {
     }
 
     /// Set the filesystem root for process directories: every process runs in
-    /// its own `<workdir>/<pid>`, which is what `Process::workdir` and
+    /// its own `<workdir>/<pid>`, which is what `Scope::workdir` and
     /// `Context::workdir` answer and what `$env.WORK_DIR` names. An empty
     /// path is refused at `start` (remove the setting to run without
     /// directory control).

@@ -234,7 +234,7 @@ pub struct ScopePolicy {
     pub enforce_rn: bool,
     /// Filesystem root this process runs under: its own directory is
     /// `<workdir_root>/<pid>`, created at start (that directory — not this
-    /// root — is what `Process::workdir` and `Context::workdir` answer, and
+    /// root — is what `Scope::workdir` and `Context::workdir` answer, and
     /// what `$env.WORK_DIR` names). Compiled from the engine config (see
     /// [`crate::Config::workdir`]); `None` means no directory control.
     #[serde(default)]

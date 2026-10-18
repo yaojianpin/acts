@@ -204,7 +204,7 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
             .tasks()
             .iter()
             .filter(|t| t.state().is_interrupted())
-            .map(|t| t.id.clone())
+            .map(|t| t.tid().to_string())
             .collect();
         assert!(
             waiting.is_empty(),
@@ -333,7 +333,7 @@ async fn fail_racing_complete_converges_on_one_terminal_decision_inner() {
             .tasks()
             .iter()
             .filter(|t| !t.state().is_completed())
-            .map(|t| format!("{}:{}", t.id, t.state()))
+            .map(|t| format!("{}:{}", t.tid(), t.state()))
             .collect();
         assert!(
             unfinished.is_empty(),

@@ -242,7 +242,6 @@ mod tests {
                 .map(|_| ()),
             executor.proc().list(&Query::new()).await.map(|_| ()),
             executor.proc().get("p1").await.map(|_| ()),
-            executor.proc().get_process("p1").await.map(|_| ()),
             executor.task().list(&Query::new()).await.map(|_| ()),
             executor.task().get("p1", "t1").await.map(|_| ()),
             executor.msg().list(&Query::new()).await.map(|_| ()),
@@ -368,9 +367,9 @@ mod tests {
             .pid()
             .to_string();
 
-        let proc = executor
-            .proc()
-            .get_process(&pid)
+        let proc = engine
+            .runtime()
+            .read_proc(&pid)
             .await
             .unwrap()
             .expect("the run is live");

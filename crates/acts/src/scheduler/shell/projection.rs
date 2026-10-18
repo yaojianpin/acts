@@ -1,7 +1,7 @@
 //! The legacy read model, projected from the aggregate.
 //!
 //! The kernel's only durable truth is the aggregate document; the engine's
-//! read APIs (`proc:get`/`task:get`/`msg:ls`, `Runtime::proc`) read the three
+//! read APIs (`proc:get`/`task:get`/`msg:ls`, `Runtime::read_proc`) read the three
 //! legacy row collections (`procs`, `tasks`, `vars`). This module materializes
 //! those rows from a committed snapshot — idempotently, after every commit —
 //! so the read model follows the run without ever becoming a second source of
@@ -65,7 +65,7 @@
 //!
 //! Read contract: the read model is never consulted by Core or Recovery for
 //! an authoritative decision (the aggregate is the only truth). The query API
-//! (`Runtime::proc` / `proc:get`) is a *strong* read: it re-projects the
+//! (`Runtime::read_proc` / `proc:get`) is a *strong* read: it re-projects the
 //! aggregate when the proc row's `source_revision` is behind, and otherwise
 //! serves the rows. A failed strong read serves the stored rows and leaves
 //! the repair queued; [`ProjectionMetrics::lag`] reports the gap.

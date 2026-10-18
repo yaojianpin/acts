@@ -72,7 +72,7 @@ use crate::{
     Signal, StoreBatchOp, StoreGuard, Vars, Workflow,
     event::EventAction,
     query::{Expr, Filter, Query},
-    scheduler::{Process, Task},
+    scheduler::{ProcRead, TaskRow},
     utils,
     utils::test::USES_IRQ,
 };
@@ -227,22 +227,21 @@ pub(crate) async fn start_run(engine: &Engine, workflow: &Workflow) -> String {
 
 /// Start `workflow` with `vars` and answer the pid it runs under.
 pub(crate) async fn start_run_with(engine: &Engine, workflow: &Workflow, vars: Vars) -> String {
-    let proc = engine.runtime().start(workflow, vars).await.unwrap();
-    proc.id().to_string()
+    engine.runtime().start(workflow, vars).await.unwrap()
 }
 
 // ---------------------------------------------------------------------------
 // The read model
 // ---------------------------------------------------------------------------
 
-/// The run's projected row as a `Process`, or `None` while it has no row (a
-/// settled run whose rows the sweeper reclaimed).
-pub(crate) async fn proc_row(engine: &Engine, pid: &str) -> Option<Arc<Process>> {
-    engine.runtime().proc(pid).await.unwrap()
+/// The run's projected rows, or `None` while it has no row (a settled run
+/// whose rows the sweeper reclaimed).
+pub(crate) async fn proc_row(engine: &Engine, pid: &str) -> Option<Arc<ProcRead>> {
+    engine.runtime().read_proc(pid).await.unwrap().map(Arc::new)
 }
 
-/// The run's projected row, failing the test when there is none.
-pub(crate) async fn read_proc(engine: &Engine, pid: &str) -> Arc<Process> {
+/// The run's projected rows, failing the test when there is none.
+pub(crate) async fn read_proc(engine: &Engine, pid: &str) -> Arc<ProcRead> {
     proc_row(engine, pid)
         .await
         .unwrap_or_else(|| panic!("process {pid} has no row"))
@@ -251,8 +250,8 @@ pub(crate) async fn read_proc(engine: &Engine, pid: &str) -> Arc<Process> {
 /// The run's projected tasks for the model node `nid` (the read model keeps one
 /// task per model node; a `uses` step is one node, so an irq act is the step's
 /// own task).
-pub(crate) fn tasks_of(proc: &Arc<Process>, nid: &str) -> Vec<Arc<Task>> {
-    proc.task_by_nid(nid)
+pub(crate) fn tasks_of(proc: &Arc<ProcRead>, nid: &str) -> Vec<Arc<TaskRow>> {
+    proc.task_by_nid(nid).into_iter().map(Arc::new).collect()
 }
 
 /// The model node an address names: a wire (the C5 instance id) resolves
@@ -273,14 +272,14 @@ pub(crate) fn node_of(
 }
 
 /// The waiting task of the node `nid` (`Interrupt`), if it is waiting.
-pub(crate) fn waiting_task(proc: &Arc<Process>, nid: &str) -> Option<Arc<Task>> {
+pub(crate) fn waiting_task(proc: &Arc<ProcRead>, nid: &str) -> Option<Arc<TaskRow>> {
     tasks_of(proc, nid)
         .into_iter()
         .find(|t| t.state().is_interrupted())
 }
 
 /// Poll until the node `nid` is waiting, and return its task.
-pub(crate) async fn wait_waiting_task(engine: &Engine, pid: &str, nid: &str) -> Arc<Task> {
+pub(crate) async fn wait_waiting_task(engine: &Engine, pid: &str, nid: &str) -> Arc<TaskRow> {
     let what = format!("node '{nid}' of {pid} to be waiting");
     poll_until_dumped(
         &what,
@@ -298,9 +297,10 @@ pub(crate) async fn wait_waiting_task(engine: &Engine, pid: &str, nid: &str) -> 
 
 /// The run's projected task for the model node `nid`, failing the test when
 /// there is none.
-pub(crate) async fn read_task(engine: &Engine, pid: &str, nid: &str) -> Arc<Task> {
+pub(crate) async fn read_task(engine: &Engine, pid: &str, nid: &str) -> Arc<TaskRow> {
     let proc = read_proc(engine, pid).await;
     proc.task(nid)
+        .map(|task| Arc::new(task.to_owned()))
         .unwrap_or_else(|| panic!("run {pid} has no task row for node {nid}"))
 }
 
@@ -317,7 +317,7 @@ pub(crate) async fn assert_settled(engine: &Engine, pid: &str) {
         .tasks()
         .iter()
         .filter(|t| !t.state().is_completed())
-        .map(|t| format!("{}:{}", t.id, t.state()))
+        .map(|t| format!("{}:{}", t.tid(), t.state()))
         .collect();
     assert!(
         unfinished.is_empty(),
@@ -327,11 +327,11 @@ pub(crate) async fn assert_settled(engine: &Engine, pid: &str) {
 
 /// The run's live task set as a sorted `(task id, state)` list — the
 /// comparable snapshot of a decision point.
-pub(crate) fn task_snapshot(proc: &Arc<Process>) -> Vec<(String, String)> {
+pub(crate) fn task_snapshot(proc: &Arc<ProcRead>) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = proc
         .tasks()
         .iter()
-        .map(|t| (t.id.clone(), t.state().to_string()))
+        .map(|t| (t.tid().to_string(), t.state().to_string()))
         .collect();
     v.sort();
     v
@@ -396,7 +396,7 @@ pub(crate) async fn dump_state(engine: &Engine, pid: &str) -> String {
         let mut tasks: Vec<String> = proc
             .tasks()
             .iter()
-            .map(|t| format!("{}:{}", t.id, t.state()))
+            .map(|t| format!("{}:{}", t.tid(), t.state()))
             .collect();
         tasks.sort();
         out.push_str(&tasks.join(","));

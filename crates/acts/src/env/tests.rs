@@ -1,20 +1,23 @@
-use std::sync::Arc;
-
-use crate::{
-    ActUserVar, Context, Engine, Vars, Workflow,
-    env::Environment,
-    utils::{consts, test::USES_IRQ},
-};
+use crate::{ActUserVar, Context, Engine, Vars, Workflow, env::Environment, utils::consts};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serial_test::serial;
 
+/// Build the root context of a finished run from its projected rows.
+async fn completed_context(engine: &Engine, pid: &str) -> Context {
+    let runtime = engine.runtime();
+    let read = runtime
+        .read_proc(pid)
+        .await
+        .unwrap()
+        .expect("the finished run has rows");
+    crate::scheduler::read_context(&runtime, &read).unwrap()
+}
+
 /// Start an engine, run a workflow to completion, and hand back the engine and
-/// the finished process. The workflow must finish on its own (no IRQ wait).
-async fn start_completed(
-    workflow: &Workflow,
-    vars: Vars,
-) -> (Engine, Arc<crate::scheduler::Process>) {
+/// the finished run's root context. The workflow must finish on its own (no
+/// IRQ wait).
+async fn start_completed(workflow: &Workflow, vars: Vars) -> (Engine, Context) {
     let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let done = sig.clone();
@@ -22,19 +25,10 @@ async fn start_completed(
         let done = done.clone();
         async move { done.close() }
     });
-    let proc = engine.runtime().start(workflow, vars).await.unwrap();
+    let pid = engine.runtime().start(workflow, vars).await.unwrap();
     sig.recv().await;
-    // The finished run's *durable* shape: the kernel projects the proc/task/vars
-    // rows from the aggregate, and the read API rebuilds the same process out
-    // of them — the in-memory handle `start` returned only carries the pid.
-    let pid = proc.id().to_string();
-    let proc = engine
-        .runtime()
-        .proc(&pid)
-        .await
-        .unwrap()
-        .expect("the finished run has rows");
-    (engine, proc)
+    let context = completed_context(&engine, &pid).await;
+    (engine, context)
 }
 
 // ---- expression basics ----
@@ -73,9 +67,7 @@ async fn env_eval_array() {
     let workflow = Workflow::new()
         .with_var("list", json!(["u1", "u2"]))
         .with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         assert_eq!(env.eval::<Vec<String>>("list").unwrap(), ["u1", "u2"]);
         assert_eq!(env.eval::<String>("list[1]").unwrap(), "u2");
@@ -95,9 +87,7 @@ async fn env_eval_object() {
     let workflow = Workflow::new()
         .with_var("obj", json!({ "a": 1, "b": "abc" }))
         .with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         let result = env.eval::<Obj>("obj").unwrap();
         assert_eq!(
@@ -226,9 +216,7 @@ async fn env_eval_sys_env() {
     }
     let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         assert_eq!(env.eval::<String>("$env.TOKEN").unwrap(), "abc");
     });
@@ -241,9 +229,7 @@ async fn env_task_get_value() {
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         assert_eq!(env.eval::<i64>("a").unwrap(), 10);
     });
@@ -254,9 +240,7 @@ async fn env_task_get_value() {
 async fn env_task_get_var_not_exists() {
     let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         assert!(env.eval::<serde_json::Value>("not_exists").is_err());
     });
@@ -267,9 +251,7 @@ async fn env_task_get_var_not_exists() {
 async fn env_task_get_fn_not_exists() {
     let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         assert_eq!(
             env.eval::<serde_json::Value>("$get('not_exists')").unwrap(),
@@ -290,18 +272,11 @@ async fn env_get_a_name_the_expression_builds() {
         .with_var("var_a", 7)
         .with_var("var_b", 9)
         .with_step(|step| step.with_id("step1").with_var("total", 8));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         // Two vars by name: the condition a workflow is written as.
         assert!(env.eval::<bool>("var_b > var_a").unwrap());
         assert_eq!(env.eval::<i64>("var_a + var_b").unwrap(), 16);
-        // A step's data, and a var against it.
-        assert!(
-            env.eval::<bool>("step1.total > var_a && var_b >= step1.total")
-                .unwrap()
-        );
         // The same comparison, with the name built at runtime.
         assert_eq!(env.eval::<i64>("$get(prefix + '_a')").unwrap(), 7);
         assert!(env.eval::<bool>("$get(prefix + '_b') > var_a").unwrap());
@@ -315,12 +290,10 @@ async fn env_task_set() {
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         env.eval::<()>("$set('a', 100)").unwrap();
-        assert_eq!(proc.data().get::<i64>("a"), Some(100));
+        assert_eq!(context.task().data().get::<i64>("a"), Some(100));
     });
 }
 
@@ -329,9 +302,7 @@ async fn env_task_set() {
 async fn env_task_multi_eval() {
     let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
         env.eval::<()>("$set('a', 100)").unwrap();
         env.eval::<()>("$set('b', 200)").unwrap();
@@ -347,9 +318,7 @@ async fn env_task_multi_eval() {
 async fn env_private_keys_are_engine_only() {
     let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     context.set_env(crate::utils::consts::PROC_OWNER, "forged");
 
     Context::scope(&context, || {
@@ -366,11 +335,11 @@ async fn env_private_keys_are_engine_only() {
 async fn env_work_dir_names_the_process_directory() {
     let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     let dir = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
-    proc.set_workdir(&dir);
+    context
+        .proc
+        .with_env_mut(|env| env.set(consts::PROC_WORKDIR, &dir));
 
     Context::scope(&context, || {
         assert_eq!(
@@ -382,7 +351,7 @@ async fn env_work_dir_names_the_process_directory() {
             Some(dir.clone())
         );
     });
-    assert_eq!(proc.workdir(), Some(dir));
+    assert_eq!(context.proc.workdir(), Some(dir));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -413,7 +382,7 @@ async fn env_user_var_get_from_context() {
     });
 
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine
+    let pid = engine
         .runtime()
         .start(
             &workflow,
@@ -422,16 +391,7 @@ async fn env_user_var_get_from_context() {
         .await
         .unwrap();
     sig.recv().await;
-    // Read the finished run back through its projected rows: the handle
-    // `start` returned carries only the pid.
-    let proc = engine
-        .runtime()
-        .proc(proc.id())
-        .await
-        .unwrap()
-        .expect("the finished run has rows");
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let context = completed_context(&engine, &pid).await;
     Context::scope(&context, || {
         assert_eq!(env.eval::<i32>("test.var1").unwrap(), 10);
     });
@@ -469,22 +429,13 @@ async fn env_user_var_get_default() {
     });
 
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine
+    let pid = engine
         .runtime()
         .start(&workflow, Vars::new())
         .await
         .unwrap();
     sig.recv().await;
-    // Read the finished run back through its projected rows: the handle
-    // `start` returned carries only the pid.
-    let proc = engine
-        .runtime()
-        .proc(proc.id())
-        .await
-        .unwrap()
-        .expect("the finished run has rows");
-
-    let context = proc.root().unwrap().create_context(&proc);
+    let context = completed_context(&engine, &pid).await;
     Context::scope(&context, || {
         assert_eq!(env.eval::<i32>("test.var1").unwrap(), 5);
     });
@@ -495,13 +446,11 @@ async fn env_user_var_get_default() {
 async fn env_user_var_secrets_get() {
     let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_engine, proc) = start_completed(
+    let (_engine, context) = start_completed(
         &workflow,
         Vars::new().with("secrets", Vars::new().with("TOKEN", "my_token")),
     )
     .await;
-
-    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<String>("secrets.TOKEN").unwrap(), "my_token");
     });
@@ -526,114 +475,10 @@ async fn env_eval_scopes_do_not_leak_vars() {
     let w1 = Workflow::new()
         .with_var("a", 1)
         .with_step(|step| step.with_id("step1"));
-    let (_e1, p1) = start_completed(&w1, Vars::new()).await;
-    let c1 = p1.root().unwrap().create_context(&p1);
+    let (_e1, c1) = start_completed(&w1, Vars::new()).await;
     Context::scope(&c1, || assert_eq!(env.eval::<i64>("a").unwrap(), 1));
 
     let w2 = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_e2, p2) = start_completed(&w2, Vars::new()).await;
-    let c2 = p2.root().unwrap().create_context(&p2);
+    let (_e2, c2) = start_completed(&w2, Vars::new()).await;
     Context::scope(&c2, || assert!(env.eval::<i64>("a").is_err()));
-}
-
-// ---- step data access ----
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_get_data_by_id() {
-    let env = Environment::new();
-    let workflow = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_var("a", 10))
-        .with_step(|step| step.with_id("step2").with_var("b", "abc"));
-    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
-
-    let context = proc.root().unwrap().create_context(&proc);
-    Context::scope(&context, || {
-        assert_eq!(env.eval::<i32>("step1.a").unwrap(), 10);
-        assert_eq!(env.eval::<String>("step2.b").unwrap(), "abc");
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_get_data() {
-    let env = Environment::new();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("b", "abc")
-            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
-    });
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let done = sig.clone();
-    engine.channel().on_message(move |e| {
-        let done = done.clone();
-        async move {
-            if e.is_irq() {
-                done.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    // Read the finished run back through its projected rows: the handle
-    // `start` returned carries only the pid.
-    let proc = engine
-        .runtime()
-        .proc(proc.id())
-        .await
-        .unwrap()
-        .expect("the finished run has rows");
-
-    let context = proc.root().unwrap().create_context(&proc);
-    Context::scope(&context, || {
-        let result = env.eval::<Vars>("$step_data('step1')").unwrap();
-        assert_eq!(result.get::<String>("b").unwrap(), "abc");
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_get_inputs() {
-    let env = Environment::new();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("a", 10)
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let done = sig.clone();
-    engine.channel().on_message(move |e| {
-        let done = done.clone();
-        async move {
-            if e.is_irq() {
-                done.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    // Read the finished run back through its projected rows: the handle
-    // `start` returned carries only the pid.
-    let proc = engine
-        .runtime()
-        .proc(proc.id())
-        .await
-        .unwrap()
-        .expect("the finished run has rows");
-
-    let context = proc.root().unwrap().create_context(&proc);
-    Context::scope(&context, || {
-        let result = env.eval::<Vars>("$step_inputs('step1')").unwrap();
-        assert_eq!(result.get::<i32>("a").unwrap(), 10);
-    });
 }

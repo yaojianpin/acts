@@ -3,7 +3,6 @@ pub mod data;
 mod delivery_rows;
 mod lease;
 mod memory;
-mod process_rows;
 pub mod query;
 
 #[allow(clippy::module_inception)]

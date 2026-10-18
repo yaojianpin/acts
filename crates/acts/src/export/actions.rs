@@ -1163,7 +1163,7 @@ mod tests {
         // the ancestor chain with the same code/message.)
         let proc = engine
             .runtime()
-            .proc(&started_pid)
+            .read_proc(&started_pid)
             .await
             .unwrap()
             .expect("the refused run has rows");
@@ -1177,7 +1177,7 @@ mod tests {
             "the refused seal must be recorded on the failing act: {:?}",
             proc.tasks()
                 .iter()
-                .map(|task| (task.id.clone(), task.err()))
+                .map(|task| (task.tid().to_string(), task.err()))
                 .collect::<Vec<_>>()
         );
         // The positive half — a run under its own uid seals its own value — is
@@ -1255,16 +1255,21 @@ mod tests {
         // The run got `<root>/<pid>`, and the workflow never saw the key.
         let dir = root.join("run1");
         assert!(dir.is_dir(), "workdir {} was not created", dir.display());
-        let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
+        let proc = engine.runtime().read_proc(&pid).await.unwrap().unwrap();
         assert_eq!(proc.workdir(), Some(dir.clone()));
-        assert!(proc.inputs().get::<String>(consts::PROC_WORKDIR).is_none());
+        assert!(
+            proc.tasks()
+                .iter()
+                .all(|task| task.data().get::<String>(consts::PROC_WORKDIR).is_none()),
+            "the workflow must never see the private workdir key"
+        );
 
         // ...and the run's own script finds the directory by name, the public
         // alias of the private key the workflow never saw
         sig.recv().await;
         // The run is finished: read it back through its projected rows (the
         // handle read before completion is a snapshot of the moment).
-        let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
+        let proc = engine.runtime().read_proc(&pid).await.unwrap().unwrap();
         assert_eq!(
             proc.tasks()
                 .iter()

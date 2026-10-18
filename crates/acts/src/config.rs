@@ -163,7 +163,7 @@ pub struct ConfigData {
     /// default.
     pub store_writer_queue_cap: Option<usize>,
     /// Filesystem root for process directories: a process runs in its own
-    /// `<workdir>/<pid>`, which is what `Process::workdir`/`Context::workdir`
+    /// `<workdir>/<pid>`, which is what `Scope::workdir`/`Context::workdir`
     /// answer and what `$env.WORK_DIR` names. The directory lives exactly as
     /// long as the process's durable rows. Omitted means no directory
     /// control, and a process may touch whatever the server's own account

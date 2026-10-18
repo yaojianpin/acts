@@ -8,7 +8,7 @@ use tracing::trace;
 
 use crate::store::KvStore;
 use crate::{
-    ActError, Result, Trigger, Workflow,
+    ActError, Result, Trigger, Vars, Workflow,
     scheduler::LegacyTaskState,
     store::{Model, Package},
     utils,
@@ -443,6 +443,26 @@ impl Store {
         batch.extend(procs.delete_ops(pid).await?);
         self.kv.batch(&batch, &[]).await?;
         Ok(true)
+    }
+
+    /// Remove a process and every row of it (see [`Self::remove_proc_rows`]).
+    pub async fn remove_proc(&self, pid: &str) -> Result<bool> {
+        trace!("remove_proc pid={}", pid);
+        self.remove_proc_rows(pid).await
+    }
+
+    /// The directory a process's filesystem access was confined to, read from
+    /// its durable row: the process env carries it under a private key, so it
+    /// is still reachable once the in-memory instance is gone — the sweeper
+    /// removes a *finished* process's directory, and a start that never became
+    /// durable removes its own. `None` when there is no row, the process was
+    /// started without an ACL workdir, or the stored env cannot be read: the
+    /// directory is reclaimed best-effort and a row that cannot answer must
+    /// never be a reason to keep the process's rows alive.
+    pub(crate) async fn proc_workdir(&self, pid: &str) -> Option<std::path::PathBuf> {
+        let proc = self.procs().find_opt(pid).await.ok()??;
+        let env: serde_json::Value = serde_json::from_str(&proc.env).ok()?;
+        Vars::from(env).get::<std::path::PathBuf>(utils::consts::PROC_WORKDIR)
     }
 
     /// A process may be deleted once it is finished AND every delivery of its

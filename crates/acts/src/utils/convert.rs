@@ -1,7 +1,7 @@
-use crate::{Context, Vars, scheduler::ScopeTask};
+use crate::{Context, Vars};
 use regex::Regex;
 use serde_json::Value as JsonValue;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
     match params {
@@ -125,30 +125,6 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
         }
     }
 
-    ret
-}
-
-pub fn fill_proc_vars(task: &Arc<ScopeTask>, values: &Vars, ctx: &Context) -> Vars {
-    let mut ret = Vars::new();
-    for (k, v) in values.iter() {
-        if let JsonValue::String(string) = v
-            && let Some(expr) = get_expr(string)
-        {
-            let result = Context::scope(ctx, || ctx.runtime.env().eval::<JsonValue>(&expr));
-            let new_value = result.unwrap_or(JsonValue::Null);
-
-            // satisfies the rule 1
-            ret.insert(k.clone(), new_value);
-
-            continue;
-        }
-
-        // rule 2
-        match task.find::<JsonValue>(&ctx.proc, k) {
-            Some(v) => ret.insert(k.clone(), v.clone()),
-            None => ret.insert(k.clone(), v.clone()),
-        };
-    }
     ret
 }
 

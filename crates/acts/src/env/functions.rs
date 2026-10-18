@@ -73,15 +73,11 @@ fn task_var(name: &str) -> Option<JsonValue> {
 
 /// The data of the last task with node id `nid`, which is how a step's own
 /// data is read as a bare step id (`step1.a`).
-fn step_data(nid: &str) -> Option<Vars> {
-    Context::try_with_current(|ctx| {
-        ctx.proc
-            .find_tasks(|task| task.node().id() == nid)
-            .last()
-            .map(|task| task.data())
-    })
-    .ok()
-    .flatten()
+///
+/// The kernel's scope carries only the acting execution (no task graph), so a
+/// step id is not a readable scope there: the lookup answers `None`.
+fn step_data(_nid: &str) -> Option<Vars> {
+    None
 }
 
 /// `$env`, `$os` and the functions the engine exposes to an expression.
@@ -182,56 +178,25 @@ fn builtin(name: &str) -> Option<Value> {
         }),
         "$step_inputs" => Value::function(|args| {
             arity("$step_inputs", args, 1, 1)?;
-            let nid = str_arg("$step_inputs", args, 0)?;
-            let inputs = Context::with(|ctx| {
-                ctx.proc
-                    .find_tasks(|task| task.node().id() == nid.as_str())
-                    .last()
-                    .map(|task| task.inputs(ctx))
-            });
-
-            Ok(match inputs {
-                Some(inputs) => from_json(JsonValue::from(inputs)),
-                None => Value::Null,
-            })
+            let _nid = str_arg("$step_inputs", args, 0)?;
+            // The kernel's scope carries only the acting execution (see
+            // `step_data`), so a step id names no readable scope here.
+            Ok(Value::Null)
         }),
         "$set_step_value" => Value::function(|args| {
             arity("$set_step_value", args, 3, 3)?;
-            let nid = str_arg("$set_step_value", args, 0)?;
-            let name = str_arg("$set_step_value", args, 1)?;
-            let value = json_arg("$set_step_value", args, 2)?;
-            let vars = Vars::new().with(name.as_str(), value);
-            let result: Result<()> = Context::with(|ctx| {
-                let tasks = ctx.proc.find_tasks(|task| task.node().id() == nid.as_str());
-                if let Some(task) = tasks.last() {
-                    if task.state().is_completed() {
-                        return Err(crate::ActError::Script(format!(
-                            "Task with nid '{nid}' is already completed, cannot set value",
-                        )));
-                    }
-                    task.update_data(&vars);
-                }
-                Ok(())
-            });
-            result.map_err(|err| ExprError::Function {
-                name: "$set_step_value".to_string(),
-                message: err.to_string(),
-            })?;
-
+            let _nid = str_arg("$set_step_value", args, 0)?;
+            let _name = str_arg("$set_step_value", args, 1)?;
+            let _value = json_arg("$set_step_value", args, 2)?;
+            // The kernel's scope carries only the acting execution (see
+            // `step_data`), so a step id names no writable scope here.
             Ok(Value::Null)
         }),
         "$steps" => Value::function(|args| {
             arity("$steps", args, 0, 0)?;
-            let steps = Context::with(|ctx| {
-                ctx.proc
-                    .tasks()
-                    .iter()
-                    .filter(|task| task.is_kind(crate::NodeKind::Step))
-                    .map(|task| Value::from(task.node().id()))
-                    .collect::<Vec<_>>()
-            });
-
-            Ok(Value::List(steps.into()))
+            // The kernel's scope carries only the acting execution (see
+            // `step_data`), so there is no step list here.
+            Ok(Value::List(Vec::new().into()))
         }),
 
         _ => return None,
@@ -291,11 +256,9 @@ fn from_json(value: JsonValue) -> Value {
     Value::from(value)
 }
 
-fn step_data_of(ctx: &Context, nid: &str) -> Option<Vars> {
-    ctx.proc
-        .find_tasks(|task| task.node().id() == nid)
-        .last()
-        .map(|task| task.data())
+fn step_data_of(_ctx: &Context, _nid: &str) -> Option<Vars> {
+    // The kernel's scope carries only the acting execution (see `step_data`).
+    None
 }
 
 fn env_map() -> Vars {

@@ -2095,12 +2095,11 @@ async fn kernel_engine_serves_a_run_to_completion() {
         workflow = workflow.with_step(|step| step.with_id("s2"));
         workflow
     };
-    let proc = engine
+    let pid = engine
         .runtime()
         .start(&workflow, crate::Vars::new())
         .await
         .unwrap();
-    let pid = proc.id().to_string();
     tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
         .await
         .expect("engine never finished");
@@ -2126,7 +2125,7 @@ async fn kernel_engine_serves_a_run_to_completion() {
         ]
     );
     assert!(
-        runtime.proc(&pid).await.unwrap().is_some(),
+        runtime.read_proc(&pid).await.unwrap().is_some(),
         "the projected rows serve the read API"
     );
 }
@@ -2187,8 +2186,7 @@ async fn kernel_engine_serves_client_actions_on_an_irq_workflow() {
     let created1 = wait_for_created(&engine, "act1");
     let created2 = wait_for_created(&engine, "act2");
 
-    let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
-    let pid = proc.id().to_string();
+    let pid = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
 
     // Each waiting act completes exactly when its client action arrives.
     for created in [created1, created2] {
@@ -2259,12 +2257,11 @@ async fn kernel_engine_scopes_effects_to_the_run_workdir() {
                 crate::Vars::new().with("dir", "${{ $env.WORK_DIR }}"),
             )
         });
-    let proc = engine
+    let pid = engine
         .runtime()
         .start(&workflow, crate::Vars::new())
         .await
         .unwrap();
-    let pid = proc.id().to_string();
     tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
         .await
         .expect("engine never finished");
@@ -2287,7 +2284,7 @@ async fn kernel_engine_scopes_effects_to_the_run_workdir() {
 }
 
 /// The read model in driver mode: the kernel's rows land in the legacy
-/// collections, so `proc:get`/`task:get`/`Runtime::proc` answer from them,
+/// collections, so `proc:get`/`task:get`/`Runtime::read_proc` answer from them,
 /// and once the run settled the sweeper reclaims its rows and its
 /// directory.
 #[tokio::test(flavor = "multi_thread")]
@@ -2328,8 +2325,7 @@ async fn kernel_engine_projects_the_legacy_read_model() {
             )
         });
     let runtime = engine.runtime();
-    let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
-    let pid = proc.id().to_string();
+    let pid = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
         .await
         .expect("the run never finished");
@@ -2366,10 +2362,9 @@ async fn kernel_engine_projects_the_legacy_read_model() {
         "the task data must carry the effect output: {}",
         s1.data
     );
-    // `Runtime::proc` rebuilds the process from the rows: the durable read
-    // model, not a resident instance.
+    // The read API serves the durable rows directly: no resident instance.
     let live = runtime
-        .proc(&pid)
+        .read_proc(&pid)
         .await
         .unwrap()
         .expect("the projected process must load");
@@ -2435,7 +2430,7 @@ async fn kernel_engine_projects_the_legacy_read_model() {
             .unwrap()
             .is_none()
     );
-    assert!(runtime.proc(&pid).await.unwrap().is_none());
+    assert!(runtime.read_proc(&pid).await.unwrap().is_none());
     // A11: the durable record and every derived index are gone too, so the
     // pid is reusable and nothing of the run survives as an index orphan.
     assert!(
@@ -2521,7 +2516,7 @@ async fn kernel_engine_refuses_a_pid_until_the_run_is_reclaimed_and_then_reuses_
         .start(&workflow, options)
         .await
         .expect("a reclaimed pid must be reusable");
-    assert_eq!(reused.id(), pid, "the new run keeps the requested pid");
+    assert_eq!(reused, pid, "the new run keeps the requested pid");
 
     runtime.close().await;
 }
@@ -2701,7 +2696,7 @@ async fn kernel_engine_finishes_an_interrupted_terminal_cleanup() {
         .start(&workflow, options)
         .await
         .expect("the residue is gone, so the pid is reusable");
-    assert_eq!(reused.id(), pid);
+    assert_eq!(reused, pid);
 
     std::fs::remove_dir_all(&root).ok();
     runtime.close().await;
@@ -2930,8 +2925,7 @@ async fn effect_write_back_folds_into_the_process() {
             step.with_id("s2")
                 .with_uses("test.readenv", crate::Vars::new())
         });
-    let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
-    let pid = proc.id().to_string();
+    let pid = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
         .await
         .expect("the run never finished");
@@ -3108,8 +3102,7 @@ async fn kernel_task_and_act_messages_are_emitted() {
             });
         }
 
-        let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
-        let _ = proc.id();
+        runtime.start(&workflow, crate::Vars::new()).await.unwrap();
         // The client's action completes the waiting act, on the tid its
         // own Created message named (the legacy act's random task id, the
         // kernel's node id).
@@ -8722,8 +8715,7 @@ async fn a_proc_read_reprojects_a_lagging_row() {
         .with_id("wf-strong-read")
         .with_step(|step| step.with_id("s1"));
     let runtime = engine.runtime();
-    let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
-    let pid = proc.id().to_string();
+    let pid = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
         .await
         .expect("the run never finished");
@@ -8741,7 +8733,11 @@ async fn a_proc_read_reprojects_a_lagging_row() {
     row.source_revision = "1.0.0".into();
     runtime.store().procs().update(&row).await.unwrap();
 
-    let live = runtime.proc(&pid).await.unwrap().expect("the proc row");
+    let live = runtime
+        .read_proc(&pid)
+        .await
+        .unwrap()
+        .expect("the proc row");
     assert_eq!(
         live.state(),
         crate::LegacyTaskState::Completed,

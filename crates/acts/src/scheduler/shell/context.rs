@@ -2,7 +2,7 @@ use crate::{
     ActError, Executor, MissingParamAction, Result,
     scheduler::{
         Runtime,
-        shell::{Process, Scope, ScopeTask, Task},
+        shell::{Scope, ScopeTask},
     },
     snapshot::{SnapshotPolicy, SnapshotStore, join_scope, resolve_scope_params},
     utils::consts,
@@ -58,25 +58,13 @@ impl Context {
         });
     }
 
-    pub fn new(proc: &Arc<Process>, task: &Arc<Task>) -> Self {
-        // The read-model compatibility view: a context built from a loaded
-        // process keeps delegating to that process and task, while the
-        // headless seams use the lightweight carriers directly.
-        Self::from_scope(
-            task.runtime().clone(),
-            Scope::from_process(proc),
-            ScopeTask::from_task(task.clone()),
-        )
-    }
-
     /// The headless context: the scope and task the effect/predicate seams
     /// built from a [`ScopeSpec`](super::scope::ScopeSpec).
     pub(crate) fn headless(runtime: Arc<Runtime>, proc: Arc<Scope>, task: Arc<ScopeTask>) -> Self {
         Self::from_scope(runtime, proc, task)
     }
 
-    /// The context over already-built carriers. `Task::inputs` uses it to
-    /// evaluate a predecessor's outputs in that predecessor's own scope.
+    /// The context over already-built carriers.
     pub(crate) fn from_scope(
         runtime: Arc<Runtime>,
         proc: Arc<Scope>,
