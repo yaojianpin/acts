@@ -16,24 +16,21 @@ pub(crate) struct ProcessEnvelope {
 }
 
 impl ProcessEnvelope {
-    pub(crate) fn seal(payload: Vec<u8>) -> Self {
-        Self {
-            schema_version: AGGREGATE_SCHEMA_VERSION,
-            payload_digest: sha256_hex(&payload),
-            payload,
-        }
-    }
-
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, EnvelopeError> {
-        self.validate()?;
+    /// Seal `payload` into the persisted document.
+    ///
+    /// The payload is hashed exactly once, here, and the digest goes straight
+    /// into the header: the write path must not re-hash the bytes it just
+    /// sealed. `decode` still verifies the digest against the payload it
+    /// read, so corruption detection at the storage boundary is unchanged.
+    pub(crate) fn seal(payload: Vec<u8>) -> Result<Vec<u8>, EnvelopeError> {
         let payload_len =
-            u64::try_from(self.payload.len()).map_err(|_| EnvelopeError::PayloadTooLarge)?;
-        let mut bytes = Vec::with_capacity(HEADER_LEN + self.payload.len());
+            u64::try_from(payload.len()).map_err(|_| EnvelopeError::PayloadTooLarge)?;
+        let mut bytes = Vec::with_capacity(HEADER_LEN + payload.len());
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&self.schema_version.to_be_bytes());
+        bytes.extend_from_slice(&AGGREGATE_SCHEMA_VERSION.to_be_bytes());
         bytes.extend_from_slice(&payload_len.to_be_bytes());
-        bytes.extend_from_slice(self.payload_digest.as_bytes());
-        bytes.extend_from_slice(&self.payload);
+        bytes.extend_from_slice(sha256_hex(&payload).as_bytes());
+        bytes.extend_from_slice(&payload);
         Ok(bytes)
     }
 
@@ -128,16 +125,30 @@ mod tests {
 
     #[test]
     fn envelope_round_trip_is_exact_and_self_validating() {
-        let envelope = ProcessEnvelope::seal(b"deterministic payload".to_vec());
-        let encoded = envelope.encode().unwrap();
-        assert_eq!(ProcessEnvelope::decode(&encoded).unwrap(), envelope);
+        let encoded = ProcessEnvelope::seal(b"deterministic payload".to_vec()).unwrap();
+        let decoded = ProcessEnvelope::decode(&encoded).unwrap();
+        assert_eq!(decoded.payload, b"deterministic payload");
+        assert_eq!(decoded.schema_version, AGGREGATE_SCHEMA_VERSION);
+        assert_eq!(decoded.payload_digest, sha256_hex(&decoded.payload));
     }
 
     #[test]
     fn corruption_is_detected_before_payload_decode() {
-        let envelope = ProcessEnvelope::seal(b"payload".to_vec());
-        let mut encoded = envelope.encode().unwrap();
+        let mut encoded = ProcessEnvelope::seal(b"payload".to_vec()).unwrap();
         *encoded.last_mut().unwrap() ^= 0x01;
+        assert!(matches!(
+            ProcessEnvelope::decode(&encoded),
+            Err(EnvelopeError::DigestMismatch { .. })
+        ));
+    }
+
+    /// The header digest is verified against the payload it describes: a
+    /// document whose digest was altered while its payload stayed intact is
+    /// rejected too, so validation cannot be skipped by a writer.
+    #[test]
+    fn tampered_digest_is_rejected_by_decode() {
+        let mut encoded = ProcessEnvelope::seal(b"payload".to_vec()).unwrap();
+        encoded[18] = if encoded[18] == b'a' { b'b' } else { b'a' };
         assert!(matches!(
             ProcessEnvelope::decode(&encoded),
             Err(EnvelopeError::DigestMismatch { .. })
@@ -146,15 +157,15 @@ mod tests {
 
     #[test]
     fn unsupported_schema_and_trailing_bytes_are_rejected() {
-        let envelope = ProcessEnvelope::seal(Vec::new());
-        let mut unsupported = envelope.encode().unwrap();
+        let encoded = ProcessEnvelope::seal(Vec::new()).unwrap();
+        let mut unsupported = encoded.clone();
         unsupported[8..10].copy_from_slice(&2u16.to_be_bytes());
         assert_eq!(
             ProcessEnvelope::decode(&unsupported),
             Err(EnvelopeError::UnsupportedSchema(2))
         );
 
-        let mut trailing = envelope.encode().unwrap();
+        let mut trailing = encoded;
         trailing.push(0);
         assert_eq!(
             ProcessEnvelope::decode(&trailing),
@@ -164,7 +175,7 @@ mod tests {
 
     #[test]
     fn truncation_never_panics_and_is_classified() {
-        let encoded = ProcessEnvelope::seal(b"payload".to_vec()).encode().unwrap();
+        let encoded = ProcessEnvelope::seal(b"payload".to_vec()).unwrap();
         for length in 0..HEADER_LEN {
             assert_eq!(
                 ProcessEnvelope::decode(&encoded[..length]),

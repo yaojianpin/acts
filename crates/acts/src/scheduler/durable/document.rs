@@ -25,7 +25,7 @@ impl ProcessDocumentCodec {
             .validate()
             .map_err(SnapshotCodecError::InvalidProcess)?;
         let payload = SnapshotCodecV3::encode(snapshot)?;
-        let sealed = ProcessEnvelope::seal(payload).encode()?;
+        let sealed = ProcessEnvelope::seal(payload)?;
         Ok(sealed)
     }
 
@@ -130,6 +130,23 @@ mod tests {
         assert_eq!(ProcessDocumentCodec::decode(&bytes).unwrap(), source);
     }
 
+    /// The single hash on the write path is deterministic: the same snapshot
+    /// always seals to the same document, and the header digest it carries is
+    /// the digest of the payload it carries.
+    #[test]
+    fn document_encoding_is_byte_stable() {
+        use crate::scheduler::core::commit::aggregate::sha256_hex;
+
+        let source = snapshot();
+        let first = ProcessDocumentCodec::encode(&source).unwrap();
+        let second = ProcessDocumentCodec::encode(&source).unwrap();
+        assert_eq!(first, second);
+
+        let envelope = ProcessEnvelope::decode(&first).unwrap();
+        assert_eq!(envelope.payload_digest, sha256_hex(&envelope.payload));
+        assert_eq!(ProcessDocumentCodec::decode(&first).unwrap(), source);
+    }
+
     #[test]
     fn corrupted_envelope_is_not_misreported_as_snapshot_failure() {
         let mut bytes = ProcessDocumentCodec::encode(&snapshot()).unwrap();
@@ -144,9 +161,7 @@ mod tests {
 
     #[test]
     fn valid_envelope_with_invalid_payload_is_reported_as_snapshot_failure() {
-        let bytes = ProcessEnvelope::seal(b"not a snapshot".to_vec())
-            .encode()
-            .unwrap();
+        let bytes = ProcessEnvelope::seal(b"not a snapshot".to_vec()).unwrap();
         assert_eq!(
             ProcessDocumentCodec::decode(&bytes),
             Err(ProcessDocumentError::Snapshot(
@@ -163,9 +178,7 @@ mod tests {
     fn v2_documents_upcast_to_the_loaded_snapshot() {
         use crate::scheduler::durable::snapshot_codec::SnapshotCodecV2;
         let source = snapshot();
-        let v2 = ProcessEnvelope::seal(SnapshotCodecV2::encode(&source).unwrap())
-            .encode()
-            .unwrap();
+        let v2 = ProcessEnvelope::seal(SnapshotCodecV2::encode(&source).unwrap()).unwrap();
         assert_eq!(ProcessDocumentCodec::decode(&v2).unwrap(), source);
     }
 }
