@@ -4143,6 +4143,42 @@ seq=0)。以后任何 framing 变更必须同时改该测试与 CHANGELOG,不能
 - 未改 manifest,未跑 `cargo deny`。不改摘要算法、effect/outbox payload 与顺序、A4/A5/A8/A9/A10/A11 语义;
   不引入 `unsafe`。
 
+### L9 完成(2026-10-18):删动态 act 死簇与 legacy 事件面(零行为变更)
+
+**任务**:§11 B 的 L9。C8c 已证明 `build_acts` 的产物只写进 headless `NodeTree`,被 `effects::run` 丢弃;
+行投影从 durable model 重建。本笔只删死件,不碰 effect/outbox、持久化格式与行投影。
+
+**删除范围与证据**
+
+| 簇 | 删除项 | 证据 |
+|---|---|---|
+| 动态 act | `Context::build_acts`、`view/build.rs::dyn_build_act`、`NodeTree::append_node`、`Node::nodes`;`block`/`parallel`/`sequence` 的三个调用点 | C8c 的 effect seam 探针 + 既有 `a_block_packages_inline_acts_run_as_children_in_both_modes`;生产侧 `git grep "build_acts\|dyn_build_act\|append_node"` = 0(仅历史注释/测试名,见下) |
+| 容器包执行体 | 三包不再构造 `Act`/调用 `build_acts`,只保留 params 解析(schema 校验)与 `Ok(None)` | `materialize_container_acts` 在 import 时已把同一形状写进 durable model;kernel fan-out 读它 |
+| legacy 事件面 | `Emitter::{on_proc,on_task,emit_proc_event,emit_task_event,emit_task_event_with_extra}`、`ProcHandle`/`TaskHandle`、`run_proc_handle`/`run_task_handle`、`procs`/`tasks` handler 表、`TaskExtra`/`event/extra.rs`;`Event` 去掉未用的 extra 泛型/`new_with_extra`/`extra()` | 全仓 `.on_proc(`/`.on_task(`/`.emit_proc_event(`/`.emit_task_event` = 0;channel 适配器只用 keyed 的 `on_message/on_start/on_complete/on_error` |
+| `Process` 死方法 | `create_task`、`print`、`tree_output`、`write_task_tree`、`into_data`、`info`、`cost`、`outputs`、`parent`、`children`、`node`、`model`、`timestamp`、`set_data_with`、`set_end_time`、`set_err`、`set_state`、`task_for_node_prev`、`task_by_params`、`task_by_uses` | 逐项 `\.method\(` grep = 0;`task_by_nid` 保留(reliability 夹具使用) |
+| `Task` 死方法 | `unique_id`、`into_data`、`into_data_vars`、`is_vars_dirty`(连 `vars_dirty`/`vars_gen`/`mark_vars_dirty`)、`siblings`、`children`、`next`、`is_uses`、`has_sealed`、`sealed_keys` | 同上;`cost`/`parent`/`find`/`sealed`/`update_data` 等生产路径仍用 |
+| 连带死件 | `TaskTree::run_count`/`run_counts`、`ACT_INDEX`/`ACT_VALUE`、`Process::runtime` 字段与 `Process::new*` 的 `rt` 参数、`package::core::RunningMode` re-export | 删除 `create_task`/容器包构造后由 `-D warnings` 暴露;`Process::new` 的 3 个调用点已同步 |
+
+**唯一行为面风险**:`dyn_build_act` 曾能把树构建错误(重复 id)提升为 effect 失败;`append_node` 对重复 id
+做 `shortid` 去重,模型 import 的 `assign_ids` 也保证 id 唯一,故该错误路径实际不可达。容器包仍解析
+params,非法 params 仍使 act 失败(与删除前一致)。
+
+**验收**
+
+- 生产侧 `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` = 0;剩余命中只有
+  `KERNEL_*.md`/`CHANGELOG.md` 历史记录与测试/生产注释(`reliability/{next,parallel,subflow}.rs`、
+  `model.rs`、`operation/action.rs`),已改成过去时;`sch_tree_dyn_acts_restore_chain` 保留,改为用
+  `NodeTree::make` + `set_parent`/`set_next` 构造同一链,继续覆盖 `get_or_make`/`restore_links` 的恢复路径。
+- `cargo test -p acts --lib --tests` = **958 passed / 0 failed**(含逐字断言的
+  `sch_tree_output_is_byte_stable`;行投影/消息断言未改)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check` 绿。
+- 未改 manifest,未跑 `cargo deny`;不改 effect/outbox payload 与顺序、持久化格式、A3/A4/A5/A9/A10/A11
+  语义;不引入 `unsafe`;探针未提交。
+
+**API 面**:`Emitter::on_proc`/`on_task`、`emit_proc_event`/`emit_task_event*`、`TaskExtra`,以及上述
+`Process`/`Task` 方法与 `Process::new*` 的参数变更一起属 BREAKING(已在 CHANGELOG 记录)。
+`Process`/`Task`/`NodeTree` 的类型退休仍按 L10-L12。
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4165,7 +4201,7 @@ seq=0)。以后任何 framing 变更必须同时改该测试与 CHANGELOG,不能
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1、P2、L8 已完成(§10「P1 完成」「P2 完成」「L8 完成」),下一执行项为 §11 B 的 L9**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2、L8、L9 已完成(§10「P1 完成」「P2 完成」「L8 完成」「L9 完成」),下一执行项为 §11 B 的 L10**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4211,7 +4247,7 @@ seq=0)。以后任何 framing 变更必须同时改该测试与 CHANGELOG,不能
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L8 已完成,§12 当前指向 L9。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L8、L9 已完成,§12 当前指向 L10。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
@@ -4224,7 +4260,7 @@ seq=0)。以后任何 framing 变更必须同时改该测试与 CHANGELOG,不能
 | **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
 | **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
 | **L8** | **减字节:整包聚合 → append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**:head + base + 每 commit 的变更日志;阈值(32)压缩;懒迁移旧 V2/V3;golden 重冻结 + CHANGELOG BREAKING | 原 §1.b③ / §1.b(i)② / §1.b(iii) | **已做(§10「L8 完成」)**。验收:同一探针 187 commits 聚合写 205,207 B 总量 / 1,097 B/commit(改前每 commit 一个整包文档,终态 50,249 B;§5i 形状 14.7 MB),普通 commit 只写 head+一个变更 entry,每 32 个 commit 才写一次 base;旧 V2/V3 迁移/中断重入/guard 冲突/reclaim 全绿;golden 新族 fingerprint 冻结;`-p acts --lib --tests` 绿 |
-| **L9** | **退役 Phase 0:删动态 act 死簇与 legacy 事件面** —— `Context::build_acts`/`dyn_build_act`/`NodeTree::append_node`、`package/core/{block,parallel,sequence}.rs` 的三个调用点;`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;确认零调用的 `Process`/`Task` 方法(`create_task`/`print`/`into_data`/`task_by_*`、`unique_id`/`into_data_vars`/`is_vars_dirty` 等) | 设计 §3.7(d)⑤ + 2026-10-17 评估 | 未做。**零行为变更**(headless tree 的产物本来就被 `effects::run` 丢弃,`projection` 从 durable model 重建);验收:生产侧 `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` = 0,`-p acts` 全绿,行/消息/`tree_output` 不变 |
+| **L9** | **退役 Phase 0:删动态 act 死簇与 legacy 事件面** —— `Context::build_acts`/`dyn_build_act`/`NodeTree::append_node`、`package/core/{block,parallel,sequence}.rs` 的三个调用点;`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;确认零调用的 `Process`/`Task` 方法(`create_task`/`print`/`into_data`/`task_by_*`、`unique_id`/`into_data_vars`/`is_vars_dirty` 等) | 设计 §3.7(d)⑤ + 2026-10-17 评估 | **已做(§10「L9 完成」)**。生产侧 `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` = 0(历史注释除外);`-p acts --lib --tests` **958 passed**;行/消息/`tree_output` 逐字断言不变;clippy/fmt 绿。**BREAKING**:legacy 事件面与零调用 `Process`/`Task` 方法移除 |
 | **L10** | **退役 Phase 1:headless scope 去 `Process`/`Task`** —— `ScopeSpec` 已是完整输入,换成 `ScopeTask`(node content + data + sealed + cancel)+ `Scope`(pid/env/owner/workdir);替换 `scope.rs:47-87`,保留包实际用到的 `task.{pid,id,options,node,data}` 与 `proc.{id,owner_scope,env,workdir,set_data}` | 设计 §3.7(d)① | 未做;前置 L9。验收:effect/predicate/package 套件全绿;每 hop 不再建 `Process`+`NodeTree`(收益按 P1 口径量);`Context` 的包 API 名字不变或按 BREAKING 记录 |
 | **L11** | **退役 Phase 2:model 直出 view** —— `Workflow::valid`/`tree_output` 与投影 `node_data` 直接走 `Workflow`/`Step`/`Branch`(逐字保持行与树输出);删 `NodeTree`/`Node`;`NodeData`/`NodeContent` 持久化形状保留 | 设计 §3.7(d)③ | 未做;前置 L10。验收:`sch_tree_output_is_byte_stable` 563-byte、`model:get fmt=tree`、`node_data` 逐字、投影行格式不变 |
 | **L12** | **退役 Phase 3:读 API 改行查询并删类型** —— `proc:get` 用 task 行 + `TaskInfo::from(&data::Task)` + vars join;删 `Runtime::proc`/`Store::load_proc`/`store/process_rows`/`Process`/`Task`/`TaskTree`;`Executor::proc().get_process` 删除或改读模型 DTO(**BREAKING**) | 设计 §3.7(d)④ | 未做;前置 L11。验收:`proc:get` 字段不变、reliability 测试改读行/快照后全绿、`git grep "struct Process\|struct Task\|struct NodeTree"` = 0、CHANGELOG BREAKING |
@@ -4287,48 +4323,49 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:L9 —— 退役 Phase 0:删动态 act 死簇与 legacy 事件面(§11 B,第二波,接 L8)
+# 当前任务:L10 —— 退役 Phase 1:headless scope 去掉 `Process`/`Task`(§11 B,第二波,接 L9)
 
-**依据**:§11 B 的 L9;设计 `KERNEL_REFACTOR_DESIGN.md` §3.7(d)⑤ + 2026-10-17 评估。
-C8c 已取证:headless tree 的产物被 `effects::run` 丢弃,`projection` 从 durable model 重建 ⇒
-`Context::build_acts`/`dyn_build_act`/`NodeTree::append_node` 这一簇每 hop 跑了但不生效。
+**依据**:§11 B 的 L10;设计 `KERNEL_REFACTOR_DESIGN.md` §3.7(d)①。L9 已删掉动态 act 簇与 legacy
+事件面;`scope.rs` 仍为每次 effect/predicate 建一个 `Process` + 整棵 `NodeTree` + 一个 `Task`。
 
-**目标**:零行为变更地删除 Phase 0 的动态 act 死簇与 legacy 事件面;行投影、消息、`tree_output`、
-完成/错误逐字不变。
+**目标**:零行为变更地把 headless scope 换成轻量载体——`ScopeSpec` 已是完整输入,直接驱动
+`ScopeTask`(node content + data + sealed + cancel)与 `Scope`(pid/env/owner/workdir);
+effect、predicate、容器 fan-out 的判定、消息与行投影逐字不变。
 
 **本笔内容**
 
-1. 删动态 act 簇:`Context::build_acts`、`dyn_build_act`、`NodeTree::append_node`,以及
-   `package/core/{block,parallel,sequence}.rs` 的三个调用点(先确认调用链只通向被丢弃的产物)。
-2. 删 legacy 事件面:`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;
-   若某个名字仍被 channel 适配器或公开 API 使用,保留但写明调用方,不要连带删活件。
-3. 清理已证零调用的 `Process`/`Task` 方法(`create_task`、`print`、`into_data`、`task_by_*`、
-   `unique_id`、`into_data_vars`、`is_vars_dirty` 等):逐项 `grep` 确认零调用再删;被测试使用的
-   夹具方法按测试需要保留。
-4. 每删一簇先跑 `-p acts` 的对应套件,证明没有行为面变化;不引入新抽象、不改持久化格式。
+1. 在 `scheduler/shell/scope.rs` 引入 `ScopeTask`(等价于包实际读到的 `pid`、`id`、`options`、
+   `node`、`data`/`sealed`、`cancellation_token`)与 `Scope`(等价于 `id`、`owner_scope`、`env`、
+   `workdir`,以及 `set_data`),替换 `headless_scope` 的 `Process::new` + `process.load` + `Task::new`。
+2. `Context` 内部改持 `Scope`/`ScopeTask`;包侧名字保持 `ctx.task()`/`ctx.proc` 的现有形状,
+   只保留 L10 需要的字段与方法。若某公开名必须改,按 BREAKING 记录并同步所有包。
+3. 效果写回仍只取 `task.data()` 差量、`task.sealed`、`process.env()` 与包 `outputs`;不改
+   `EffectOutcome`/`TransitionPlan`/outbox 顺序。predicate 路径共用同一个 scope 构造。
+4. `NodeTree` 仍留给投影/`valid`/`tree_output`(L11 再删),本笔不碰行格式。
 
 **边界**
 
-- 零行为变更;不改 effect/outbox payload 与顺序;不改 A3/A4/A5/A9/A10/A11 语义;不引入 `unsafe`。
+- 零行为变更;不改持久化格式、effect/outbox payload 与顺序;不改 A3/A4/A5/A9/A10/A11 语义;
+  不引入 `unsafe`;不提前做 L11/L12。
 - 不删仍被生产路径调用的函数;拿不准就保留并记录证据。
 - 不改 manifest 就不跑 `cargo deny`;探针/临时插桩不提交;生产代码与文档分开提交。
 
 **验收**
 
-- `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` 生产侧 = 0
-  (测试夹具/注释除外,逐条说明);
-- `-p acts` 的 `--lib --tests` 全绿;行投影、消息、`tree_output` 的既有逐字断言不变;
+- 每 hop 不再构造 `Process` + `NodeTree`(按 §10「P1 完成」的 release 探针口径量前后);
+- `cargo test -p acts --lib --tests` 全绿(行投影/消息/`tree_output` 逐字断言不变),并跑受
+  `Context` 影响的 per-crate 套件:`acts-package-*`、`acts-plugin-*`、`acts-channel`、`acts-cli`、
+  `acts-server`(需要 NATS/Postgres 的套件按 §11.C 记录环境);
 - `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`;
-- §10 写「L9 完成」并更新 §11 B 状态;§12 原地指向下一项。
+- §10 写「L10 完成」并更新 §11 B 状态;§12 原地指向下一项。
 
 # 限制与约束
 
-- **先读**:§10「C8c 完成」「L8 完成」、§11 B L9、设计 §3.7(d)⑤;
-  `crates/acts/src/scheduler/shell/{context,model,effects}.rs`、
-  `crates/acts/src/scheduler/core/model/view/**`、`packages/acts-package-*/src` 的 `build_acts` 调用点、
-  `Emitter`/`TaskExtra` 定义与调用方、`Process`/`Task` 的候选死方法。
-- 遵守 §11.C 门禁;改动只在 `acts` 与包内时跑 `-p acts` 全套 + 受影响包的 per-crate 套件;
-  不改 manifest 就不跑 `cargo deny`。
+- **先读**:§10「L9 完成」、§11 B L10、设计 §3.7(d)①;
+  `crates/acts/src/scheduler/shell/{scope,context,effects,predicate}.rs`、
+  `crates/acts/src/scheduler/shell/process/{process,task}.rs`、`crates/acts/src/scheduler/shell/mod.rs`
+  的 scope 构造,以及 `packages/acts-package-*/src` 对 `Context`/`Task`/`Process` 的读取。
+- 遵守 §11.C 门禁;改到包/CLI/server 面时跑完整 per-crate 套件;不改 manifest 就不跑 `cargo deny`。
 - 探针与临时插桩不提交;生产代码与文档分开提交,提交前过 §11.C 门禁。
 ```
 
