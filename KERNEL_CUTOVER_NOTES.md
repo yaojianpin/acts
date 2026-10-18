@@ -3357,6 +3357,86 @@ cargo fmt --all --check -> OK
 - 新增的 dispatch Err 分类只覆盖 `is_conflict` 的错误;非 conflict 的提交失败(真正损坏的 plan)仍原样
   上抛,e2(协议错误)不被吞掉。
 
+### A5 完成(2026-10-18):Projection 版本协议
+
+**任务**:§11 D 的 A5(P1)。投影从“进程内 claim 表的写前检查”变成**持久化版本 + store-level 条件写**;
+启动按持久化 revision 增量补投影,失败进入有界、可重试、有指标的 repair queue;外部观察者只在行写完后可见。
+
+**事实与契约**
+
+- **行版本载体**:`procs`/`tasks`/`vars` 三行各新增 `#[serde(default)] source_revision: String`,
+  编码为 `"<graph>.<process>.<operations>"`(`ProcessVersion::encode/decode`)。字段是**追加**的:
+  codec `v` 不升版(与 `Proc.removable` 同口径),旧行缺字段解码为空串 → `None` → “比任何 aggregate
+  都旧”,下一次投影覆盖它。`ProcessVersion` 的字段顺序/派生 `Ord` 与字符串解析后的数值比较一致。
+- **store-level 条件写**:`KvCollection::write_if_newer`(`Store::write_projection`)在文档锁内读
+  stored 行、比较 revision,再把 `update_ops` 与**该行当前字节的 exact guard**(缺失时 absent guard)
+  放进同一个 `KvStore::batch`。guard 失败 → 重读重判(跨进程写者的唯一可见形式);有界 8 次后报错。
+  规则:`stored 无 revision` → 应用;否则 `incoming > stored` 才应用;`allow_equal` 只给两种显式修复:
+  `project_repair`(boot catch-up / repair queue)与 `project_proc_row`(`removable` 依赖 delivery 行,
+  不在 aggregate 版本内)。相同内容不重写(`Unchanged`)。
+- **claim 表降级**:`RowProjector::projected` 仍是快路径(避免重复读/写),但不再是唯一守卫;去掉了
+  `forget_proc` 的“同版本重投影靠清 claim”这一假设,claim 只在两步都失败时兜底。
+- **启动增量补投影**:`AsyncProcessRepository::process_ids()` 枚举 `kernel/aggregates/`;host 的首次
+  recover 在 `repair_all_ready` 之后调用 `catch_up_projections`,`project_repair` 每个 aggregate,已同版本
+  的行由条件写跳过。失败的行/run 进入 repair queue。
+- **durable repair queue**:queue 的持久形态就是“行 revision 落后于 aggregate”这一事实本身 —— 重启后
+  boot catch-up 从 aggregate 集合重建;进程内只是它的视图(`BTreeMap<pid, first_seen>`,每 pid 一条,
+  与 aggregate 数同阶,不随失败次数增长)。`recover` 每轮重试至多 32 条;失败留在队列,指标可见。
+  不新增 collection、不缩短 tick。
+- **顺序契约**:`dispatch` 仍是 commit → wake → project/project_touched → lifecycle → outbox transport →
+  confirm → slot。`project` 现在返回“行是否已 current”:失败时**跳过 lifecycle 与本次投递**,outbox 记录
+  保持 `Pending`,run 入 repair queue;repair 成功后补报 lifecycle(once-per-phase),outbox retry pass 在
+  投递前先 `repair_projection`,因此消息消费者同样只能看到已投影的提交。A1b 的“提交后发送 + 每 operation
+  一笔批量确认”未改;失败只是把发送推迟到下一次 pass。
+- **读契约**:Core/Recovery 从不读投影做权威判断(aggregate 仍是唯一真值)。查询 API 选择**强读 aggregate**:
+  `Runtime::proc`(以及经它的 `proc:get`)比较 proc 行的 `source_revision` 与 aggregate 版本,落后就同步
+  `project_repair`;修复失败仍返回已存的行并留下 repair(用 `projection_metrics().lag` 观察),不把读
+  API 变成聚合读的唯一入口。
+- **终态语义**:`facts::run_settled`(只看 task terminal,决定 admission slot / lifecycle)与
+  `projection::projection_settled`(还要求 outbox 全 `Delivered`、operation 全 retired,决定行/目录可回收)
+  分别命名并在模块文档写清;`report_lifecycle` 用前者,`removable` 用后者。
+- **指标**:`ProjectionMetrics { lag, oldest_lag_age_ms, applied, unchanged, stale, failed, repaired }`,
+  经 `Runtime::projection_metrics()` 暴露。`stale` 是“被持久版本拒绝”的次数(旧投影);`failed` 是写失败;
+  `repaired` 是 repair queue 中成功收敛的 run 数。
+- **A11 未回归**:清理仍按 pid 墓碑 + lifecycle/projection 锁串行;`refresh_projection` 改为整 run 的
+  `project_repair`(tasks 先、proc 最后),清理前仍要求 proc 行已标 `removable`;删除行/aggregate 的顺序、
+  `reclaiming` 标记、`RemoveProc` 幂等删除均未动。
+
+**测试**
+
+- `an_older_projection_cannot_overwrite_a_newer_one`:instrumented store 在旧投影“读后、guarded batch 前”
+  注入新版本行;旧 batch 的 guard 失败,重读后为 `Stale`,行保持新版本;重启(无 claim 表)同版本也拒绝旧投影。
+- `a_restart_catches_up_only_the_rows_that_lag`:把一行改成旧 revision/旧状态后换 host;boot catch-up 恢复
+  到 aggregate 版本,`lag == 0`。
+- `a_projection_failure_is_repaired_before_the_completion_event`:行写持续失败时 completion event 不发出、
+  `failed/lag > 0`;解除故障后 `recover` 重投影并补报 completion,`repaired > 0`、`lag == 0`。
+- 既有 `messages_are_visible_only_after_the_projection`、A11 回收/复用、outbox/reliability、effect 套件全部保留。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 919 passed, 0 failed, 1 ignored (152.67s)
+cargo test -p acts --lib reliability:: -> 65 passed, 0 failed (119.06s)
+cargo test -p acts --lib outbox -> 32 passed, 0 failed
+cargo test -p acts --lib effect -> 26 passed, 0 failed
+cargo test -p acts --lib reclaim -> 8 passed, 0 failed (A11)
+cargo test -p acts --lib projection -> 8 passed, 0 failed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all --check -> OK
+```
+
+**下游(非服务依赖)**:`acts-acl`、`acts-expr --all-features`、`acts-store --features sled,sqlite`、`acts-cli` 全绿;
+`acts-channel`/`acts-plugin-nats`/`acts-server` 仍按 §11.C 的服务依赖口径。
+
+**边界**
+
+- 不新增持久化 repair collection:queue 的持久性由“行 revision 落后”表达,重启重建;这是有意的简化。
+  若未来需要跨进程共享 repair 进度,再把它提到 durable index(A10 的独立 interval/指标范畴)。
+- 同一 aggregate 版本的显式修复可以改 `removable`/时间戳保留;它无法把行写回更旧状态(持久版本仍单调)。
+- 读 API 的强读以 proc 行作为整 run 的 current 标记:tasks 先写、proc 最后写,因此 `proc.source_revision`
+  至少等于 task/vars 行版本。
+- 不做 A6 的 Core Decision、A7 的统一 Recovery Command;不改 effect/outbox payload 与 A1b 顺序;不改 A4 lane。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3375,8 +3455,9 @@ cargo fmt --all --check -> OK
 > **2026-10-17 用户裁决(架构优先)**:在第一波之后、第二波之前插入**第三波 = A1→A11 架构修正**。
 > A1a 已完成;A2(durable ready queue)已完成(§10);A11(终态回收 + PID 复用)已完成(§10);
 > A1b(提交后发送 + 每 operation 一笔批量确认)已完成(§10「A1b 完成」);
-> A1c(effect 幂等协议)已完成(§10「A1c 完成」);A3(折叠纯内部 hop)已完成(§10「A3 完成」)。
-> **当前执行项是 A4(每 Process 单写者 command lane;§11 D)**,其后 A5 → A6 → A7/A8/A9/A10。
+> A1c(effect 幂等协议)已完成(§10「A1c 完成」);A3(折叠纯内部 hop)已完成(§10「A3 完成」);
+> A4(每 Process 单写者 command lane)已完成(§10「A4 完成」);A5(projection 版本协议)已完成(§10「A5 完成」)。
+> **当前执行项是 A6(Shell 变薄,Core 输出完整 Decision;§11 D)**,其后 A7/A8/A9/A10。
 > 第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
@@ -3469,7 +3550,7 @@ cargo fmt --all --check -> OK
 | **A2** | durable ready queue:业务提交内写 ready 索引;`try_send` 只做加速;driver 从 ready 取到期操作;recovery 只做异常兜底;修 recovery 分页每页全扫的 $O(N^2)$ | #1 | **P0** | —(与 A1b 的 store schema 改动需协调) | **已做(§10「A2 完成」)**。验收:队列满不导致下一跳等 tick;recovery 扫描量与异常操作数相关;idle timer/parked run 不进热 ready 集合;冷启动/缺 ready 记录可从 aggregate 修复 |
 | **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | **已做(§10「A3 完成」)**。验收:线性 3 节点 claim/commit 从 9 降到 6(`ExecuteTask` + `ApplyAction`,无纯 hand-off 落盘);branch/join/catch/next/终态与 skip/abort 级联、rewind 都在产生者提交内折叠;行为、消息、行投影、lifecycle 不变;fold 失败回退原计划,effect/CAS 语义不退 |
 | **A4** | 每 Process 单写者 command lane:正常/客户端动作/恢复 command 串行决定状态;effect 可并发;observation 回 lane;CAS 只做恢复/fencing | #4 | P1 | A2 | **已做(§10「A4 完成」)**。验收:同一 pid 的并发 client action 恰一个决策、loser 为决策性拒绝、`action_replans()==0`、aggregate guard 冲突为 0;不同 pid 的 effect 在 `Barrier(2)` 会合、各自提交;effect 窗口内同一 pid 的 command 可执行,effect 后冲突落 `EffectUnknown`(不重跑)。`commit_transition` 的 domain `VersionConflict` Err 在 effect 后也按 A1a 分类 |
-| **A5** | projection 正式协议:每行持久化 `source_aggregate_revision`;store-level 条件写;启动增量补投影;repair queue;API lag/强读 aggregate;lifecycle 后置或显式契约 | #5 | P1 | — | 未做。验收:旧投影不能覆盖新投影;重启不丢版本;消息/完成事件消费者能看到对应行 |
+| **A5** | projection 正式协议:每行持久化 `source_aggregate_revision`;store-level 条件写;启动增量补投影;repair queue;API lag/强读 aggregate;lifecycle 后置或显式契约 | #5 | P1 | — | **已做(§10「A5 完成」)**。验收:旧投影不能覆盖新投影(store guard + 持久 revision);重启不丢版本(boot catch-up);消息/完成事件消费者只能在行 current 后看到提交;lag/failed/repaired 有指标 |
 | **A6** | Shell 变薄:Core 输出完整 `Decision`(aggregate changes/operations/effect intents/outbox/timers/process status/admission directives);Shell 只做 IO/commit/execute | #6 | P1 | A3/A4/A5 | 未做。验收:settle/lifecycle/admission 规则进入 Core 或 policy;新增 operation 不再改四处 |
 | **A7** | Recovery 统一成 `RecoverOperation(observed) -> Decision`:恢复层只收集 observed;正常/恢复共用 transition/commit 与 per-pid lane | #7 | P1 | A2/A4 | 未做。验收:恢复不再自行决定 wake/reclaim/finalize;正常/恢复同状态同 Decision |
 | **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | 未做。验收:manual run 不阻塞新 run;cancel 后 slot 立即可用;parked 准入不依赖 tick |
@@ -3498,68 +3579,63 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A5 —— Projection 版本协议(§11 D,P1)
+# 当前任务:A6 —— Shell 变薄,Core 输出完整 Decision(§11 D,P1)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A5 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A5;
-§10「A11 完成」「A3 完成」「A4 完成」。当前缺口:`RowProjector::claim` 的按行 `ProcessVersion` 守卫是
-**进程内 map**,只在写前检查、写后不复核,也没有 store-level CAS 或持久化 `projection_revision`;重启后
-map 清空。一个先 claim 的旧投影可以在 await 之后覆盖新投影;`report_lifecycle` 还在 projection 之前上报,
-`on_complete` 订阅者可能读到旧行。A11 的 pid 墓碑与 A3 的 `forget_run` 重投影只是临时修正。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A6 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A6;
+§10「A5 完成」「A4 完成」「A3 完成」「A11 完成」。当前缺口:settle/completion/lifecycle/admission 判定仍散在
+`shell/mod.rs`、`shell/operation/dispatch.rs`、`shell/facts.rs` 与 `shell/planning.rs`;新增一种 operation 仍要
+同时改 Core/Shell/Recovery/Projection 多处。`run_settled` 与 `projection_settled` 已在 A5 分别命名,但
+“何时完成、何时释放 slot、何时上报、何时允许回收”仍不是 Core 的一个输出。
 
-**目标**:投影成为有持久化版本的条件写。每行(proc/task/vars)记录来源 aggregate revision;写入只允许
-`incoming_revision > stored_revision`;启动按持久化版本增量补投影,失败进入 durable repair queue;
-lag/失败/修复有指标;读模型与权威聚合的边界写清楚。
+**目标**:Core 输出完整的 `Decision { aggregate_changes, operations_to_create, operations_to_close,
+effect_intents, outbox_records, timers, process_status, admission_directives }`;Shell 只做
+load → call Core → commit Decision → execute committed EffectIntent → feed Observation back。
+settle/lifecycle/admission 规则进入 Core 或显式的 policy 模块;Shell 不再用调用顺序补业务判断。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 画清 `shell/projection.rs`(RowProjector 的 claim 表、`project`/`project_nodes`/`project_proc_row`/
-     `forget_*`/`resume`)、行键与版本来源、`store/writebehind.rs` 的写路径、`dispatch` 的
-     projection → lifecycle → deliver 顺序、`sweep_removable`/`cleanup_process` 的 `removable` 刷新与
-     A11 的 pid 墓碑、A4 的 per-pid lane 与投影写入的关系。
-   - 明确版本载体:每行持久化 `source_aggregate_revision`(或等价 projection offset)的字段形态、字节编码
-     与旧库迁移;若必须改格式,按现有 codec 规则升版本并登记。
-   - 明确读/写契约:写入是 store-level 条件写;Core/Recovery 永不读投影做权威判断;查询 API 在 lag 时
-     强读 aggregate 或显式返回 lag(二选一并在文档写清)。
+   - 画清当前 Decision 的“事实来源”:`TransitionPlan` 已有哪些字段、`dispatch` 在 commit 之后补做了哪些判断
+     (`report_lifecycle`、`place_run`/`admit_run`、`deliver_committed_outbox`、`refresh_proc_row`)、
+     `recover` 的 special-case;列出其中哪些是业务语义、哪些是 IO 顺序。
+   - 定义 `Decision` 的形态与位置(Core 纯类型、可序列化/可测试);明确 `process_status` 与
+     admission directive 的取值域;保持 A4 lane 边界:Decision 的产生不跨 effect/transport。
+   - 明确 `run_settled`(slot/lifecycle)与 `projection_settled`(可回收)在 Decision 中的表达方式;
+     Shell 只执行,不重新推导。
 2. **协议**
-   - 实现 store-level 条件写与写后复核;拿掉“进程内 claim 表 = 唯一守卫”的假设(可保留为快路径)。
-   - 启动增量补投影:按持久化 revision 找出落后的 run/行并重投影;失败进 durable repair queue
-     (有界、可重试、有指标),不靠更短的 tick。
-   - lifecycle 与外部消息的位置:`report_lifecycle` 后置到投影完成之后,或明确“事件先于读模型”的契约;
-     A1b 的提交后发送/批量确认语义不得改。
-   - 合并或分别命名 `run_settled`(只看 task terminal)与投影 `settled`(还看 outbox)两套终态语义。
+   - 把 settle/lifecycle/admission 判定移入 Core(或 `core/policy`),让正常路径与 Recovery 共用同一入口;
+     A5 的“行 current 后才允许外部观察者”顺序不变。
+   - 新增 operation 时只需在 Core 增加 plan/Decision 分支,Shell/Recovery/Projection 不再各加一处。
+   - 不改 effect 语义、outbox payload/topic/A1b 顺序、channel ack/delivery 行语义、A11 回收判定。
 3. **测试**
-   - 旧投影在 await 后不能覆盖新投影(instrumented store 注入逆序写);重启不丢版本;
-     完成事件/消息的消费者能看到对应提交的行;A11 的墓碑/清理顺序不回归。
-   - A1a/A1b/A1c/A2/A3/A4/A11/outbox/reliability 套件绿。
+   - Core 单测覆盖终态、lifecycle 决策、admission/slot 决策与 `run_settled`/`projection_settled` 的区分。
+   - 既有 A1a/A1b/A1c/A2/A3/A4/A5/A11、outbox、reliability、effect 套件绿;新增 operation 的改动面用测试/
+     代码审查固定。
 
 **边界**
 
-- 不做 A6 的 Core Decision、不做 A7 的统一 Recovery Command;
-- 不改 channel ack/delivery 行语义、消息 payload/topic、A1b 的提交后发送/批量确认;
-- A4 的 lane 边界不改:投影写入不得让 lane 跨 effect 或 transport 持有;若投影需要 lane,必须写明位置;
-- 不缩短 tick;不把活性转嫁 recovery 扫描;
-- 保持 `EffectUnknown -> ManualReconciliation` 与 A1c 的 observation 自动收敛;不改 `EffectKey` 派生。
+- 不做 A7 的统一 Recovery Command、不做 A8 的 admission 额度拆分、不做 A9 的 durable handle;
+- 不缩短 tick、不把活性转嫁 recovery 扫描;不改 A5 的持久 revision/repair queue 语义;
+- A4 的 lane 边界不改;投影写入不得让 lane 跨 effect 或 transport 持有。
 
 **验收**
 
-- 旧投影不能覆盖新投影;重启不丢版本;完成事件/消息的消费者能看到对应提交的行;
-- projection lag、失败、修复有指标;`run_settled`/`settled` 只有一套明确语义(或分别命名并写清用途);
-- `cargo test -p acts --lib --tests` 与 reliability/effect/outbox/A11 套件绿;
-- 写 §10「A5 完成」,§11 D 状态更新,§12 原地指向下一项(A6)。
+- `settled`/lifecycle/admission 规则只在 Core/policy 一处;Shell 只做 IO 与执行顺序;
+- 新增 operation 不再同时改 Core/Shell/Recovery/Projection 四处;
+- `cargo test -p acts --lib --tests` 与 reliability/effect/outbox/A1*/A11 套件绿;
+- 写 §10「A6 完成」,§11 D 状态更新,§12 原地指向下一项(A7)。
 
 # 限制与约束
 
-- **先读**:§11 D、§10「A11 完成」「A3 完成」「A4 完成」、设计 §3.10 A5、`shell/projection.rs`、
-  `shell/mod.rs`(`project`/`project_touched`/`report_lifecycle`/`refresh_projection`/`refresh_proc_row`)、
-  `store/writebehind.rs`、`store/process_rows.rs`、`scheduler/runtime.rs`(`sweep_removable`/`cleanup_process`)、
-  `shell/tests/mod.rs` 的投影/乱序用例。
+- **先读**:§11 D A6、设计 §3.10 A6、`shell/operation/dispatch.rs`、`shell/mod.rs`
+  (`report_lifecycle`/`place_run`/`admit_run`/`recover`/`project`)、`shell/facts.rs`、`shell/planning.rs`、
+  `core/model/transition_plan.rs`、`core/plan/**`。
 - 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-per-row 持久化 source revision + store-level 条件写 + 启动增量补投影/repair queue + lag/指标
+Core `Decision` + Shell 只执行 + settle/lifecycle/admission 单一来源
 → 更新 §10/§11/§12。
 ```
 

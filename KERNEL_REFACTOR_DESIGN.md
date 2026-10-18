@@ -580,6 +580,15 @@ lease 接管和跨实例 fencing,不再是正常并发控制的主要手段。
 **验收**:旧投影不能覆盖新投影;重启不丢版本;完成事件/消息的消费者能看到对应提交的行;
 projection lag、失败、修复有指标。
 
+**落地(2026-10-18,详见 notes §10「A5 完成」)**:`procs`/`tasks`/`vars` 行新增
+`source_revision`(追加字段,不升 codec 版本;旧行缺字段视为最旧);`Store::write_projection` 在文档锁内
+比较版本并用 exact-bytes guard 提交(`incoming > stored`,相等仅限显式 repair);进程内 claim 表降为快路径。
+host 首次 recover 枚举 aggregate 做 boot catch-up,失败进每 pid 一条的 repair queue(持久形态就是行 revision
+的落后,重启由 catch-up 重建);`project` 失败时 lifecycle 与本次 outbox 投递都推迟,repair 成功后才补报,
+retry pass 投递前先重投影。读 API 改为强读 aggregate(`Runtime::proc` 在 proc 行落后时同步重投影)。
+`ProjectionMetrics` 暴露 lag/oldest_lag_age、applied/unchanged/stale/failed/repaired。`run_settled` 与
+`projection_settled` 分别命名并在模块文档写清。A11 的墓碑/清理顺序与 A1b 的提交后发送未改。
+
 #### A6 — Shell 变薄,Core 输出完整 Decision
 
 **现状**:`shell/mod.rs` 2059 行、`operation/action.rs` 1245 行、`model.rs` 1315 行;admission、wake、
