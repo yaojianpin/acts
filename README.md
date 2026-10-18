@@ -113,13 +113,6 @@ async fn main() {
     // set the pid or auto generate by engine
     vars.set("pid", "w1");
 
-    // start workflow by model id
-    executor
-        .proc()
-        .start(&workflow.id, vars)
-        .await
-        .expect("fail to start workflow");
-
     // create channel to receive messages
     let chan = engine.channel();
 
@@ -138,6 +131,13 @@ async fn main() {
     chan.on_error(|e| async move {
         println!("error on proc id: {} model id: {}", e.pid, e.mid);
     });
+
+    // start workflow by model id
+    executor
+        .proc()
+        .start(&workflow.id, vars)
+        .await
+        .expect("fail to start workflow");
 }
 ```
 

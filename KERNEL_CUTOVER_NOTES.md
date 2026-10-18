@@ -3710,6 +3710,85 @@ cargo fmt --all -- --check -> OK
 - 不改 effect/outbox payload、channel 语义、A5 持久 revision/repair queue、A11 回收。
 - 不引入跨进程 exactly-once;quarantine gauge 只是进程内观测,准入规则仍从 aggregate 推导。
 
+### A9 完成(2026-10-18):Durable run handle
+
+**任务**:§11 D 的 A9(P2)。`ProcessExecutor::start` 不再只返回 pid,而是返回可 `wait()` 的 durable
+handle;`wait()` 的顺序固定为“查聚合终态 → 未完成则订阅 → 订阅后复查”;进程内事件 channel 只做通知,
+不是正确性来源。示例改为先注册 handler 再 start。
+
+**事实与契约(当前等待事实)**
+
+- `ProcessExecutor::{start,start_from_model,start_as_owner}` 原返回 `String`(pid);`Runtime::start`
+  在返回前已经 `kernel.start_process(&spec)` 提交 seed 聚合,所以“pid 持久化”早于调用方拿到返回值。
+- 终态只在一个地方判定:`core/decision.rs`。`run_settled(snapshot)` = 所有执行终态;
+  `ProcessStatus::of` 读根执行;`lifecycle(snapshot)` 给出 `Started`/`Completed`/
+  `Errored { code, message }`;failed root 的 facts 来自 `root_error` 读根 scope 的
+  `error.code`/`error.message`(由 operation 的 `Upward` 走 + propagate 的 carry 写入)。
+- 终态通知的现有路径:commit → `Decision` → `execute_decision` → projection →
+  `report_lifecycle_decision`(per-pid 去重)→ outbox。channel 的 `on_complete`/`on_error` 是进程内
+  事件队列;订阅晚于终态提交时事件已经过去,调用方无从补查 —— 这就是本笔关闭的缺口。
+- aggregate 才是 run 的 durable existence record;`run_settled` 仍只在 `core/decision.rs`,handle 不复制
+  状态机,也不新建第二套终态判定。
+
+**协议**
+
+- `start()` / `start_from_model()` 返回 `RunHandle`;`start_as_owner()` 返回同一类型(subflow 只丢弃它)。
+  `RunHandle { runtime, pid }` 的 identity 就是 pid + runtime 句柄;`pid()` 暴露 id,`Display` 与
+  `Serialize` 都输出 pid 字符串,因此 `proc:start`/`proc:start_from_model` 的 wire 结果不变。
+- `proc().handle(pid)` 从 pid 重建 handle(ACL 检查 `proc:get`),重启后走同一入口。
+- `wait()` 的循环:
+  1. `KernelHost::snapshot(pid)`;聚合缺失 = 从未存在或已被 A11 回收,返回 `ActError::Runtime`;
+  2. `decision::run_outcome(snapshot)`:`None` 表示仍在飞,`Some(Completed)` /
+     `Some(Errored { code, message })` / `Some(Terminated)`;
+  3. 未终态:`KernelHost::run_waiter(pid)` 取该 pid 的 `Notify`,`enable()` 注册后**再查一次**;
+  4. 通知到达后回到 1。
+- 通知点:`execute_decision` 在 `decision.settlement.run`(即 `run_settled`)时 `notify_settled` ——
+  聚合已 durable,projection 的失败无法扣住终态;`forget_process`(A11 回收成功)也发一次,让仍在
+  等待的 handle 醒来并得到“记录已消失”。通知只是加速器:丢失只增加延迟,复查永远给出结论。
+- `RunOutcome` 由 core 的同一批 facts 导出(`run_outcome` 复用 `run_settled` + `lifecycle`),从 crate
+  根公开为 `acts::RunOutcome`;`RunHandle` 公开为 `acts::RunHandle`。
+- 未改:channel 的 ack/delivery 与事件顺序、A1b outbox 顺序、A4 lane、A5 projection/revision/repair
+  queue、A11 回收判定;handle 不参与 admission/durable ready,也不提供跨进程 exactly-once。
+
+**测试/示例**
+
+- `crates/acts/src/export/tests.rs` 新增 6 条:
+  - 无任何订阅的极短 run:start 后立即 `wait()` 得到 `Completed`(check-subscribe race 不存在);
+  - 已终态 run:`wait()` 立即返回,且同一 pid 用 `handle(pid)` 重建后得到同一结果;
+  - failed root:`act().fail(ecode/message)` → `Errored { code, message }`(复用 lifecycle facts);
+  - abort root → `Terminated`;
+  - 重启:run 停在 act 上,close 旧 engine、同一 store 启动新 engine、`proc().handle(pid)` 重建,
+    完成前保持 pending,完成 act 后 `wait()` 得到 `Completed`;
+  - 不存在的 pid:`handle` 可构造,`wait()` 报告 gone(不无限等待)。
+- 示例改为“先注册 handler / 订阅,再 start”:`actions`、`approve`、`simple`、`while`、
+  `custom_package`、`message`、`packages/{http,shell,state}`、`plugins/{grpc,web}`;
+  `catches`、`timeout`、`subflow`、`packages/javascript` 原本已是有序。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 946 passed, 0 failed, 1 ignored (148.65s)
+cargo test -p acts --lib run_handle -> 6 passed
+cargo test -p acts-channel -> 32 passed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all -- --check -> OK
+```
+
+- 全量运行期间观察到两次既有负载翻转:`export::actions::tests::an_unsub_reaches_only_the_callers_own_namespace`
+  与 `scheduler::tests::reliability::timer::the_trigger_loop_degrades_under_a_down_store_and_recovers`;
+  两条单跑均通过,全量复跑(152.39s)为 946 passed / 0 failed。属 §1.8 的负载翻转类,与 A9 改动无关
+  (A9 只新增每 pid 的 `Notify` 唤醒与终态读取,不触及 trigger/recovery 循环)。
+- `cargo test -p acts-package-shell --test vars` 的 `the_inputs_of_the_act_embed_in_the_script`
+  在干净 HEAD worktree(7fc8a52)上同样失败(`$inputs().data` 为 `null`),是既有环境/基线问题,
+  不是 A9 回归;同 target 的其余 3 条通过。
+
+**边界**
+
+- 不做 A10 的调度器拆分;不缩短 tick;wait 不轮询,只靠 commit/reclaim 的通知。
+- 不引入跨进程 exactly-once;通知是进程内的,另一个实例提交的终态由 `handle` 的首次/重建读取发现,
+  已在等待中的 handle 不订阅另一实例。
+- 不改 effect/outbox payload、channel ack/delivery 语义、A5 持久 revision/repair queue、A11 回收。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3732,8 +3811,8 @@ cargo fmt --all -- --check -> OK
 > A4(每 Process 单写者 command lane)已完成(§10「A4 完成」);A5(projection 版本协议)已完成(§10「A5 完成」);
 > A6(Shell 变薄,Core 输出完整 Decision)已完成(§10「A6 完成」);
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
-> A8(Admission 分离)已完成(§10「A8 完成」)。
-> **当前执行项是 A9(durable run handle;§11 D)**,其后 A10。
+> A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」)。
+> **当前执行项是 A10(拆分控制面调度器;§11 D)**。
 > 第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
@@ -3830,7 +3909,7 @@ cargo fmt --all -- --check -> OK
 | **A6** | Shell 变薄:Core 输出完整 `Decision`(aggregate changes/operations/effect intents/outbox/timers/process status/admission directives);Shell 只做 IO/commit/execute | #6 | P1 | A3/A4/A5 | **已做(§10「A6 完成」)**。验收:`core/decision.rs` 的 `Decision { transition, process_status, settlement, lifecycle, admission }` 由 `Decision::committed` 产出;`run_settled`/`projection_settled`/lifecycle/admission/resume-operation 规则只在 Core;`Admissions`/`report_lifecycle`/`place_run` 只执行 directive;`OperationKind::is_schedulable` 与 enum 同处;Recovery 按 state 分类、Projection 不匹配 kind |
 | **A7** | Recovery 统一成 `RecoverOperation(observed) -> Decision`:恢复层只收集 observed;正常/恢复共用 transition/commit 与 per-pid lane | #7 | P1 | A2/A4 | **已做(§10「A7 完成」)**。验收:`Observed { operation_id, kind, persisted_phase, revision, aggregate_revision, effect_receipt, now_ms }` 是唯一输入;`recover_operation -> RecoveryDecision { directive, command }` 是唯一入口,`RecoveryPlanner::classify` 私有;reclaim/finalize 走 lane + revision guard,`FinalizeCommit` 与正常 `dispatch` 共用 `execute_decision`(project → lifecycle → outbox batch confirm → admission);`EffectUnknown` 仍按 A1c(`Applied`/`Failed` 重放、`NotApplied`+幂等才重试、其余人工);正常/恢复同状态同 Decision |
 | **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | **已做(§10「A8 完成」)**。验收:`RunFacts::execution_active`/`place` 在 Core,`EffectUnknown`/`Quarantined` 的 run 立即释放 execution slot;manual 决策走 `Slot::Direct` + reconciliation gate;`mark_effect_unknown` 与终态 client decision 在同一决策里 `admit_run` 队首;五类 cap 各自配置,`AdmissionMetrics` 暴露 execution/parked/effect/recovery/reconciliation/projection/quarantined |
-| **A9** | durable run handle:`start()` 返回可 `wait()` 的 handle;先查终态→订阅→复查;event channel 只做通知;示例改先注册或 `wait()` | #9 | P2 | A1/A5 | 未做。验收:check-subscribe race 不存在;重启后仍可等待 |
+| **A9** | durable run handle:`start()` 返回可 `wait()` 的 handle;先查终态→订阅→复查;event channel 只做通知;示例改先注册或 `wait()` | #9 | P2 | A1/A5 | **已做(§10「A9 完成」)**。验收:check-subscribe race 不存在;重启后仍可等待 |
 | **A10** | 拆分控制面调度器:timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair 独立 interval/backoff/budget/指标;禁止用统一缩短 tick 解决延迟 | #10 | P2 | A2 | 未做。验收:调整 recovery 频率不影响 timer/outbox;各循环有独立健康/积压指标 |
 | **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index + ready index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | **已做(§10「A11 完成」)**。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删。**pid 存在性只看 aggregate**(行/`ops` 不参与);start 与 cleanup 共用 per-pid 生命周期锁。A5 的完整投影 generation 协议仍未做,本笔以 pid 墓碑收窄清理后的旧投影重写窗口 |
 
@@ -3855,60 +3934,60 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A9 —— Durable run handle(§11 D,P2)
+# 当前任务:A10 —— 拆分控制面调度器(§11 D,P2)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A9 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A9;
-§10「A8 完成」「A5 完成」「A1c 完成」。当前缺口:`ProcessExecutor::start` 只返回 `String`(pid),
-完成/失败只通过进程内 `Channel` 事件通知;示例先 `start` 再注册 `on_complete`/`on_error`,
-足够快的 run 可能在订阅前结束,事件丢失且调用方无法补查。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A10 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A10;
+§10「A9 完成」「A8 完成」「A5 完成」「A2 完成」。当前缺口:同一个 `tick_interval` 驱动
+driver 的 recovery + outbox、retry timer、trigger timer、snapshot TTL;timer 的 `DispatchTimeout`
+也靠 recovery 每 tick 唤醒;不同任务的延迟/负载特征被绑死,而“缩短 tick”会同时放大所有扫描。
 
-**目标**:让 `start()` 返回可 `wait()` 的 durable handle;`wait()` 的顺序固定为
-**先查持久化终态 → 未完成则订阅 → 订阅后再次复查**,事件 channel 只做通知,不是正确性来源;
-重启后仍能对同一 pid 等待并读到终态。示例改为先注册再 start,或直接 `handle.wait()`。
+**目标**:timer scheduler、outbox retry、recovery scanner、lease renewal、settled sweeper、
+projection repair 各自拥有独立的 interval/backoff/budget/指标;timer 使用到期索引,不再依赖全量
+recovery 扫描。**不要**用统一缩短 tick 解决延迟。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 画清 `Execution`/`ProcessExecutor::start`、`Runtime::start` 与 `Channel::on_*` 的现状:
-     pid 何时持久化、终态在哪里(aggregate/`run_settled`/lifecycle sink)、事件何时发出。
-   - `run_settled` 的判定来源仍是 `core/decision.rs`;handle 不复制状态机。
-   - 定义 handle 的 identity(pid + runtime/store 句柄)与 `wait()` 的返回值
-     (Completed/Errored/Terminated;failed root 的 error facts 复用 lifecycle directive)。
+   - 画清现状:`Runtime` 的三个 store-facing timer(`trigger`/`retry`/`cleanup`)、
+     `KernelHost::serve` 的 tick(ready due pass + outbox pass + recovery scan)、
+     `timer_poll_ms` 与 `DispatchTimeout` 的唤醒、`SnapshotRegistry` 的 TTL、(可选)lease 续期。
+   - 列出每个循环的输入(ready/recovery/outbox 索引、到期时间、租约)与当前统一的 tick 来源;
+     区分“正常活性”(durable ready/到期索引)与“异常兜底”(recovery 扫描)。
 2. **协议**
-   - `start()` 返回 `RunHandle`(或 engine/executor 层等价类型);`wait()`:
-     查 aggregate → 未终态则注册一次性通知 → 再查 aggregate;通知只把 waiter 唤醒。
-   - handle 不依赖进程内 `Channel` 存活;重启后由同一个 pid 重新构造 handle 也能等待。
-   - `Channel` 的既有事件语义、outbox/effect 顺序、A4 lane、A5 projection、A11 回收不变。
-3. **测试/示例**
-   - Core/Shell 单测:已完成 run 的 `wait()` 立即返回;start 后立即 `wait()` 不丢终态
-     (含极短 workflow 与订阅前完成);重启后用同一 pid 等待;failed root 返回 error facts。
-   - `examples/actions`、`examples/simple`、`examples/approve` 等改为先注册或 `wait()`。
-   - 既有 reliability/A1*/A2/A3/A4/A5/A6/A7/A8/A11、action/cancel、outbox/effect、channel 套件绿。
+   - 每个循环独立配置与独立调度:interval、backoff、单轮 budget、健康状态、积压/延迟指标;
+     默认值保持现有节奏,避免行为突变。
+   - timer 的到期集合来自到期索引/记录,不靠“每 tick 扫一遍 recovery”发现;调整 recovery 频率
+     不得改变 timer/outbox 的延迟,调整 timer 精度不得增加 recovery 扫描量。
+   - 保留现有语义:A2 的 ready 记录仍是正常活性来源;A7 的 recovery 只做异常兜底;A4 lane、
+     A5 projection/revision/repair queue、A8 额度、A9 handle、A11 回收判定不变。
+3. **测试/指标**
+   - 单测/集成:调整 recovery interval 时 timer/outbox 的到期延迟不变;调整 timer interval 时
+     recovery 扫描次数不增加;每个循环的 backlog/lag 可观察。
+   - 既有 reliability/A1*/A2/A3/A4/A5/A6/A7/A8/A9/A11、action/cancel、outbox/effect、
+     timer/timeout、cleanup/reclaim、projection 套件绿;示例与 channel 套件编译/运行不变。
 
 **边界**
 
-- 不做 A10 的调度器拆分;不缩短 tick;不引入跨进程 exactly-once。
-- 不改 effect/outbox payload、channel ack/delivery 语义、A5 持久 revision/repair queue、A11 回收;
-- handle 只是等待语义,不替代 admission/durable ready。
+- 不做跨进程 exactly-once;不改 effect/outbox payload、channel ack/delivery 语义、
+  A5 持久 revision/repair queue、A11 回收判定与顺序。
+- 不把“缩短 tick”当作任何循环的延迟手段;不把异常兜底转成正常活性来源。
+- 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
 
 **验收**
 
-- check-subscribe race 不存在:极短 run 在 `start` 返回前完成也能 `wait()` 到终态;
-- 重启后仍可等待同一 pid;
-- `cargo test -p acts --lib --tests` 与相关 channel/example 编译/套件绿;
-- 写 §10「A9 完成」,§11 D 状态更新,§12 原地指向下一项(A10)。
+- 调整 recovery 频率不影响 timer/outbox 延迟;调整 timer 精度不增加 recovery 扫描压力;
+- 每个循环有独立的健康状态与积压指标,且默认配置下行为与 A9 完成时一致;
+- `cargo test -p acts --lib --tests` 绿;
+- 写 §10「A10 完成」,§11 D 状态更新,§12 原地指向下一项(其后无剩余 A 项时指向 §11 B 的第二波)。
 
 # 限制与约束
 
-- **先读**:§11 D A9、设计 §3.10 A9、`export/executor/process_executor.rs`、
-  `scheduler/runtime.rs`(`start`/lifecycle sink)、`event/channel` 的 `on_complete`/`on_error`、
-  `core/decision.rs`(`run_settled`/`LifecycleDirective`/failed-root error facts)、
-  `shell/mod.rs`(`process_completed`/`report_lifecycle`)。
+- **先读**:§11 D A10、设计 §3.10 A10;`scheduler/runtime.rs`(`tick_interval`、三个 timer、
+  `serve` 的接线)、`shell/mod.rs`(`serve`/`recover`/outbox pass/`repair_projection`/
+  `drive_ready`、`timer_poll_ms`)、`core/plan/timeout.rs`、`core/ready.rs`、
+  `core/recovery/*`、`Config` 的 tick/cleanup 配置、`scheduler/shell/health.rs` 与
+  `projection_metrics`/`cleanup_metrics`。
 - 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
-
-# 交付
-
-RunHandle(`start` 返回、`wait()` 查-订阅-复查)+ 示例迁移 + 测试 → 更新 §10/§11/§12。
 ```
 

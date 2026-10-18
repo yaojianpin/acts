@@ -675,6 +675,16 @@ channel 是进程内事件路由。足够快的工作流可能在订阅前完成
 
 **验收**:check-subscribe race 不存在;事件先发生也不会丢;等待 API 在重启后仍可恢复。
 
+**落地(2026-10-18,详见 notes §10「A9 完成」)**:
+
+- `ProcessExecutor::start`/`start_from_model` 返回 `RunHandle { runtime, pid }`(`Serialize`/`Display`
+  仍是 pid,wire 输出不变);`proc().handle(pid)` 从 pid 重建,重启后走同一入口。
+- `wait()` 先读 aggregate(`decision::run_outcome`,复用 `run_settled` + `lifecycle`),
+  未终态则取 per-pid `Notify`、`enable()`、再读一次,然后等待通知;通知在
+  `execute_decision` 的 settled 提交与 `forget_process`(A11 回收)时发出,只唤醒、不携带结果。
+- `RunOutcome::{Completed, Errored{code,message}, Terminated}` 从 crate 根公开;failed root 的
+  error facts 与 lifecycle directive 同源。channel 语义、outbox 顺序、A4/A5/A11 均未改。
+
 #### A10 — 拆分控制面调度器
 
 **现状**:同一个 `tick_interval` 驱动 driver 的 recovery+outbox、retry timer、trigger timer、snapshot TTL;
