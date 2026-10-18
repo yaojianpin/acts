@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::{ActError, Result, store::Store, utils::LaneRouter};
 
 pub(crate) enum WriteOp {
-    /// Drop a process and its rows (tasks, outbox ops, message/delivery rows).
+    /// Drop a process and its rows (tasks, message/delivery rows).
     /// Queued on the writer after any pending writes of the process, so
     /// removal can never race them: the completion markers apply first, then
     /// the rows are dropped.

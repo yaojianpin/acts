@@ -50,8 +50,6 @@ pub enum StoreIden {
     Deliveries,
     #[strum(serialize = "events")]
     Events,
-    #[strum(serialize = "ops")]
-    Ops,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

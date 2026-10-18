@@ -106,9 +106,6 @@ impl Store {
     pub fn events(&self) -> Arc<dyn DbCollection<Item = data::Event>> {
         self.collection()
     }
-    pub fn ops(&self) -> Arc<dyn DbCollection<Item = data::Op>> {
-        self.collection()
-    }
 
     /// Rebuild the index rows of one collection from its stored documents.
     /// The maintenance path for a crate outside this one whose documents the
@@ -376,9 +373,9 @@ impl Store {
         Ok(true)
     }
 
-    /// Atomically remove a process and every row of it — task rows, durable
-    /// outbox (`ops`) rows, the process's message (`messages`) and delivery
-    /// (`deliveries`) rows and the proc row — in one batch: a crash during
+    /// Atomically remove a process and every row of it — task rows, the
+    /// process's message (`messages`) and delivery (`deliveries`) rows and
+    /// the proc row — in one batch: a crash during
     /// removal can no longer leave a half-deleted process (some task rows
     /// gone, others + the proc row still present) that would resurrect as a
     /// broken process on the next restore, nor orphaned message/delivery rows
@@ -389,7 +386,6 @@ impl Store {
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let tasks = KvCollection::<data::Task>::new(StoreIden::Tasks.as_ref(), self.kv.clone());
-        let ops = KvCollection::<data::Op>::new(StoreIden::Ops.as_ref(), self.kv.clone());
         let messages =
             KvCollection::<data::Message>::new(StoreIden::Messages.as_ref(), self.kv.clone());
         let deliveries =
@@ -409,7 +405,6 @@ impl Store {
         let filter = Filter::and().expr(Expr::eq("pid", pid.to_string()));
         let vars_ids = vars.matching_ids(Some(&filter)).await?;
         let task_ids = tasks.matching_ids(Some(&filter)).await?;
-        let op_ids = ops.matching_ids(Some(&filter)).await?;
         let msg_ids = messages.matching_ids(Some(&filter)).await?;
         let dlv_ids = deliveries.matching_ids(Some(&filter)).await?;
         let _locks = lock_docs(
@@ -417,7 +412,6 @@ impl Store {
                 .iter()
                 .map(|id| vars.data_key(id))
                 .chain(task_ids.iter().map(|id| tasks.data_key(id)))
-                .chain(op_ids.iter().map(|id| ops.data_key(id)))
                 .chain(msg_ids.iter().map(|id| messages.data_key(id)))
                 .chain(dlv_ids.iter().map(|id| deliveries.data_key(id)))
                 .chain([procs.data_key(pid)]),
@@ -430,9 +424,6 @@ impl Store {
         }
         for id in &task_ids {
             batch.extend(tasks.delete_ops(id).await?);
-        }
-        for id in &op_ids {
-            batch.extend(ops.delete_ops(id).await?);
         }
         for id in &msg_ids {
             batch.extend(messages.delete_ops(id).await?);
@@ -1876,44 +1867,32 @@ mod tests {
     }
 
     /// Recovery and cleanup must see every row of a match set larger than one
-    /// `Query::new()` page: a truncated removal leaves task/vars/outbox rows
+    /// `Query::new()` page: a truncated removal leaves task/vars/message rows
     /// (with their index rows) behind as orphans. The set below crosses the
     /// 100000 page limit, so a limit-capped read or delete fails the count
     /// assertions.
     #[tokio::test(flavor = "multi_thread")]
     async fn recovery_and_removal_are_exhaustive_past_one_query_page() {
         use super::{KvCollection, StoreIden};
-        use crate::store::data::{Op, OpPhase, OpStatus};
+        use crate::store::data::Message;
 
         let (kv, store) = counting_store();
         let pid = "p-huge";
         let total = 100_001usize;
-        let ops = KvCollection::<Op>::new(StoreIden::Ops.as_ref(), kv.clone());
-        let now = crate::utils::time::time_millis();
+        let messages = KvCollection::<Message>::new(StoreIden::Messages.as_ref(), kv.clone());
         // Write the seed rows in batches (`create_ops` is exactly what a
         // `create` of an absent id applies): 100001 per-row `create` calls
         // would spend most of the test in store round trips.
         let mut pending = Vec::new();
         for i in 0..total {
             pending.extend(
-                ops.create_ops(&Op {
-                    id: format!("{pid}op{i}"),
-                    pid: pid.to_string(),
-                    source_tid: "t1".to_string(),
-                    tid: "t1".to_string(),
-                    target_tid: None,
-                    source_version: 0,
-                    causal_op_id: None,
-                    phase: OpPhase::DurablePending.as_ref().to_string(),
-                    r#type: "next".to_string(),
-                    status: OpStatus::Pending.as_ref().to_string(),
-                    event: None,
-                    options: None,
-                    create_time: now,
-                    update_time: now,
-                    v: 0,
-                })
-                .unwrap(),
+                messages
+                    .create_ops(&Message {
+                        id: format!("{pid}msg{i}"),
+                        pid: pid.to_string(),
+                        ..Default::default()
+                    })
+                    .unwrap(),
             );
             if pending.len() >= 4096 * 4 {
                 kv.batch(&pending, &[]).await.unwrap();
@@ -1928,7 +1907,7 @@ mod tests {
         // the premise: a page read stops at the limit, so an implementation
         // that used `query` here would lose rows
         let page = store
-            .ops()
+            .messages()
             .query(&Query::new().filter(filter.clone()))
             .await
             .unwrap();
@@ -1943,18 +1922,23 @@ mod tests {
         // of the process may survive
         assert!(store.remove_proc_rows(pid).await.unwrap());
         assert!(
-            store.ops().matching_ids(None).await.unwrap().is_empty(),
-            "every outbox row must be removed"
+            store
+                .messages()
+                .matching_ids(None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "every message row must be removed"
         );
         assert_eq!(
             store
-                .ops()
+                .messages()
                 .query(&Query::new().filter(filter))
                 .await
                 .unwrap()
                 .count,
             0,
-            "no index row of a removed outbox row may survive"
+            "no index row of a removed message row may survive"
         );
     }
 }

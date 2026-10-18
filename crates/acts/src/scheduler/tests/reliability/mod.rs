@@ -383,7 +383,7 @@ pub(crate) async fn wait_completed(engine: &Engine, pid: &str) {
 }
 
 /// A coarse, stable picture of the run for the failure output: the row's own
-/// state and its tasks, the run's operation rows and the un-settled delivery
+/// state and its tasks, the run's outbox records and the un-settled delivery
 /// rows. No timestamps, so a genuinely stuck state prints once.
 pub(crate) async fn dump_state(engine: &Engine, pid: &str) -> String {
     let store = engine.runtime().store();
@@ -403,19 +403,13 @@ pub(crate) async fn dump_state(engine: &Engine, pid: &str) -> String {
     }
     out.push(']');
     let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-    let ops = store
-        .ops()
-        .query(&q)
-        .await
-        .map(|r| r.rows.len())
-        .unwrap_or(0);
     let deliveries = store
         .deliveries()
         .query(&q)
         .await
         .map(|r| r.rows.len())
         .unwrap_or(0);
-    out.push_str(&format!(" ops={ops} deliveries={deliveries}"));
+    out.push_str(&format!(" deliveries={deliveries}"));
     // The raw proc row: `removable` is what the sweeper selects on, and a
     // lost projection write is visible here as a stale flag.
     match store.procs().find(pid).await {
@@ -522,10 +516,9 @@ pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
         store.tasks().query(&q).await.unwrap().rows.is_empty(),
         "the finished run's task rows must be removed"
     );
-    let ops = store.ops().query(&q).await.unwrap().rows;
     assert!(
-        ops.is_empty(),
-        "the finished run's outbox rows must be removed, left: {ops:?}"
+        !engine.runtime().kernel().exists(pid).await.unwrap(),
+        "the finished run's aggregate must be removed"
     );
     let vars = store.vars().query(&q).await.unwrap().rows;
     assert!(
