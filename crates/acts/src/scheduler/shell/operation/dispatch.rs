@@ -1,12 +1,15 @@
 //! Phase 4 of a claimed operation: dispatching the plan phase 3 built.
 //!
-//! One commit is the operation's whole durable effect: the plan's outbox records are
-//! delivered first (the at-least-once window the effect seam documents), the
-//! transition is committed with the operation's own claim as its source operation —
-//! which closes the operation *inside* the same atomic batch and writes the
-//! ready records of its successors — and only then do the operations the commit
-//! created get woken, the run's lifecycle reported, the read model re-materialized
-//! and the slot bookkeeping settled.
+//! One commit is the operation's whole durable effect: the transition is
+//! committed with the operation's own claim as its source operation — which
+//! closes the operation *inside* the same atomic batch and writes the ready
+//! records of its successors — and only then do the operations the commit
+//! created get woken, the read model re-materialized, the run's lifecycle
+//! reported and the plan's outbox records delivered (the at-least-once window
+//! the effect seam documents). Settlement, lifecycle and admission are not
+//! decided here: they are the [`Decision`] Core builds from the committed
+//! snapshot, and this module only executes its directives in the order the
+//! durability contracts require (A5: rows before external observers).
 
 use super::*;
 use crate::scheduler::shell::*;
@@ -170,6 +173,12 @@ impl KernelHost {
         operation_trace::end(operation_trace::COMMIT, phase);
         // The commit closed the operation inside its batch (see
         // `advance_transition`): there is no second, close-only commit to run.
+        // Core's whole post-commit rule is one value (A6): the plan plus what
+        // the committed snapshot means for lifecycle, settlement and the
+        // admission slot. Everything below only executes it in the order the
+        // durability contracts require.
+        let admission = self.admissions.lock().directive(&loaded.snapshot);
+        let decision = Decision::committed(plan, &loaded.snapshot, admission);
         let phase = operation_trace::start();
         for operation in &receipt.new_operations {
             // A timer armed by an execution's *start* operation waits for its
@@ -202,17 +211,22 @@ impl KernelHost {
         let projected = match projection {
             Projection::Whole => self.project(&loaded.snapshot).await,
             Projection::Touched => {
-                let touched: std::collections::BTreeSet<String> = plan
+                let touched: std::collections::BTreeSet<String> = decision
+                    .transition
                     .state_changes
                     .iter()
                     .map(|change| change.task.wire(&loaded.snapshot.process_id))
                     .chain(
-                        plan.task_creates
+                        decision
+                            .transition
+                            .task_creates
                             .iter()
                             .map(|create| create.task.wire(&loaded.snapshot.process_id)),
                     )
                     .chain(
-                        plan.variable_writes
+                        decision
+                            .transition
+                            .variable_writes
                             .iter()
                             .map(|write| write.scope.wire(&loaded.snapshot.process_id)),
                     )
@@ -231,11 +245,12 @@ impl KernelHost {
         // direct row read during the failure window, which reports its own
         // lag).
         if projected {
-            // The run's lifecycle, from the freshly committed state: a start
-            // while it is alive, one terminal event once every execution
-            // settled. A closed sink or an absent one makes this a no-op.
+            // The run's lifecycle, from the decision Core made about the
+            // freshly committed state: a start while it is alive, one terminal
+            // event once every execution settled. A closed sink or an absent
+            // one makes this a no-op.
             let phase = operation_trace::start();
-            self.report_lifecycle(&loaded.snapshot);
+            self.report_lifecycle_decision(&loaded.snapshot, decision.lifecycle.as_ref());
             operation_trace::end(operation_trace::LIFECYCLE, phase);
             // The commit's own outbox records are now visible to the
             // transport — after the aggregate commit and after the projection
@@ -251,13 +266,17 @@ impl KernelHost {
             // records are already `Pending`; the pass re-reads them).
             self.deliver.notify_one();
         }
-        // This operation may have settled the run: its slot goes back to the parked
-        // queue right here, so the run that has waited longest starts now
-        // instead of on the driver's next tick. The run is the one this operation
-        // just drove, so it either holds its slot or needs none — never parked.
+        // This operation may have settled the run: the slot Core's directive
+        // frees goes back to the parked queue right here, so the run that has
+        // waited longest starts now instead of on the driver's next tick. The
+        // directive was decided from the committed snapshot; the shell only
+        // mutates its own set and wakes the admitted operation.
         let phase = operation_trace::start();
-        let (_, admission) = self.place_run(&loaded.snapshot);
-        if let Some(admission) = admission {
+        let freed = self
+            .admissions
+            .lock()
+            .apply(&loaded.snapshot, decision.admission);
+        if let Some(admission) = freed {
             self.admit_run(&admission).await?;
         }
         operation_trace::end(operation_trace::PLACE2, phase);

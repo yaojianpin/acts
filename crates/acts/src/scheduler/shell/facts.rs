@@ -13,17 +13,12 @@ pub(super) fn model_of(
         .map_err(runtime)
 }
 
-/// The root execution of an aggregate: the `$` node's earliest generation —
-/// the generation a re-entry never removes.
+/// The root execution of an aggregate — the core decision's single
+/// derivation (see [`crate::scheduler::core::decision::root_task`]).
 pub(super) fn root_task(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
 ) -> Option<crate::scheduler::core::model::task_graph::TaskId> {
-    snapshot
-        .tasks
-        .keys()
-        .filter(|id| id.node.as_str() == crate::utils::consts::TASK_ROOT_TID)
-        .min_by_key(|id| id.generation)
-        .cloned()
+    crate::scheduler::core::decision::root_task(snapshot)
 }
 
 /// One root-scope variable (root = the `$` execution, earliest generation —
@@ -34,30 +29,6 @@ pub(super) fn root_variable(
 ) -> Result<Option<String>> {
     Ok(root_task(snapshot)
         .and_then(|root| snapshot.variables.get(&(root, name.to_string())).cloned()))
-}
-
-/// The root execution's state — what the slot rule bounds
-/// (`crate::scheduler::core::plan::concurrency`). A snapshot without a root (no
-/// seed produces one) reads as running, so the run asks for a slot instead of
-/// being admitted for free.
-pub(super) fn root_state(
-    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-) -> crate::scheduler::core::model::task_graph::TaskState {
-    root_task(snapshot)
-        .and_then(|root| snapshot.tasks.get(&root).map(|task| task.state))
-        .unwrap_or(crate::scheduler::core::model::task_graph::TaskState::Running)
-}
-
-/// Whether every execution of the run reached a terminal state: the run is no
-/// longer *in flight*, so the slot it holds is free. The legacy engine's
-/// equivalent is the terminal process event that evicts it from the resident
-/// set. Deliberately weaker than the row projection's `settled`, which also
-/// waits for the outbox and the channel deliveries: those keep the run's rows
-/// alive, never its slot.
-pub(super) fn run_settled(
-    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-) -> bool {
-    !snapshot.tasks.is_empty() && snapshot.tasks.values().all(|task| task.state.is_terminal())
 }
 
 /// The run's `__created` stamp (milliseconds): the FIFO key of the parked
@@ -310,27 +281,6 @@ pub(super) fn lifecycle_state(
         S::Removed => M::Removed,
         S::Created | S::Ready | S::Running | S::Waiting => M::None,
     }
-}
-
-/// The failed root's error variables (`error.code` / `error.message`).
-pub(super) fn root_error(
-    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-    root: &crate::scheduler::core::model::task_graph::TaskId,
-) -> (String, String) {
-    // The value is read the way every other scope reader reads it
-    // ([`json_text`]): the failure vocabulary reaches the root both as an
-    // engine-encoded JSON string (the catch fan-out's `json_var`) and as the
-    // raw text a client's `ecode`/`message` options carry (`ApplyActionCommand`
-    // writes the client's strings verbatim), so a strict decode would report
-    // every client failure as an empty code.
-    let read = |name: &str| {
-        snapshot
-            .variables
-            .get(&(root.clone(), name.to_string()))
-            .map(|raw| json_text(raw))
-            .unwrap_or_default()
-    };
-    (read("error.code"), read("error.message"))
 }
 
 /// The private execution variables the start operation pins on a `uses` step: its

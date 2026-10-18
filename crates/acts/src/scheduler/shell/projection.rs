@@ -70,16 +70,17 @@
 //! serves the rows. A failed strong read serves the stored rows and leaves
 //! the repair queued; [`ProjectionMetrics::lag`] reports the gap.
 //!
-//! The two terminal predicates are deliberately distinct:
-//! [`super::facts::run_settled`] (task terminality — the run holds no admission
-//! slot) and [`projection_settled`] (tasks + outbox + operations — the rows may
-//! be reclaimed).
+//! The two terminal predicates are deliberately distinct and both live in
+//! [`crate::scheduler::core::decision`]: `run_settled` (task terminality — the
+//! run holds no admission slot) and `projection_settled` (tasks + outbox +
+//! operations — the rows may be reclaimed). The shell only reads them.
 
 use super::{facts::node_facts, model_of, root_variable};
 use crate::{
     ActError, Result, Vars,
     scheduler::core::{
         commit::aggregate::ProcessSnapshot,
+        decision::projection_settled,
         model::{
             legacy_task_state::LegacyTaskState,
             task_graph::{TaskId, TaskState},
@@ -810,25 +811,6 @@ pub(crate) fn env_map(snapshot: &ProcessSnapshot) -> Result<Vec<(String, serde_j
         .iter()
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect())
-}
-
-/// Whether the **read model** may be handed to the sweeper: every execution
-/// terminal, every outbox record delivered and every operation retired.
-///
-/// This is deliberately stronger than [`super::facts::run_settled`], which
-/// only looks at task terminality and decides whether the run still holds an
-/// admission slot. The two are different questions:
-///
-/// - `run_settled` — the run has no more work to drive; its slot is free.
-/// - `projection_settled` (this function) — the rows may be deleted, because
-///   no message can still be produced and no operation still needs an owner.
-///
-/// A record the transport could not classify (`DeliveryUnknown`,
-/// `Quarantined`) or an operation that still needs one (`EffectUnknown`,
-/// `Quarantined`, schedulable work) keeps the rows alive for reconciliation,
-/// exactly like an open legacy delivery row.
-pub(crate) fn projection_settled(snapshot: &ProcessSnapshot) -> bool {
-    snapshot.is_reclaimable()
 }
 
 /// The model chain following one execution (D3: node ids, not instances):

@@ -116,23 +116,13 @@ impl ReadyIndex {
 
 /// Whether one operation belongs in the ready index at all.
 ///
-/// The undriven vocabulary kinds (`DeliverMessage`, `FireTrigger`,
-/// `RunPostCommit`) never had a host driver, so indexing them would only make
-/// the due pass report the same "not driven yet" error forever.
+/// The kind classification lives beside the enum
+/// ([`OperationKind::is_schedulable`]); this only adds the state check.
 pub(crate) fn schedulable(operation: &OperationRecord) -> bool {
     matches!(
         operation.state,
         OperationState::Pending | OperationState::RetryScheduled { .. }
-    ) && matches!(
-        operation.kind,
-        OperationKind::ExecuteTask
-            | OperationKind::ApplyAction
-            | OperationKind::SkipTask
-            | OperationKind::AbortTask
-            | OperationKind::DispatchTimeout
-            | OperationKind::PropagateTask
-            | OperationKind::ReenterTask
-    )
+    ) && operation.kind.is_schedulable()
 }
 
 /// The first moment a newly schedulable operation may run.

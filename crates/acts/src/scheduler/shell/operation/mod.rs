@@ -19,9 +19,13 @@
 //!    durable next plan — the state changes, the successor operations and the
 //!    outbox records it implies.
 //! 4. **Dispatch** ([`dispatch`]): the transition committed (its outbox
-//!    records written `Pending`), the read model projected, the plan's
-//!    records delivered and confirmed in one batch, its new operations woken,
-//!    and the run's bookkeeping (lifecycle, slot) settled.
+//!    records written `Pending`), then Core's complete
+//!    [`Decision`](crate::scheduler::core::decision::Decision) for the
+//!    committed snapshot executed in order — project its rows, report its
+//!    lifecycle, deliver and confirm the plan's outbox records in one batch,
+//!    wake its new operations and apply its admission directive. The shell
+//!    never re-derives settlement, lifecycle or admission; those rules are
+//!    `core::decision`'s.
 //!
 //! Everything kind-specific lives in one module per kind under this one —
 //! [`task`], [`action`], [`timeout`], [`cascade`], [`propagate`], [`reentry`]

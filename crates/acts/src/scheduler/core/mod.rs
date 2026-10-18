@@ -7,6 +7,7 @@ pub(crate) mod architecture;
 pub(crate) mod commit;
 #[cfg(test)]
 pub(crate) mod coverage;
+pub(crate) mod decision;
 pub(crate) mod model;
 pub(crate) mod outbox;
 pub(crate) mod plan;

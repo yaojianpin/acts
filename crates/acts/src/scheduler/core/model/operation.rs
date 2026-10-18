@@ -63,6 +63,29 @@ pub(crate) enum OperationKind {
     RunPostCommit,
 }
 
+impl OperationKind {
+    /// Whether this kind is normal, driven work and therefore belongs in the
+    /// durable ready index.
+    ///
+    /// The undriven vocabulary kinds (`DeliverMessage`, `FireTrigger`,
+    /// `RunPostCommit`) never had a host driver, so indexing them would only
+    /// make the due pass report the same "not driven yet" error forever. The
+    /// list sits beside the enum (A6) so a new kind is classified where it is
+    /// declared instead of in the ready/queue plumbing.
+    pub(crate) fn is_schedulable(self) -> bool {
+        matches!(
+            self,
+            Self::ExecuteTask
+                | Self::ApplyAction
+                | Self::SkipTask
+                | Self::AbortTask
+                | Self::DispatchTimeout
+                | Self::PropagateTask
+                | Self::ReenterTask
+        )
+    }
+}
+
 /// A persisted operation has one authoritative lifecycle.
 ///
 /// `Completed` is intentionally unreachable from `Pending` or `Claimed`.

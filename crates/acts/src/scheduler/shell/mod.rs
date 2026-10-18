@@ -47,6 +47,10 @@ use crate::{
                 aggregate::{ProcessSnapshot, TaskSnapshot},
                 command::{ActionCommand, ActionKind, ActionPlanner},
             },
+            decision::{
+                self, AdmissionDirective, Decision, LifecycleDirective, SlotDirective,
+                SlotObservation, SlotStanding,
+            },
             model::{
                 clock::{Clock, SystemClock},
                 effect::EffectKey,
@@ -473,27 +477,53 @@ impl Admissions {
         self.active.insert(process_id);
         Some(admission)
     }
-}
 
-/// The operation that admits a run the driver did not seed itself — one
-/// already in flight when it booted: the seed's root `ExecuteTask` (sequence 0
-/// of the root execution), which is the operation that starts a `Created` root. A run
-/// whose root operation already ran has no such operation left, so admitting it is a
-/// no-op; its real work already owns a ready record.
-fn resume_operation(
-    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-) -> OperationId {
-    let root = root_task(snapshot).unwrap_or_else(|| {
-        crate::scheduler::core::model::task_graph::TaskId::new(
-            crate::utils::consts::TASK_ROOT_TID,
-            0,
+    /// The core admission policy over this in-memory set (A6): the shell owns
+    /// the set, [`crate::scheduler::core::decision::place`] owns the rule.
+    fn directive(&self, snapshot: &ProcessSnapshot) -> AdmissionDirective {
+        let standing = if self.is_parked(&snapshot.process_id) {
+            SlotStanding::Parked
+        } else if self.holds(&snapshot.process_id) {
+            SlotStanding::Holding
+        } else {
+            SlotStanding::Unplaced
+        };
+        decision::place(
+            SlotObservation {
+                standing,
+                cap: self.cap,
+                active: self.active.len(),
+            },
+            decision::root_state(snapshot),
+            decision::run_settled(snapshot),
         )
-        .expect("the root tid constant is a valid node id")
-    });
-    OperationId {
-        process_id: snapshot.process_id.clone(),
-        task: root,
-        sequence: 0,
+    }
+
+    /// Execute one admission directive against the set. Returns the operation
+    /// that admits the parked run taking a freed slot, if any.
+    fn apply(
+        &mut self,
+        snapshot: &ProcessSnapshot,
+        directive: AdmissionDirective,
+    ) -> Option<OperationId> {
+        match directive {
+            AdmissionDirective::Park => {
+                if !self.is_parked(&snapshot.process_id) {
+                    self.park(
+                        created_stamp(snapshot),
+                        &snapshot.process_id,
+                        &decision::resume_operation(snapshot),
+                    );
+                }
+                None
+            }
+            AdmissionDirective::Drive(SlotDirective::Release) => self.release(&snapshot.process_id),
+            AdmissionDirective::Drive(SlotDirective::Take) => {
+                self.activate(&snapshot.process_id);
+                None
+            }
+            AdmissionDirective::Drive(SlotDirective::Keep | SlotDirective::NoSlot) => None,
+        }
     }
 }
 
@@ -680,7 +710,7 @@ impl KernelHost {
             // rows without a later commit. Clear this run's claims and
             // re-derive the same version once (the durable revision guard
             // still refuses an older projection).
-            if run_settled(snapshot) {
+            if decision::run_settled(snapshot) {
                 projector.forget_run(&snapshot.process_id);
                 match projector.project_repair(snapshot).await {
                     Ok(_) => {
@@ -720,7 +750,7 @@ impl KernelHost {
             return true;
         };
         if let Err(error) = projector.project_nodes(snapshot, Some(touched)).await {
-            if run_settled(snapshot) {
+            if decision::run_settled(snapshot) {
                 projector.forget_run(&snapshot.process_id);
                 match projector.project_repair(snapshot).await {
                     Ok(_) => {
@@ -1027,49 +1057,61 @@ impl KernelHost {
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     ) {
+        let directive = decision::lifecycle(snapshot);
+        self.report_lifecycle_decision(snapshot, directive.as_ref());
+    }
+
+    /// Execute the lifecycle directive Core already decided. The shell owns
+    /// only the message shape, the sink and the once-per-phase bookkeeping;
+    /// *whether* the run is alive or settled (and whether a terminal root is an
+    /// error) is [`crate::scheduler::core::decision::lifecycle`].
+    fn report_lifecycle_decision(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        directive: Option<&LifecycleDirective>,
+    ) {
         let lifecycle = self.lifecycle.read();
         let Some(sink) = lifecycle.as_ref() else {
             return;
         };
-        let Some(root) = snapshot
-            .tasks
-            .keys()
-            .filter(|id| id.node.as_str() == crate::utils::consts::TASK_ROOT_TID)
-            .min_by_key(|id| id.generation)
-            .cloned()
-        else {
+        let Some(root) = root_task(snapshot) else {
             return;
         };
-        let root_state = snapshot.tasks.get(&root).map(|task| task.state);
-        // `run_settled` is the slot/lifecycle view (task terminality only).
-        // The read model's `projection_settled` is deliberately stronger; a
-        // lifecycle event is emitted when the run is no longer in flight, not
-        // when its rows may be reclaimed.
-        let no_longer_in_flight = run_settled(snapshot);
-        let mut reported = self.reported.lock();
-        if no_longer_in_flight {
-            if !reported.finished.insert(snapshot.process_id.clone()) {
-                return;
-            }
-            let mut message = process_message(snapshot, &root);
-            if root_state == Some(crate::scheduler::core::model::task_graph::TaskState::Failed) {
-                let (code, text) = root_error(snapshot, &root);
-                message.set_err(&code, &text);
-                sink(&message, ProcessEvent::Errored);
-                return;
-            }
-            match exposes_error(snapshot, &message) {
-                Some(error) => {
-                    message.set_err("", &error);
-                    sink(&message, ProcessEvent::Errored);
-                }
-                None => sink(&message, ProcessEvent::Completed),
-            }
+        let Some(directive) = directive else {
             return;
-        }
-        if reported.started.insert(snapshot.process_id.clone()) {
-            let message = process_message(snapshot, &root);
-            sink(&message, ProcessEvent::Started);
+        };
+        let mut reported = self.reported.lock();
+        match directive {
+            LifecycleDirective::Started => {
+                if reported.started.insert(snapshot.process_id.clone()) {
+                    let message = process_message(snapshot, &root);
+                    sink(&message, ProcessEvent::Started);
+                }
+            }
+            LifecycleDirective::Completed => {
+                if !reported.finished.insert(snapshot.process_id.clone()) {
+                    return;
+                }
+                let mut message = process_message(snapshot, &root);
+                // The legacy `on_proc` handler validates the model's
+                // `exposes` against the completed outputs; a mismatch is
+                // reported as an error on the same completion event.
+                match exposes_error(snapshot, &message) {
+                    Some(error) => {
+                        message.set_err("", &error);
+                        sink(&message, ProcessEvent::Errored);
+                    }
+                    None => sink(&message, ProcessEvent::Completed),
+                }
+            }
+            LifecycleDirective::Errored { code, message } => {
+                if !reported.finished.insert(snapshot.process_id.clone()) {
+                    return;
+                }
+                let mut payload = process_message(snapshot, &root);
+                payload.set_err(code, message);
+                sink(&payload, ProcessEvent::Errored);
+            }
         }
     }
 
@@ -1388,41 +1430,11 @@ impl KernelHost {
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     ) -> (bool, Option<OperationId>) {
         let mut admissions = self.admissions.lock();
-        let mut freed = None;
-        let drive = if admissions.is_parked(&snapshot.process_id) {
-            false
-        } else if admissions.holds(&snapshot.process_id) {
-            if run_settled(snapshot) {
-                freed = admissions.release(&snapshot.process_id);
-            }
-            true
-        } else {
-            let state = root_state(snapshot);
-            match infallible(Admit::plan(
-                (),
-                &(admissions.cap, admissions.active.len(), state),
-            )) {
-                Admission::Admit => {
-                    // A settled run is admitted *because* it needs no slot:
-                    // taking one here would hold it for a run that never operations
-                    // again.
-                    if !state.is_terminal() {
-                        admissions.activate(&snapshot.process_id);
-                    }
-                    true
-                }
-                Admission::Park => {
-                    admissions.park(
-                        created_stamp(snapshot),
-                        &snapshot.process_id,
-                        &resume_operation(snapshot),
-                    );
-                    false
-                }
-            }
-        };
-        drop(admissions);
-        (drive, freed)
+        // The rule is core's (`decision::place`); this set is only the state
+        // it reads and the mutations it names.
+        let directive = admissions.directive(snapshot);
+        let freed = admissions.apply(snapshot, directive);
+        (directive.drives(), freed)
     }
 
     /// Make a parked run's ready record due now, then wake it. Used when a
@@ -2388,7 +2400,7 @@ impl KernelHost {
         Ok(self
             .snapshot(process_id)
             .await?
-            .is_some_and(|snapshot| run_settled(&snapshot)))
+            .is_some_and(|snapshot| decision::run_settled(&snapshot)))
     }
 
     /// Reconcile one `EffectUnknown` operation from the executor's own
