@@ -177,11 +177,13 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
     );
 
     // the read model converges to the decision (or the run is swept with the
-    // stale row; either way the act never keeps reading as waiting)
+    // stale row; either way the act never keeps reading as waiting). A11
+    // cleanup is driven here: the test build does not run the timer.
     let what = format!("the decided act of {pid} to stop reading as waiting");
     poll_until_dumped(
         &what,
         || async {
+            let _ = engine.runtime().sweep_removable().await;
             match proc_row(&engine, &pid).await {
                 Some(proc) => proc
                     .task(&tid)
@@ -410,20 +412,20 @@ async fn a_restart_does_not_reapply_a_decided_fail_inner() {
             Some(LegacyTaskState::Error),
             "the recovered act must hold its decision"
         );
-    } else {
-        // a settled and fully delivered run is swept; its aggregate stays, and
-        // that is what the decision lives in
-        assert!(
-            engine_state(&reloaded, &pid, &tid).await.is_some(),
-            "the aggregate must outlive the swept rows"
+    }
+    // A11: a settled, fully delivered run may already have been reclaimed (the
+    // reliability harness sweeps it explicitly, but a boot can also find it
+    // gone). If the aggregate is still there, it must hold the decision;
+    // absence is the reclaimed state, and the no-resurrection assertion above
+    // is the evidence that the decided failure was not re-applied.
+    let decided = engine_state(&reloaded, &pid, &tid).await;
+    if decided.is_some() {
+        assert_eq!(
+            decided,
+            Some(TaskState::Failed),
+            "the recovered aggregate must keep the act failed"
         );
     }
-    let decided = engine_state(&reloaded, &pid, &tid).await;
-    assert_eq!(
-        decided,
-        Some(TaskState::Failed),
-        "the recovered aggregate must keep the act failed"
-    );
     sweep_until_gone(&reloaded, &pid).await;
     reloaded.close().await;
 }

@@ -450,10 +450,40 @@ pub(crate) async fn dump_state(engine: &Engine, pid: &str) -> String {
     out
 }
 
+/// Whether A11 deliberately retains this run for reconciliation: an
+/// `EffectUnknown`/`Quarantined` operation or an outbox record whose delivery
+/// outcome is unknown/quarantined. Such a run keeps its aggregate, its rows and
+/// its pid.
+async fn retained_for_reconciliation(engine: &Engine, pid: &str) -> bool {
+    use crate::scheduler::core::model::operation::OperationState;
+    use crate::scheduler::core::outbox::records::OutboxState;
+
+    engine
+        .runtime()
+        .kernel()
+        .snapshot(pid)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|snapshot| {
+            snapshot.operations.values().any(|operation| {
+                matches!(
+                    operation.state,
+                    OperationState::EffectUnknown { .. } | OperationState::Quarantined { .. }
+                )
+            }) || snapshot.outbox.values().any(|record| {
+                matches!(
+                    record.state,
+                    OutboxState::DeliveryUnknown { .. } | OutboxState::Quarantined { .. }
+                )
+            })
+        })
+}
+
 /// Poll until the finished run's rows are gone, driving the kernel's sweeper
-/// each tick, and assert no row family is left behind. A fault or a race that
-/// left the run un-sweepable keeps the rows alive and fails the poll either
-/// way.
+/// each tick, and assert no row family is left behind. A run A11 retains for
+/// manual reconciliation (`EffectUnknown`/`Quarantined`) is the documented
+/// exception: its rows and aggregate must stay, and the pid stays occupied.
 pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
     let store = engine.runtime().store();
     let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
@@ -461,7 +491,9 @@ pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
     poll_until_within(
         &what,
         || async {
-            if store.procs().find(pid).await.is_err() {
+            if store.procs().find(pid).await.is_err()
+                || retained_for_reconciliation(engine, pid).await
+            {
                 return true;
             }
             let _ = engine.runtime().sweep_removable().await;
@@ -471,6 +503,17 @@ pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
         SWEEP_WAIT,
     )
     .await;
+    if retained_for_reconciliation(engine, pid).await {
+        assert!(
+            store.procs().find(pid).await.is_ok(),
+            "a retained run keeps its proc row"
+        );
+        assert!(
+            engine.runtime().kernel().exists(pid).await.unwrap_or(false),
+            "a retained run keeps its aggregate"
+        );
+        return;
+    }
     assert!(
         store.procs().find(pid).await.is_err(),
         "the finished run's proc row must be removed"

@@ -81,9 +81,11 @@ pub struct LoopHealth {
 pub struct SchedulerHealth {
     /// The schedule-trigger timer (due `schedule` rows).
     pub trigger: LoopHealth,
-    /// The message-retry timer (unacked deliveries, settled-process sweep and
-    /// the durable-overflow replay).
+    /// The message-retry timer (unacked deliveries and the durable-overflow
+    /// replay).
     pub retry: LoopHealth,
+    /// The terminal-run cleanup loop (aggregate/row/workdir reclamation).
+    pub cleanup: LoopHealth,
 }
 
 /// Consecutive-failure tracker of one periodic loop.

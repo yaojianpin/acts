@@ -135,8 +135,12 @@ async fn quiesce(engine: &Engine) {
 }
 
 /// Whether every execution of `pid` reached a terminal state — the run is no
-/// longer in flight.
+/// longer in flight. A missing aggregate is a run A11 already reclaimed: it is
+/// settled by definition (and has no aggregate left to read).
 async fn completed(engine: &Engine, pid: &str) -> bool {
+    if !engine.runtime().kernel().exists(pid).await.unwrap_or(false) {
+        return true;
+    }
     engine
         .runtime()
         .kernel()
@@ -243,6 +247,12 @@ fn completion_records(pid: &str, tid: &str) -> (String, String) {
 /// root, both `Completed`, and exactly one record per operation of the decision.
 async fn assert_finished_once(engine: &Engine, pid: &str, tid: &str) {
     assert!(completed(engine, pid).await, "run {pid} must settle");
+    if !engine.runtime().kernel().exists(pid).await.unwrap_or(false) {
+        // A11 reclaimed the run (a sweep of a sibling in the same batch may
+        // have done it): there is no aggregate left to read, and the reclaim
+        // itself proves every execution was terminal.
+        return;
+    }
     for node in [utils::consts::TASK_ROOT_TID, tid] {
         assert_eq!(
             generations(engine, pid, node).await,

@@ -261,11 +261,10 @@ async fn a_restart_never_reapplies_a_decided_abort_inner() {
         "the abort must terminate the run"
     );
 
-    // everything of the finished run is delivered and reclaimed; the aggregate
-    // (the decision itself) is what outlives it
-    sweep_until_gone(&engine, &pid).await;
-
-    // the crash a run resumes from
+    // the crash a run resumes from — the run is still durable here (A11
+    // reclaims a finished run only once its cleanup runs, and this cell reads
+    // the decision back from the aggregate after the restart)
+    engine.close().await;
     let reloaded = restart(&engine, store.clone()).await;
     let resurrected = capture_created(&reloaded, "act1");
     let announced = tokio::time::timeout(Duration::from_millis(2000), resurrected.recv()).await;
@@ -286,6 +285,7 @@ async fn a_restart_never_reapplies_a_decided_abort_inner() {
         Some(TaskState::Aborted),
         "the recovered run must hold its terminal outcome"
     );
+    sweep_until_gone(&reloaded, &pid).await;
     reloaded.close().await;
 }
 

@@ -24,9 +24,10 @@ use crate::{
         durable::document_store::{
             DocumentGuard, DocumentMutation, DocumentRepositoryError, LoadedProcess,
             OUTBOX_INDEX_KEY_PREFIX, PROCESS_KEY_PREFIX, READY_INDEX_KEY_PREFIX,
-            RECOVERY_INDEX_KEY_PREFIX, build_create_transaction, build_repair_transaction,
-            build_replace_transaction, decode_loaded_process, decode_process_key,
-            loaded_after_write, outbox_index_key, process_key, ready_index_key, recovery_entries,
+            RECOVERY_INDEX_KEY_PREFIX, build_create_transaction, build_orphan_reclaim_transaction,
+            build_reclaim_transaction, build_repair_transaction, build_replace_transaction,
+            decode_loaded_process, decode_process_key, loaded_after_write, outbox_index_key,
+            process_key, ready_index_key, recovery_entries, recovery_entry_process_prefix,
             recovery_index_document, recovery_index_key,
         },
     },
@@ -659,15 +660,23 @@ impl AsyncProcessRepository {
             let snapshot = match processes.get(&process_id) {
                 Some(snapshot) => snapshot.clone(),
                 None => {
-                    let loaded = self
+                    let Some(loaded) = self
                         .load(&process_id)
                         .await
                         .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?
-                        .ok_or_else(|| {
-                            OutboxRepositoryError::CorruptData(format!(
-                                "outbox index references missing aggregate {process_id:?}"
-                            ))
-                        })?;
+                    else {
+                        // An interrupted cleanup left an index document whose
+                        // aggregate is already gone. There is no record to
+                        // deliver: skip it instead of failing the pass (and
+                        // every later one) on work that cannot exist. The
+                        // cleanup retry removes the document when it can name
+                        // the process from its rows.
+                        tracing::debug!(
+                            process_id,
+                            "outbox index references a missing aggregate; skipping"
+                        );
+                        continue;
+                    };
                     processes.insert(process_id.clone(), loaded.snapshot.clone());
                     loaded.snapshot
                 }
@@ -764,6 +773,108 @@ impl AsyncProcessRepository {
             }
             _ => Ok(ReplaceOutcome::Conflict),
         }
+    }
+
+    /// Atomically reclaim one run whose aggregate is already
+    /// [reclaimable](crate::scheduler::core::commit::aggregate::ProcessSnapshot::is_reclaimable):
+    /// delete the aggregate and its recovery, outbox and ready index documents
+    /// in one guarded batch (the aggregate's exact bytes are the version
+    /// guard). Leftover per-operation recovery-entry documents are deleted in
+    /// the same batch.
+    ///
+    /// When the aggregate is already gone — an interrupted earlier cleanup —
+    /// the derived index documents still present are removed, guarded by the
+    /// aggregate's absence. `Absent` with nothing to remove is a clean no-op,
+    /// so the caller can distinguish "never existed / fully reclaimed" from
+    /// "index or row residue remains".
+    ///
+    /// A concurrent commit, start or another cleaner makes the guarded batch
+    /// fail; the load is then repeated. After [`LOAD_ATTEMPTS`] the outcome is
+    /// a conflict, which the cleanup loop reports and retries on its next
+    /// pass; the aggregate is never deleted on an unguarded read.
+    pub(crate) async fn reclaim(
+        &self,
+        process_id: &str,
+    ) -> Result<ReclaimOutcome, AsyncRepositoryError> {
+        let entry_prefix = recovery_entry_process_prefix(process_id)?;
+        for _ in 0..LOAD_ATTEMPTS {
+            let loaded = self.load(process_id).await?;
+            match loaded {
+                Some(loaded) => {
+                    if !loaded.snapshot.is_reclaimable() {
+                        return Ok(ReclaimOutcome::Retained);
+                    }
+                    let recovery_entries = self.store.scan_prefix(&entry_prefix).await?;
+                    let transaction = build_reclaim_transaction(&loaded, &recovery_entries)?;
+                    let document_bytes = loaded.original_document().len()
+                        + loaded.original_recovery_index().map_or(0, <[u8]>::len)
+                        + loaded.original_outbox_index().map_or(0, <[u8]>::len)
+                        + loaded.original_ready_index().map_or(0, <[u8]>::len)
+                        + recovery_entries
+                            .iter()
+                            .map(|(_, bytes)| bytes.len())
+                            .sum::<usize>();
+                    if self
+                        .store
+                        .atomic_batch(transaction.guards(), transaction.mutations())
+                        .await?
+                    {
+                        return Ok(ReclaimOutcome::Reclaimed {
+                            document_bytes: document_bytes as u64,
+                            orphan_indexes: recovery_entries.len(),
+                        });
+                    }
+                }
+                None => {
+                    let recovery_entries = self.store.scan_prefix(&entry_prefix).await?;
+                    let keys = [
+                        recovery_index_key(process_id)?,
+                        outbox_index_key(process_id)?,
+                        ready_index_key(process_id)?,
+                    ];
+                    let mut documents = self.store.read_many(&keys).await?.into_iter();
+                    let recovery_index = documents.next().flatten();
+                    let outbox_index = documents.next().flatten();
+                    let ready_index = documents.next().flatten();
+                    let orphan_indexes = [&recovery_index, &outbox_index, &ready_index]
+                        .into_iter()
+                        .filter(|document| document.is_some())
+                        .count()
+                        + recovery_entries.len();
+                    if orphan_indexes == 0 {
+                        return Ok(ReclaimOutcome::Absent {
+                            document_bytes: 0,
+                            orphan_indexes: 0,
+                        });
+                    }
+                    let document_bytes = recovery_index.as_ref().map_or(0, Vec::len)
+                        + outbox_index.as_ref().map_or(0, Vec::len)
+                        + ready_index.as_ref().map_or(0, Vec::len)
+                        + recovery_entries
+                            .iter()
+                            .map(|(_, bytes)| bytes.len())
+                            .sum::<usize>();
+                    let transaction = build_orphan_reclaim_transaction(
+                        process_id,
+                        recovery_index,
+                        outbox_index,
+                        ready_index,
+                        &recovery_entries,
+                    )?;
+                    if self
+                        .store
+                        .atomic_batch(transaction.guards(), transaction.mutations())
+                        .await?
+                    {
+                        return Ok(ReclaimOutcome::Absent {
+                            document_bytes: document_bytes as u64,
+                            orphan_indexes,
+                        });
+                    }
+                }
+            }
+        }
+        Err(AsyncRepositoryError::Conflict(process_id.to_string()))
     }
 
     /// Load one aggregate with its derived indexes.
@@ -883,6 +994,29 @@ pub(crate) enum ReplaceOutcome {
     Committed,
     AlreadyCommitted(Box<LoadedProcess>),
     Conflict,
+}
+
+/// What one reclamation attempt did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReclaimOutcome {
+    /// The aggregate and its indexes were deleted in one guarded batch.
+    /// `orphan_indexes` counts leftover recovery-entry documents removed with
+    /// them (a reclaimable aggregate projects none).
+    Reclaimed {
+        document_bytes: u64,
+        orphan_indexes: usize,
+    },
+    /// The aggregate was already absent. `orphan_indexes` is non-zero when
+    /// index documents of the gone aggregate were removed; zero means there
+    /// was nothing left to clean.
+    Absent {
+        document_bytes: u64,
+        orphan_indexes: usize,
+    },
+    /// The aggregate still exists and the run is not reclaimable (unsettled
+    /// outbox, an outstanding operation, `EffectUnknown`/`Quarantined`, or
+    /// tasks that are not terminal). Nothing was deleted.
+    Retained,
 }
 
 #[derive(Debug)]
@@ -1052,6 +1186,414 @@ mod tests {
             reads: reads.clone(),
         });
         (store, reads)
+    }
+
+    /// A run that is reclaimable by A11: its only execution is terminal, its
+    /// outbox record is delivered and it has no outstanding operations.
+    fn reclaimable_snapshot(process_id: &str) -> ProcessSnapshot {
+        let task = TaskId::new("step", 0).unwrap();
+        let outbox_id = crate::scheduler::core::outbox::records::OutboxId {
+            process_id: process_id.into(),
+            key: "delivered".into(),
+        };
+        ProcessSnapshot {
+            process_id: process_id.into(),
+            version: ProcessVersion {
+                graph: 1,
+                process: 1,
+                operations: 0,
+            },
+            tasks: HashMap::from([(
+                task,
+                TaskSnapshot {
+                    model_node: NodeId::parse("model-step").unwrap(),
+                    parent: None,
+                    predecessors: vec![],
+                    state: TaskState::Completed,
+                    revision: 1,
+                },
+            )]),
+            variables: BTreeMap::new(),
+            operations: HashMap::new(),
+            outbox: HashMap::from([(
+                outbox_id.clone(),
+                crate::scheduler::core::outbox::records::OutboxRecord {
+                    id: outbox_id,
+                    topic: "topic".into(),
+                    payload: "{}".into(),
+                    state: crate::scheduler::core::outbox::records::OutboxState::Delivered {
+                        receipt: "ok".into(),
+                    },
+                    attempt: 1,
+                    last_fence: 1,
+                    revision: 1,
+                },
+            )]),
+        }
+    }
+
+    /// A terminal run with one non-retired operation: `EffectUnknown` and
+    /// `Quarantined` must keep the aggregate and every index.
+    fn retained_snapshot(process_id: &str, state: OperationState) -> ProcessSnapshot {
+        let mut snapshot = reclaimable_snapshot(process_id);
+        let operation_id = OperationId {
+            process_id: process_id.into(),
+            task: TaskId::new("step", 0).unwrap(),
+            sequence: 0,
+        };
+        snapshot.version.operations = 1;
+        snapshot.operations.insert(
+            operation_id.clone(),
+            OperationRecord {
+                id: operation_id,
+                kind: OperationKind::ExecuteTask,
+                state,
+                revision: 2,
+            },
+        );
+        snapshot
+    }
+
+    /// The authoritative batch is guarded by the exact aggregate bytes the
+    /// decision was taken on (its version), and a missing index is guarded
+    /// absent instead of being deleted blind.
+    #[test]
+    fn reclaim_transaction_guards_the_aggregate_and_every_index() {
+        let snapshot = reclaimable_snapshot("guard");
+        let document = ProcessDocumentCodec::encode(&snapshot).unwrap();
+        let loaded = loaded_after_write(&snapshot, document.clone(), None, None, None);
+        let transaction = build_reclaim_transaction(&loaded, &[]).unwrap();
+        let aggregate_key = process_key("guard").unwrap();
+        assert!(transaction.guards().iter().any(|guard| {
+            guard.key == aggregate_key && guard.expected.as_deref() == Some(document.as_slice())
+        }));
+        for key in [
+            recovery_index_key("guard").unwrap(),
+            outbox_index_key("guard").unwrap(),
+            ready_index_key("guard").unwrap(),
+        ] {
+            assert!(
+                transaction
+                    .guards()
+                    .iter()
+                    .any(|guard| guard.key == key && guard.expected.is_none()),
+                "a missing index must be guarded absent: {key:?}"
+            );
+        }
+        for key in [
+            aggregate_key,
+            recovery_index_key("guard").unwrap(),
+            outbox_index_key("guard").unwrap(),
+            ready_index_key("guard").unwrap(),
+        ] {
+            assert!(
+                transaction
+                    .mutations()
+                    .contains(&DocumentMutation::Delete { key: key.clone() }),
+                "the batch must delete {key:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reclaim_deletes_the_guarded_documents_and_is_idempotent() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        let snapshot = reclaimable_snapshot("reclaim");
+        repository
+            .create(&snapshot, 0, 800)
+            .await
+            .expect("the aggregate is created");
+
+        // A settled run projects no recovery/outbox/ready document, so the
+        // aggregate is the only document present — and a missing ready index
+        // (an older database) is still a clean delete.
+        assert!(
+            kv.one(&process_key("reclaim").unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            kv.one(&ready_index_key("reclaim").unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            repository.reclaim("reclaim").await.unwrap(),
+            ReclaimOutcome::Reclaimed { document_bytes, .. } if document_bytes > 0
+        ));
+        for key in [
+            process_key("reclaim").unwrap(),
+            recovery_index_key("reclaim").unwrap(),
+            outbox_index_key("reclaim").unwrap(),
+            ready_index_key("reclaim").unwrap(),
+        ] {
+            assert!(
+                kv.one(&key).await.unwrap().is_none(),
+                "{key:?} must be gone"
+            );
+        }
+
+        // A second pass finds nothing to do: reclamation is idempotent.
+        assert_eq!(
+            repository.reclaim("reclaim").await.unwrap(),
+            ReclaimOutcome::Absent {
+                document_bytes: 0,
+                orphan_indexes: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn reclaim_retains_effect_unknown_and_quarantined_runs() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        for (pid, state) in [
+            (
+                "effect-unknown",
+                OperationState::EffectUnknown { attempt: 1 },
+            ),
+            (
+                "quarantined",
+                OperationState::Quarantined {
+                    reason: "manual review".into(),
+                },
+            ),
+        ] {
+            let snapshot = retained_snapshot(pid, state);
+            repository.create(&snapshot, 0, 800).await.unwrap();
+            assert_eq!(
+                repository.reclaim(pid).await.unwrap(),
+                ReclaimOutcome::Retained,
+                "{pid} must stay for reconciliation"
+            );
+            assert!(
+                kv.one(&process_key(pid).unwrap()).await.unwrap().is_some(),
+                "{pid}'s aggregate must survive"
+            );
+            assert!(
+                kv.one(&recovery_index_key(pid).unwrap())
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{pid}'s recovery index must survive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reclaim_retains_outbox_records_that_did_not_deliver() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        for (pid, state) in [
+            (
+                "delivery-unknown",
+                crate::scheduler::core::outbox::records::OutboxState::DeliveryUnknown {
+                    reason: "transport outcome unknown".into(),
+                },
+            ),
+            (
+                "outbox-quarantined",
+                crate::scheduler::core::outbox::records::OutboxState::Quarantined {
+                    reason: "manual review".into(),
+                },
+            ),
+            (
+                "outbox-pending",
+                crate::scheduler::core::outbox::records::OutboxState::Pending {
+                    available_at_ms: 0,
+                },
+            ),
+        ] {
+            let mut snapshot = reclaimable_snapshot(pid);
+            let record = snapshot
+                .outbox
+                .values_mut()
+                .next()
+                .expect("the snapshot carries one record");
+            record.state = state;
+            repository.create(&snapshot, 0, 800).await.unwrap();
+            assert_eq!(
+                repository.reclaim(pid).await.unwrap(),
+                ReclaimOutcome::Retained,
+                "{pid} must stay until its outbox record is delivered"
+            );
+            assert!(
+                kv.one(&process_key(pid).unwrap()).await.unwrap().is_some(),
+                "{pid}'s aggregate must survive"
+            );
+        }
+    }
+
+    /// A crash after the aggregate batch leaves the derived indexes behind.
+    /// The retry recognises the missing aggregate and deletes exactly the
+    /// documents that exist, including per-operation recovery entries — and
+    /// nothing that belongs to another pid.
+    #[tokio::test]
+    async fn reclaim_cleans_orphan_indexes_after_the_aggregate_is_gone() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        let pid = "orphan";
+        for key in [
+            recovery_index_key(pid).unwrap(),
+            outbox_index_key(pid).unwrap(),
+            ready_index_key(pid).unwrap(),
+        ] {
+            kv.put(&key, b"stale index".to_vec()).await.unwrap();
+        }
+        let entry_key = format!("{}abc", recovery_entry_process_prefix(pid).unwrap());
+        kv.put(&entry_key, b"stale entry".to_vec()).await.unwrap();
+        let other_key = recovery_index_key("other").unwrap();
+        kv.put(&other_key, b"not mine".to_vec()).await.unwrap();
+
+        assert_eq!(
+            repository.reclaim(pid).await.unwrap(),
+            ReclaimOutcome::Absent {
+                document_bytes: 3 * b"stale index".len() as u64 + b"stale entry".len() as u64,
+                orphan_indexes: 4,
+            }
+        );
+        for key in [
+            recovery_index_key(pid).unwrap(),
+            outbox_index_key(pid).unwrap(),
+            ready_index_key(pid).unwrap(),
+            entry_key,
+        ] {
+            assert!(
+                kv.one(&key).await.unwrap().is_none(),
+                "{key:?} must be gone"
+            );
+        }
+        assert!(
+            kv.one(&other_key).await.unwrap().is_some(),
+            "another pid's index must not be touched"
+        );
+    }
+
+    /// A store that commits a new aggregate version just before the reclaim
+    /// batch applies: the exact-bytes guard must refuse the deletion, the
+    /// retry must re-read and find the run no longer reclaimable, and neither
+    /// the aggregate nor its indexes may be removed.
+    struct RaceOnReclaimStore {
+        inner: Arc<KvDocumentStore>,
+        replacement: Vec<u8>,
+        raced: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncDocumentStore for RaceOnReclaimStore {
+        async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+            self.inner.read_many(keys).await
+        }
+        async fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            self.inner.scan_prefix(prefix).await
+        }
+        async fn scan_range(
+            &self,
+            prefix: &str,
+            lower: Option<&str>,
+            upper: Option<&str>,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            self.inner.scan_range(prefix, lower, upper).await
+        }
+        async fn atomic_batch(
+            &self,
+            guards: &[DocumentGuard],
+            mutations: &[DocumentMutation],
+        ) -> Result<bool, ActError> {
+            let deletes_aggregate = mutations.iter().any(|mutation| {
+                matches!(
+                    mutation,
+                    DocumentMutation::Delete { key } if key.starts_with(PROCESS_KEY_PREFIX)
+                )
+            });
+            if deletes_aggregate && !self.raced.swap(true, Ordering::SeqCst) {
+                // The commit the reclamation read did not see: it installs a
+                // newer, non-reclaimable aggregate version.
+                self.inner
+                    .atomic_batch(
+                        &[],
+                        &[DocumentMutation::Put {
+                            key: process_key("race").unwrap(),
+                            value: self.replacement.clone(),
+                        }],
+                    )
+                    .await?;
+            }
+            self.inner.atomic_batch(guards, mutations).await
+        }
+    }
+
+    #[tokio::test]
+    async fn reclaim_refuses_to_delete_an_aggregate_that_moved() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv.clone()));
+        let creator = AsyncProcessRepository::new(inner.clone());
+        creator
+            .create(&reclaimable_snapshot("race"), 0, 800)
+            .await
+            .unwrap();
+
+        let mut replacement = reclaimable_snapshot("race");
+        replacement.version.process += 1;
+        for task in replacement.tasks.values_mut() {
+            task.state = TaskState::Running;
+        }
+        let replacement_document = ProcessDocumentCodec::encode(&replacement).unwrap();
+        let repository = AsyncProcessRepository::new(Arc::new(RaceOnReclaimStore {
+            inner,
+            replacement: replacement_document.clone(),
+            raced: std::sync::atomic::AtomicBool::new(false),
+        }));
+        assert_eq!(
+            repository.reclaim("race").await.unwrap(),
+            ReclaimOutcome::Retained,
+            "the moved aggregate is no longer reclaimable"
+        );
+        assert_eq!(
+            kv.one(&process_key("race").unwrap()).await.unwrap(),
+            Some(replacement_document),
+            "the concurrent commit's bytes must survive the reclaim attempt"
+        );
+    }
+
+    /// An outbox index document whose aggregate is already gone (an
+    /// interrupted cleanup, an older orphan) is skipped, not turned into a
+    /// corrupt-data failure that would wedge every later delivery pass.
+    #[tokio::test]
+    async fn outbox_page_skips_an_index_whose_aggregate_is_gone() {
+        use crate::scheduler::core::outbox::outbox_index::OutboxIndex;
+
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        let pid = "gone";
+        let outbox_id = crate::scheduler::core::outbox::records::OutboxId {
+            process_id: pid.into(),
+            key: "k".into(),
+        };
+        let record = crate::scheduler::core::outbox::records::OutboxRecord::pending(
+            outbox_id.clone(),
+            "topic".into(),
+            "{}".into(),
+            0,
+        )
+        .unwrap();
+        let index = OutboxIndex::project(pid, &HashMap::from([(outbox_id, record)]))
+            .unwrap()
+            .expect("a pending record projects an index");
+        kv.put(
+            &outbox_index_key(pid).unwrap(),
+            OutboxIndexCodec::encode(&index).unwrap(),
+        )
+        .await
+        .unwrap();
+        let page = repository
+            .dispatchable_outbox_page(0, None, 10)
+            .await
+            .expect("a missing aggregate is stale, not damage");
+        assert!(page.records.is_empty());
     }
 
     /// A load that finds the aggregate paired with a recovery index from

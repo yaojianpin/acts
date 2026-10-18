@@ -89,6 +89,19 @@ pub(crate) struct RowProjector {
     /// the map is in-process, and after a restart the first projection of a
     /// run writes (the rows are re-derived anyway).
     projected: Arc<parking_lot::Mutex<std::collections::HashMap<String, ProcessVersion>>>,
+    /// Pids whose durable aggregate was reclaimed. A projection that already
+    /// holds the old run's snapshot must not recreate its rows after the
+    /// sweeper deleted them, so every projection refuses a tombstoned pid; a
+    /// new run under the same pid clears the tombstone before it is created.
+    /// (The full generation guard belongs to the projection protocol, A5.)
+    reclaimed: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    /// One async lock per pid, shared by the projection and the cleanup. A
+    /// cleanup waits for an in-flight projection of the run before deleting its
+    /// aggregate and setting the tombstone; a projection that starts afterwards
+    /// sees the tombstone. Without the lock the two writes are unordered and a
+    /// projection could recreate rows behind `RemoveProc`.
+    process_locks:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl RowProjector {
@@ -102,7 +115,42 @@ impl RowProjector {
             writer,
             workdir,
             projected: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            reclaimed: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
+            process_locks: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    fn process_lock(&self, process_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.process_locks
+            .lock()
+            .entry(process_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Serialize one run's projection with its cleanup (see
+    /// [`Self::process_locks`]).
+    pub(crate) async fn lock_process(&self, process_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.process_lock(process_id).lock_owned().await
+    }
+
+    /// Forget every projection claim of one run and tombstone its pid: the
+    /// aggregate is gone, so no in-flight projection may write its rows again.
+    pub(crate) fn forget_process(&self, process_id: &str) {
+        let prefix = format!("{process_id}\u{1f}");
+        self.projected
+            .lock()
+            .retain(|key, _| !key.starts_with(&prefix));
+        self.reclaimed.lock().insert(process_id.to_string());
+    }
+
+    /// Clear a reclaimed pid's tombstone: a new run is starting under it.
+    pub(crate) fn resume(&self, process_id: &str) {
+        self.reclaimed.lock().remove(process_id);
+    }
+
+    fn is_reclaimed(&self, process_id: &str) -> bool {
+        self.reclaimed.lock().contains(process_id)
     }
 
     /// Claim one row's projection version, or refuse it because a newer
@@ -161,6 +209,10 @@ impl RowProjector {
         snapshot: &ProcessSnapshot,
         instances: Option<&std::collections::BTreeSet<String>>,
     ) -> Result<()> {
+        let _guard = self.process_lock(&snapshot.process_id).lock_owned().await;
+        if self.is_reclaimed(&snapshot.process_id) {
+            return Ok(());
+        }
         let Some(model) = model_of(snapshot)? else {
             // An aggregate seeded before the model fact existed: nothing to
             // project the rows from.
@@ -212,6 +264,10 @@ impl RowProjector {
     /// Project only the process row: what the outbox's settling pass needs
     /// (the `removable` flag), with nothing else changed.
     pub(crate) async fn project_proc_row(&self, snapshot: &ProcessSnapshot) -> Result<()> {
+        let _guard = self.process_lock(&snapshot.process_id).lock_owned().await;
+        if self.is_reclaimed(&snapshot.process_id) {
+            return Ok(());
+        }
         let Some(model) = model_of(snapshot)? else {
             return Ok(());
         };
@@ -443,19 +499,14 @@ pub(crate) fn env_map(snapshot: &ProcessSnapshot) -> Result<Vec<(String, serde_j
         .collect())
 }
 
-/// Whether the sweeper may delete the run: every execution settled and every
-/// outbox record delivered. A record the transport could not classify
-/// (`DeliveryUnknown`, `Quarantined`) keeps the rows alive for reconciliation,
-/// exactly like an open legacy delivery row.
+/// Whether the sweeper may delete the run: every execution settled, every
+/// outbox record delivered and every operation retired. A record the transport
+/// could not classify (`DeliveryUnknown`, `Quarantined`) or an operation that
+/// still needs an owner (`EffectUnknown`, `Quarantined`, schedulable work)
+/// keeps the rows alive for reconciliation, exactly like an open legacy
+/// delivery row.
 pub(crate) fn settled(snapshot: &ProcessSnapshot) -> bool {
-    !snapshot.tasks.is_empty()
-        && snapshot.tasks.values().all(|task| task.state.is_terminal())
-        && snapshot.outbox.values().all(|record| {
-            matches!(
-                record.state,
-                crate::scheduler::core::outbox::records::OutboxState::Delivered { .. }
-            )
-        })
+    snapshot.is_reclaimable()
 }
 
 /// The model chain following one execution (D3: node ids, not instances):

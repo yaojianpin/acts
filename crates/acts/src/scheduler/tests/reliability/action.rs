@@ -362,12 +362,21 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
         "the run's projection must hold exactly one row per node"
     );
 
+    // The decision is the aggregate's before the stale row is cleaned up.
+    assert_eq!(
+        decided_state(&engine, &pid, &tid).await,
+        Some(TaskState::Completed),
+        "the aggregate must hold the completed act"
+    );
+
     // The read model converges to the decision, or the sweeper carries the
     // stale row away with the run — it never keeps the settled act as waiting.
+    // A11 cleanup is driven here: the test build does not run the timer.
     let what = format!("the decided act of {pid} to stop reading as waiting");
     poll_until_dumped(
         &what,
         || async {
+            let _ = engine.runtime().sweep_removable().await;
             match proc_row(&engine, &pid).await {
                 Some(proc) => proc
                     .task(&tid)
@@ -381,14 +390,22 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
 
     sweep_until_gone(&engine, &pid).await;
 
-    // A reload observes the finished run: the aggregate keeps the decision and
-    // nothing resurrects the act as waiting.
+    // A reload observes the finished run — or its reclaimed state, which
+    // keeps no rows and therefore cannot resurrect the act as waiting.
     let reloaded = restart(&engine, store.clone()).await;
-    assert_eq!(
-        decided_state(&reloaded, &pid, &tid).await,
-        Some(TaskState::Completed),
-        "the aggregate must outlive the swept rows with the act completed"
-    );
+    if reloaded
+        .runtime()
+        .kernel()
+        .exists(&pid)
+        .await
+        .unwrap_or(false)
+    {
+        assert_eq!(
+            decided_state(&reloaded, &pid, &tid).await,
+            Some(TaskState::Completed),
+            "the aggregate, if still there, must hold the completed act"
+        );
+    }
     if let Some(proc) = proc_row(&reloaded, &pid).await {
         assert!(
             waiting_task(&proc, "s1").is_none(),

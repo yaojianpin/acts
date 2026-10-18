@@ -56,6 +56,30 @@ impl ProcessSnapshot {
         })
     }
 
+    /// Whether the durable state of this run is no longer needed for
+    /// recovery: every execution is terminal, every outbox record was
+    /// delivered, and every operation is retired (`Completed`/`Superseded`).
+    ///
+    /// A `Pending`/`Claimed`/`CommitPrepared`/`Committed`/`RetryScheduled`
+    /// operation is outstanding work; `EffectUnknown` and `Quarantined` need a
+    /// human; an outbox record that is not `Delivered` (including
+    /// `DeliveryUnknown`/`Quarantined`) may still produce an external effect.
+    /// Any of those keeps the aggregate — and the pid — alive.
+    pub(crate) fn is_reclaimable(&self) -> bool {
+        !self.tasks.is_empty()
+            && self.tasks.values().all(|task| task.state.is_terminal())
+            && self.outbox.values().all(|record| {
+                matches!(
+                    record.state,
+                    crate::scheduler::core::outbox::records::OutboxState::Delivered { .. }
+                )
+            })
+            && self
+                .operations
+                .values()
+                .all(|operation| operation.is_retired())
+    }
+
     pub(crate) fn validate(&self) -> Result<(), CommitError> {
         if self.process_id.trim().is_empty() {
             return Err(CommitError::EmptyProcessId);

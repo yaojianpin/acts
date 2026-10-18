@@ -448,9 +448,9 @@ pub(crate) async fn store_delivery(
 /// Evict one process's rows without waiting for them: `RemoveProc` is
 /// serialized through the writer (FIFO), so it can never race writes still
 /// queued for the process — its completion markers are applied first, then the
-/// rows are dropped once the shard reaches the op. Callers that need the
-/// removal to be durable when they return flush afterwards:
-/// [`sweep_removable`] once for the whole batch.
+/// rows are dropped once the shard reaches the op. The terminal cleanup holds
+/// the pid's lifecycle lock and flushes the pid shard before releasing it, so
+/// a same-pid start cannot interleave with the removal.
 pub(crate) async fn queue_removal(store: &Store, writer: &StoreWriter, pid: &str) -> Result<()> {
     debug!("remove pid={pid}");
     // Read before the writer drops the row: the directory lives in the
@@ -466,35 +466,6 @@ pub(crate) async fn queue_removal(store: &Store, writer: &StoreWriter, pid: &str
             pid: pid.to_string(),
         })
         .await
-}
-
-/// The sweeper: delete every finished process whose deliveries have all
-/// settled (see [`Store::sweep_settled_procs`]). Runs on the retry-timer tick;
-/// deletion is never synchronous with the process completion — it waits for
-/// the deliveries to settle. Removal goes through the writer (`RemoveProc`,
-/// FIFO after any still-queued writes of the process), so it cannot race them.
-pub(crate) async fn sweep_removable(
-    store: &Store,
-    writer: &StoreWriter,
-    router: &LaneRouter,
-) -> Result<usize> {
-    let pids = store.sweep_settled_procs(256).await?;
-    for pid in &pids {
-        queue_removal(store, writer, pid).await?;
-    }
-    // One barrier covers the whole sweep: each `RemoveProc` is already FIFO
-    // after its process's pending writes, so the batch flush only bounds how
-    // long the dropped rows can linger for readers — it must not pay one
-    // all-shard wait per process.
-    if !pids.is_empty() {
-        writer.flush().await?;
-        // Removals are durable: release the gate's lane assignments (the
-        // writer forgot its own shard assignments during apply).
-        for pid in &pids {
-            router.forget(pid);
-        }
-    }
-    Ok(pids.len())
 }
 
 /// Delete the directory a process's filesystem access was confined to —

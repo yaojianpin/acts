@@ -1149,7 +1149,9 @@ async fn kernel_engine_projects_the_legacy_read_model() {
         messages.rows
     );
     // The finished task settled every delivery of its messages, so the
-    // run is sweepable.
+    // run is sweepable. Re-derive the proc row first: the projection of the
+    // final commit is asynchronous to the aggregate read above, and the sweep
+    // selects terminal rows only.
     for row in &messages.rows {
         assert_eq!(
             row.status, "completed",
@@ -1157,7 +1159,7 @@ async fn kernel_engine_projects_the_legacy_read_model() {
             messages.rows
         );
     }
-    runtime.sweep_removable().await.unwrap();
+    sweep_until_gone(&runtime, &pid).await;
     assert!(!dir.exists(), "the sweeper reclaims the run's directory");
     assert!(
         runtime
@@ -1169,41 +1171,47 @@ async fn kernel_engine_projects_the_legacy_read_model() {
             .is_none()
     );
     assert!(runtime.proc(&pid).await.unwrap().is_none());
+    // A11: the durable record and every derived index are gone too, so the
+    // pid is reusable and nothing of the run survives as an index orphan.
+    assert!(
+        host.snapshot(&pid).await.unwrap().is_none(),
+        "aggregate gone"
+    );
+    let kv = runtime.store().kv();
+    for key in [
+        crate::scheduler::durable::document_store::process_key(&pid).unwrap(),
+        crate::scheduler::durable::document_store::recovery_index_key(&pid).unwrap(),
+        crate::scheduler::durable::document_store::outbox_index_key(&pid).unwrap(),
+        crate::scheduler::durable::document_store::ready_index_key(&pid).unwrap(),
+    ] {
+        assert!(
+            kv.one(&key).await.unwrap().is_none(),
+            "{key:?} must be reclaimed with the aggregate"
+        );
+    }
 
     std::fs::remove_dir_all(&root).ok();
     engine.close().await;
 }
 
-/// Restart discrimination: a pid's durable record is the aggregate, so a
-/// same-pid start is refused both while the projected rows exist and after
-/// the sweeper reclaimed them — the aggregate outlives the rows.
+/// Restart discrimination (A11): a pid is refused while any durable trace of
+/// the run remains (aggregate, rows, messages or deliveries), and becomes
+/// reusable exactly once the cleanup removed the aggregate, the indexes, the
+/// rows and the workdir.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
-async fn kernel_engine_refuses_a_started_pid_via_the_process() {
-    let mut config = crate::Config::default();
-    config.data.tick_interval_secs = Some(1);
-    let engine = crate::Engine::builder()
-        .set_config(&config)
-        .start()
-        .await
-        .unwrap();
-    let sig = engine.signal(());
-    let done = sig.clone();
-    engine.channel().on_complete(move |_| {
-        let done = done.clone();
-        async move { done.close() }
-    });
-
+async fn kernel_engine_refuses_a_pid_until_the_run_is_reclaimed_and_then_reuses_it() {
+    let config = crate::Config::default();
+    // No periodic timers: the cleanup is driven explicitly, so the assertion
+    // windows cannot race an automatic pass.
+    let runtime = crate::scheduler::Runtime::new(&config, None).unwrap();
     let workflow = crate::model::Workflow::new()
         .with_id("wf-dup")
         .with_step(|step| step.with_id("s1"));
-    let runtime = engine.runtime();
     let pid = "duppid";
     let options = crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid);
     runtime.start(&workflow, options.clone()).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
-        .await
-        .expect("the run never finished");
+    wait_until_settled(&runtime, pid).await;
 
     let duplicated = runtime.start(&workflow, options.clone()).await;
     assert!(
@@ -1211,10 +1219,24 @@ async fn kernel_engine_refuses_a_started_pid_via_the_process() {
         "an existing pid must be refused while its rows are there"
     );
 
-    // Settle and sweep the rows: the aggregate is what still answers.
+    // The run is still occupied even while only its rows are left: a start
+    // races the cleanup, which deletes the aggregate before the rows.
     let host = runtime.kernel().clone();
     host.dispatch_outbox().await.unwrap();
-    runtime.sweep_removable().await.unwrap();
+    runtime.flush_writer().await.unwrap();
+    assert!(
+        host.exists(pid).await.unwrap(),
+        "the aggregate is the record"
+    );
+    let duplicated = runtime.start(&workflow, options.clone()).await;
+    assert!(
+        duplicated.is_err_and(|err| err.to_string().contains("duplicated")),
+        "an aggregate still present must refuse the pid"
+    );
+
+    // The cleanup reclaims the aggregate, the indexes, the rows and the
+    // workdir; only then is the pid free.
+    sweep_until_gone(&runtime, pid).await;
     assert!(
         runtime
             .store()
@@ -1225,18 +1247,274 @@ async fn kernel_engine_refuses_a_started_pid_via_the_process() {
             .is_none(),
         "the settled run's rows must be swept"
     );
-    assert!(host.exists(pid).await.unwrap(), "the aggregate stays");
-    let duplicated = runtime.start(&workflow, options).await;
     assert!(
-        duplicated.is_err_and(|err| err.to_string().contains("duplicated")),
-        "the aggregate must refuse a restart the swept rows no longer show"
+        !host.exists(pid).await.unwrap(),
+        "the aggregate must be reclaimed with the rows"
+    );
+    assert_no_row_families(&runtime.store(), pid).await;
+    let reused = runtime
+        .start(&workflow, options)
+        .await
+        .expect("a reclaimed pid must be reusable");
+    assert_eq!(reused.id(), pid, "the new run keeps the requested pid");
+
+    runtime.close().await;
+}
+
+/// Wait for a runtime-created run to settle (the runtime's driver owns the
+/// operations; no engine timer is involved in these cleanup tests).
+async fn wait_until_settled(runtime: &Arc<crate::scheduler::Runtime>, pid: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if runtime
+            .kernel()
+            .process_completed(pid)
+            .await
+            .unwrap_or(false)
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run {pid} never settled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Drive the cleanup until `pid`'s rows are gone.
+///
+/// A single pass can legitimately find the run not yet reclaimable: the
+/// final commit's projection is asynchronous, and a concurrent outbox pass can
+/// hold a record `Claimed` for the instant the pass reads it. The production
+/// timer retries; a test does the same with a short bound.
+async fn sweep_until_gone(runtime: &Arc<crate::scheduler::Runtime>, pid: &str) {
+    for _ in 0..200 {
+        runtime.kernel().refresh_projection(pid).await;
+        runtime.sweep_removable().await.unwrap();
+        if runtime
+            .store()
+            .procs()
+            .find_opt(pid)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let snapshot = runtime.kernel().snapshot(pid).await.unwrap();
+    panic!("run {pid} was not reclaimed: {snapshot:?}");
+}
+
+/// The row families the cleanup removes. `ops` is deliberately not checked:
+/// it is the legacy outbox family L1 deletes, and pid existence never depends
+/// on it.
+async fn assert_no_row_families(store: &crate::store::Store, pid: &str) {
+    use crate::store::query::{Expr, Filter, Query};
+
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
+    assert!(
+        store.procs().find_opt(pid).await.unwrap().is_none(),
+        "proc row"
+    );
+    assert!(
+        store.tasks().query(&q).await.unwrap().rows.is_empty(),
+        "tasks"
+    );
+    assert!(
+        store.vars().query(&q).await.unwrap().rows.is_empty(),
+        "vars"
+    );
+    assert!(
+        store.messages().query(&q).await.unwrap().rows.is_empty(),
+        "messages"
+    );
+    assert!(
+        store.deliveries().query(&q).await.unwrap().rows.is_empty(),
+        "deliveries"
+    );
+}
+
+/// A crash after the authoritative deletion batch (aggregate + indexes) but
+/// before the row/workdir cleanup leaves the aggregate gone and the rows
+/// behind. The next pass must finish the removal — and a further pass must be
+/// a no-op.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn kernel_engine_finishes_an_interrupted_terminal_cleanup() {
+    let root = std::env::temp_dir().join(format!("acts-kernel-cut-{}", crate::utils::longid()));
+    let mut config = crate::Config::default();
+    config.data.workdir = Some(root.display().to_string());
+    let runtime = crate::scheduler::Runtime::new(&config, None).unwrap();
+    let pid = format!("interrupted_{}", crate::utils::longid());
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-cleanup")
+        .with_step(|step| step.with_id("s1"));
+    let options = crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid.clone());
+    runtime.start(&workflow, options.clone()).await.unwrap();
+    wait_until_settled(&runtime, &pid).await;
+    let host = runtime.kernel().clone();
+    host.dispatch_outbox().await.unwrap();
+    runtime.flush_writer().await.unwrap();
+
+    // The mark the cleanup writes before cutting, then the cut itself — the
+    // crash happens before the rows and directory are removed.
+    host.refresh_projection(&pid).await;
+    let store = runtime.store();
+    assert!(
+        store
+            .procs()
+            .find_opt(&pid)
+            .await
+            .unwrap()
+            .unwrap()
+            .removable,
+        "the run must be marked before the authoritative deletion"
+    );
+    let dir = root.join(&pid);
+    assert!(dir.is_dir());
+    let outcome = host.reclaim_process(&pid).await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            crate::scheduler::durable::async_document_store::ReclaimOutcome::Reclaimed { .. }
+        ),
+        "the authoritative batch must delete the aggregate: {outcome:?}"
+    );
+    assert!(!host.exists(&pid).await.unwrap());
+    assert!(
+        store.procs().find_opt(&pid).await.unwrap().is_some(),
+        "the crash leaves the rows behind"
+    );
+    assert!(dir.is_dir(), "the crash leaves the directory behind");
+
+    // The aggregate is gone but the residue is not: the pid exists by its
+    // aggregate, yet the cleanup's per-pid mark keeps it closed until the
+    // rows and workdir are removed.
+    host.begin_reclaim(&pid);
+    let blocked = runtime.start(&workflow, options.clone()).await;
+    assert!(
+        matches!(&blocked, Err(error) if error.to_string().contains("duplicated")),
+        "a cleanup residue must keep the pid closed: {blocked:?}"
     );
 
-    engine.close().await;
+    // The retry recognises the missing aggregate and finishes the cleanup.
+    assert_eq!(runtime.sweep_removable().await.unwrap(), 1);
+    assert_no_row_families(&store, &pid).await;
+    assert!(!dir.exists());
+    // Nothing left to do: a second pass is an idempotent no-op.
+    assert_eq!(runtime.sweep_removable().await.unwrap(), 0);
+
+    let reused = runtime
+        .start(&workflow, options)
+        .await
+        .expect("the residue is gone, so the pid is reusable");
+    assert_eq!(reused.id(), pid);
+
+    std::fs::remove_dir_all(&root).ok();
+    runtime.close().await;
+}
+
+/// An open (unsettled) delivery keeps the whole run — aggregate, indexes, rows
+/// and workdir — alive; settling it lets the next pass reclaim everything.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn kernel_engine_keeps_a_run_with_an_open_delivery() {
+    use crate::store::data::{Delivery, DeliveryStatus};
+
+    let root = std::env::temp_dir().join(format!("acts-kernel-open-{}", crate::utils::longid()));
+    let mut config = crate::Config::default();
+    config.data.workdir = Some(root.display().to_string());
+    let runtime = crate::scheduler::Runtime::new(&config, None).unwrap();
+    let pid = format!("open_{}", crate::utils::longid());
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-open")
+        .with_step(|step| step.with_id("s1"));
+    let options = crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid.clone());
+    runtime.start(&workflow, options).await.unwrap();
+
+    // A delivery row of this process that never settled: its task is not one
+    // of the run's, so the task close cannot complete it.
+    let store = runtime.store();
+    let delivery_id = format!("open-delivery-{}", crate::utils::longid());
+    let now = crate::utils::time::time_millis();
+    store
+        .deliveries()
+        .create(&Delivery {
+            id: delivery_id.clone(),
+            msg_id: format!("open-message-{}", crate::utils::longid()),
+            pid: pid.clone(),
+            tid: "unrelated".to_string(),
+            chan_id: "open-channel".to_string(),
+            chan_pattern: "*".to_string(),
+            status: DeliveryStatus::Created,
+            retry_times: 0,
+            create_time: now,
+            update_time: now,
+            timestamp: now,
+            v: 1,
+        })
+        .await
+        .unwrap();
+
+    wait_until_settled(&runtime, &pid).await;
+    let host = runtime.kernel().clone();
+    host.dispatch_outbox().await.unwrap();
+    runtime.flush_writer().await.unwrap();
+    host.refresh_projection(&pid).await;
+    let dir = root.join(&pid);
+    assert!(dir.is_dir());
+
+    runtime.sweep_removable().await.unwrap();
+    assert!(
+        host.exists(&pid).await.unwrap(),
+        "an open delivery must keep the aggregate"
+    );
+    assert!(store.procs().find_opt(&pid).await.unwrap().is_some());
+    assert!(dir.is_dir(), "an open delivery must keep the workdir");
+
+    store
+        .set_delivery(&delivery_id, DeliveryStatus::Completed)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.deliveries().find(&delivery_id).await.unwrap().status,
+        DeliveryStatus::Completed
+    );
+    assert!(!store.has_unsettled_deliveries(&pid).await.unwrap());
+    let snapshot = host.snapshot(&pid).await.unwrap().expect("the aggregate");
+    assert!(
+        snapshot.is_reclaimable(),
+        "operations={:?} outbox={:?} tasks={:?}",
+        snapshot
+            .operations
+            .values()
+            .map(|op| &op.state)
+            .collect::<Vec<_>>(),
+        snapshot
+            .outbox
+            .values()
+            .map(|record| &record.state)
+            .collect::<Vec<_>>(),
+        snapshot
+            .tasks
+            .values()
+            .map(|task| task.state)
+            .collect::<Vec<_>>(),
+    );
+    sweep_until_gone(&runtime, &pid).await;
+    assert!(!host.exists(&pid).await.unwrap());
+    assert!(store.procs().find_opt(&pid).await.unwrap().is_none());
+    assert!(!dir.exists());
+
+    std::fs::remove_dir_all(&root).ok();
+    runtime.close().await;
 }
 
 /// The package write-back: what a Func package leaves in its context —
-/// the returned outputs, the task data it wrote, and the process env it
+/// the returned outputs, the task data it wrote, the process env it
 /// set — commits with the completion, the env on the run's root scope,
 /// where a later task's `$env` reads it and the projected proc row carries
 /// it.

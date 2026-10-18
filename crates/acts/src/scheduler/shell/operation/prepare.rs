@@ -31,11 +31,19 @@ impl KernelHost {
         }
         let now = SystemClock.now_ms();
         let phase = operation_trace::start();
-        let snapshot = self
-            .load(&id.process_id)
-            .await?
-            .ok_or_else(|| ActError::Runtime(format!("aggregate {} not found", id.process_id)))?
-            .snapshot;
+        let Some(snapshot) = self.load(&id.process_id).await? else {
+            // A ready/recovery/wake record whose aggregate is already gone
+            // (an interrupted cleanup, or an older orphan index): there is no
+            // work to drive. Skipping keeps the pass alive instead of failing
+            // it on a record that cannot become work; the cleanup retry
+            // removes the index when its rows still name the process.
+            tracing::debug!(
+                process_id = %id.process_id,
+                "operation record references a missing aggregate; skipping"
+            );
+            return Ok(None);
+        };
+        let snapshot = snapshot.snapshot;
         operation_trace::end(operation_trace::LOAD, phase);
         // The slot policy for this run, before it is driven: a parked run
         // waits, a run this driver never admitted (one already in flight when

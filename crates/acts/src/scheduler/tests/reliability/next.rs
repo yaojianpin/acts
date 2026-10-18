@@ -295,7 +295,19 @@ async fn assert_propagation_once(engine: &Engine, pid: &str, source: &str) {
 /// is what the poll fails on. `nodes` is the exact node set the projection must
 /// hold (the root included).
 async fn wait_rows_finished(engine: &Engine, pid: &str, nodes: &[&str]) {
-    let mut expected: Vec<String> = nodes.iter().map(|node| (*node).to_string()).collect();
+    // Callers name a mix of model nodes (`step2`, the root `$`) and instance
+    // wires (what `expect_created` answers): a row's id is always the wire, so
+    // a name is translated to generation 0's wire here.
+    let mut expected: Vec<String> = nodes
+        .iter()
+        .map(|node| {
+            if node.len() == 32 && node.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                (*node).to_string()
+            } else {
+                tid_of(pid, node, 0)
+            }
+        })
+        .collect();
     expected.sort();
     let what = format!("the rows of {pid} to read its finished one-row-per-node projection");
     poll_until_dumped(

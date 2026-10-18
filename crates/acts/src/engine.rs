@@ -149,10 +149,11 @@ impl Engine {
         // Boot. The host *is* the engine — its driver task is already running
         // (spawned in `Runtime::create`) and it recovers every pending
         // operation on its own — so only the periodic timers start here. The
-        // retry timer carries the settled-run sweep and the
-        // unacknowledged-delivery re-sends; the trigger timer fires due
-        // schedules; the snapshot timer drops expired entries.
+        // retry timer re-sends unacknowledged deliveries; the cleanup timer
+        // reclaims terminal runs on its own budget and health; the trigger
+        // timer fires due schedules; the snapshot timer drops expired entries.
         self.runtime.init_retry_timer()?;
+        self.runtime.init_cleanup_timer();
         self.runtime.init_trigger_timer();
         self.runtime.init_snapshot_timer();
 

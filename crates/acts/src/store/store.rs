@@ -697,6 +697,11 @@ impl Store {
     /// in one query over the terminal states; the CALLER deletes them
     /// (through the writer, so removal is ordered after any still-queued
     /// writes of the process) and evicts them from memory.
+    ///
+    /// The runtime's A11 cleanup no longer selects by this mark alone (it also
+    /// requires the aggregate to be reclaimable), so the helper is kept for
+    /// the store-level tests of the mark itself.
+    #[cfg(test)]
     pub(crate) async fn sweep_settled_procs(&self, limit: usize) -> Result<Vec<String>> {
         Ok(self
             .terminal_proc_rows(limit)
@@ -726,7 +731,7 @@ impl Store {
 
     /// Every finished process's row, `removable` or not: one scan over the
     /// terminal states (`state` is indexed), capped at `limit`.
-    async fn terminal_proc_rows(&self, limit: usize) -> Result<Vec<data::Proc>> {
+    pub(crate) async fn terminal_proc_rows(&self, limit: usize) -> Result<Vec<data::Proc>> {
         use super::query::{Expr, Filter, Query};
         use crate::scheduler::LegacyTaskState;
 

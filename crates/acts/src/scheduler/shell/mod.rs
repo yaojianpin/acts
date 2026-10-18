@@ -79,7 +79,7 @@ use crate::{
             recovery::planner::{RecoveryDisposition, RecoveryPlanner, RecoveryReport},
         },
         durable::async_document_store::{
-            AsyncProcessRepository, AsyncRecoveryRepository, KvDocumentStore,
+            AsyncProcessRepository, AsyncRecoveryRepository, KvDocumentStore, ReclaimOutcome,
             TransitionCommitOutcome,
         },
     },
@@ -226,6 +226,18 @@ pub(crate) struct KernelHost {
     /// The first recovery pass repairs derived indexes from the aggregates.
     boot_reconciled: Arc<std::sync::atomic::AtomicBool>,
     ready_metrics: Arc<parking_lot::Mutex<ReadyMetrics>>,
+    /// One async lock per pid shared by a start and the terminal cleanup. The
+    /// aggregate is the pid's durable existence record: a start checks it and
+    /// creates the run under this lock, and cleanup holds it from the
+    /// aggregate batch through the row/workdir removal. The window between
+    /// "aggregate gone" and "derived rows gone" is therefore never visible to
+    /// a start of the same pid.
+    lifecycle_locks:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Pids whose authoritative batch succeeded but whose row/workdir cleanup
+    /// has not: a start must wait for the retry even though the aggregate is
+    /// already gone. Cleared when the residue is removed.
+    reclaiming: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Which engine event a run's lifecycle report is: the driver's mirror of the
@@ -446,6 +458,10 @@ impl KernelHost {
                 ready: Arc::new(tokio::sync::Notify::new()),
                 boot_reconciled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 ready_metrics: Arc::new(parking_lot::Mutex::new(ReadyMetrics::default())),
+                lifecycle_locks: Arc::new(
+                    parking_lot::Mutex::new(std::collections::HashMap::new()),
+                ),
+                reclaiming: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
             }),
             wake_rx,
         )
@@ -581,6 +597,62 @@ impl KernelHost {
                 error = %error,
                 "row projection failed; the next commit re-derives the rows"
             );
+        }
+    }
+
+    /// Serialize a start and the cleanup of the same pid (see
+    /// [`Self::lifecycle_locks`]). A start holds it from the
+    /// aggregate-existence check through creation; cleanup holds it from the
+    /// authoritative batch through the row/workdir removal.
+    pub(crate) async fn lock_lifecycle(
+        &self,
+        process_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.lifecycle_locks.lock();
+            locks
+                .entry(process_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+
+    /// Mark that a pid's aggregate was deleted and its residue is still being
+    /// removed; a start refuses the pid until [`Self::finish_reclaim`].
+    pub(crate) fn begin_reclaim(&self, process_id: &str) {
+        self.reclaiming.lock().insert(process_id.to_string());
+    }
+
+    /// The residue is gone (or the run turned out not to be reclaimable).
+    pub(crate) fn finish_reclaim(&self, process_id: &str) {
+        self.reclaiming.lock().remove(process_id);
+    }
+
+    /// Whether a cleanup of this pid started and has not finished. A start
+    /// checks this under the lifecycle lock.
+    pub(crate) fn is_reclaiming(&self, process_id: &str) -> bool {
+        self.reclaiming.lock().contains(process_id)
+    }
+
+    /// The pids whose residue removal is still pending, for the cleanup pass
+    /// to clear after a failure whose rows turned out to be gone.
+    pub(crate) fn reclaiming_pids(&self) -> Vec<String> {
+        self.reclaiming.lock().iter().cloned().collect()
+    }
+
+    /// Wait for and hold the pid's projection lock, when a read model is
+    /// attached. Cleanup takes it before deleting the aggregate so an
+    /// in-flight projection of the old run finishes first; the tombstone set
+    /// by [`Self::reclaim_process`] then blocks every later one.
+    pub(crate) async fn lock_projection(
+        &self,
+        process_id: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let projector = self.projection.read().clone();
+        match projector {
+            Some(projector) => Some(projector.lock_process(process_id).await),
+            None => None,
         }
     }
 
@@ -896,6 +968,9 @@ impl KernelHost {
     /// Create the process atomically and wake its root operation — or park it,
     /// when every slot is taken (see [`Admissions`]).
     pub(crate) async fn start_process(&self, spec: &ProcessSpec) -> Result<String> {
+        // A reclaimed pid is a new run: clear the projection tombstone the
+        // cleanup left so the new run's rows are written.
+        self.resume_process(&spec.process_id);
         // The decision (and the reservation it implies) comes first: it
         // decides the seed — an admitted run's root is `Ready`, a parked one's
         // stays `Created` — and the aggregate is written exactly once. Both
@@ -1984,6 +2059,55 @@ impl KernelHost {
     /// stays.
     pub(crate) async fn exists(&self, process_id: &str) -> Result<bool> {
         Ok(self.load(process_id).await?.is_some())
+    }
+
+    /// Reclaim one finished run's durable state: the aggregate and its
+    /// recovery/outbox/ready index documents are deleted in one guarded batch
+    /// (see [`AsyncProcessRepository::reclaim`]). The caller is responsible for
+    /// the preconditions that live outside the aggregate (channel delivery
+    /// rows); this method decides only what the aggregate itself says.
+    ///
+    /// On a successful reclaim (or an aggregate that is already gone) the
+    /// host forgets its in-process bookkeeping for the pid — reported
+    /// lifecycle phases, admission slots and projection version claims — so a
+    /// later start under the same pid is a fresh run. `Retained` leaves every
+    /// fact exactly as it was.
+    pub(crate) async fn reclaim_process(&self, process_id: &str) -> Result<ReclaimOutcome> {
+        let outcome = self
+            .processes
+            .reclaim(process_id)
+            .await
+            .map_err(repository_error)?;
+        if !matches!(outcome, ReclaimOutcome::Retained) {
+            self.forget_process(process_id);
+        }
+        Ok(outcome)
+    }
+
+    /// Drop the pid-keyed in-process state of a reclaimed run. Called only
+    /// once the durable aggregate is gone (or was already gone): the pid is a
+    /// new identity from here on, and the next start must not inherit a
+    /// reported lifecycle phase, a slot or a projection claim.
+    fn forget_process(&self, process_id: &str) {
+        self.admissions.lock().abandon(process_id);
+        {
+            let mut reported = self.reported.lock();
+            reported.started.remove(process_id);
+            reported.finished.remove(process_id);
+        }
+        let projector = self.projection.read().clone();
+        if let Some(projector) = projector {
+            projector.forget_process(process_id);
+        }
+    }
+
+    /// Clear a reclaimed run's projection tombstone before a new run takes the
+    /// pid (see [`projection::RowProjector::forget_process`]).
+    fn resume_process(&self, process_id: &str) {
+        let projector = self.projection.read().clone();
+        if let Some(projector) = projector {
+            projector.resume(process_id);
+        }
     }
 
     /// Whether every execution of the process reached a terminal state.

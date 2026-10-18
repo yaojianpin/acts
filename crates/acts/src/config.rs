@@ -50,6 +50,14 @@ pub struct ConfigData {
     /// when this bounded the resident process set.
     pub cache_cap: Option<i64>,
     pub tick_interval_secs: Option<i64>,
+    /// Interval of the terminal-run cleanup loop, in seconds. Omitted follows
+    /// `tick_interval_secs`; the loop is independent of the driver's ready /
+    /// recovery pass and of the message-retry timer, with its own budget and
+    /// health. Values below 1 are clamped.
+    pub cleanup_interval_secs: Option<i64>,
+    /// How many terminal proc rows one cleanup pass examines (and how many
+    /// unmarked rows it re-projects before deciding). At least 1.
+    pub cleanup_batch: Option<usize>,
 
     /// max times an unacknowledged message delivery is re-sent before it
     /// turns into an `Error` that needs manual handling. Must be at least 1 —
@@ -229,6 +237,21 @@ impl Config {
     }
     pub fn tick_interval_secs(&self) -> i64 {
         self.data.tick_interval_secs.unwrap_or(15)
+    }
+
+    /// The terminal-run cleanup interval: its own schedule, defaulting to the
+    /// tick when unset. Never zero.
+    pub fn cleanup_interval_secs(&self) -> i64 {
+        self.data
+            .cleanup_interval_secs
+            .unwrap_or_else(|| self.tick_interval_secs())
+            .max(1)
+    }
+
+    /// Terminal proc rows one cleanup pass examines. Bounded so a large
+    /// backlog costs one page per pass instead of an unbounded scan.
+    pub fn cleanup_batch(&self) -> usize {
+        self.data.cleanup_batch.unwrap_or(256).clamp(1, 4096)
     }
 
     /// Maximum concurrently executing scheduler jobs. This is also the explicit

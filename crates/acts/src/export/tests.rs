@@ -2,7 +2,6 @@ use crate::{
     ActSchema, ChannelOptions, Engine, Message, Signal, Variant, VariantTypes, Vars, Workflow,
     data::{self, Package},
     event::MessageState,
-    scheduler::LegacyTaskState,
     store::query::*,
     utils::{self, consts, test::USES_IRQ, test::USES_SET},
 };
@@ -176,22 +175,6 @@ async fn export_executor_start_dup_pid_error() {
         .with_id(&mid)
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
-    let store = engine.runtime().store();
-    let proc = data::Proc {
-        id: pid.clone(),
-        name: model.name.clone(),
-        mid: model.id.clone(),
-        state: LegacyTaskState::None.to_string(),
-        start_time: 0,
-        end_time: 0,
-        timestamp: 0,
-        model: model.to_json().unwrap(),
-        env: "{}".to_string(),
-        err: None,
-        removable: false,
-        v: 0,
-    };
-    store.procs().create(&proc).await.expect("create process");
     engine
         .executor(&crate::Principal::unrestricted())
         .model()
@@ -200,6 +183,13 @@ async fn export_executor_start_dup_pid_error() {
         .expect("fail to deploy workflow");
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(pid.to_string()));
+    // The aggregate is the pid's existence record: the first start takes it,
+    // the second is refused. No row participates in the decision.
+    executor
+        .proc()
+        .start(&model.id, options.clone())
+        .await
+        .expect("the first start takes the pid");
     let result = executor.proc().start(&model.id, options).await;
     assert!(result.is_err());
 }

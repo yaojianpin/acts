@@ -49,6 +49,10 @@ pub struct Runtime {
     trigger_health: Arc<LoopGuard>,
     /// Failure state of the message-retry timer (see [`SchedulerHealth`]).
     retry_health: Arc<LoopGuard>,
+    /// Failure state of the cleanup timer (see [`SchedulerHealth`]).
+    cleanup_health: Arc<LoopGuard>,
+    /// What the last cleanup passes did (see [`Runtime::cleanup_metrics`]).
+    cleanup_metrics: Arc<parking_lot::Mutex<CleanupMetrics>>,
     /// The deterministic kernel host: it *is* the engine — it owns every
     /// started process (start, actions, effects, messages) and drives the operations
     /// over the aggregate documents.
@@ -61,10 +65,41 @@ pub struct Runtime {
 #[cfg(test)]
 pub(crate) const TEST_TICK_MS: u64 = 800;
 
-/// How many terminal-but-unmarked runs one sweep re-projects before selecting
-/// (see [`Runtime::sweep_removable`]): the same order as the sweep's own page,
-/// so one pass over the collection can repair and then reclaim.
-const SWEEP_RECONCILE_LIMIT: usize = 256;
+/// What the terminal-run cleanup observed and reclaimed.
+///
+/// `backlog` and `oldest_removable_age_ms` are gauges of the last pass;
+/// `reclaimed`, `document_bytes_deleted`, `delete_failures` and
+/// `orphan_indexes_removed` accumulate for the runtime's lifetime.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CleanupMetrics {
+    /// Terminal proc rows the last pass selected (capped by the cleanup
+    /// batch).
+    pub backlog: usize,
+    /// Age in milliseconds of the oldest finished run whose row is marked
+    /// `removable`; `None` when nothing is waiting.
+    pub oldest_removable_age_ms: Option<i64>,
+    /// Runs whose durable aggregate was reclaimed (or whose aggregate was
+    /// already gone and whose marked rows were removed).
+    pub reclaimed: u64,
+    /// Bytes of aggregate/index documents deleted.
+    pub document_bytes_deleted: u64,
+    /// Cleanup attempts that failed and are retried on the next pass.
+    pub delete_failures: u64,
+    /// Index documents removed for an aggregate that was already gone, or
+    /// stale recovery-entry documents removed with a reclaimed aggregate.
+    pub orphan_indexes_removed: u64,
+}
+
+/// One cleanup pass's local counters, folded into [`CleanupMetrics`].
+#[derive(Default)]
+struct CleanupPass {
+    backlog: usize,
+    oldest_removable_age_ms: Option<i64>,
+    reclaimed: u64,
+    document_bytes: u64,
+    delete_failures: u64,
+    orphan_indexes: u64,
+}
 
 /// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
 pub(crate) struct SnapshotRegistry {
@@ -193,25 +228,176 @@ impl Runtime {
         writebehind::store_delivery(&self.writer, message, delivery).await
     }
 
-    /// The sweeper: delete every finished process whose deliveries settled
-    /// (see [`writebehind::sweep_removable`]).
+    /// One terminal-run cleanup pass: reclaim the durable state of finished
+    /// runs and then delete their rows and workdirs.
     ///
-    /// A settled run's `removable` mark is re-derived here first. The mark is
+    /// A settled run's `removable` mark is re-derived first. The mark is
     /// written by the projection of the run's own commits, and a settled run
     /// has none left: its last commit can predate the delivery that settled
     /// its outbox records (the delivery pass refreshes the row only for the
     /// runs it delivered for, and nothing repairs a settled run's row), so a
     /// terminal row that still reads not-removable would otherwise keep the
     /// run's rows — and the directory swept with them — forever.
+    ///
+    /// The authoritative cut is the aggregate deletion (one guarded batch:
+    /// aggregate + recovery + outbox + ready indexes). Rows and the workdir
+    /// are then removed idempotently. A delivery row still open, a
+    /// non-retired operation, an undelivered/unclassified outbox record, or
+    /// `EffectUnknown`/`Quarantined` keeps the aggregate and every row: the
+    /// pid is not reusable. An aggregate already gone (an interrupted
+    /// cleanup) lets the retry remove only its marked rows.
     pub(crate) async fn sweep_removable(&self) -> Result<usize> {
-        for pid in self
-            .store
-            .unmarked_settled_procs(SWEEP_RECONCILE_LIMIT)
-            .await?
-        {
+        let limit = self.config().cleanup_batch();
+        for pid in self.store.unmarked_settled_procs(limit).await? {
             self.kernel.refresh_projection(&pid).await;
         }
-        writebehind::sweep_removable(&self.store, &self.writer, &self.router).await
+        let rows = self.store.terminal_proc_rows(limit).await?;
+        let now = crate::utils::time::time_millis();
+        let mut pass = CleanupPass {
+            backlog: rows.len(),
+            oldest_removable_age_ms: rows
+                .iter()
+                .filter(|row| row.removable && row.end_time > 0)
+                .map(|row| now.saturating_sub(row.end_time))
+                .max(),
+            ..CleanupPass::default()
+        };
+        let mut removed = 0usize;
+        let mut failure: Option<ActError> = None;
+        for row in rows {
+            match self
+                .cleanup_process(&row.id, row.removable, &mut pass)
+                .await
+            {
+                Ok(remove) => {
+                    if remove {
+                        removed += 1;
+                    }
+                }
+                Err(error) => {
+                    // One run's failure must not stop the pass: every other
+                    // run's cleanup is independent, and this run is retried
+                    // on the next tick.
+                    pass.delete_failures += 1;
+                    tracing::warn!(
+                        pid = %row.id,
+                        error = %error,
+                        "terminal cleanup failed for one process; the next pass retries"
+                    );
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        // A failed pass leaves a pid marked until its residue is gone. If the
+        // rows disappeared anyway (the batch applied, an operator cleaned up),
+        // clear the mark so the pid is not blocked forever.
+        for pid in self.kernel.reclaiming_pids() {
+            if let Ok(None) = self.store.procs().find_opt(&pid).await {
+                self.kernel.finish_reclaim(&pid);
+                self.router.forget(&pid);
+            }
+        }
+        {
+            let mut metrics = self.cleanup_metrics.lock();
+            metrics.backlog = pass.backlog;
+            metrics.oldest_removable_age_ms = pass.oldest_removable_age_ms;
+            metrics.reclaimed += pass.reclaimed;
+            metrics.document_bytes_deleted += pass.document_bytes;
+            metrics.delete_failures += pass.delete_failures;
+            metrics.orphan_indexes_removed += pass.orphan_indexes;
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(removed),
+        }
+    }
+
+    /// Reclaim one process's aggregate and indexes, then report whether its
+    /// rows may be removed.
+    ///
+    /// The writer's pid shard is barriered first: a delivery row the transport
+    /// queued this instant must be visible to the `removable` decision, or the
+    /// rows would be deleted behind a still-open delivery.
+    async fn cleanup_process(
+        &self,
+        pid: &str,
+        marked: bool,
+        pass: &mut CleanupPass,
+    ) -> Result<bool> {
+        // A start and this cleanup are serialized per pid. The lifecycle lock
+        // is held from the aggregate decision through the row/workdir
+        // removal: `Runtime::start` checks the aggregate under the same lock,
+        // so it can never observe "aggregate gone, rows still there" and
+        // create a new run whose rows the old cleanup would then delete.
+        let _lifecycle = self.kernel.lock_lifecycle(pid).await;
+        // Projection and cleanup are ordered per pid: an in-flight projection
+        // of the old run finishes before the aggregate is judged (its rows
+        // cannot be written behind the removal), and the tombstone the
+        // reclamation leaves blocks every later one.
+        let _projection = self.kernel.lock_projection(pid).await;
+        self.writer.flush_pid(pid).await?;
+        if self.store.has_unsettled_deliveries(pid).await? {
+            return Ok(false);
+        }
+        if !marked {
+            // The design's step 1: the mark is written before the authoritative
+            // batch. It is also what makes an interrupted cleanup retryable —
+            // if the aggregate is gone and only rows remain, the mark is the
+            // durable evidence that the run was settled when it was cut.
+            return Ok(false);
+        }
+        // Set before the batch: if the batch succeeds and the row removal
+        // fails, a start must keep refusing the pid until a later pass
+        // finishes the residue. Cleared only after the rows are gone.
+        self.kernel.begin_reclaim(pid);
+        let outcome = self.kernel.reclaim_process(pid).await;
+        let (document_bytes, orphan_indexes) = match outcome {
+            Ok(crate::scheduler::durable::async_document_store::ReclaimOutcome::Reclaimed {
+                document_bytes,
+                orphan_indexes,
+            })
+            | Ok(crate::scheduler::durable::async_document_store::ReclaimOutcome::Absent {
+                document_bytes,
+                orphan_indexes,
+            }) => (document_bytes, orphan_indexes),
+            Ok(crate::scheduler::durable::async_document_store::ReclaimOutcome::Retained) => {
+                self.kernel.finish_reclaim(pid);
+                tracing::debug!(
+                    pid,
+                    "terminal cleanup retained a run for recovery/reconciliation"
+                );
+                return Ok(false);
+            }
+            // Leave the mark set: a batch that did land may have left rows.
+            Err(error) => return Err(error),
+        };
+        pass.reclaimed += 1;
+        pass.document_bytes += document_bytes;
+        pass.orphan_indexes += orphan_indexes as u64;
+
+        // Rows and workdir go while the lifecycle lock is still held; the
+        // flush makes the removal durable before a new start can take the pid.
+        let removal = match writebehind::queue_removal(&self.store, &self.writer, pid).await {
+            Ok(()) => self.writer.flush_pid(pid).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = removal {
+            // The `RemoveProc` batch may have applied even though the flush
+            // reported a failure. The proc row is deleted atomically with every
+            // other row of the process, so its absence proves the removal;
+            // keep the mark only when residue may still be there.
+            match self.store.procs().find_opt(pid).await {
+                Ok(None) => {
+                    self.kernel.finish_reclaim(pid);
+                    self.router.forget(pid);
+                    return Ok(true);
+                }
+                _ => return Err(error),
+            }
+        }
+        self.router.forget(pid);
+        self.kernel.finish_reclaim(pid);
+        Ok(true)
     }
 
     /// Global write-behind barrier — test visibility (a test that asserted on
@@ -231,7 +417,13 @@ impl Runtime {
         SchedulerHealth {
             trigger: self.trigger_health.snapshot(),
             retry: self.retry_health.snapshot(),
+            cleanup: self.cleanup_health.snapshot(),
         }
+    }
+
+    /// The terminal-run cleanup's counters (see [`CleanupMetrics`]).
+    pub fn cleanup_metrics(&self) -> CleanupMetrics {
+        *self.cleanup_metrics.lock()
     }
 
     pub fn config(&self) -> &Arc<Config> {
@@ -292,15 +484,17 @@ impl Runtime {
                 )));
             }
         }
-        // Restart discrimination. The pid must be free: an existing pid is
-        // refused. The durable record is the aggregate document (the proc/task
-        // rows are its projection of the moment, and a settled run's rows are
-        // swept while its aggregate stays); a leftover proc row is refused
-        // too, so a run whose aggregate is gone cannot be restarted under a
-        // pid the row still names. The check runs before anything durable: a
-        // refusal consumes nothing.
-        let occupied = self.kernel.exists(&proc_id).await?
-            || self.store.procs().find_opt(&proc_id).await?.is_some();
+        // Restart discrimination. The aggregate is the pid's durable existence
+        // record: a pid with an aggregate is taken, and only after the
+        // authoritative batch removed it can the same pid start again. The
+        // per-pid lifecycle lock makes that decision atomic with the cleanup:
+        // a cleanup that already deleted the aggregate keeps the lock (and its
+        // `reclaiming` mark) until the derived rows and workdir are gone, so a
+        // new run cannot be created in the middle of the old run's residue
+        // removal. No row family — and in particular no legacy `ops` row,
+        // which L1 removes — participates in pid existence.
+        let _lifecycle = self.kernel.lock_lifecycle(&proc_id).await;
+        let occupied = self.kernel.exists(&proc_id).await? || self.kernel.is_reclaiming(&proc_id);
         if occupied {
             return Err(ActError::Action(format!(
                 "proc_id({proc_id}) is duplicated in running process list"
@@ -528,6 +722,8 @@ impl Runtime {
             snapshots,
             trigger_health: LoopGuard::new("schedule-trigger"),
             retry_health: LoopGuard::new("message-retry"),
+            cleanup_health: LoopGuard::new("terminal-cleanup"),
+            cleanup_metrics: Arc::new(parking_lot::Mutex::new(CleanupMetrics::default())),
             kernel,
         });
 
@@ -585,14 +781,30 @@ impl Runtime {
         }
     }
 
-    /// Message-retry timer — periodically re-sends unacknowledged messages and
-    /// sweeps the settled processes whose deliveries have all landed.
+    /// The cleanup loop's own interval: the configured cleanup interval, or
+    /// [`TEST_TICK_MS`] under test. It never shares the driver's tick or the
+    /// retry timer's schedule (A10 keeps the loops separate; A11 gives cleanup
+    /// its own).
+    fn cleanup_interval(config: &Config) -> Duration {
+        #[cfg(test)]
+        {
+            let _ = config;
+            Duration::from_millis(TEST_TICK_MS)
+        }
+        #[cfg(not(test))]
+        {
+            Duration::from_millis((config.cleanup_interval_secs() * 1000) as u64)
+        }
+    }
+
+    /// Message-retry timer — periodically re-sends unacknowledged messages.
     ///
-    /// Both jobs are the kernel's: the delivery rows are written through the
-    /// channel path (which the kernel's outbox transport feeds) and the rows
-    /// themselves are the kernel's projection, so the two store-facing loops
-    /// run here rather than inside the driver — they are not part of the operation
-    /// protocol and must not delay it.
+    /// The delivery rows are written through the channel path (which the
+    /// kernel's outbox transport feeds) and the rows themselves are the
+    /// kernel's projection, so this store-facing loop runs here rather than
+    /// inside the driver — it is not part of the operation protocol and must
+    /// not delay it. Terminal-run cleanup is a separate loop
+    /// ([`Self::init_cleanup_timer`]) with its own budget and health.
     pub fn init_retry_timer(self: &Arc<Self>) -> crate::Result<()> {
         let max_message_retry_times = self.config().max_message_retry_times();
         let interval_ms = Self::tick_interval(self.config()).as_millis() as u64;
@@ -601,7 +813,6 @@ impl Runtime {
         let store = self.store.clone();
         let shutdown = self.shutdown.clone();
         let health = self.retry_health.clone();
-        let sweeper = self.clone();
         Handle::current().spawn(async move {
             let mut intv = time::interval(Duration::from_millis(interval_ms));
             loop {
@@ -654,14 +865,6 @@ impl Runtime {
                     }
                 }
 
-                // delete finished processes whose deliveries have all settled
-                // (the proc completion itself never deletes rows — it waits
-                // for the deliveries that lag behind)
-                if let Err(err) = sweeper.sweep_removable().await {
-                    error!(error = %err, "settled-process sweep failed");
-                    failure.get_or_insert(err);
-                }
-
                 match failure {
                     Some(err) => health.failed(&err),
                     None => health.recovered(),
@@ -670,6 +873,63 @@ impl Runtime {
         });
 
         Ok(())
+    }
+
+    /// Terminal-run cleanup timer: its own loop, interval, batch budget and
+    /// health. It never shares the operation driver's ready/recovery pass or
+    /// the message-retry loop, so a slow or failing cleanup cannot delay
+    /// normal operations or recovery.
+    pub fn init_cleanup_timer(self: &Arc<Self>) {
+        #[cfg(test)]
+        {
+            // The test build (and the reliability matrix built on it) reads a
+            // settled run's aggregate as its durable decision after the run
+            // ends, and A11 deletes it. Reclamation is therefore driven
+            // explicitly by `Runtime::sweep_removable` in those cells; the
+            // timer's loop is the same code the production build runs.
+            let _ = Self::cleanup_interval(self.config());
+            let _ = self;
+        }
+        #[cfg(not(test))]
+        {
+            let interval = Self::cleanup_interval(self.config());
+            let shutdown = self.shutdown.clone();
+            let health = self.cleanup_health.clone();
+            let sweeper = self.clone();
+            tokio::spawn(async move {
+                let mut intv = time::interval(interval);
+                loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => break,
+                        _ = intv.tick() => {}
+                    }
+                    if !health.attempt() {
+                        continue;
+                    }
+                    match sweeper.sweep_removable().await {
+                        Ok(_) => {
+                            health.recovered();
+                            let metrics = sweeper.cleanup_metrics();
+                            if metrics.backlog > 0 {
+                                tracing::debug!(
+                                    backlog = metrics.backlog,
+                                    oldest_removable_age_ms = metrics.oldest_removable_age_ms,
+                                    reclaimed = metrics.reclaimed,
+                                    document_bytes_deleted = metrics.document_bytes_deleted,
+                                    delete_failures = metrics.delete_failures,
+                                    orphan_indexes_removed = metrics.orphan_indexes_removed,
+                                    "terminal cleanup"
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            error!(error = %err, "terminal cleanup pass failed");
+                            health.failed(&err);
+                        }
+                    }
+                }
+            });
+        }
     }
 
     /// Schedule-trigger timer — periodically fires every due `schedule`

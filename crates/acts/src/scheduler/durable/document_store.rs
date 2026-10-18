@@ -4,7 +4,7 @@ use crate::scheduler::{
         outbox::outbox_index::{OutboxIndex, OutboxIndexCodec},
         ready::{ReadyIndex, ReadyIndexCodec},
         recovery::{
-            recovery_entry::RecoveryEntryDocument,
+            recovery_entry::{RECOVERY_ENTRY_KEY_PREFIX, RecoveryEntryDocument},
             recovery_index::{RecoveryIndex, RecoveryIndexCodec},
         },
     },
@@ -455,6 +455,104 @@ pub(crate) fn build_repair_transaction(
     }
     transaction.validate()?;
     Ok(Some(transaction))
+}
+
+/// The scan prefix of one process's per-operation recovery-entry documents.
+///
+/// The entry key is `{prefix}{hex(pid)}.{wire}.{sequence}`; the trailing dot
+/// keeps a pid from matching a longer pid that shares its hex prefix.
+pub(crate) fn recovery_entry_process_prefix(
+    process_id: &str,
+) -> Result<String, DocumentRepositoryError> {
+    Ok(format!(
+        "{}.",
+        encoded_process_key(RECOVERY_ENTRY_KEY_PREFIX, process_id)?
+    ))
+}
+
+/// The authoritative deletion of a reclaimable run: the aggregate plus its
+/// recovery, outbox and ready index documents, guarded by the exact bytes the
+/// decision was taken on (the aggregate document bytes are the version guard:
+/// any commit installs different bytes).
+///
+/// `recovery_entries` are the per-operation entry documents found under the
+/// process's prefix. A reclaimable snapshot projects none, so any found are
+/// leftovers from an older database; they are deleted in the same batch so no
+/// index can outlive the aggregate.
+pub(crate) fn build_reclaim_transaction(
+    loaded: &LoadedProcess,
+    recovery_entries: &[(String, Vec<u8>)],
+) -> Result<DocumentTransaction, DocumentRepositoryError> {
+    let process_id = &loaded.snapshot.process_id;
+    let key = process_key(process_id)?;
+    let recovery_key = recovery_index_key(process_id)?;
+    let outbox_key = outbox_index_key(process_id)?;
+    let ready_key = ready_index_key(process_id)?;
+    let mut transaction =
+        DocumentTransaction::new().require_exact(&key, loaded.original_document().to_vec())?;
+    transaction =
+        guard_original_document(transaction, &recovery_key, loaded.original_recovery_index())?;
+    transaction =
+        guard_original_document(transaction, &outbox_key, loaded.original_outbox_index())?;
+    transaction = guard_original_document(transaction, &ready_key, loaded.original_ready_index())?;
+    for (entry_key, entry_value) in recovery_entries {
+        transaction = transaction.require_exact(entry_key.as_str(), entry_value.clone())?;
+    }
+    transaction = transaction
+        .delete(&key)?
+        .delete(&recovery_key)?
+        .delete(&outbox_key)?
+        .delete(&ready_key)?;
+    for (entry_key, _) in recovery_entries {
+        transaction = transaction.delete(entry_key.as_str())?;
+    }
+    transaction.validate()?;
+    Ok(transaction)
+}
+
+/// The same deletion when the aggregate is already gone (an interrupted
+/// cleanup): only the derived indexes found in storage are removed. The
+/// aggregate key is guarded absent, so a concurrent start that recreates the
+/// pid wins and the caller re-reads instead of deleting the new run's indexes.
+pub(crate) fn build_orphan_reclaim_transaction(
+    process_id: &str,
+    recovery_index: Option<Vec<u8>>,
+    outbox_index: Option<Vec<u8>>,
+    ready_index: Option<Vec<u8>>,
+    recovery_entries: &[(String, Vec<u8>)],
+) -> Result<DocumentTransaction, DocumentRepositoryError> {
+    let key = process_key(process_id)?;
+    let recovery_key = recovery_index_key(process_id)?;
+    let outbox_key = outbox_index_key(process_id)?;
+    let ready_key = ready_index_key(process_id)?;
+    let mut transaction = DocumentTransaction::new().require_absent(&key)?;
+    transaction = guard_original_document(transaction, &recovery_key, recovery_index.as_deref())?;
+    transaction = guard_original_document(transaction, &outbox_key, outbox_index.as_deref())?;
+    transaction = guard_original_document(transaction, &ready_key, ready_index.as_deref())?;
+    for (entry_key, entry_value) in recovery_entries {
+        transaction = transaction.require_exact(entry_key.as_str(), entry_value.clone())?;
+    }
+    transaction = transaction
+        .delete(&key)?
+        .delete(&recovery_key)?
+        .delete(&outbox_key)?
+        .delete(&ready_key)?;
+    for (entry_key, _) in recovery_entries {
+        transaction = transaction.delete(entry_key.as_str())?;
+    }
+    transaction.validate()?;
+    Ok(transaction)
+}
+
+fn guard_original_document(
+    transaction: DocumentTransaction,
+    key: &str,
+    expected: Option<&[u8]>,
+) -> Result<DocumentTransaction, DocumentStoreError> {
+    match expected {
+        Some(bytes) => transaction.require_exact(key, bytes.to_vec()),
+        None => transaction.require_absent(key),
+    }
 }
 
 pub(crate) fn loaded_after_write(
