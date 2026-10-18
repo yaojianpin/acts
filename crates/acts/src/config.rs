@@ -12,6 +12,16 @@ pub struct Config {
 /// otherwise: one week of hourly files.
 pub const DEFAULT_LOG_MAX_FILES: usize = 168;
 
+/// Concurrent external effects a host runs when `[data].effect_concurrency`
+/// does not say otherwise (A8). Effects run outside the pid's command lane, so
+/// this is the one bound that can be reached by ordinary parallel workflows.
+pub(crate) const DEFAULT_EFFECT_CONCURRENCY: usize = 256;
+
+/// Concurrent recovery, reconciliation or projection commands a host runs when
+/// the matching `[data]` key does not say otherwise (A8). These are control
+/// plane passes; a handful is enough, and each has its own budget.
+pub(crate) const DEFAULT_CONTROL_CONCURRENCY: usize = 16;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConfigLog {
     pub dir: String,
@@ -49,6 +59,21 @@ pub struct ConfigData {
     /// A negative value reads as "no bound" (`as usize`), exactly as it did
     /// when this bounded the resident process set.
     pub cache_cap: Option<i64>,
+    /// Concurrent external effects (A8). `0` means unbounded; omitted uses
+    /// 256. This budget is independent of [`cache_cap`](Self::cache_cap): an
+    /// effect never consumes an execution slot, and a slow effect never holds
+    /// the control plane's reconciliation quota.
+    pub effect_concurrency: Option<usize>,
+    /// Concurrent recovery scans and their exceptional commands (A8). `0`
+    /// means unbounded; omitted uses 16.
+    pub recovery_concurrency: Option<usize>,
+    /// Concurrent manual reconciliations of `EffectUnknown`/`Quarantined`
+    /// operations (A8). `0` means unbounded; omitted uses 16. Manual work
+    /// never asks for an execution slot, so it cannot park a new run.
+    pub reconciliation_concurrency: Option<usize>,
+    /// Concurrent row projections and their repair work (A8). `0` means
+    /// unbounded; omitted uses 16.
+    pub projection_concurrency: Option<usize>,
     pub tick_interval_secs: Option<i64>,
     /// Interval of the terminal-run cleanup loop, in seconds. Omitted follows
     /// `tick_interval_secs`; the loop is independent of the driver's ready /
@@ -228,6 +253,31 @@ impl Config {
     /// Defaults to 1024.
     pub fn cache_cap(&self) -> i64 {
         self.data.cache_cap.unwrap_or(1024)
+    }
+    /// Concurrent external effects (see [`ConfigData::effect_concurrency`]).
+    pub fn effect_concurrency(&self) -> usize {
+        self.data
+            .effect_concurrency
+            .unwrap_or(DEFAULT_EFFECT_CONCURRENCY)
+    }
+    /// Concurrent recovery commands (see [`ConfigData::recovery_concurrency`]).
+    pub fn recovery_concurrency(&self) -> usize {
+        self.data
+            .recovery_concurrency
+            .unwrap_or(DEFAULT_CONTROL_CONCURRENCY)
+    }
+    /// Concurrent manual reconciliations (see
+    /// [`ConfigData::reconciliation_concurrency`]).
+    pub fn reconciliation_concurrency(&self) -> usize {
+        self.data
+            .reconciliation_concurrency
+            .unwrap_or(DEFAULT_CONTROL_CONCURRENCY)
+    }
+    /// Concurrent projections (see [`ConfigData::projection_concurrency`]).
+    pub fn projection_concurrency(&self) -> usize {
+        self.data
+            .projection_concurrency
+            .unwrap_or(DEFAULT_CONTROL_CONCURRENCY)
     }
     pub fn max_message_retry_times(&self) -> i32 {
         self.data.max_message_retry_times.unwrap_or(20)
@@ -492,6 +542,33 @@ dir = "other"
             Some(DEFAULT_LOG_MAX_FILES)
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn admission_quotas_have_independent_defaults_and_overrides() {
+        let defaults = Config::default();
+        assert_eq!(defaults.effect_concurrency(), DEFAULT_EFFECT_CONCURRENCY);
+        for value in [
+            defaults.recovery_concurrency(),
+            defaults.reconciliation_concurrency(),
+            defaults.projection_concurrency(),
+        ] {
+            assert_eq!(value, DEFAULT_CONTROL_CONCURRENCY);
+        }
+
+        let dir = scratch("admission-quotas");
+        let path = write(
+            &dir,
+            "limits.toml",
+            "cache_cap = 3\neffect_concurrency = 7\nrecovery_concurrency = 2\nreconciliation_concurrency = 5\nprojection_concurrency = 11\n",
+        );
+        let config = Config::create(&path).unwrap();
+        assert_eq!(config.cache_cap(), 3);
+        assert_eq!(config.effect_concurrency(), 7);
+        assert_eq!(config.recovery_concurrency(), 2);
+        assert_eq!(config.reconciliation_concurrency(), 5);
+        assert_eq!(config.projection_concurrency(), 11);
         std::fs::remove_dir_all(&dir).ok();
     }
 

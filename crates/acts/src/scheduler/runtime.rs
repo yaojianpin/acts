@@ -752,9 +752,9 @@ impl Runtime {
         // recovery and outbox delivery, and it serves (starts, actions,
         // effects, messages).
         let tick = Self::tick_interval(config);
-        let (kernel, wake_rx) = crate::scheduler::shell::KernelHost::new(
+        let (kernel, wake_rx) = crate::scheduler::shell::KernelHost::new_with_caps(
             store.kv(),
-            config.cache_cap() as usize,
+            crate::scheduler::shell::KernelHost::caps_from_config(config),
             config.max_node_run_times() as u64,
             tick.as_millis() as i64,
         );

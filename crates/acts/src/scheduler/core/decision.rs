@@ -26,11 +26,20 @@
 //!
 //! Both are carried together in [`Settlement`] so a shell can read the one it
 //! needs without re-deriving either.
+//!
+//! # Admission categories
+//!
+//! A run that is over — or one whose only remaining route is manual
+//! reconciliation — does not occupy an execution slot. The other budgets
+//! (concurrent effects, recovery, human reconciliation and projection) are
+//! independent ([`AdmissionCategory`], [`quota`]), so a saturated category
+//! never holds another category's work. Execution's richer rule is [`place`];
+//! the shell owns the sets and executes the directives.
 
 use crate::scheduler::core::{
     commit::aggregate::ProcessSnapshot,
     model::{
-        operation::OperationId,
+        operation::{OperationId, OperationState},
         task_graph::{TaskId, TaskState},
         transition_plan::TransitionPlan,
     },
@@ -128,6 +137,22 @@ pub(crate) fn run_settled(snapshot: &ProcessSnapshot) -> bool {
     !snapshot.tasks.is_empty() && snapshot.tasks.values().all(|task| task.state.is_terminal())
 }
 
+/// Whether the run's remaining route is manual reconciliation (A8): at least
+/// one operation crossed the external-effect boundary without a provable
+/// outcome (`EffectUnknown`) or was explicitly quarantined.
+///
+/// Such a run is still in flight, but ordinary admission cannot advance it:
+/// only the reconciliation path may. It therefore does not occupy an execution
+/// slot; the reconciliation quota bounds the human work instead.
+pub(crate) fn awaiting_reconciliation(snapshot: &ProcessSnapshot) -> bool {
+    snapshot.operations.values().any(|operation| {
+        matches!(
+            operation.state,
+            OperationState::EffectUnknown { .. } | OperationState::Quarantined { .. }
+        )
+    })
+}
+
 /// Whether the read model and the durable state may be reclaimed (A11):
 /// terminal executions, delivered outbox records, retired operations. This is
 /// the aggregate's own rule; the shell's sweeper only executes it.
@@ -211,8 +236,10 @@ pub(crate) enum SlotStanding {
 pub(crate) enum SlotDirective {
     /// Keep the slot the run holds.
     Keep,
-    /// The run settled: free its slot, then drive (its own remaining work, a
-    /// timer operation for instance, needs no slot).
+    /// The run no longer needs the execution slot — every execution settled,
+    /// or it is waiting on manual reconciliation: free its slot, then drive
+    /// (its own remaining work, a timer operation for instance, needs no
+    /// slot).
     Release,
     /// Take a slot, then drive.
     Take,
@@ -245,33 +272,101 @@ pub(crate) struct SlotObservation {
     pub(crate) active: usize,
 }
 
+/// The run-level facts admission reads from the committed aggregate. They are
+/// derived together so every category sees one answer:
+///
+/// - the root state bounds the ordinary slot;
+/// - [`run_settled`] says the run is over;
+/// - [`awaiting_reconciliation`] says ordinary execution cannot advance it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunFacts {
+    pub(crate) root_state: TaskState,
+    pub(crate) run_settled: bool,
+    pub(crate) awaiting_reconciliation: bool,
+}
+
+impl RunFacts {
+    pub(crate) fn of(snapshot: &ProcessSnapshot) -> Self {
+        Self {
+            root_state: root_state(snapshot),
+            run_settled: run_settled(snapshot),
+            awaiting_reconciliation: awaiting_reconciliation(snapshot),
+        }
+    }
+
+    /// Whether the run still needs one of the execution slots: it has live
+    /// business work and no manual-reconciliation hold. A quarantined run
+    /// leaves the execution quota immediately, so the parked run it held back
+    /// starts now; its eventual human decision is admitted by the
+    /// reconciliation quota instead.
+    pub(crate) fn execution_active(self) -> bool {
+        !self.run_settled && !self.awaiting_reconciliation
+    }
+}
+
+/// The independent admission categories (A8). Execution owns the run slots;
+/// the other four bound their own work, so one category's saturation never
+/// consumes another's budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdmissionCategory {
+    /// Normal runs in flight.
+    Execution,
+    /// Concurrent external effects.
+    Effect,
+    /// Recovery scans and their exceptional commands.
+    Recovery,
+    /// Human decisions on `EffectUnknown`/`Quarantined` operations.
+    Reconciliation,
+    /// Row projections and their repair queue.
+    Projection,
+}
+
+/// Whether one more holder of an auxiliary quota may start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QuotaDirective {
+    Admit,
+    Wait,
+}
+
+/// The auxiliary categories' whole rule: `active < cap`, with `cap == 0`
+/// meaning unbounded. Execution's richer rule is [`place`]; this is the one
+/// the effect/recovery/reconciliation/projection gates execute.
+pub(crate) fn quota(cap: usize, active: usize) -> QuotaDirective {
+    if cap == 0 || active < cap {
+        QuotaDirective::Admit
+    } else {
+        QuotaDirective::Wait
+    }
+}
+
 /// The admission decision for one run:
 ///
 /// - a parked run waits, whatever its state;
-/// - a run holding a slot releases it once every execution settled, otherwise
-///   keeps it;
+/// - a run holding a slot releases it once its execution work is over —
+///   every execution settled, or the run is waiting on manual reconciliation;
+///   otherwise it keeps it;
 /// - a run this driver never admitted takes a slot, or parks exactly like a
 ///   start that found every slot taken. A run whose root is already terminal
 ///   is admitted *because* it needs no slot — taking one here would hold it
-///   for a run that never operates again.
-pub(crate) fn place(
-    observation: SlotObservation,
-    root_state: TaskState,
-    run_settled: bool,
-) -> AdmissionDirective {
+///   for a run that never operates again. A quarantined run is likewise
+///   admitted without an execution slot: only its reconciliation path may
+///   advance it, and that path is bounded separately.
+pub(crate) fn place(observation: SlotObservation, facts: RunFacts) -> AdmissionDirective {
     match observation.standing {
         SlotStanding::Parked => AdmissionDirective::Park,
-        SlotStanding::Holding if run_settled => AdmissionDirective::Drive(SlotDirective::Release),
+        SlotStanding::Holding if !facts.execution_active() => {
+            AdmissionDirective::Drive(SlotDirective::Release)
+        }
         SlotStanding::Holding => AdmissionDirective::Drive(SlotDirective::Keep),
         SlotStanding::Unplaced => {
+            if facts.root_state.is_terminal() || facts.awaiting_reconciliation {
+                return AdmissionDirective::Drive(SlotDirective::NoSlot);
+            }
             let admission = infallible(SlotPolicy::plan(
                 (),
-                &(observation.cap, observation.active, root_state),
+                &(observation.cap, observation.active, facts.root_state),
             ));
             match admission {
-                SlotAdmission::Admit if root_state.is_terminal() => {
-                    AdmissionDirective::Drive(SlotDirective::NoSlot)
-                }
                 SlotAdmission::Admit => AdmissionDirective::Drive(SlotDirective::Take),
                 SlotAdmission::Park => AdmissionDirective::Park,
             }
@@ -308,7 +403,11 @@ pub(crate) struct Decision {
     pub(crate) settlement: Settlement,
     /// The lifecycle event the committed snapshot implies.
     pub(crate) lifecycle: Option<LifecycleDirective>,
-    /// What the driver must do with the run's slot.
+    /// Whether the run is waiting on manual reconciliation after this commit
+    /// (`EffectUnknown`/`Quarantined`). Such a run is outside the execution
+    /// quota; the shell reports it on the reconciliation gate.
+    pub(crate) quarantined: bool,
+    /// What the driver must do with the run's execution slot.
     pub(crate) admission: AdmissionDirective,
 }
 
@@ -326,6 +425,7 @@ impl Decision {
             process_status: ProcessStatus::of(snapshot),
             settlement: settle(snapshot),
             lifecycle: lifecycle(snapshot),
+            quarantined: awaiting_reconciliation(snapshot),
             admission,
         }
     }
@@ -511,6 +611,22 @@ mod tests {
         );
     }
 
+    fn facts(root_state: TaskState, run_settled: bool) -> RunFacts {
+        RunFacts {
+            root_state,
+            run_settled,
+            awaiting_reconciliation: false,
+        }
+    }
+
+    fn quarantined(root_state: TaskState) -> RunFacts {
+        RunFacts {
+            root_state,
+            run_settled: false,
+            awaiting_reconciliation: true,
+        }
+    }
+
     #[test]
     fn admission_distinguishes_parked_held_and_unplaced_runs() {
         let running = SlotObservation {
@@ -519,7 +635,7 @@ mod tests {
             active: 0,
         };
         assert_eq!(
-            place(running, TaskState::Running, false),
+            place(running, facts(TaskState::Running, false)),
             AdmissionDirective::Park,
             "a parked run waits even when a slot is free; release admits it by pid"
         );
@@ -530,13 +646,18 @@ mod tests {
             active: 2,
         };
         assert_eq!(
-            place(held, TaskState::Running, false),
+            place(held, facts(TaskState::Running, false)),
             AdmissionDirective::Drive(SlotDirective::Keep)
         );
         assert_eq!(
-            place(held, TaskState::Completed, true),
+            place(held, facts(TaskState::Completed, true)),
             AdmissionDirective::Drive(SlotDirective::Release),
             "a settled run frees the slot that admits the oldest parked run"
+        );
+        assert_eq!(
+            place(held, facts(TaskState::Cancelled, true)),
+            AdmissionDirective::Drive(SlotDirective::Release),
+            "a cancellation's deciding command frees the slot immediately"
         );
 
         let unplaced = SlotObservation {
@@ -545,7 +666,7 @@ mod tests {
             active: 1,
         };
         assert_eq!(
-            place(unplaced, TaskState::Running, false),
+            place(unplaced, facts(TaskState::Running, false)),
             AdmissionDirective::Park,
             "a booted run meeting a full cap parks like a start that found it full"
         );
@@ -555,14 +676,76 @@ mod tests {
             active: 0,
         };
         assert_eq!(
-            place(free, TaskState::Running, false),
+            place(free, facts(TaskState::Running, false)),
             AdmissionDirective::Drive(SlotDirective::Take)
         );
         assert_eq!(
-            place(free, TaskState::Completed, true),
+            place(free, facts(TaskState::Completed, true)),
             AdmissionDirective::Drive(SlotDirective::NoSlot),
             "a finished run needs no slot for its remaining bookkeeping"
         );
+    }
+
+    #[test]
+    fn a_quarantined_run_leaves_the_execution_quota() {
+        let held = SlotObservation {
+            standing: SlotStanding::Holding,
+            cap: 1,
+            active: 1,
+        };
+        assert_eq!(
+            place(held, quarantined(TaskState::Running)),
+            AdmissionDirective::Drive(SlotDirective::Release),
+            "an EffectUnknown/Quarantined run must free the slot it cannot use"
+        );
+        let unplaced = SlotObservation {
+            standing: SlotStanding::Unplaced,
+            cap: 1,
+            active: 1,
+        };
+        assert_eq!(
+            place(unplaced, quarantined(TaskState::Running)),
+            AdmissionDirective::Drive(SlotDirective::NoSlot),
+            "a full execution quota does not stop a manual reconciliation's run"
+        );
+        assert!(
+            !quarantined(TaskState::Running).execution_active(),
+            "a quarantined run is not execution work"
+        );
+        assert!(facts(TaskState::Running, false).execution_active());
+    }
+
+    #[test]
+    fn awaiting_reconciliation_reads_both_manual_states() {
+        let mut snapshot = snapshot(TaskState::Running);
+        let id = OperationId {
+            process_id: snapshot.process_id.clone(),
+            task: root(),
+            sequence: 1,
+        };
+        assert!(!awaiting_reconciliation(&snapshot));
+        snapshot.operations.insert(
+            id.clone(),
+            crate::scheduler::core::model::operation::OperationRecord {
+                id: id.clone(),
+                kind: crate::scheduler::core::model::operation::OperationKind::ApplyAction,
+                state: OperationState::EffectUnknown { attempt: 1 },
+                revision: 1,
+            },
+        );
+        assert!(awaiting_reconciliation(&snapshot));
+        snapshot.operations.get_mut(&id).unwrap().state = OperationState::Quarantined {
+            reason: "operator hold".into(),
+        };
+        assert!(awaiting_reconciliation(&snapshot));
+    }
+
+    #[test]
+    fn auxiliary_quotas_are_independent() {
+        assert_eq!(quota(0, 0), QuotaDirective::Admit, "zero is unbounded");
+        assert_eq!(quota(4, 3), QuotaDirective::Admit);
+        assert_eq!(quota(4, 4), QuotaDirective::Wait);
+        assert_eq!(quota(4, 9), QuotaDirective::Wait);
     }
 
     #[test]

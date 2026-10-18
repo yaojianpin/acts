@@ -36,15 +36,26 @@ impl KernelHost {
     ) -> Result<()> {
         let attempt = u32::try_from(claimed.claim.claim.fence)
             .map_err(|_| runtime("operation claim fence exceeds the effect-unknown range"))?;
-        self.operation_event(
-            &claimed.id,
-            claimed.revision,
-            OperationEvent::MarkEffectUnknown {
-                claim: claimed.claim.claim.clone(),
-                attempt,
-            },
-        )
-        .await?;
+        let (_, loaded) = self
+            .operation_event(
+                &claimed.id,
+                claimed.revision,
+                OperationEvent::MarkEffectUnknown {
+                    claim: claimed.claim.claim.clone(),
+                    attempt,
+                },
+            )
+            .await?;
+        // A8: an unknown effect puts the run in the reconciliation quarantine.
+        // Its execution slot is released in this deciding step, not by whichever
+        // operation happens to be driven next, so a parked run starts now.
+        self.admissions
+            .lock()
+            .note_quarantined(&claimed.id.process_id, true);
+        let (_, freed) = self.place_run(&loaded.snapshot);
+        if let Some(admission) = freed {
+            self.admit_run(&admission).await?;
+        }
         Ok(())
     }
 
@@ -292,10 +303,11 @@ impl KernelHost {
         // directive was decided from the committed snapshot; the shell only
         // mutates its own set and wakes the admitted operation.
         let phase = operation_trace::start();
-        let freed = self
-            .admissions
-            .lock()
-            .apply(&loaded.snapshot, decision.admission);
+        let freed = {
+            let mut admissions = self.admissions.lock();
+            admissions.note_quarantined(&loaded.snapshot.process_id, decision.quarantined);
+            admissions.apply(&loaded.snapshot, decision.admission)
+        };
         if let Some(admission) = freed {
             self.admit_run(&admission).await?;
         }

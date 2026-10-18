@@ -1165,7 +1165,16 @@ impl ActOperation for ApplyAction {
                         // loss is the A1a `EffectUnknown` boundary — never a
                         // reason to run the effect again.
                         operation.lane.release();
+                        // A8: the external effect has its own concurrency
+                        // budget. The command lane is already free, so waiting
+                        // here serializes nothing but effects.
+                        let effect_lease = host
+                            .enter_admission(
+                                crate::scheduler::core::decision::AdmissionCategory::Effect,
+                            )
+                            .await;
                         let ran = runner.run(request, key).await;
+                        drop(effect_lease);
                         operation.lane.resume().await;
                         match ran {
                             Ok(outcome) => Effect::Completed(Some(outcome)),

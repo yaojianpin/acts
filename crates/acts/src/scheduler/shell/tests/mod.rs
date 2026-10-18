@@ -1253,6 +1253,199 @@ async fn a_non_idempotent_effect_can_be_resolved_not_applied() {
     assert_eq!(keys[0], keys[1], "the retry kept the stable key");
 }
 
+/// A8: an unknown effect retires the run from the execution quota immediately,
+/// not when some later operation notices. With one execution slot, the parked
+/// run behind it starts in the same deciding step — no tick, no recovery pass.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_quarantined_run_frees_its_slot_and_admits_the_parked_run() {
+    const PID: &str = "p-quarantine-slot";
+    const PARKED: &str = "p-quarantine-parked";
+    let stored = ConflictKv::new(PID);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let runner = Arc::new(ObservedRunner {
+        calls: calls.clone(),
+        keys,
+        observation,
+        record: false,
+        idempotent: false,
+    });
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx, engine) = effect_host(kv, PID, runner).await;
+    let apply = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+
+    // The only slot belongs to the effect run; the next start parks.
+    let spec = ProcessSpec::linear(PARKED, crate::utils::consts::TASK_ROOT_TID, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    {
+        let parked = host.snapshot(PARKED).await.unwrap().unwrap();
+        assert!(
+            parked
+                .tasks
+                .values()
+                .all(|task| task.state == TaskState::Created),
+            "the run behind the cap is parked"
+        );
+        assert_eq!(host.admission_metrics().parked, 1);
+    }
+
+    // The effect's commit is lost: `EffectUnknown` is durable. The run leaves
+    // the execution quota and the parked run takes the slot in that step.
+    lose_the_effect_commit(&host, &stored, &apply, PID).await;
+    let metrics = host.admission_metrics();
+    assert_eq!(metrics.execution.active, 1, "the parked run took the slot");
+    assert_eq!(metrics.parked, 0, "the parked queue drained immediately");
+    assert_eq!(metrics.quarantined_runs, 1);
+    assert_eq!(
+        metrics.reconciliation.active, 0,
+        "no human decision is in flight"
+    );
+
+    host.run_until_quiescent(&mut wake_rx, 50).await.unwrap();
+    assert!(
+        host.process_completed(PARKED).await.unwrap(),
+        "the admitted run progresses without a tick"
+    );
+    assert_eq!(
+        host.effect_unknowns(PID).await.unwrap().len(),
+        1,
+        "the unknown effect still waits for its human decision"
+    );
+    engine.close().await;
+}
+
+/// A8: manual reconciliation is control-plane work with its own quota. It
+/// commits while the only execution slot is held by another run, and that run
+/// is neither parked nor delayed by it.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn manual_reconciliation_advances_while_the_execution_quota_is_full() {
+    const PID: &str = "p-reconcile-full";
+    const HOLDER: &str = "p-reconcile-holder";
+    let stored = ConflictKv::new(PID);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let runner = Arc::new(ObservedRunner {
+        calls: calls.clone(),
+        keys,
+        observation,
+        record: false,
+        idempotent: false,
+    });
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx, engine) = effect_host(kv, PID, runner).await;
+    let apply = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+    lose_the_effect_commit(&host, &stored, &apply, PID).await;
+    assert_eq!(host.admission_metrics().execution.active, 0);
+
+    // A waiting act holds the only execution slot.
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-reconcile-holder")
+        .with_step(|step| {
+            step.with_id("hold").with_uses(
+                crate::utils::test::USES_IRQ,
+                crate::Vars::new().with("key", "hold"),
+            )
+        });
+    let package = engine.runtime().package().clone();
+    let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+    let spec = ProcessSpec::from_workflow(HOLDER, &workflow, &run_as).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 50).await.unwrap();
+    assert_eq!(
+        state_of(&host.snapshot(HOLDER).await.unwrap().unwrap(), "hold"),
+        TaskState::Waiting,
+        "the holder waits on its act and occupies the slot"
+    );
+    let before = host.admission_metrics();
+    assert_eq!(before.execution.active, 1);
+    assert_eq!(before.parked, 0);
+
+    // The human decision commits under the reconciliation quota only.
+    let unknowns = host.effect_unknowns(PID).await.unwrap();
+    host.resolve_effect_by_key(
+        PID,
+        &unknowns[0].key,
+        crate::EffectResolution::Applied {
+            outputs: crate::Vars::new().with("manual", "applied"),
+        },
+    )
+    .await
+    .unwrap();
+    let after = host.admission_metrics();
+    assert_eq!(
+        after.execution.active, 1,
+        "the holder keeps the only execution slot"
+    );
+    assert_eq!(
+        after.quarantined_runs, 0,
+        "the resolved run is no longer quarantined"
+    );
+    assert!(after.reconciliation.admitted >= 1);
+    assert_eq!(after.reconciliation.active, 0, "the permit was returned");
+    assert!(
+        matches!(
+            host.snapshot(PID).await.unwrap().unwrap().operations[&apply].state,
+            OperationState::Completed(_)
+        ),
+        "the human decision committed"
+    );
+
+    // The holder still owns the slot; completing it lets the reconciled run
+    // finish through the ordinary path.
+    host.apply_action(
+        HOLDER,
+        &tid_of(HOLDER, "hold", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+    assert!(host.process_completed(PID).await.unwrap());
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the effect never re-ran");
+    engine.close().await;
+}
+
+/// A8: a client decision that ends the run returns the execution slot in the
+/// deciding command, not on the next operation. The parked run is admitted by
+/// that same `Decision`, so no tick is involved.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_cancel_frees_the_slot_and_admits_the_parked_run() {
+    const PID: &str = "p-cancel-slot";
+    const PARKED: &str = "p-cancel-parked";
+    let (host, mut wake_rx) = KernelHost::in_memory_with_cap(1);
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-cancel-slot")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    // Stop right before `s1`'s auto-completion: the slot is held and the
+    // execution is still actionable.
+    let _pending_auto = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+
+    let parked = ProcessSpec::linear(PARKED, crate::utils::consts::TASK_ROOT_TID, &["only"]);
+    host.start_process(&parked).await.unwrap();
+    assert_eq!(host.admission_metrics().parked, 1);
+
+    host.apply_action(PID, &tid_of(PID, "s1", 0), ActionKind::Abort, Vec::new())
+        .await
+        .unwrap();
+    assert!(
+        host.process_completed(PID).await.unwrap(),
+        "aborting the only live execution settles the run"
+    );
+    let metrics = host.admission_metrics();
+    assert_eq!(metrics.execution.active, 1, "the parked run took the slot");
+    assert_eq!(metrics.parked, 0);
+
+    host.run_until_quiescent(&mut wake_rx, 50).await.unwrap();
+    assert!(host.process_completed(PARKED).await.unwrap());
+}
+
 /// A4: concurrent client actions on one execution decide exactly once. Every
 /// racer takes the pid's command lane in turn, so exactly one decision
 /// commits on its first attempt and every loser is answered with the refusal

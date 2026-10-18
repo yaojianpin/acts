@@ -48,8 +48,8 @@ use crate::{
                 command::{ActionCommand, ActionKind, ActionPlanner},
             },
             decision::{
-                self, AdmissionDirective, Decision, LifecycleDirective, SlotDirective,
-                SlotObservation, SlotStanding,
+                self, AdmissionCategory, AdmissionDirective, Decision, LifecycleDirective,
+                QuotaDirective, RunFacts, SlotDirective, SlotObservation, SlotStanding,
             },
             model::{
                 clock::{Clock, SystemClock},
@@ -356,8 +356,137 @@ struct ReportedRuns {
     finished: std::collections::HashSet<String>,
 }
 
-/// The driver's slot bookkeeping: which runs hold one of the `cache_cap`
-/// slots, and which wait for one.
+/// The configured bounds of the five admission categories (A8). Execution
+/// bounds normal runs in flight; the other four bound their own work and never
+/// consume another category's budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AdmissionCaps {
+    pub(crate) execution: usize,
+    pub(crate) effect: usize,
+    pub(crate) recovery: usize,
+    pub(crate) reconciliation: usize,
+    pub(crate) projection: usize,
+}
+
+impl AdmissionCaps {
+    /// The caps a host without an explicit admission configuration uses: the
+    /// execution bound it was given and the process defaults for the rest.
+    #[cfg(test)]
+    fn new(execution: usize) -> Self {
+        Self {
+            execution,
+            effect: crate::config::DEFAULT_EFFECT_CONCURRENCY,
+            recovery: crate::config::DEFAULT_CONTROL_CONCURRENCY,
+            reconciliation: crate::config::DEFAULT_CONTROL_CONCURRENCY,
+            projection: crate::config::DEFAULT_CONTROL_CONCURRENCY,
+        }
+    }
+
+    fn from_config(config: &crate::Config) -> Self {
+        Self {
+            execution: config.cache_cap() as usize,
+            effect: config.effect_concurrency(),
+            recovery: config.recovery_concurrency(),
+            reconciliation: config.reconciliation_concurrency(),
+            projection: config.projection_concurrency(),
+        }
+    }
+}
+
+/// One auxiliary quota's counter and waiters. The rule is
+/// [`decision::quota`]; this type is only the in-memory half the shell owns.
+#[derive(Debug, Default)]
+struct AdmissionGate {
+    cap: usize,
+    active: std::sync::atomic::AtomicUsize,
+    admitted: std::sync::atomic::AtomicU64,
+    waiters: tokio::sync::Notify,
+}
+
+impl AdmissionGate {
+    fn new(cap: usize) -> Arc<Self> {
+        Arc::new(Self {
+            cap,
+            active: std::sync::atomic::AtomicUsize::new(0),
+            admitted: std::sync::atomic::AtomicU64::new(0),
+            waiters: tokio::sync::Notify::new(),
+        })
+    }
+
+    /// Take one permit, waiting while the category is saturated. The waiter
+    /// is registered before the counter is read, so a permit released in
+    /// between is never lost.
+    async fn enter(self: &Arc<Self>) -> AdmissionLease {
+        use std::sync::atomic::Ordering::SeqCst;
+        loop {
+            let notified = self.waiters.notified();
+            let active = self.active.load(SeqCst);
+            if decision::quota(self.cap, active) == QuotaDirective::Wait {
+                notified.await;
+                continue;
+            }
+            if self
+                .active
+                .compare_exchange(active, active.saturating_add(1), SeqCst, SeqCst)
+                .is_ok()
+            {
+                self.admitted.fetch_add(1, SeqCst);
+                return AdmissionLease { gate: self.clone() };
+            }
+            // Another entrant took the permit between the read and the CAS.
+            // Re-check immediately: with a cap above one a free permit may
+            // still exist, and waiting here could strand it.
+        }
+    }
+
+    fn metrics(&self) -> QuotaMetrics {
+        QuotaMetrics {
+            cap: self.cap,
+            active: self.active.load(std::sync::atomic::Ordering::SeqCst),
+            admitted: self.admitted.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+}
+
+/// One held auxiliary permit; dropping it wakes one waiter.
+struct AdmissionLease {
+    gate: Arc<AdmissionGate>,
+}
+
+impl Drop for AdmissionLease {
+    fn drop(&mut self) {
+        self.gate
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.gate.waiters.notify_one();
+    }
+}
+
+/// One auxiliary quota's gauge: the configured cap, holders now, and how many
+/// holders it admitted over the host's lifetime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct QuotaMetrics {
+    pub(crate) cap: usize,
+    pub(crate) active: usize,
+    pub(crate) admitted: u64,
+}
+
+/// Every category's gauge (A8). Execution reports its slot set and parked
+/// queue; each auxiliary quota reports its own counter.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AdmissionMetrics {
+    pub(crate) execution: QuotaMetrics,
+    pub(crate) parked: usize,
+    pub(crate) effect: QuotaMetrics,
+    pub(crate) recovery: QuotaMetrics,
+    pub(crate) reconciliation: QuotaMetrics,
+    pub(crate) projection: QuotaMetrics,
+    /// Runs the last decisions observed waiting on manual reconciliation.
+    pub(crate) quarantined_runs: usize,
+}
+
+/// The driver's slot bookkeeping: which runs hold one of the execution slots,
+/// which wait for one, and the four auxiliary quotas (A8).
 ///
 /// The configured number used to bound the legacy engine's *resident object
 /// set*; the kernel holds no resident objects, so the same number is redefined
@@ -371,9 +500,15 @@ struct ReportedRuns {
 /// (`__created` ascending, the legacy row's `timestamp` order) is what a freed
 /// slot admits.
 ///
+/// The execution slot is *not* a lease on a run forever: a run that settles,
+/// or one whose only remaining route is manual reconciliation, releases it in
+/// the decision that observed that fact. Effects, recovery, human
+/// reconciliation and projections have their own gates, so a saturated
+/// category never holds another category's work.
+///
 /// The legacy resident set answered the same question through `Cache`; here
-/// the only two writers are [`KernelHost::start_process`] (which reserves) and
-/// the driver's operations (which settle), so this set is the single answer to "may
+/// the only writers are [`KernelHost::start_process`] (which reserves) and the
+/// driver's operations (which settle), so this set is the single answer to "may
 /// this run operation". Like that set it is in-memory: a restart starts it
 /// empty, and the runs still in flight take their slots again through
 /// [`KernelHost::place_run`] when the ready queue hands them their first turn.
@@ -385,20 +520,78 @@ struct ReportedRuns {
 struct Admissions {
     /// The bound on runs in flight at once.
     cap: usize,
-    /// Runs holding a slot: admitted here and not yet settled.
+    /// Runs holding an execution slot: admitted here and not yet settled or
+    /// quarantined.
     active: std::collections::HashSet<String>,
+    /// Execution slots granted over the host's lifetime (a metric).
+    admitted: u64,
     /// Parked runs, oldest first, with the operation that admits each: the
     /// seeded root `ExecuteTask` whose operation starts the parked root. The key is
     /// the run's `__created` stamp; two runs seeded in the same millisecond
     /// are ordered by pid, so no run can hide behind an equal key.
     parked: std::collections::BTreeMap<(i64, String), OperationId>,
+    /// Concurrent external effects.
+    effect: Arc<AdmissionGate>,
+    /// Recovery scans and their exceptional commands.
+    recovery: Arc<AdmissionGate>,
+    /// Human reconciliation of `EffectUnknown`/`Quarantined` operations.
+    reconciliation: Arc<AdmissionGate>,
+    /// Row projections and their repair work.
+    projection: Arc<AdmissionGate>,
+    /// Runs whose remaining route is manual reconciliation, as the last
+    /// decision observed them. A gauge for operators; the admission rule reads
+    /// the aggregate, never this set.
+    quarantined: std::collections::HashSet<String>,
 }
 
 impl Admissions {
-    fn new(cap: usize) -> Self {
+    fn new(caps: AdmissionCaps) -> Self {
         Self {
-            cap,
+            cap: caps.execution,
+            effect: AdmissionGate::new(caps.effect),
+            recovery: AdmissionGate::new(caps.recovery),
+            reconciliation: AdmissionGate::new(caps.reconciliation),
+            projection: AdmissionGate::new(caps.projection),
             ..Self::default()
+        }
+    }
+
+    /// The gate for an auxiliary category. Execution has no auxiliary gate:
+    /// its set is the ledger itself and its rule is [`decision::place`].
+    fn gate(&self, category: AdmissionCategory) -> Option<Arc<AdmissionGate>> {
+        match category {
+            AdmissionCategory::Execution => None,
+            AdmissionCategory::Effect => Some(self.effect.clone()),
+            AdmissionCategory::Recovery => Some(self.recovery.clone()),
+            AdmissionCategory::Reconciliation => Some(self.reconciliation.clone()),
+            AdmissionCategory::Projection => Some(self.projection.clone()),
+        }
+    }
+
+    fn metrics(&self) -> AdmissionMetrics {
+        AdmissionMetrics {
+            execution: QuotaMetrics {
+                cap: self.cap,
+                active: self.active.len(),
+                admitted: self.admitted,
+            },
+            parked: self.parked.len(),
+            effect: self.effect.metrics(),
+            recovery: self.recovery.metrics(),
+            reconciliation: self.reconciliation.metrics(),
+            projection: self.projection.metrics(),
+            quarantined_runs: self.quarantined.len(),
+        }
+    }
+
+    /// Record the last decision's view of a run's reconciliation hold. The
+    /// admission rule itself reads the aggregate; this set is the operator
+    /// gauge.
+    fn note_quarantined(&mut self, process_id: &str, quarantined: bool) {
+        if quarantined {
+            self.quarantined.insert(process_id.to_string());
+        } else {
+            self.quarantined.remove(process_id);
         }
     }
 
@@ -429,7 +622,9 @@ impl Admissions {
     }
 
     fn activate(&mut self, process_id: &str) {
-        self.active.insert(process_id.to_string());
+        if self.active.insert(process_id.to_string()) {
+            self.admitted = self.admitted.saturating_add(1);
+        }
     }
 
     fn park(&mut self, created_ms: i64, process_id: &str, admission: &OperationId) {
@@ -443,6 +638,7 @@ impl Admissions {
     fn abandon(&mut self, process_id: &str) {
         self.active.remove(process_id);
         self.parked.retain(|(_, parked), _| parked != process_id);
+        self.quarantined.remove(process_id);
     }
 
     /// Take a free slot for a parked run — the check a start makes after it
@@ -461,8 +657,9 @@ impl Admissions {
         true
     }
 
-    /// A settled run frees its slot; returns the operation that admits the
-    /// parked run taking it, if there is one.
+    /// A run that no longer needs an execution slot frees it; returns the
+    /// operation that admits the parked run taking it, if there is one. The
+    /// caller wakes that operation immediately — the tick is only a fallback.
     fn release(&mut self, process_id: &str) -> Option<OperationId> {
         if !self.active.remove(process_id) {
             return None;
@@ -475,8 +672,8 @@ impl Admissions {
         Some(admission)
     }
 
-    /// The core admission policy over this in-memory set (A6): the shell owns
-    /// the set, [`crate::scheduler::core::decision::place`] owns the rule.
+    /// The core admission policy over this in-memory set (A6/A8): the shell
+    /// owns the set, [`crate::scheduler::core::decision::place`] owns the rule.
     fn directive(&self, snapshot: &ProcessSnapshot) -> AdmissionDirective {
         let standing = if self.is_parked(&snapshot.process_id) {
             SlotStanding::Parked
@@ -491,8 +688,7 @@ impl Admissions {
                 cap: self.cap,
                 active: self.active.len(),
             },
-            decision::root_state(snapshot),
-            decision::run_settled(snapshot),
+            RunFacts::of(snapshot),
         )
     }
 
@@ -552,9 +748,27 @@ impl KernelHost {
     /// driver task must own. `cache_cap` bounds the runs that may be in flight
     /// at once (see [`Admissions`]); tests pass
     /// `Arc::new(MemoryStore::new())` and a cap.
+    #[cfg(test)]
     pub(crate) fn new(
         kv: Arc<dyn KvStore>,
         cache_cap: usize,
+        max_node_run_times: u64,
+        timer_poll_ms: i64,
+    ) -> (Arc<Self>, Receiver<OperationId>) {
+        Self::new_with_caps(
+            kv,
+            AdmissionCaps::new(cache_cap),
+            max_node_run_times,
+            timer_poll_ms,
+        )
+    }
+
+    /// The host with explicit caps for every admission category (A8). The
+    /// serving runtime builds these from [`Config`](crate::Config); tests that
+    /// only exercise the execution bound keep [`Self::new`].
+    pub(crate) fn new_with_caps(
+        kv: Arc<dyn KvStore>,
+        caps: AdmissionCaps,
         max_node_run_times: u64,
         timer_poll_ms: i64,
     ) -> (Arc<Self>, Receiver<OperationId>) {
@@ -575,7 +789,7 @@ impl KernelHost {
                 predicate: Arc::new(parking_lot::RwLock::new(None)),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
                 max_node_run_times,
-                admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(cache_cap))),
+                admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(caps))),
                 timer_poll_ms: timer_poll_ms.max(1),
                 ready: Arc::new(tokio::sync::Notify::new()),
                 boot_reconciled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -590,6 +804,33 @@ impl KernelHost {
             }),
             wake_rx,
         )
+    }
+
+    /// The caps a [`Config`](crate::Config) names (A8). Public entry points
+    /// that build a host without one use [`AdmissionCaps::new`]'s defaults.
+    pub(crate) fn caps_from_config(config: &crate::Config) -> AdmissionCaps {
+        AdmissionCaps::from_config(config)
+    }
+
+    /// Take one permit of an auxiliary admission category. Execution has no
+    /// auxiliary gate — its set is the ledger and [`Self::place_run`] is its
+    /// admission path.
+    async fn enter_admission(&self, category: AdmissionCategory) -> AdmissionLease {
+        assert!(
+            category != AdmissionCategory::Execution,
+            "execution admission is the slot ledger, not a gate"
+        );
+        let gate = self
+            .admissions
+            .lock()
+            .gate(category)
+            .expect("execution admission is the slot ledger, not a gate");
+        gate.enter().await
+    }
+
+    /// Every admission category's gauge (A8).
+    pub(crate) fn admission_metrics(&self) -> AdmissionMetrics {
+        self.admissions.lock().metrics()
     }
 
     /// A host over an in-memory store for tests and the P2 parity harness,
@@ -702,6 +943,7 @@ impl KernelHost {
         let Some(projector) = projector else {
             return true;
         };
+        let _projection = self.enter_admission(AdmissionCategory::Projection).await;
         if let Err(error) = projector.project(snapshot).await {
             // The run's last commit is also its last chance to derive the
             // rows without a later commit. Clear this run's claims and
@@ -746,6 +988,7 @@ impl KernelHost {
         let Some(projector) = projector else {
             return true;
         };
+        let _projection = self.enter_admission(AdmissionCategory::Projection).await;
         if let Err(error) = projector.project_nodes(snapshot, Some(touched)).await {
             if decision::run_settled(snapshot) {
                 projector.forget_run(&snapshot.process_id);
@@ -796,6 +1039,7 @@ impl KernelHost {
             return true;
         };
         let queued = projector.is_repair_pending(process_id);
+        let _projection = self.enter_admission(AdmissionCategory::Projection).await;
         match self.load(process_id).await {
             Ok(Some(loaded)) => match projector.project_repair(&loaded.snapshot).await {
                 Ok(_) => {
@@ -1190,6 +1434,25 @@ impl KernelHost {
                             wake_failures = metrics.wake_failures,
                             repaired = metrics.repaired,
                             "kernel ready queue"
+                        );
+                    }
+                    let admissions = self.admission_metrics();
+                    if admissions.parked > 0
+                        || admissions.quarantined_runs > 0
+                        || admissions.reconciliation.active > 0
+                    {
+                        tracing::debug!(
+                            execution_active = admissions.execution.active,
+                            execution_cap = admissions.execution.cap,
+                            parked = admissions.parked,
+                            quarantined = admissions.quarantined_runs,
+                            effect = admissions.effect.active,
+                            effect_cap = admissions.effect.cap,
+                            recovery = admissions.recovery.active,
+                            reconciliation = admissions.reconciliation.active,
+                            reconciliation_cap = admissions.reconciliation.cap,
+                            projection = admissions.projection.active,
+                            "kernel admission"
                         );
                     }
                     if let Err(error) = self.dispatch_outbox().await {
@@ -2524,6 +2787,12 @@ impl KernelHost {
         id: &OperationId,
         resolution: crate::engine::EffectResolution,
     ) -> Result<()> {
+        // A8: a human decision is control-plane work with its own budget. It
+        // never asks for an execution slot, so a full run quota cannot park it
+        // and it cannot park a new run.
+        let _reconciliation = self
+            .enter_admission(AdmissionCategory::Reconciliation)
+            .await;
         let Some(loaded) = self.load(&id.process_id).await? else {
             return Err(ActError::Runtime(format!(
                 "aggregate {} not found",
@@ -2593,6 +2862,7 @@ impl KernelHost {
     /// and a missing ready record (an older database, a damaged index) is
     /// repaired.
     pub(crate) async fn recover(&self, now_ms: i64) -> Result<RecoveryReport> {
+        let _recovery = self.enter_admission(AdmissionCategory::Recovery).await;
         let mut report = RecoveryReport::default();
         // One boot pass: rebuild the derived indexes from the authoritative
         // aggregates. This is linear in the aggregate set once per host, not
