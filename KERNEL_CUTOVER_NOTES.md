@@ -3789,6 +3789,81 @@ cargo fmt --all -- --check -> OK
   已在等待中的 handle 不订阅另一实例。
 - 不改 effect/outbox payload、channel ack/delivery 语义、A5 持久 revision/repair queue、A11 回收。
 
+### A10 完成(2026-10-18):拆分控制面调度器
+
+**任务**:§11 D 的 A10(P2)。timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair
+各自拥有独立的 interval/backoff/budget/指标;timer 使用到期索引,不靠全量 recovery 扫描;禁止用统一
+缩短 tick 解决延迟。
+
+**事实与契约(拆分前)**
+
+- driver 的一个 `tick` 同时做 ready 到期扫描、recovery 扫描、outbox retry,并把投影 repair 塞在
+  `recover()` 里;trigger、message retry、snapshot TTL 也读同一个 `tick_interval`。
+- 正常活性早已来自 A2 的 durable ready index:`default_ready_at` 只让 `DispatchTimeout` 等一个轮询间隔,
+  `drive_ready` 只读到期记录。`RecoveryIndex::project` 只收 `needs_recovery()` 的状态
+  (`Claimed`/`CommitPrepared`/`Committed`/`EffectUnknown`/`Quarantined`),所以 timer 本就不在 recovery
+  索引里;但两者的**频率**仍被同一个 tick 绑死。
+- cleanup(A11)已有独立 loop/health/metrics;lease renewal 没有独立实现——claim 过期仍由 recovery
+  的异常路径回收(`ReleaseExpiredClaim`),本笔不新增假的续期循环。
+
+**协议**
+
+- `ConfigData` 新增 `ready_interval_secs`/`recovery_interval_secs`/`outbox_interval_secs`/
+  `projection_interval_secs`/`trigger_interval_secs`/`retry_interval_secs`/`snapshot_interval_secs`,
+  以及 `ready_batch`/`recovery_batch`/`outbox_batch`/`projection_batch`。全部省略时跟随
+  `tick_interval_secs`(测试构建的 `TEST_TICK_MS`),因此默认配置与 A9 完成时一致;显式值下限 1 秒,
+  budget 夹在 1..=1024。
+- `KernelSchedule` 把一个宿主的四个 driver 间隔与预算固定下来;`KernelHost::serve` 用四个独立的
+  `tokio::time::interval` 跑 ready/timer、recovery、outbox retry、projection repair。`ready.notified()`
+  与 `deliver.notified()` 仍只做加速,丢失只增加延迟。
+- timer:仍是 ready index 的到期记录(`DispatchTimeout.ready_at_ms = now + ready_interval`;idle round
+  由 `drive_ready` 延后一个 ready 间隔),recovery 频率不参与其唤醒。
+- recovery:预算按候选操作数截断,`recovery_cursor` 从上次已观察的 entry 继续;游标只是调度提示,
+  重启/丢失只会从头再扫。`recover()` 不再调用 `repair_projections`。
+- outbox:预算按记录数截断,`outbox_cursor` 从上次已处理记录继续;cursor 越过末尾时回绕一次。
+- boot:ready 索引修复归 ready loop(`ensure_ready_boot`),投影 catch-up 归 projection loop
+  (`ensure_projection_boot`);`serve` 启动时先做一次 `ensure_boot`,之后由各自的 loop 重试失败项。
+- trigger/message-retry/snapshot TTL 各用自己的 interval;cleanup 保持 A11 的独立 interval。
+- 健康与指标:`SchedulerHealth` 增加 `ready`/`recovery`/`outbox`/`projection`;新增
+  `ReadyMetrics.passes`、`OutboxMetrics`(backlog/oldest_due_age/observed/passes/delivered/deferred)、
+  `RecoveryMetrics`(scanned/more_pending/passes/reclaimed/ready_repaired/finalized/
+  reconciliation_required/effect_*);`Runtime::{ready,outbox,recovery}_metrics` 公开读取。
+  `ProjectionMetrics`/`CleanupMetrics` 沿用。
+- 未改:effect/outbox payload 与顺序、channel ack/delivery、A4 lane、A5 revision/repair queue、
+  A8 额度、A9 handle、A11 回收判定与顺序;lease 续期仍不存在,claim 过期仍走 recovery。
+
+**测试/指标**
+
+- `config.rs::control_plane_intervals_default_to_the_tick_and_move_independently`:七类 interval
+  默认跟随 tick、可分别覆盖、0 被夹到 1。
+- `scheduler/shell/tests/scheduler_split.rs`:
+  - recovery 压到 1 小时时,ready 间隔 25 ms 的 timeout branch 仍在 ready pass 触发;
+  - ready 10 ms 运行 250 ms:ready passes ≥5,recovery passes ≤2,outbox passes ≥3;
+  - 真实 `Engine` 配置(`ready=1s`、`recovery=3600s`)下 timeout 仍触发,recovery 只跑启动时的一轮。
+- 既有 reliability/A1*/A2/A3/A4/A5/A6/A7/A8/A9/A11、action/cancel、outbox/effect、timer/timeout、
+  cleanup/reclaim、projection 套件全绿(见下)。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 950 passed, 0 failed, 1 ignored (155.35s)
+cargo test -p acts --lib scheduler::shell::tests::scheduler_split -> 3 passed
+cargo test -p acts --lib config::tests::control_plane_intervals_default_to_the_tick_and_move_independently -> 1 passed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all -- --check -> OK
+```
+
+- 全量首跑出现一次既有负载翻转:`export::actions::tests::an_unsub_reaches_only_the_callers_own_namespace`
+  (A9 记录同一现象);单跑通过,复跑全量 950 passed / 0 failed。与 A10 的 loop 拆分无关。
+
+**边界**
+
+- 不做跨进程 exactly-once;不改 effect/outbox payload、channel ack/delivery、A5 持久 revision/repair
+  queue、A11 回收判定与顺序。
+- 不把“缩短 tick”当延迟手段;不把异常兜底(recovery)转成正常活性来源。
+- 不新增 lease-renewal 循环:当前协议没有需要续期的执行期租约,claim 生命周期仍由 recovery 的
+  过期回收决定。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3811,9 +3886,9 @@ cargo fmt --all -- --check -> OK
 > A4(每 Process 单写者 command lane)已完成(§10「A4 完成」);A5(projection 版本协议)已完成(§10「A5 完成」);
 > A6(Shell 变薄,Core 输出完整 Decision)已完成(§10「A6 完成」);
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
-> A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」)。
-> **当前执行项是 A10(拆分控制面调度器;§11 D)**。
-> 第二波 P1/L* **暂缓,不删除**。
+> A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
+> A10(拆分控制面调度器)已完成(§10「A10 完成」)。
+> **第三波 A1-A11 已全部完成;当前执行项回到 §11 B 第二波,从 P1 开始**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -3859,7 +3934,7 @@ cargo fmt --all -- --check -> OK
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:暂缓(§11 D 第三波优先;A2 完成后 §12 指向 A11,不在本轮执行)。**
+**状态:第三波(A1-A11)已全部完成,第二波解锁;§12 当前指向 P1。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
@@ -3892,7 +3967,7 @@ cargo fmt --all -- --check -> OK
 > **effect/commit 顺序、正常路径的活性来源、同一 Process 的写者模型、投影协议、Shell 仍承担状态机语义、
 > 以及终态 ProcessSnapshot/投影/索引的回收与 PID 复用**。
 > 执行顺序:**A1a → A2 → A11 → A1b(批量 confirm) → A1c → A3/A4/A5 → A6 → A7/A8/A9/A10**。
-> A1a/A2/A11/A1b/A1c/A3/A4/A5/A6 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
+> A1a/A2/A11/A1b/A1c/A3/A4/A5/A6/A7/A8/A9/A10 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
 > 正常路径不得恢复 per-record claim/confirm;A1c 的自动重试只对 executor observation 证明 not-applied
 > 且包显式声明幂等的 effect 生效。
 > 第二波 P1/L* 暂缓,不删除。
@@ -3910,7 +3985,7 @@ cargo fmt --all -- --check -> OK
 | **A7** | Recovery 统一成 `RecoverOperation(observed) -> Decision`:恢复层只收集 observed;正常/恢复共用 transition/commit 与 per-pid lane | #7 | P1 | A2/A4 | **已做(§10「A7 完成」)**。验收:`Observed { operation_id, kind, persisted_phase, revision, aggregate_revision, effect_receipt, now_ms }` 是唯一输入;`recover_operation -> RecoveryDecision { directive, command }` 是唯一入口,`RecoveryPlanner::classify` 私有;reclaim/finalize 走 lane + revision guard,`FinalizeCommit` 与正常 `dispatch` 共用 `execute_decision`(project → lifecycle → outbox batch confirm → admission);`EffectUnknown` 仍按 A1c(`Applied`/`Failed` 重放、`NotApplied`+幂等才重试、其余人工);正常/恢复同状态同 Decision |
 | **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | **已做(§10「A8 完成」)**。验收:`RunFacts::execution_active`/`place` 在 Core,`EffectUnknown`/`Quarantined` 的 run 立即释放 execution slot;manual 决策走 `Slot::Direct` + reconciliation gate;`mark_effect_unknown` 与终态 client decision 在同一决策里 `admit_run` 队首;五类 cap 各自配置,`AdmissionMetrics` 暴露 execution/parked/effect/recovery/reconciliation/projection/quarantined |
 | **A9** | durable run handle:`start()` 返回可 `wait()` 的 handle;先查终态→订阅→复查;event channel 只做通知;示例改先注册或 `wait()` | #9 | P2 | A1/A5 | **已做(§10「A9 完成」)**。验收:check-subscribe race 不存在;重启后仍可等待 |
-| **A10** | 拆分控制面调度器:timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair 独立 interval/backoff/budget/指标;禁止用统一缩短 tick 解决延迟 | #10 | P2 | A2 | 未做。验收:调整 recovery 频率不影响 timer/outbox;各循环有独立健康/积压指标 |
+| **A10** | 拆分控制面调度器:timer/outbox retry/recovery/lease renewal/settled sweeper/projection repair 独立 interval/backoff/budget/指标;禁止用统一缩短 tick 解决延迟 | #10 | P2 | A2 | **已做(§10「A10 完成」)**。验收:ready/timer、recovery、outbox、projection 各自独立 ticker + `KernelSchedule`/`Config` interval/budget;recovery 频率不影响 timer/outbox,ready 精度不增加 recovery 扫描;`SchedulerHealth` 与 `Ready/Outbox/RecoveryMetrics` 独立可读。lease renewal 无独立实现,claim 过期仍由 recovery 回收 |
 | **A11** | 终态回收 + PID 复用:run 终态且消息全部投递/结算、无未决 operation 后,原子删除 aggregate + recovery index + outbox index + ready index,再幂等删行/messages/deliveries/workdir;清理后同一 pid 可再次启动;不做历史归档,旧 pid 迟到消息由业务去重 | 2026-10-17 追加(存储目标) | **P1** | A2/A5 | **已做(§10「A11 完成」)**。验收:清理后聚合/索引/行/workdir 全消失;清理前拒绝复用、清理后允许;崩溃不留不可恢复半状态;`EffectUnknown`/未 ack run 不误删。**pid 存在性只看 aggregate**(行/`ops` 不参与);start 与 cleanup 共用 per-pid 生命周期锁。A5 的完整投影 generation 协议仍未做,本笔以 pid 墓碑收窄清理后的旧投影重写窗口 |
 
 **A1/A2/A11 的边界**:A1a 只关闭“effect 已执行后自动重试”的重复路径;A1b(批量确认)已关闭 outbox 的提交前可见性,
@@ -3934,60 +4009,49 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A10 —— 拆分控制面调度器(§11 D,P2)
+# 当前任务:P1 —— engine ~1 ms/hop 的分阶段画像(§11 B,第二波)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A10 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A10;
-§10「A9 完成」「A8 完成」「A5 完成」「A2 完成」。当前缺口:同一个 `tick_interval` 驱动
-driver 的 recovery + outbox、retry timer、trigger timer、snapshot TTL;timer 的 `DispatchTimeout`
-也靠 recovery 每 tick 唤醒;不同任务的延迟/负载特征被绑死,而“缩短 tick”会同时放大所有扫描。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 B 的 P1;§10「P6-1」的 engine 探针形状;§9.5 的 legacy 基线;
+§10「A10 完成」(第三波 A1-A11 已全部完成)。当前口径(release,内存 store):93 hops / 0.684 s =
+7.4 ms/hop ≈ 136 hop/s;legacy 2778–5099 hop/s。debug 的 11.2 hop/s 与 §9.5 对比作废(debug 下两次
+SHA-256 占整 run ~65%)。
 
-**目标**:timer scheduler、outbox retry、recovery scanner、lease renewal、settled sweeper、
-projection repair 各自拥有独立的 interval/backoff/budget/指标;timer 使用到期索引,不再依赖全量
-recovery 扫描。**不要**用统一缩短 tick 解决延迟。
+**目标**:把 ~1 ms/hop 的 plan/记账 CPU 分解到具体块(计划构造、消息 payload、`place_run`/
+`deliver_plan`、行投影),用数据决定下一块动谁。**只量不改代码**:插桩留在工作区、不提交、完成后删除
+或按 §10「P6-1」记录探针形状。
 
 **本笔内容**
 
-1. **事实与契约**
-   - 画清现状:`Runtime` 的三个 store-facing timer(`trigger`/`retry`/`cleanup`)、
-     `KernelHost::serve` 的 tick(ready due pass + outbox pass + recovery scan)、
-     `timer_poll_ms` 与 `DispatchTimeout` 的唤醒、`SnapshotRegistry` 的 TTL、(可选)lease 续期。
-   - 列出每个循环的输入(ready/recovery/outbox 索引、到期时间、租约)与当前统一的 tick 来源;
-     区分“正常活性”(durable ready/到期索引)与“异常兜底”(recovery 扫描)。
-2. **协议**
-   - 每个循环独立配置与独立调度:interval、backoff、单轮 budget、健康状态、积压/延迟指标;
-     默认值保持现有节奏,避免行为突变。
-   - timer 的到期集合来自到期索引/记录,不靠“每 tick 扫一遍 recovery”发现;调整 recovery 频率
-     不得改变 timer/outbox 的延迟,调整 timer 精度不得增加 recovery 扫描量。
-   - 保留现有语义:A2 的 ready 记录仍是正常活性来源;A7 的 recovery 只做异常兜底;A4 lane、
-     A5 projection/revision/repair queue、A8 额度、A9 handle、A11 回收判定不变。
-3. **测试/指标**
-   - 单测/集成:调整 recovery interval 时 timer/outbox 的到期延迟不变;调整 timer interval 时
-     recovery 扫描次数不增加;每个循环的 backlog/lag 可观察。
-   - 既有 reliability/A1*/A2/A3/A4/A5/A6/A7/A8/A9/A11、action/cancel、outbox/effect、
-     timer/timeout、cleanup/reclaim、projection 套件绿;示例与 channel 套件编译/运行不变。
+1. **探针**
+   - 用 §10「P6-1」的 engine 探针形状重建(一次 `examples/simple` / 内存 store,release 构建),
+     在 `#[cfg(test)]` 或等价开关下分阶段计时;不改变生产路径、不引入常驻 instrumentation。
+   - 阶段至少覆盖:计划/Decision 构造、消息 payload、`place_run`/`deliver_plan`、commit/聚合编解码、
+     行投影与 write-behind。
+2. **测量**
+   - 同一机器、release、内存 store,至少两次 run;记录每阶段 ns/hop、次数/hop 与占比。
+   - 与 §10「P6-1」的 708 次聚合读 / 726 次提交 / 569 行读对齐,解释差异。
+3. **结论**
+   - 选一个块作为下一笔性能工作,写出假设、预期收益与验证方式;不改代码实现该优化。
 
 **边界**
 
-- 不做跨进程 exactly-once;不改 effect/outbox payload、channel ack/delivery 语义、
-  A5 持久 revision/repair queue、A11 回收判定与顺序。
-- 不把“缩短 tick”当作任何循环的延迟手段;不把异常兜底转成正常活性来源。
-- 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
+- 不提交插桩/探针;不改变生产代码、消息 payload、outbox 顺序、A4/A5/A8/A9/A10/A11 语义。
+- 不用 debug 数据做结论;不以“缩短 tick”或跳过校验制造吞吐。
+- 不改业务流程/工作流语义;性能数据必须是可复现的 release 口径。
 
 **验收**
 
-- 调整 recovery 频率不影响 timer/outbox 延迟;调整 timer 精度不增加 recovery 扫描压力;
-- 每个循环有独立的健康状态与积压指标,且默认配置下行为与 A9 完成时一致;
-- `cargo test -p acts --lib --tests` 绿;
-- 写 §10「A10 完成」,§11 D 状态更新,§12 原地指向下一项(其后无剩余 A 项时指向 §11 B 的第二波)。
+- §10 记录:写「P1 完成」,含探针形状、每阶段 ns/hop 与占比、前后/legacy 对照、下一块建议;
+- 探针代码从工作区移除(或明确记录为未提交的临时物);
+- 不因本笔改动生产代码,既有 `cargo test -p acts --lib --tests` 不受影响;
+- §11 B 状态更新,§12 原地指向下一项(下一笔性能/遗留项,按 P1 结论从 P*/L* 选择)。
 
 # 限制与约束
 
-- **先读**:§11 D A10、设计 §3.10 A10;`scheduler/runtime.rs`(`tick_interval`、三个 timer、
-  `serve` 的接线)、`shell/mod.rs`(`serve`/`recover`/outbox pass/`repair_projection`/
-  `drive_ready`、`timer_poll_ms`)、`core/plan/timeout.rs`、`core/ready.rs`、
-  `core/recovery/*`、`Config` 的 tick/cleanup 配置、`scheduler/shell/health.rs` 与
-  `projection_metrics`/`cleanup_metrics`。
-- 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
+- **先读**:§11 B P1、§10「P6-1」「P1 相关」「A10 完成」、§9.5;`benches/` 与
+  `crates/acts/src/scheduler/shell/tests/perf_probe.rs`(已存在但当前 ignored)的现状。
+- 遵守 §11.C 门禁:若确实不改生产代码,只需 `-p acts --lib --tests` 与 `cargo fmt --check` 的现状确认;
+  任何临时插桩在交付前删除。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 ```
 
