@@ -4179,6 +4179,65 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 `Process`/`Task` 方法与 `Process::new*` 的参数变更一起属 BREAKING(已在 CHANGELOG 记录)。
 `Process`/`Task`/`NodeTree` 的类型退休仍按 L10-L12。
 
+### L10 完成(2026-10-18):headless scope 去 `Process`/`Task`(零行为变更)
+
+**任务**:§11 B 的 L10;设计 §3.7(d)①。L9 后 `scope.rs` 仍为每次 effect/predicate 建一个
+`Process` + 整棵 `NodeTree` + 一个 `Task`;本笔只换载体,不碰判定、消息与行。
+
+**改法**
+
+- `shell/scope.rs` 新增 `Scope`(run id、env、owner、workdir、`set_data`)与 `ScopeTask`(node
+  content、data、sealed、state/时间、cancel token、`pid`/`id`)。`headless_scope` 只按 `ScopeSpec`
+  构造二者并建 `Context`,不再 `Process::new`/`process.load`/`Task::new`;节点按已导入的 durable
+  model 直接解析(`model.id`、step、branch、catch/timeout;branch 仅在 step 无 `next` 时进入,
+  与 `NodeTree` build 同规则),不再建 `NodeTree`。
+- `Context` 内部改持 `Arc<Scope>`/`Arc<ScopeTask>`;`ctx.task()`/`ctx.proc` 的包侧形状不变
+  (`pid`/`id`/`options`/`node`/`params`/`data`/`sealed`/`cancellation_token`;`id`/
+  `owner_scope`/`env`/`workdir`/`set_data`/`find_tasks`/`tasks`/`task`)。`scope_vars` → data
+  seeding、`prepare`/`resolve_sealed`、effect 写回(`data_delta`/env/outputs)与 predicate 路径
+  都只换类型,逻辑未改。
+- **read-model 兼容**:`Process::create_context` 仍可用(env 单测与读模型 API 构造 Context),
+  其 `Scope`/`ScopeTask` 只是委托给已加载的 `Process`/`Task`;headless 路径不持有它们。
+  `NodeContent` 从 test-only 导出改为 crate 内正式导出(它仍是持久化形状)。
+- `NodeTree` 仍留给 projection/`valid`/`tree_output`,本笔未改行格式;`Process`/`Task` 仍是
+  `Runtime::start` 的返回句柄与读模型(L11/L12 删除)。
+
+**探针(release,临时,已删)**
+
+- 形状:同一 `headless_scope`、单步模型(`step1`)、固定 `ScopeSpec`、2000 次调用;只测 scope
+  构造,不含 package 执行或整 hop。探针 `#[ignore]` 单测与工作区均未提交。
+- 改前(HEAD `28ae0d8`):**15,543.9 ns/call**;改后:**7,480.5 ns/call**(−51.9%,约 **2.08×**)。
+- 该数不等于整 hop 收益(§10「P1 完成」的分阶段里 `perform` 约 49 µs/op);它证明每 hop 不再付
+  `Process::new` + `NodeTree::load` + `Task::new`,且 release 下构造成本减半。
+
+**验收**
+
+- `cargo test -p acts --lib --tests` = **958 passed / 0 failed**(行/消息/`tree_output` 逐字断言未改)。
+- per-crate:`acts-package-*` **54 passed**(1 filtered,见下);`acts-plugin-grpc` **14 passed**
+  (2 filtered)、`acts-plugin-nats` **11 passed**、`acts-plugin-web` **22 passed**(2 filtered);
+  `acts-channel` **32 passed**(2 ignored);`acts-cli` **30 passed**;`acts-server` **17 passed**
+  (6 suites);`acts-acl` **28 passed**;`acts-expr --all-features` **45 passed**;
+  `acts-store --features sled,sqlite,postgres` **385 passed**(1 ignored)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`
+  绿;未改 manifest,未跑 `cargo deny`。
+- 环境:`nats-server -js -p 4222 -a 127.0.0.1`(JetStream)提供 broker;Postgres 16 在
+  localhost:5433 可用。`acts-server` 在本机全并行 rustc 下触发 Windows page-file/mmap 限制
+  (os error 1455),以 `-j 2` 重跑后全绿——这是构建资源现象,不是套件失败。
+
+**既有红(非本笔回归,均以 L10 前提交单跑确认)**
+
+- `acts-package-shell::vars::the_inputs_of_the_act_embed_in_the_script`:在 `4645c9e`(L9 前)与
+  `28ae0d8`(L9)上同样失败——`$inputs().data` 取不到上一步输出;本笔只换 scope 载体,未改
+  `Task::inputs` 的 prev/输出语义。
+- `acts-plugin-grpc::tests::test_on_message_stream_drop_deregisters_channel`/
+  `test_on_message_slow_subscriber_is_disconnected`,以及
+  `acts-plugin-web::sse::tests::sse_stream_drop_deregisters_channel_handler`/
+  `sse_slow_subscriber_is_disconnected_instead_of_queueing`:在 `28ae0d8` 上同样超时(等待 workflow
+  message 分发),与本笔无关。
+
+**API 面**:`Context::task()` 的返回类型改为 `ScopeTask`、`Context::proc` 改为 `Scope`;包侧字段/
+方法名不变。`Process`/`Task`/`NodeTree` 的类型退休仍按 L11/L12。已在 CHANGELOG 记 BREAKING。
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4201,7 +4260,7 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1、P2、L8、L9 已完成(§10「P1 完成」「P2 完成」「L8 完成」「L9 完成」),下一执行项为 §11 B 的 L10**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2、L8、L9、L10 已完成(§10「P1 完成」「P2 完成」「L8 完成」「L9 完成」「L10 完成」),下一执行项为 §11 B 的 L11**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4247,7 +4306,7 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L8、L9 已完成,§12 当前指向 L10。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L8、L9、L10 已完成,§12 当前指向 L11。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
@@ -4261,7 +4320,7 @@ params,非法 params 仍使 act 失败(与删除前一致)。
 | **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
 | **L8** | **减字节:整包聚合 → append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**:head + base + 每 commit 的变更日志;阈值(32)压缩;懒迁移旧 V2/V3;golden 重冻结 + CHANGELOG BREAKING | 原 §1.b③ / §1.b(i)② / §1.b(iii) | **已做(§10「L8 完成」)**。验收:同一探针 187 commits 聚合写 205,207 B 总量 / 1,097 B/commit(改前每 commit 一个整包文档,终态 50,249 B;§5i 形状 14.7 MB),普通 commit 只写 head+一个变更 entry,每 32 个 commit 才写一次 base;旧 V2/V3 迁移/中断重入/guard 冲突/reclaim 全绿;golden 新族 fingerprint 冻结;`-p acts --lib --tests` 绿 |
 | **L9** | **退役 Phase 0:删动态 act 死簇与 legacy 事件面** —— `Context::build_acts`/`dyn_build_act`/`NodeTree::append_node`、`package/core/{block,parallel,sequence}.rs` 的三个调用点;`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;确认零调用的 `Process`/`Task` 方法(`create_task`/`print`/`into_data`/`task_by_*`、`unique_id`/`into_data_vars`/`is_vars_dirty` 等) | 设计 §3.7(d)⑤ + 2026-10-17 评估 | **已做(§10「L9 完成」)**。生产侧 `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` = 0(历史注释除外);`-p acts --lib --tests` **958 passed**;行/消息/`tree_output` 逐字断言不变;clippy/fmt 绿。**BREAKING**:legacy 事件面与零调用 `Process`/`Task` 方法移除 |
-| **L10** | **退役 Phase 1:headless scope 去 `Process`/`Task`** —— `ScopeSpec` 已是完整输入,换成 `ScopeTask`(node content + data + sealed + cancel)+ `Scope`(pid/env/owner/workdir);替换 `scope.rs:47-87`,保留包实际用到的 `task.{pid,id,options,node,data}` 与 `proc.{id,owner_scope,env,workdir,set_data}` | 设计 §3.7(d)① | 未做;前置 L9。验收:effect/predicate/package 套件全绿;每 hop 不再建 `Process`+`NodeTree`(收益按 P1 口径量);`Context` 的包 API 名字不变或按 BREAKING 记录 |
+| **L10** | **退役 Phase 1:headless scope 去 `Process`/`Task`** —— `ScopeSpec` 已是完整输入,换成 `ScopeTask`(node content + data + sealed + cancel)+ `Scope`(pid/env/owner/workdir);替换 `scope.rs:47-87`,保留包实际用到的 `task.{pid,id,options,node,data}` 与 `proc.{id,owner_scope,env,workdir,set_data}` | 设计 §3.7(d)① | **已做(§10「L10 完成」)**。`headless_scope` 不再 `Process::new`/`load`/`Task::new`,节点直接按 durable model 解析;release 探针 15,543.9 → 7,480.5 ns/call;`-p acts --lib --tests` 958 绿;行/消息/`tree_output` 逐字断言不变;`Context::task()`/`proc` 的包侧形状不变。**BREAKING**:carrier 类型名(`ScopeTask`/`Scope`) |
 | **L11** | **退役 Phase 2:model 直出 view** —— `Workflow::valid`/`tree_output` 与投影 `node_data` 直接走 `Workflow`/`Step`/`Branch`(逐字保持行与树输出);删 `NodeTree`/`Node`;`NodeData`/`NodeContent` 持久化形状保留 | 设计 §3.7(d)③ | 未做;前置 L10。验收:`sch_tree_output_is_byte_stable` 563-byte、`model:get fmt=tree`、`node_data` 逐字、投影行格式不变 |
 | **L12** | **退役 Phase 3:读 API 改行查询并删类型** —— `proc:get` 用 task 行 + `TaskInfo::from(&data::Task)` + vars join;删 `Runtime::proc`/`Store::load_proc`/`store/process_rows`/`Process`/`Task`/`TaskTree`;`Executor::proc().get_process` 删除或改读模型 DTO(**BREAKING**) | 设计 §3.7(d)④ | 未做;前置 L11。验收:`proc:get` 字段不变、reliability 测试改读行/快照后全绿、`git grep "struct Process\|struct Task\|struct NodeTree"` = 0、CHANGELOG BREAKING |
 
@@ -4323,49 +4382,50 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:L10 —— 退役 Phase 1:headless scope 去掉 `Process`/`Task`(§11 B,第二波,接 L9)
+# 当前任务:L11 —— 退役 Phase 2:model 直出 view(§11 B,第二波,接 L10)
 
-**依据**:§11 B 的 L10;设计 `KERNEL_REFACTOR_DESIGN.md` §3.7(d)①。L9 已删掉动态 act 簇与 legacy
-事件面;`scope.rs` 仍为每次 effect/predicate 建一个 `Process` + 整棵 `NodeTree` + 一个 `Task`。
+**依据**:§11 B 的 L11;设计 `KERNEL_REFACTOR_DESIGN.md` §3.7(d)③。L10 已让 headless scope 不再
+建 `NodeTree`;`NodeTree`/`Node` 仍服务投影、`Workflow::valid` 与 `tree_output`。
 
-**目标**:零行为变更地把 headless scope 换成轻量载体——`ScopeSpec` 已是完整输入,直接驱动
-`ScopeTask`(node content + data + sealed + cancel)与 `Scope`(pid/env/owner/workdir);
-effect、predicate、容器 fan-out 的判定、消息与行投影逐字不变。
+**目标**:零行为变更地把 `NodeTree`/`Node` 的三处消费者直接改到 model——`Workflow::valid`
+(`model:deploy` 校验)、`tree_output`(`model:get fmt=tree`)与投影 `node_data`(行)——并删除
+`NodeTree`/`Node`;逐字保持行格式、树输出与校验结论。`NodeData`/`NodeContent` 是持久化形状,保留。
 
 **本笔内容**
 
-1. 在 `scheduler/shell/scope.rs` 引入 `ScopeTask`(等价于包实际读到的 `pid`、`id`、`options`、
-   `node`、`data`/`sealed`、`cancellation_token`)与 `Scope`(等价于 `id`、`owner_scope`、`env`、
-   `workdir`,以及 `set_data`),替换 `headless_scope` 的 `Process::new` + `process.load` + `Task::new`。
-2. `Context` 内部改持 `Scope`/`ScopeTask`;包侧名字保持 `ctx.task()`/`ctx.proc` 的现有形状,
-   只保留 L10 需要的字段与方法。若某公开名必须改,按 BREAKING 记录并同步所有包。
-3. 效果写回仍只取 `task.data()` 差量、`task.sealed`、`process.env()` 与包 `outputs`;不改
-   `EffectOutcome`/`TransitionPlan`/outbox 顺序。predicate 路径共用同一个 scope 构造。
-4. `NodeTree` 仍留给投影/`valid`/`tree_output`(L11 再删),本笔不碰行格式。
+1. `Workflow::valid` 直接在 `Workflow`/`Step`/`Branch` 上实现(trigger/event id、重复节点 id、
+   `next` 目标、`while`+`next`、`rn` 等现有规则),不再经 `NodeTree::load`。
+2. `tree_output` 从 model 的声明结构直接渲染,保持现有 563-byte 输出、缩进、顺序与 `next=` 文本。
+3. 投影 `node_data` 直接由 `Workflow`/`Step`/`Branch` 构造 `NodeData`/`NodeContent`;行 key/字段、
+   dynamic 节点语义与持久化字节不变。
+4. 删除 `NodeTree`/`Node` 及 `view/build.rs` 中只服务它们的部分;保留 `NodeData`/`NodeContent`/
+   `assign_ids`/`NodeKind`。`Store::load_proc` 的读模型重建改按行数据构造,不再有 `Arc<Node>`;
+   `Process`/`Task` 的读 API 本笔保留(L12 删除)。
+5. `NodeContent` 已是 crate 内正式导出(L10);不要再挪 `view`(D4 暂不挪)。
 
 **边界**
 
-- 零行为变更;不改持久化格式、effect/outbox payload 与顺序;不改 A3/A4/A5/A9/A10/A11 语义;
-  不引入 `unsafe`;不提前做 L11/L12。
+- 零行为变更;不改持久化格式、行 key/字段、消息 payload 与 outbox 顺序;不改 A3/A4/A5/A9/A10/A11
+  语义;不提前做 L12;不引入 `unsafe`。
 - 不删仍被生产路径调用的函数;拿不准就保留并记录证据。
 - 不改 manifest 就不跑 `cargo deny`;探针/临时插桩不提交;生产代码与文档分开提交。
 
 **验收**
 
-- 每 hop 不再构造 `Process` + `NodeTree`(按 §10「P1 完成」的 release 探针口径量前后);
-- `cargo test -p acts --lib --tests` 全绿(行投影/消息/`tree_output` 逐字断言不变),并跑受
-  `Context` 影响的 per-crate 套件:`acts-package-*`、`acts-plugin-*`、`acts-channel`、`acts-cli`、
-  `acts-server`(需要 NATS/Postgres 的套件按 §11.C 记录环境);
-- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`;
-- §10 写「L10 完成」并更新 §11 B 状态;§12 原地指向下一项。
+- `sch_tree_output_is_byte_stable` 的 563-byte 输出逐字不变;`model:get fmt=tree` 不变;
+  投影 `node_data` 每个字段/字节不变;`model:deploy` 的校验结论与错误文本不变。
+- `cargo test -p acts --lib --tests` 全绿;受读模型/CLI/server 影响的 per-crate 套件按 §11.C 跑
+  (NATS 127.0.0.1:4222、Postgres localhost:5433 按现场环境记录)。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
+- `crates/acts/src` 内 `struct NodeTree`/`struct Node` = 0;`NodeData`/`NodeContent` 保留。
+- §10 写「L11 完成」并更新 §11 B 状态;§12 原地指向 L12。
 
 # 限制与约束
 
-- **先读**:§10「L9 完成」、§11 B L10、设计 §3.7(d)①;
-  `crates/acts/src/scheduler/shell/{scope,context,effects,predicate}.rs`、
-  `crates/acts/src/scheduler/shell/process/{process,task}.rs`、`crates/acts/src/scheduler/shell/mod.rs`
-  的 scope 构造,以及 `packages/acts-package-*/src` 对 `Context`/`Task`/`Process` 的读取。
-- 遵守 §11.C 门禁;改到包/CLI/server 面时跑完整 per-crate 套件;不改 manifest 就不跑 `cargo deny`。
+- **先读**:§10「L10 完成」、§11 B L11、设计 §3.7(d)③;`core/model/view/{node,node_tree,build}.rs`、
+  `shell/projection.rs` 的 `node_data`、`model/workflow.rs` 的 `valid`/`tree_output`、
+  `store/process_rows.rs` 的读模型重建。
+- 遵守 §11.C 门禁;改到 store/CLI/server 面时跑完整 per-crate 套件;不改 manifest 就不跑 `cargo deny`。
 - 探针与临时插桩不提交;生产代码与文档分开提交,提交前过 §11.C 门禁。
 ```
 
