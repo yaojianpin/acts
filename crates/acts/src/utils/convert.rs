@@ -1,4 +1,4 @@
-use crate::{Context, Vars, scheduler::Task};
+use crate::{Context, Vars, scheduler::ScopeTask};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::sync::{Arc, LazyLock};
@@ -128,7 +128,7 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
     ret
 }
 
-pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
+pub fn fill_proc_vars(task: &Arc<ScopeTask>, values: &Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
     for (k, v) in values.iter() {
         if let JsonValue::String(string) = v

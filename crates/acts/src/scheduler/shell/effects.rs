@@ -12,9 +12,9 @@
 //! stable [`EffectKey`] of the operation, so a retry, replan or restart can
 //! present the same idempotency token instead of a fresh random one.
 //!
-//! The runner drives the package through a *headless* scope: a bare
-//! in-memory [`Process`] over the declaring model with one task on the
-//! acting node. Packages read the context they always read — the params
+//! The runner drives the package through a *headless* scope: the acting
+//! node's content, its data/sealed values and the run's env, with no
+//! `Process` or `NodeTree`. Packages read the context they always read — the params
 //! resolve through the same `fill_params` path — and nothing the headless
 //! scope touches is durably written: outputs come back as values and land
 //! in the aggregate through the operation's own plan.
@@ -24,7 +24,7 @@ use crate::{
     scheduler::{
         Runtime,
         core::model::effect::EffectKey,
-        shell::{Context, Process, Task},
+        shell::{Context, Scope, ScopeTask},
     },
     utils::consts,
 };
@@ -149,7 +149,7 @@ impl PackageEffectRunner {
     /// own directory (`<workdir>/<pid>`) and the durable env map are seeded,
     /// so `$env.WORK_DIR` and `$env.X` answer exactly what the legacy process
     /// env answered.
-    fn headless(&self, request: &EffectRequest) -> Result<(Arc<Process>, Arc<Task>, Context)> {
+    fn headless(&self, request: &EffectRequest) -> Result<(Arc<Scope>, Arc<ScopeTask>, Context)> {
         super::scope::headless_scope(&self.runtime, &request.scope)
     }
 }
@@ -275,7 +275,10 @@ fn non_private(vars: Vars) -> Vec<(String, serde_json::Value)> {
 /// The headless task data beyond the seeded scope: a key the seam did not
 /// seed, or one whose value the package changed. Echoing an unchanged seeded
 /// value back would shadow an ancestor's variable with a local copy.
-fn data_delta(task: &Arc<Task>, seeded: &[(String, String)]) -> Vec<(String, serde_json::Value)> {
+fn data_delta(
+    task: &Arc<ScopeTask>,
+    seeded: &[(String, String)],
+) -> Vec<(String, serde_json::Value)> {
     task.data()
         .iter()
         .filter(|(name, _)| !crate::utils::consts::is_private_key(name))

@@ -364,14 +364,14 @@ pub(crate) fn join_scope(values: &[serde_json::Value]) -> String {
 /// Validate that every scope param of `options` resolves on the task chain,
 /// returning the raw values in order, or the missing names.
 pub(crate) fn resolve_scope_params(
-    task: &crate::scheduler::Task,
-    proc: &std::sync::Arc<crate::scheduler::Process>,
+    task: &crate::scheduler::ScopeTask,
+    scope: &std::sync::Arc<crate::scheduler::Scope>,
     options: &SnapshotOptions,
 ) -> std::result::Result<Vec<serde_json::Value>, Vec<String>> {
     let mut values = Vec::with_capacity(options.scope.len());
     let mut missing = Vec::new();
     for p in &options.scope {
-        match task.find::<serde_json::Value>(proc, p) {
+        match task.find::<serde_json::Value>(scope, p) {
             Some(v) => values.push(v),
             None => missing.push(p.clone()),
         }

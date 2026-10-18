@@ -131,6 +131,7 @@ pub(crate) use model::ProcessSpec;
 pub(crate) use predicate::EnginePredicateRunner;
 pub(crate) use process::{Process, Task};
 pub(crate) use projection::{ProjectionMetrics, RowProjector};
+pub(crate) use scope::{Scope, ScopeTask};
 
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;

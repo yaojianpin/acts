@@ -2,7 +2,7 @@ use crate::{
     ActError, Executor, MissingParamAction, Result,
     scheduler::{
         Runtime,
-        shell::{Process, Task},
+        shell::{Process, Scope, ScopeTask, Task},
     },
     snapshot::{SnapshotPolicy, SnapshotStore, join_scope, resolve_scope_params},
     utils::consts,
@@ -21,8 +21,8 @@ tokio::task_local! {
 pub struct Context {
     pub runtime: Arc<Runtime>,
     pub executor: Arc<Executor>,
-    pub proc: Arc<Process>,
-    task: RwLock<Arc<Task>>,
+    pub proc: Arc<Scope>,
+    task: RwLock<Arc<ScopeTask>>,
 }
 
 impl Clone for Context {
@@ -46,7 +46,7 @@ impl std::fmt::Debug for Context {
 }
 
 impl Context {
-    fn init_vars(&self, task: &Arc<Task>) {
+    fn init_vars(&self, task: &Arc<ScopeTask>) {
         let inputs = task.inputs(self);
         debug!(inputs = %inputs, "init vars");
 
@@ -59,11 +59,34 @@ impl Context {
     }
 
     pub fn new(proc: &Arc<Process>, task: &Arc<Task>) -> Self {
+        // The read-model compatibility view: a context built from a loaded
+        // process keeps delegating to that process and task, while the
+        // headless seams use the lightweight carriers directly.
+        Self::from_scope(
+            task.runtime().clone(),
+            Scope::from_process(proc),
+            ScopeTask::from_task(task.clone()),
+        )
+    }
+
+    /// The headless context: the scope and task the effect/predicate seams
+    /// built from a [`ScopeSpec`](super::scope::ScopeSpec).
+    pub(crate) fn headless(runtime: Arc<Runtime>, proc: Arc<Scope>, task: Arc<ScopeTask>) -> Self {
+        Self::from_scope(runtime, proc, task)
+    }
+
+    /// The context over already-built carriers. `Task::inputs` uses it to
+    /// evaluate a predecessor's outputs in that predecessor's own scope.
+    pub(crate) fn from_scope(
+        runtime: Arc<Runtime>,
+        proc: Arc<Scope>,
+        task: Arc<ScopeTask>,
+    ) -> Self {
         Context {
-            runtime: task.runtime().clone(),
-            executor: Arc::new(Executor::engine(task.runtime())),
-            proc: proc.clone(),
-            task: RwLock::new(task.clone()),
+            executor: Arc::new(Executor::engine(&runtime)),
+            runtime,
+            proc,
+            task: RwLock::new(task),
         }
     }
 
@@ -88,7 +111,7 @@ impl Context {
         CONTEXT.with(|ctx| f(ctx))
     }
 
-    pub fn task(&self) -> Arc<Task> {
+    pub fn task(&self) -> Arc<ScopeTask> {
         self.task.read().clone()
     }
 

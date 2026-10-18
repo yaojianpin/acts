@@ -148,7 +148,8 @@ impl Task {
             // set the prev task's outputs as current inputs. The outputs are
             // read in the prev task's own scope (its context, not `ctx`): the
             // exposes/expressions it fills are its own.
-            let prev_ctx = ctx.proc.create_context(&prev_task);
+            let prev_ctx =
+                Context::from_scope(ctx.runtime.clone(), ctx.proc.clone(), prev_task.clone());
             for (k, v) in prev_task.outputs(&prev_ctx).iter() {
                 inputs.set(k, v.clone());
             }

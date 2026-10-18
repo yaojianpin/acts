@@ -172,6 +172,7 @@ impl Process {
     pub fn inputs(self: &Arc<Self>) -> Vars {
         if let Some(task) = self.root() {
             let ctx = task.create_context(self);
+            let task = ctx.task();
             return self.with_model(|model| utils::fill_proc_vars(&task, &model.vars(), &ctx));
         }
         Vars::new()

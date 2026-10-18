@@ -6,7 +6,6 @@ mod node;
 mod node_tree;
 
 pub(crate) use build::assign_ids;
-#[cfg(test)]
-pub use node::NodeContent;
+pub(crate) use node::NodeContent;
 pub use node::{Node, NodeData, NodeKind};
 pub use node_tree::NodeTree;

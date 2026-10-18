@@ -327,7 +327,7 @@ fn env_map() -> Vars {
     map
 }
 
-fn current_cost(task: &crate::scheduler::Task) -> i64 {
+fn current_cost(task: &crate::scheduler::ScopeTask) -> i64 {
     if let Some(cost) = task.data().get::<i64>(consts::TASK_COST) {
         return cost;
     }

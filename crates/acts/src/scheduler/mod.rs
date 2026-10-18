@@ -54,17 +54,10 @@ pub use self::shell::Context;
 
 pub(crate) use self::core::model::{
     legacy_task_state::LegacyTaskState,
-    view::{Node, NodeData, NodeKind, NodeTree},
+    view::{Node, NodeContent, NodeData, NodeKind, NodeTree},
 };
 pub(crate) use self::core::plan::cron::Cron;
 pub(crate) use self::runtime::Runtime;
-pub(crate) use self::shell::{Process, Task};
-
-// `NodeContent` is the one kernel type a consumer outside the runtime needs
-// only to build a row: the model's own conversion test constructs a view node
-// to check what `TaskInfo` makes of it. It is test-only by nature, so it is
-// re-exported as such rather than claimed as serving-path surface.
-#[cfg(test)]
-pub(crate) use self::core::model::view::NodeContent;
+pub(crate) use self::shell::{Process, Scope, ScopeTask, Task};
 
 pub(crate) use self::runtime::prepare_workdir;
