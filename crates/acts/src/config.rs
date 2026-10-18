@@ -75,6 +75,52 @@ pub struct ConfigData {
     /// unbounded; omitted uses 16.
     pub projection_concurrency: Option<usize>,
     pub tick_interval_secs: Option<i64>,
+    /// Interval of the ready/timer pass, in seconds (A10). This is normal-path
+    /// liveness: the durable ready queue (including `DispatchTimeout` timers)
+    /// is walked for due records, and an idle timer's record is deferred by
+    /// this same interval. Omitted follows `tick_interval_secs`; values below
+    /// 1 are clamped. It is independent of the recovery, outbox and projection
+    /// intervals, so changing one never changes another loop's cadence.
+    pub ready_interval_secs: Option<i64>,
+    /// Interval of the recovery scanner, in seconds (A10). Recovery is the
+    /// exceptional path (expired claims, prepared commits, effect unknowns,
+    /// quarantine) and never the liveness source for ready work or timers.
+    /// Omitted follows `tick_interval_secs`; values below 1 are clamped.
+    pub recovery_interval_secs: Option<i64>,
+    /// Interval of the outbox retry pass, in seconds (A10). The normal path
+    /// delivers inside the operation's commit; this loop is the retry net for
+    /// lost confirmations, deferred transports and expired delivery claims.
+    /// Omitted follows `tick_interval_secs`; values below 1 are clamped.
+    pub outbox_interval_secs: Option<i64>,
+    /// Interval of the projection repair pass, in seconds (A10). Boot
+    /// catch-up runs on this loop too; the in-memory repair queue is retried
+    /// here, independently of recovery. Omitted follows
+    /// `tick_interval_secs`; values below 1 are clamped.
+    pub projection_interval_secs: Option<i64>,
+    /// Interval of the schedule-trigger timer, in seconds (A10). Omitted
+    /// follows `tick_interval_secs`; values below 1 are clamped.
+    pub trigger_interval_secs: Option<i64>,
+    /// Interval of the unacknowledged-message retry timer, in seconds (A10).
+    /// Omitted follows `tick_interval_secs`; values below 1 are clamped.
+    pub retry_interval_secs: Option<i64>,
+    /// Interval of the snapshot-cache TTL sweep, in seconds (A10). Omitted
+    /// follows `tick_interval_secs`; values below 1 are clamped.
+    pub snapshot_interval_secs: Option<i64>,
+    /// Operations the ready/timer pass drives per round (A10). At least 1,
+    /// capped at 1024.
+    pub ready_batch: Option<usize>,
+    /// Exceptional operations the recovery scanner examines per round (A10).
+    /// The scan resumes at the next index entry, so a large backlog is bounded
+    /// work per round instead of one unbounded pass. At least 1, capped at
+    /// 1024.
+    pub recovery_batch: Option<usize>,
+    /// Outbox records the retry pass delivers per round (A10). The pass
+    /// resumes at the next record on the following round. At least 1, capped
+    /// at 1024.
+    pub outbox_batch: Option<usize>,
+    /// Queued projection repairs retried per round (A10). At least 1, capped
+    /// at 1024.
+    pub projection_batch: Option<usize>,
     /// Interval of the terminal-run cleanup loop, in seconds. Omitted follows
     /// `tick_interval_secs`; the loop is independent of the driver's ready /
     /// recovery pass and of the message-retry timer, with its own budget and
@@ -287,6 +333,89 @@ impl Config {
     }
     pub fn tick_interval_secs(&self) -> i64 {
         self.data.tick_interval_secs.unwrap_or(15)
+    }
+
+    /// The ready/timer pass interval (A10): its own schedule, defaulting to
+    /// the tick when unset. Never zero.
+    pub fn ready_interval_secs(&self) -> i64 {
+        self.data
+            .ready_interval_secs
+            .unwrap_or_else(|| self.tick_interval_secs())
+            .max(1)
+    }
+
+    /// The recovery scanner interval (A10): its own schedule, defaulting to
+    /// the tick when unset. Never zero.
+    pub fn recovery_interval_secs(&self) -> i64 {
+        self.data
+            .recovery_interval_secs
+            .unwrap_or_else(|| self.tick_interval_secs())
+            .max(1)
+    }
+
+    /// The outbox retry interval (A10): its own schedule, defaulting to the
+    /// tick when unset. Never zero.
+    pub fn outbox_interval_secs(&self) -> i64 {
+        self.data
+            .outbox_interval_secs
+            .unwrap_or_else(|| self.tick_interval_secs())
+            .max(1)
+    }
+
+    /// The projection repair interval (A10): its own schedule, defaulting to
+    /// the tick when unset. Never zero.
+    pub fn projection_interval_secs(&self) -> i64 {
+        self.data
+            .projection_interval_secs
+            .unwrap_or_else(|| self.tick_interval_secs())
+            .max(1)
+    }
+
+    /// The schedule-trigger interval (A10): its own schedule, defaulting to
+    /// the tick when unset. Never zero.
+    pub fn trigger_interval_secs(&self) -> i64 {
+        self.data
+            .trigger_interval_secs
+            .unwrap_or_else(|| self.tick_interval_secs())
+            .max(1)
+    }
+
+    /// The message-retry interval (A10): its own schedule, defaulting to the
+    /// tick when unset. Never zero.
+    pub fn retry_interval_secs(&self) -> i64 {
+        self.data
+            .retry_interval_secs
+            .unwrap_or_else(|| self.tick_interval_secs())
+            .max(1)
+    }
+
+    /// The snapshot TTL sweep interval (A10): its own schedule, defaulting to
+    /// the tick when unset. Never zero.
+    pub fn snapshot_interval_secs(&self) -> i64 {
+        self.data
+            .snapshot_interval_secs
+            .unwrap_or_else(|| self.tick_interval_secs())
+            .max(1)
+    }
+
+    /// Operations one ready pass drives (A10).
+    pub fn ready_batch(&self) -> usize {
+        self.data.ready_batch.unwrap_or(128).clamp(1, 1024)
+    }
+
+    /// Exceptional operations one recovery pass examines (A10).
+    pub fn recovery_batch(&self) -> usize {
+        self.data.recovery_batch.unwrap_or(128).clamp(1, 1024)
+    }
+
+    /// Outbox records one retry pass delivers (A10).
+    pub fn outbox_batch(&self) -> usize {
+        self.data.outbox_batch.unwrap_or(128).clamp(1, 1024)
+    }
+
+    /// Queued projection repairs retried per pass (A10).
+    pub fn projection_batch(&self) -> usize {
+        self.data.projection_batch.unwrap_or(32).clamp(1, 1024)
     }
 
     /// The terminal-run cleanup interval: its own schedule, defaulting to the
@@ -569,6 +698,49 @@ dir = "other"
         assert_eq!(config.recovery_concurrency(), 2);
         assert_eq!(config.reconciliation_concurrency(), 5);
         assert_eq!(config.projection_concurrency(), 11);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn control_plane_intervals_default_to_the_tick_and_move_independently() {
+        let defaults = Config::default();
+        for interval in [
+            defaults.ready_interval_secs(),
+            defaults.recovery_interval_secs(),
+            defaults.outbox_interval_secs(),
+            defaults.projection_interval_secs(),
+            defaults.trigger_interval_secs(),
+            defaults.retry_interval_secs(),
+            defaults.snapshot_interval_secs(),
+        ] {
+            assert_eq!(interval, defaults.tick_interval_secs());
+        }
+
+        let dir = scratch("loop-intervals");
+        let path = write(
+            &dir,
+            "loops.toml",
+            "tick_interval_secs = 15\nready_interval_secs = 1\nrecovery_interval_secs = 90\noutbox_interval_secs = 2\nprojection_interval_secs = 30\ntrigger_interval_secs = 7\nretry_interval_secs = 9\nsnapshot_interval_secs = 120\n",
+        );
+        let config = Config::create(&path).unwrap();
+        // One loop moving never moves another.
+        assert_eq!(config.ready_interval_secs(), 1);
+        assert_eq!(config.recovery_interval_secs(), 90);
+        assert_eq!(config.outbox_interval_secs(), 2);
+        assert_eq!(config.projection_interval_secs(), 30);
+        assert_eq!(config.trigger_interval_secs(), 7);
+        assert_eq!(config.retry_interval_secs(), 9);
+        assert_eq!(config.snapshot_interval_secs(), 120);
+        // An unset loop still follows the tick.
+        let with_tick = write(&dir, "tick.toml", "tick_interval_secs = 4\n");
+        let config = Config::create(&with_tick).unwrap();
+        assert_eq!(config.ready_interval_secs(), 4);
+        assert_eq!(config.recovery_interval_secs(), 4);
+
+        // A configured zero is clamped rather than turned into a busy loop.
+        let zero = write(&dir, "zero.toml", "recovery_interval_secs = 0\n");
+        let config = Config::create(&zero).unwrap();
+        assert_eq!(config.recovery_interval_secs(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

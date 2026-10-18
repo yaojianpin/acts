@@ -7,6 +7,15 @@ pub(crate) struct OutboxCursor(pub(crate) OutboxId);
 pub(crate) struct OutboxPage {
     pub(crate) records: Vec<OutboxRecord>,
     pub(crate) next: Option<OutboxCursor>,
+    /// Index entries the page walked (due or not), for the retry loop's
+    /// backlog gauge.
+    pub(crate) observed: usize,
+    /// Entries due at the scan instant (pending at or before `now`, or a
+    /// claim whose lease expired).
+    pub(crate) due: usize,
+    /// The earliest due instant among this page's due entries, so the loop can
+    /// report how far behind the oldest one is.
+    pub(crate) oldest_due_at_ms: Option<i64>,
 }
 
 /// One record's post-delivery facts, applied in memory before the one guarded

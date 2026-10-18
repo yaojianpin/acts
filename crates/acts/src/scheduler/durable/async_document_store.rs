@@ -652,18 +652,31 @@ impl AsyncProcessRepository {
             .await
             .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?;
         let mut entries = Vec::new();
+        let mut observed = 0usize;
+        let mut due = 0usize;
+        let mut oldest_due_at_ms: Option<i64> = None;
         for (key, document) in documents {
             let index = OutboxIndexCodec::decode(&document).map_err(|error| {
                 OutboxRepositoryError::CorruptData(format!("outbox index {key:?}: {error}"))
             })?;
-            entries.extend(index.entries.into_iter().filter(|entry| match entry.state {
-                OutboxIndexState::Pending { available_at_ms } => now_ms >= available_at_ms,
-                // A claim whose lease expired is work again: its owner never
-                // confirmed it, and the record would otherwise sit `Claimed`
-                // forever (see `OutboxState::is_dispatchable`).
-                OutboxIndexState::Claimed { lease_until_ms } => now_ms >= lease_until_ms,
-                OutboxIndexState::DeliveryUnknown => false,
-            }));
+            observed += index.entries.len();
+            for entry in index.entries {
+                let available_at = match entry.state {
+                    OutboxIndexState::Pending { available_at_ms } => available_at_ms,
+                    // A claim whose lease expired is work again: its owner never
+                    // confirmed it, and the record would otherwise sit `Claimed`
+                    // forever (see `OutboxState::is_dispatchable`).
+                    OutboxIndexState::Claimed { lease_until_ms } => lease_until_ms,
+                    OutboxIndexState::DeliveryUnknown => continue,
+                };
+                if now_ms >= available_at {
+                    due += 1;
+                    oldest_due_at_ms = Some(
+                        oldest_due_at_ms.map_or(available_at, |oldest| oldest.min(available_at)),
+                    );
+                    entries.push(entry);
+                }
+            }
         }
         entries.sort_by(|left, right| left.id.cmp(&right.id));
         if let Some(cursor) = after {
@@ -721,7 +734,13 @@ impl AsyncProcessRepository {
         } else {
             None
         };
-        Ok(OutboxPage { records, next })
+        Ok(OutboxPage {
+            records,
+            next,
+            observed,
+            due,
+            oldest_due_at_ms,
+        })
     }
 
     /// Apply one outbox lifecycle event and persist the aggregate plus both

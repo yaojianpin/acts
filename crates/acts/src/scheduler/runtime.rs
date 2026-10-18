@@ -12,7 +12,7 @@ use crate::{
     env::Environment,
     event::{Emitter, ProcessGate},
     scheduler::shell::{
-        Process,
+        KernelSchedule, Process,
         health::{LoopGuard, SchedulerHealth},
         validation::SchemaCache,
     },
@@ -418,7 +418,26 @@ impl Runtime {
             trigger: self.trigger_health.snapshot(),
             retry: self.retry_health.snapshot(),
             cleanup: self.cleanup_health.snapshot(),
+            ready: self.kernel.ready_health(),
+            recovery: self.kernel.recovery_health(),
+            outbox: self.kernel.outbox_health(),
+            projection: self.kernel.projection_health(),
         }
+    }
+
+    /// The ready/timer pass's backlog and age gauges (A10).
+    pub fn ready_metrics(&self) -> crate::scheduler::shell::ReadyMetrics {
+        self.kernel.ready_metrics()
+    }
+
+    /// The outbox retry pass's backlog and age gauges (A10).
+    pub fn outbox_metrics(&self) -> crate::scheduler::shell::OutboxMetrics {
+        self.kernel.outbox_metrics()
+    }
+
+    /// The recovery scanner's backlog and counters (A10).
+    pub fn recovery_metrics(&self) -> crate::scheduler::shell::RecoveryMetrics {
+        self.kernel.recovery_metrics()
     }
 
     /// The terminal-run cleanup's counters (see [`CleanupMetrics`]).
@@ -751,22 +770,23 @@ impl Runtime {
         // task over the same key-value store, woken per operation, ticked for
         // recovery and outbox delivery, and it serves (starts, actions,
         // effects, messages).
-        let tick = Self::tick_interval(config);
+        let schedule = Self::kernel_schedule(config);
         let (kernel, wake_rx) = crate::scheduler::shell::KernelHost::new_with_caps(
             store.kv(),
             crate::scheduler::shell::KernelHost::caps_from_config(config),
             config.max_node_run_times() as u64,
-            tick.as_millis() as i64,
+            // A timer's idle round is deferred by the ready/timer interval,
+            // not by the recovery or outbox cadence (A10).
+            schedule.ready.as_millis() as i64,
         );
         {
             let driver = kernel.clone();
             let driver_shutdown = shutdown.clone();
-            // One rule for the driver's cadence and the periodic timers (see
-            // [`Self::tick_interval`]): the outbox delivery pass, the ready
-            // queue and the recovery scan run on it, so a test that waits for
-            // a message does not have to wait the production 15 s.
+            // Each control-plane loop runs on its own interval (A10); under
+            // test every unset interval follows the short test tick, so a test
+            // that waits for a message does not have to wait the production 15 s.
             tokio::spawn(async move {
-                driver.serve(wake_rx, driver_shutdown, tick).await;
+                driver.serve(wake_rx, driver_shutdown, schedule).await;
             });
         }
         let runtime = Arc::new(Runtime {
@@ -824,9 +844,8 @@ impl Runtime {
         Ok(runtime)
     }
 
-    /// The periodic timers' interval: the configured tick, or the engine's
-    /// default of 15s, and [`TEST_TICK_MS`] under test. One rule for every
-    /// timer that reasons in ticks.
+    /// The default interval every unset loop follows: the configured tick, or
+    /// the engine's default of 15s, and [`TEST_TICK_MS`] under test (A10).
     fn tick_interval(config: &Config) -> Duration {
         #[cfg(test)]
         {
@@ -838,6 +857,60 @@ impl Runtime {
             let secs = config.tick_interval_secs();
             let secs = if secs > 0 { secs } else { 15 };
             Duration::from_millis((secs * 1000) as u64)
+        }
+    }
+
+    /// One loop's own interval: an explicitly configured value wins; an unset
+    /// one follows `fallback` (the tick). Under test an unset value keeps the
+    /// historical [`TEST_TICK_MS`] cadence, while an explicit value is honored
+    /// so a test can move one loop without moving the others.
+    fn loop_interval(explicit: Option<i64>, configured_secs: i64, fallback: Duration) -> Duration {
+        #[cfg(test)]
+        {
+            let _ = configured_secs;
+            explicit.map_or(fallback, |secs| {
+                Duration::from_millis((secs.max(1) * 1000) as u64)
+            })
+        }
+        #[cfg(not(test))]
+        {
+            let _ = explicit;
+            let _ = fallback;
+            Duration::from_millis((configured_secs.max(1) * 1000) as u64)
+        }
+    }
+
+    /// The independent cadences and budgets of the kernel host (A10).
+    ///
+    /// Every interval defaults to the tick, so the default configuration keeps
+    /// the pre-A10 rhythm; setting one only moves that loop.
+    fn kernel_schedule(config: &Config) -> KernelSchedule {
+        let tick = Self::tick_interval(config);
+        KernelSchedule {
+            ready: Self::loop_interval(
+                config.data.ready_interval_secs,
+                config.ready_interval_secs(),
+                tick,
+            ),
+            recovery: Self::loop_interval(
+                config.data.recovery_interval_secs,
+                config.recovery_interval_secs(),
+                tick,
+            ),
+            outbox: Self::loop_interval(
+                config.data.outbox_interval_secs,
+                config.outbox_interval_secs(),
+                tick,
+            ),
+            projection: Self::loop_interval(
+                config.data.projection_interval_secs,
+                config.projection_interval_secs(),
+                tick,
+            ),
+            ready_budget: config.ready_batch(),
+            recovery_budget: config.recovery_batch(),
+            outbox_budget: config.outbox_batch(),
+            projection_budget: config.projection_batch(),
         }
     }
 
@@ -867,7 +940,15 @@ impl Runtime {
     /// ([`Self::init_cleanup_timer`]) with its own budget and health.
     pub fn init_retry_timer(self: &Arc<Self>) -> crate::Result<()> {
         let max_message_retry_times = self.config().max_message_retry_times();
-        let interval_ms = Self::tick_interval(self.config()).as_millis() as u64;
+        // A10: the delivery retry cadence is its own; moving it never moves
+        // the trigger, snapshot or driver loops.
+        let config = self.config();
+        let interval_ms = Self::loop_interval(
+            config.data.retry_interval_secs,
+            config.retry_interval_secs(),
+            Self::tick_interval(config),
+        )
+        .as_millis() as u64;
 
         let evt = self.emitter().clone();
         let store = self.store.clone();
@@ -996,7 +1077,13 @@ impl Runtime {
     /// trigger row and rolls its `next_run` forward. Deployed rows arm with
     /// their next cron fire; a changed schedule re-arms the same way.
     pub fn init_trigger_timer(self: &Arc<Self>) {
-        let interval_ms = Self::tick_interval(self.config()).as_millis() as u64;
+        let config = self.config();
+        let interval_ms = Self::loop_interval(
+            config.data.trigger_interval_secs,
+            config.trigger_interval_secs(),
+            Self::tick_interval(config),
+        )
+        .as_millis() as u64;
 
         let store = self.store();
         let shutdown = self.shutdown.clone();
@@ -1057,7 +1144,13 @@ impl Runtime {
     /// Snapshot TTL sweep — periodically drops expired cache entries so
     /// never-read, never-tombstoned scopes cannot grow the cache forever.
     pub fn init_snapshot_timer(self: &Arc<Self>) {
-        let interval_ms = Self::tick_interval(self.config()).as_millis() as u64;
+        let config = self.config();
+        let interval_ms = Self::loop_interval(
+            config.data.snapshot_interval_secs,
+            config.snapshot_interval_secs(),
+            Self::tick_interval(config),
+        )
+        .as_millis() as u64;
 
         let registry = self.snapshot_registry();
         let shutdown = self.shutdown.clone();

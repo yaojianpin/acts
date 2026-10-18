@@ -44,7 +44,7 @@ use crate::{
     scheduler::{
         core::{
             commit::{
-                aggregate::{ProcessSnapshot, RecoveryCandidate, TaskSnapshot},
+                aggregate::{ProcessSnapshot, RecoveryCandidate, RecoveryCursor, TaskSnapshot},
                 command::{ActionCommand, ActionKind, ActionPlanner},
             },
             decision::{
@@ -65,6 +65,7 @@ use crate::{
             },
             outbox::{
                 outbox_dispatch::DeliveryOutcome,
+                outbox_repository::OutboxCursor,
                 records::{DeliveryClaim, OutboxEvent, OutboxRecord},
             },
             plan::{
@@ -96,7 +97,9 @@ use crate::{
     store::KvStore,
 };
 
+use self::health::{LoopGuard, LoopHealth};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 // The shell's parts are its own submodules: they see this module's scope and
@@ -222,14 +225,100 @@ impl QueueWake {
 /// last pass wins for backlog/age; the counters accumulate for the host's
 /// lifetime.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ReadyMetrics {
-    pub(crate) backlog: usize,
-    pub(crate) due: usize,
-    pub(crate) oldest_ready_age_ms: Option<i64>,
-    pub(crate) scanned: u64,
-    pub(crate) deferred: u64,
-    pub(crate) wake_failures: u64,
-    pub(crate) repaired: u64,
+pub struct ReadyMetrics {
+    /// Ready records the last pass observed (due or not).
+    pub backlog: usize,
+    /// Operations the last page found due.
+    pub due: usize,
+    /// Age of the oldest observed ready record, in milliseconds.
+    pub oldest_ready_age_ms: Option<i64>,
+    /// Passes run over the host's lifetime.
+    pub passes: u64,
+    /// Index entries walked over the host's lifetime.
+    pub scanned: u64,
+    /// Operations deferred to a later poll (parked runs, idle timers).
+    pub deferred: u64,
+    /// Wakes that did not fit the in-memory channel.
+    pub wake_failures: u64,
+    /// Missing ready records repaired by the boot pass.
+    pub repaired: u64,
+}
+
+/// What the outbox retry pass observed and did (A10). `backlog` and
+/// `oldest_due_age_ms` are gauges of the last pass; the counters accumulate for
+/// the host's lifetime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OutboxMetrics {
+    /// Due records the last pass saw in the index.
+    pub backlog: usize,
+    /// Age of the oldest due record, in milliseconds.
+    pub oldest_due_age_ms: Option<i64>,
+    /// Index entries the last pass walked (due or not).
+    pub observed: usize,
+    /// Retry passes run.
+    pub passes: u64,
+    /// Records delivered by a retry pass.
+    pub delivered: u64,
+    /// Records left for a later pass because their run's rows were behind.
+    pub deferred: u64,
+}
+
+/// What the recovery scanner observed and did (A10). `scanned` is the backlog
+/// examined by the last pass (every exceptional row is scanned by a pass);
+/// the counters accumulate for the host's lifetime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RecoveryMetrics {
+    /// Exceptional operations the last pass examined.
+    pub scanned: usize,
+    /// Operations left after the last pass's budget (the scan resumes there).
+    pub more_pending: bool,
+    pub passes: u64,
+    /// Expired claims reclaimed into the ready queue.
+    pub reclaimed: u64,
+    /// Missing ready records repaired.
+    pub ready_repaired: u64,
+    /// Commit-prepared operations finalized.
+    pub finalized: u64,
+    /// Operations needing manual reconciliation, as of the last pass.
+    pub reconciliation_required: usize,
+    pub effect_applied: u64,
+    pub effect_retried: u64,
+}
+
+/// The independent cadences and per-round budgets of the kernel host (A10).
+///
+/// Each loop owns one interval: the ready/timer pass (normal liveness), the
+/// recovery scanner (exceptional work), the outbox retry pass and the
+/// projection repair pass. A slow or failing loop cannot delay another, and a
+/// shorter loop never multiplies another's scans.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct KernelSchedule {
+    pub(crate) ready: Duration,
+    pub(crate) recovery: Duration,
+    pub(crate) outbox: Duration,
+    pub(crate) projection: Duration,
+    pub(crate) ready_budget: usize,
+    pub(crate) recovery_budget: usize,
+    pub(crate) outbox_budget: usize,
+    pub(crate) projection_budget: usize,
+}
+
+impl KernelSchedule {
+    /// The pre-A10 cadence: every loop on the driver tick, with the historical
+    /// page budgets. Used by hosts that do not configure the split.
+    #[cfg(test)]
+    pub(crate) fn uniform(tick: Duration) -> Self {
+        Self {
+            ready: tick,
+            recovery: tick,
+            outbox: tick,
+            projection: tick,
+            ready_budget: PAGE_SIZE,
+            recovery_budget: PAGE_SIZE,
+            outbox_budget: PAGE_SIZE,
+            projection_budget: 32,
+        }
+    }
 }
 
 /// What one quiescence pass did.
@@ -306,6 +395,19 @@ pub(crate) struct KernelHost {
     /// per-pid projection failures are queued and retried independently.
     projection_booted: Arc<std::sync::atomic::AtomicBool>,
     ready_metrics: Arc<parking_lot::Mutex<ReadyMetrics>>,
+    /// A10: each control-plane loop reports its own health and backlog.
+    ready_health: Arc<LoopGuard>,
+    recovery_health: Arc<LoopGuard>,
+    outbox_health: Arc<LoopGuard>,
+    projection_health: Arc<LoopGuard>,
+    outbox_metrics: Arc<parking_lot::Mutex<OutboxMetrics>>,
+    recovery_metrics: Arc<parking_lot::Mutex<RecoveryMetrics>>,
+    /// The recovery scan's resume point across bounded passes (A10). The
+    /// in-memory cursor is an optimization, not a durable fact: losing it
+    /// (restart) only restarts the scan from the beginning.
+    recovery_cursor: Arc<parking_lot::Mutex<Option<RecoveryCursor>>>,
+    /// The outbox retry pass's resume point across bounded passes (A10).
+    outbox_cursor: Arc<parking_lot::Mutex<Option<OutboxCursor>>>,
     /// One async lock per pid shared by a start and the terminal cleanup. The
     /// aggregate is the pid's durable existence record: a start checks it and
     /// creates the run under this lock, and cleanup holds it from the
@@ -801,6 +903,14 @@ impl KernelHost {
                 boot_reconciled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 projection_booted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 ready_metrics: Arc::new(parking_lot::Mutex::new(ReadyMetrics::default())),
+                ready_health: LoopGuard::new("ready-due"),
+                recovery_health: LoopGuard::new("recovery-scan"),
+                outbox_health: LoopGuard::new("outbox-retry"),
+                projection_health: LoopGuard::new("projection-repair"),
+                outbox_metrics: Arc::new(parking_lot::Mutex::new(OutboxMetrics::default())),
+                recovery_metrics: Arc::new(parking_lot::Mutex::new(RecoveryMetrics::default())),
+                recovery_cursor: Arc::new(parking_lot::Mutex::new(None)),
+                outbox_cursor: Arc::new(parking_lot::Mutex::new(None)),
                 lifecycle_locks: Arc::new(
                     parking_lot::Mutex::new(std::collections::HashMap::new()),
                 ),
@@ -838,6 +948,36 @@ impl KernelHost {
     /// Every admission category's gauge (A8).
     pub(crate) fn admission_metrics(&self) -> AdmissionMetrics {
         self.admissions.lock().metrics()
+    }
+
+    /// The ready/timer pass's failure state (A10).
+    pub(crate) fn ready_health(&self) -> LoopHealth {
+        self.ready_health.snapshot()
+    }
+
+    /// The recovery scanner's failure state (A10).
+    pub(crate) fn recovery_health(&self) -> LoopHealth {
+        self.recovery_health.snapshot()
+    }
+
+    /// The outbox retry pass's failure state (A10).
+    pub(crate) fn outbox_health(&self) -> LoopHealth {
+        self.outbox_health.snapshot()
+    }
+
+    /// The projection repair pass's failure state (A10).
+    pub(crate) fn projection_health(&self) -> LoopHealth {
+        self.projection_health.snapshot()
+    }
+
+    /// The outbox retry pass's backlog/age gauges (A10).
+    pub(crate) fn outbox_metrics(&self) -> OutboxMetrics {
+        *self.outbox_metrics.lock()
+    }
+
+    /// The recovery scanner's backlog/counters (A10).
+    pub(crate) fn recovery_metrics(&self) -> RecoveryMetrics {
+        *self.recovery_metrics.lock()
     }
 
     /// A host over an in-memory store for tests and the P2 parity harness,
@@ -1086,17 +1226,32 @@ impl KernelHost {
         }
     }
 
-    /// Retry one bounded batch of queued repairs. Runs from the recovery pass,
-    /// never on a shortened tick: the queue is the durable aggregate set, and
-    /// a failed run stays queued until it projects.
-    async fn repair_projections(&self) {
-        const REPAIR_BATCH: usize = 32;
+    /// Retry one bounded batch of queued repairs. This is its own loop (A10),
+    /// never part of the recovery scan: the queue is derived from the aggregate
+    /// set, and a failed run stays queued until it projects.
+    ///
+    /// Returns how many repairs failed, which is the loop's health input.
+    #[cfg(test)]
+    pub(crate) async fn repair_projections(&self) -> usize {
+        self.repair_projections_batch(32).await.1
+    }
+
+    /// Retry `batch` queued repairs, oldest first. Returns `(attempted,
+    /// failed)`: a loop whose every attempt failed is the store failing, while
+    /// one poisoned run among successful repairs must not degrade the loop.
+    pub(crate) async fn repair_projections_batch(&self, batch: usize) -> (usize, usize) {
         let Some(projector) = self.projection.read().clone() else {
-            return;
+            return (0, 0);
         };
-        for process_id in projector.pending_repairs(REPAIR_BATCH) {
-            self.repair_projection(&process_id).await;
+        let repairs = projector.pending_repairs(batch.max(1));
+        let attempted = repairs.len();
+        let mut failures = 0usize;
+        for process_id in repairs {
+            if !self.repair_projection(&process_id).await {
+                failures += 1;
+            }
         }
+        (attempted, failures)
     }
 
     /// One boot pass: re-project every aggregate, so a database whose rows
@@ -1363,19 +1518,38 @@ impl KernelHost {
         }
     }
 
-    /// The background driver: executes woken operations as they arrive, drains
-    /// the durable ready index on the tick and whenever a wake was lost, runs
-    /// one outbox retry pass when a confirmation was lost or a transport
-    /// deferred a record, and on every tick scans recovery's exceptional work.
-    /// Exits when `shutdown` fires.
+    /// The background driver (A10): executes woken operations as they arrive,
+    /// and runs each control-plane loop on its own interval —
+    /// [`KernelSchedule::ready`] for the durable ready queue and timers,
+    /// [`KernelSchedule::recovery`] for the exceptional scan,
+    /// [`KernelSchedule::outbox`] for delivery retries, and
+    /// [`KernelSchedule::projection`] for row repair. Notifications still
+    /// accelerate the ready and outbox passes; a lost wake is only latency,
+    /// never lost work. Exits when `shutdown` fires.
     pub(crate) async fn serve(
         self: Arc<Self>,
         mut wake_rx: Receiver<OperationId>,
         shutdown: tokio_util::sync::CancellationToken,
-        tick: std::time::Duration,
+        schedule: KernelSchedule,
     ) {
-        let mut ticker = tokio::time::interval(tick);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Boot repair is a one-time pass, not a loop: run it before the
+        // tickers so a cold database has its derived indexes even when the
+        // recovery interval is long. A failure is retried by the owning loop.
+        if let Err(error) = self.ensure_boot(SystemClock.now_ms()).await {
+            tracing::warn!(error = %error, "kernel boot repair failed; the ready loop retries it");
+        }
+        let mut ready_ticker = tokio::time::interval(schedule.ready);
+        let mut recovery_ticker = tokio::time::interval(schedule.recovery);
+        let mut outbox_ticker = tokio::time::interval(schedule.outbox);
+        let mut projection_ticker = tokio::time::interval(schedule.projection);
+        for ticker in [
+            &mut ready_ticker,
+            &mut recovery_ticker,
+            &mut outbox_ticker,
+            &mut projection_ticker,
+        ] {
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        }
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
@@ -1384,7 +1558,7 @@ impl KernelHost {
                     // channel, or the boot repair rebuilt the index: drive it
                     // now, not on the next tick.
                     let now = SystemClock.now_ms();
-                    if let Err(error) = self.drive_ready(now, PAGE_SIZE).await {
+                    if let Err(error) = self.drive_ready(now, schedule.ready_budget).await {
                         tracing::warn!(error = %error, "kernel ready pass failed");
                     }
                 }
@@ -1395,41 +1569,28 @@ impl KernelHost {
                     // notification arriving while this pass runs is not lost —
                     // `Notify` keeps one permit, so the loop comes back for
                     // the next batch immediately instead of at the next tick.
-                    if let Err(error) = self.dispatch_outbox().await {
+                    if let Err(error) = self.dispatch_outbox_batch(schedule.outbox_budget).await {
                         tracing::warn!(error = %error, "kernel outbox pass failed");
                     }
                 }
-                _ = ticker.tick() => {
-                    let now = SystemClock.now_ms();
-                    match self.recover(now).await {
-                        Ok(report) => {
-                            if !report.reconciliation_required.is_empty() {
-                                // An operation whose effect outcome could not
-                                // be proven (no observation, a non-idempotent
-                                // effect, or a failed replay) is never
-                                // re-driven automatically (`ManualReconciliation`),
-                                // so the run that owns it stops here. Nothing
-                                // else reports it: without this line a
-                                // stranded run is silent.
-                                tracing::warn!(
-                                    operations = ?report.reconciliation_required,
-                                    "kernel recovery needs manual reconciliation for these operations; the runs that own them will not settle on their own"
-                                );
-                            }
-                            if !report.effect_applied.is_empty()
-                                || !report.effect_retried.is_empty()
-                            {
-                                tracing::info!(
-                                    applied = ?report.effect_applied,
-                                    retried = ?report.effect_retried,
-                                    "kernel recovery reconciled unknown effects from executor observations"
-                                );
-                            }
-                        }
-                        Err(error) => tracing::warn!(error = %error, "kernel recovery scan failed"),
+                _ = ready_ticker.tick() => {
+                    // A degraded loop sits this tick out; ready work stays
+                    // durable in the index and the next attempt picks it up.
+                    if !self.ready_health.attempt() {
+                        continue;
                     }
-                    if let Err(error) = self.drive_ready(now, PAGE_SIZE).await {
-                        tracing::warn!(error = %error, "kernel ready pass failed");
+                    let now = SystemClock.now_ms();
+                    let pass = async {
+                        self.ensure_ready_boot(now).await?;
+                        self.drive_ready(now, schedule.ready_budget).await
+                    }
+                    .await;
+                    match pass {
+                        Ok(_) => self.ready_health.recovered(),
+                        Err(error) => {
+                            tracing::warn!(error = %error, "kernel ready pass failed");
+                            self.ready_health.failed(&error);
+                        }
                     }
                     let metrics = self.ready_metrics();
                     if metrics.backlog > 0 {
@@ -1462,8 +1623,106 @@ impl KernelHost {
                             "kernel admission"
                         );
                     }
-                    if let Err(error) = self.dispatch_outbox().await {
-                        tracing::warn!(error = %error, "kernel outbox pass failed");
+                }
+                _ = recovery_ticker.tick() => {
+                    if !self.recovery_health.attempt() {
+                        continue;
+                    }
+                    let now = SystemClock.now_ms();
+                    match self.recover_with_budget(now, schedule.recovery_budget).await {
+                        Ok(report) => {
+                            self.recovery_health.recovered();
+                            if !report.reconciliation_required.is_empty() {
+                                // An operation whose effect outcome could not
+                                // be proven (no observation, a non-idempotent
+                                // effect, or a failed replay) is never
+                                // re-driven automatically (`ManualReconciliation`),
+                                // so the run that owns it stops here. Nothing
+                                // else reports it: without this line a
+                                // stranded run is silent.
+                                tracing::warn!(
+                                    operations = ?report.reconciliation_required,
+                                    "kernel recovery needs manual reconciliation for these operations; the runs that own them will not settle on their own"
+                                );
+                            }
+                            if !report.effect_applied.is_empty()
+                                || !report.effect_retried.is_empty()
+                            {
+                                tracing::info!(
+                                    applied = ?report.effect_applied,
+                                    retried = ?report.effect_retried,
+                                    "kernel recovery reconciled unknown effects from executor observations"
+                                );
+                            }
+                            let metrics = self.recovery_metrics();
+                            if metrics.scanned > 0 || metrics.more_pending {
+                                tracing::debug!(
+                                    scanned = metrics.scanned,
+                                    more_pending = metrics.more_pending,
+                                    reclaimed = metrics.reclaimed,
+                                    ready_repaired = metrics.ready_repaired,
+                                    finalized = metrics.finalized,
+                                    reconciliation_required = metrics.reconciliation_required,
+                                    "kernel recovery scan"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "kernel recovery scan failed");
+                            self.recovery_health.failed(&error);
+                        }
+                    }
+                }
+                _ = outbox_ticker.tick() => {
+                    if !self.outbox_health.attempt() {
+                        continue;
+                    }
+                    match self.dispatch_outbox_batch(schedule.outbox_budget).await {
+                        Ok(_) => self.outbox_health.recovered(),
+                        Err(error) => {
+                            tracing::warn!(error = %error, "kernel outbox pass failed");
+                            self.outbox_health.failed(&error);
+                        }
+                    }
+                    let metrics = self.outbox_metrics();
+                    if metrics.backlog > 0 {
+                        tracing::debug!(
+                            backlog = metrics.backlog,
+                            observed = metrics.observed,
+                            oldest_due_age_ms = metrics.oldest_due_age_ms,
+                            delivered = metrics.delivered,
+                            deferred = metrics.deferred,
+                            "kernel outbox retry"
+                        );
+                    }
+                }
+                _ = projection_ticker.tick() => {
+                    if !self.projection_health.attempt() {
+                        continue;
+                    }
+                    self.ensure_projection_boot().await;
+                    let (attempted, failures) =
+                        self.repair_projections_batch(schedule.projection_budget).await;
+                    if failures == 0 || failures < attempted {
+                        // Some repairs succeeded: the store answers, and a
+                        // single permanently-bad run must not degrade the loop.
+                        self.projection_health.recovered();
+                    } else {
+                        let error = ActError::Runtime(format!(
+                            "{failures}/{attempted} projection repairs failed"
+                        ));
+                        tracing::warn!(error = %error, "kernel projection repair pass failed");
+                        self.projection_health.failed(&error);
+                    }
+                    let metrics = self.projection_metrics();
+                    if metrics.lag > 0 {
+                        tracing::debug!(
+                            lag = metrics.lag,
+                            oldest_lag_age_ms = metrics.oldest_lag_age_ms,
+                            failed = metrics.failed,
+                            repaired = metrics.repaired,
+                            "kernel projection repair"
+                        );
                     }
                 }
                 id = wake_rx.recv() => {
@@ -1504,6 +1763,7 @@ impl KernelHost {
     /// round is still idle — is deferred one poll interval; it never spins
     /// and never has to be recovered.
     pub(crate) async fn drive_ready(&self, now_ms: i64, budget: usize) -> Result<usize> {
+        self.ready_metrics.lock().passes += 1;
         let mut executed = 0usize;
         let mut cursor = None;
         let mut round_executed = 0usize;
@@ -2875,13 +3135,15 @@ impl KernelHost {
         }
     }
 
-    /// One driver tick for the test suites: the ready queue first, then
-    /// recovery's exceptional pass. The serving loop runs exactly this pair on
-    /// its interval, so a test that calls it observes the production cadence.
+    /// One driver tick for the test suites. The production driver runs the
+    /// same four passes on independent intervals (A10); this helper runs them
+    /// once, in order, so a test that calls it observes every loop.
     #[cfg(test)]
     pub(crate) async fn tick(&self, now_ms: i64) -> Result<RecoveryReport> {
         self.drive_ready(now_ms, PAGE_SIZE).await?;
-        self.recover(now_ms).await
+        let report = self.recover(now_ms).await?;
+        self.repair_projections().await;
+        Ok(report)
     }
 
     /// Re-derive exceptional work from the recovery index.
@@ -2897,33 +3159,128 @@ impl KernelHost {
     /// quarantined operations follow the executor's proof or go to a human,
     /// and a missing ready record (an older database, a damaged index) is
     /// repaired.
+    #[cfg(test)]
     pub(crate) async fn recover(&self, now_ms: i64) -> Result<RecoveryReport> {
+        self.recover_with_budget(now_ms, PAGE_SIZE).await
+    }
+
+    /// The recovery scanner's own pass (A10). The scan resumes at the last
+    /// examined index entry when `budget` is reached, so a large exceptional
+    /// backlog is bounded work per round; an in-memory cursor is only a
+    /// scheduling hint and restarts from the beginning after a restart.
+    ///
+    /// Projection repair is **not** part of this pass: it has its own loop
+    /// ([`Self::repair_projections_batch`]) and its own interval, so changing
+    /// the recovery cadence cannot change projection lag and vice versa.
+    pub(crate) async fn recover_with_budget(
+        &self,
+        now_ms: i64,
+        budget: usize,
+    ) -> Result<RecoveryReport> {
+        self.ensure_boot(now_ms).await?;
+        let budget = budget.max(1);
         let _recovery = self.enter_admission(AdmissionCategory::Recovery).await;
         let mut report = RecoveryReport::default();
-        // One boot pass: rebuild the derived indexes from the authoritative
-        // aggregates. This is linear in the aggregate set once per host, not
-        // in the tick count, and it is the old-database migration path.
-        if !self
+        let mut cursor = self.recovery_cursor.lock().clone();
+        let mut more_pending = false;
+        loop {
+            let page = self
+                .recovery
+                .recoverable_page(cursor.as_ref(), PAGE_SIZE.min(budget))
+                .await
+                .map_err(runtime)?;
+            if page.operations.is_empty() && page.next.is_none() {
+                cursor = None;
+                break;
+            }
+            for candidate in page.operations {
+                if report.scanned >= budget {
+                    more_pending = true;
+                    break;
+                }
+                let id = candidate.operation.id.clone();
+                let process_key = id.process_id.clone();
+                report.scanned += 1;
+                self.recover_observed(candidate, now_ms, &mut report).await;
+                cursor = Some(RecoveryCursor {
+                    process_key,
+                    operation: Some(id),
+                });
+            }
+            if more_pending {
+                break;
+            }
+            match page.next {
+                Some(next) => {
+                    if report.scanned >= budget {
+                        cursor = Some(next);
+                        more_pending = true;
+                        break;
+                    }
+                    cursor = Some(next);
+                }
+                None => {
+                    cursor = None;
+                    break;
+                }
+            }
+        }
+        *self.recovery_cursor.lock() = if more_pending { cursor } else { None };
+        {
+            let mut metrics = self.recovery_metrics.lock();
+            metrics.scanned = report.scanned;
+            metrics.more_pending = more_pending;
+            metrics.passes += 1;
+            metrics.reclaimed += report.reclaimed.len() as u64;
+            metrics.ready_repaired += report.ready_repaired.len() as u64;
+            metrics.finalized += report.finalized.len() as u64;
+            metrics.effect_applied += report.effect_applied.len() as u64;
+            metrics.effect_retried += report.effect_retried.len() as u64;
+            metrics.reconciliation_required = report.reconciliation_required.len();
+        }
+        Ok(report)
+    }
+
+    /// The one-time boot passes: rebuild the derived indexes and catch the
+    /// read model up from the aggregates. Both are idempotent and independent
+    /// of the periodic loop that notices they are still pending (A10).
+    pub(crate) async fn ensure_boot(&self, now_ms: i64) -> Result<()> {
+        self.ensure_ready_boot(now_ms).await?;
+        self.ensure_projection_boot().await;
+        Ok(())
+    }
+
+    /// Rebuild the derived ready/recovery indexes from the authoritative
+    /// aggregates once per host (A2's cold-start repair). Owned by the
+    /// ready/timer loop: a recovery cadence cannot delay it and its failure is
+    /// retried by the next ready pass.
+    pub(crate) async fn ensure_ready_boot(&self, now_ms: i64) -> Result<()> {
+        if self
             .boot_reconciled
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            let repaired = self
-                .processes
-                .repair_all_ready(now_ms, self.timer_poll_ms)
-                .await
-                .map_err(runtime)?;
-            self.boot_reconciled
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            if repaired > 0 {
-                self.ready_metrics.lock().repaired += repaired as u64;
-                self.ready.notify_one();
-            }
+            return Ok(());
         }
-        // The read model's boot pass: rows carry their source aggregate
-        // revision, so this projects every aggregate once and writes only the
-        // rows that lag. A per-pid failure is queued and retried below; a scan
-        // that could not even list the aggregates is retried on the next
-        // recovery pass (not on a shorter tick).
+        let repaired = self
+            .processes
+            .repair_all_ready(now_ms, self.timer_poll_ms)
+            .await
+            .map_err(runtime)?;
+        self.boot_reconciled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if repaired > 0 {
+            self.ready_metrics.lock().repaired += repaired as u64;
+            self.ready.notify_one();
+        }
+        Ok(())
+    }
+
+    /// The read model's boot catch-up: rows carry their source aggregate
+    /// revision, so this projects every aggregate once and writes only the
+    /// rows that lag. Owned by the projection loop; a per-pid failure is
+    /// queued there, and a scan that could not list the aggregates is retried
+    /// on its next pass.
+    pub(crate) async fn ensure_projection_boot(&self) {
         if !self
             .projection_booted
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -2932,27 +3289,6 @@ impl KernelHost {
             self.projection_booted
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        self.repair_projections().await;
-        let mut cursor = None;
-        loop {
-            let page = self
-                .recovery
-                .recoverable_page(cursor.as_ref(), PAGE_SIZE)
-                .await
-                .map_err(runtime)?;
-            if page.operations.is_empty() && page.next.is_none() {
-                break;
-            }
-            for candidate in page.operations {
-                report.scanned += 1;
-                self.recover_observed(candidate, now_ms, &mut report).await;
-            }
-            cursor = page.next;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(report)
     }
 
     /// One observed operation, from the observation to the executed decision.
@@ -3348,9 +3684,22 @@ impl KernelHost {
     /// One outbox delivery pass over the attached transport: claim every due
     /// record with a fenced claim, hand it to the transport, then persist the
     /// reported outcome.
+    #[cfg(test)]
     pub(crate) async fn dispatch_outbox(&self) -> Result<usize> {
+        self.dispatch_outbox_batch(PAGE_SIZE).await
+    }
+
+    /// The bounded outbox retry pass (A10). At most `budget` records are
+    /// delivered per round; a larger backlog resumes at the next record on the
+    /// loop's next interval. The cursor is in-memory scheduling state only —
+    /// records remain `Pending` in the aggregate, so losing it (restart) just
+    /// restarts the pass.
+    pub(crate) async fn dispatch_outbox_batch(&self, budget: usize) -> Result<usize> {
         let now = SystemClock.now_ms();
+        let budget = budget.max(1);
         let mut delivered = 0usize;
+        let mut processed = 0usize;
+        let mut deferred_records = 0u64;
         let mut settled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         // Pids whose rows this pass verified current. The normal path already
         // projected before it delivered; this pass also serves records a
@@ -3362,19 +3711,50 @@ impl KernelHost {
         // `Pending`, and retrying the projection for every record of the run
         // would only multiply a store outage.
         let mut deferred: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut cursor = None;
-        loop {
+        let mut cursor = self.outbox_cursor.lock().clone();
+        let mut last_processed = cursor.clone();
+        let mut first_page = true;
+        let mut wrapped = false;
+        'pass: loop {
+            let remaining = budget.saturating_sub(processed).max(1);
             let page = self
                 .processes
-                .dispatchable_outbox_page(now, cursor.as_ref(), PAGE_SIZE)
+                .dispatchable_outbox_page(now, cursor.as_ref(), PAGE_SIZE.min(remaining))
                 .await
                 .map_err(runtime)?;
+            if first_page {
+                first_page = false;
+                let mut metrics = self.outbox_metrics.lock();
+                metrics.observed = page.observed;
+                metrics.backlog = page.due;
+                metrics.oldest_due_age_ms = page
+                    .oldest_due_at_ms
+                    .map(|at| now.saturating_sub(at).max(0));
+                metrics.passes += 1;
+            }
             if page.records.is_empty() {
+                // A cursor past the last due record only means the pass
+                // wrapped around: start once from the beginning before
+                // deciding the backlog is empty.
+                if cursor.is_some() && !wrapped {
+                    cursor = None;
+                    last_processed = None;
+                    wrapped = true;
+                    continue;
+                }
+                cursor = None;
                 break;
             }
             for record in page.records {
+                if processed >= budget {
+                    cursor = last_processed.clone();
+                    break 'pass;
+                }
+                last_processed = Some(OutboxCursor(record.id.clone()));
                 let process_id = record.id.process_id.clone();
                 if deferred.contains(&process_id) {
+                    processed += 1;
+                    deferred_records += 1;
                     continue;
                 }
                 if !projected.contains(&process_id) {
@@ -3382,10 +3762,13 @@ impl KernelHost {
                         // The rows are still behind; leave every record of
                         // this run `Pending` for the next pass.
                         deferred.insert(process_id.clone());
+                        processed += 1;
+                        deferred_records += 1;
                         continue;
                     }
                     projected.insert(process_id.clone());
                 }
+                processed += 1;
                 if self.dispatch_outbox_record(record, now).await? {
                     delivered += 1;
                     settled.insert(process_id);
@@ -3395,6 +3778,12 @@ impl KernelHost {
             if cursor.is_none() {
                 break;
             }
+        }
+        *self.outbox_cursor.lock() = cursor;
+        {
+            let mut metrics = self.outbox_metrics.lock();
+            metrics.delivered += delivered as u64;
+            metrics.deferred += deferred_records;
         }
         // The deliveries that settled decide the read model's `removable`
         // flag: a run that finished before its records were delivered only

@@ -1,5 +1,6 @@
 mod health;
 mod perf_probe;
+mod scheduler_split;
 mod state;
 mod tree;
 
@@ -7624,7 +7625,7 @@ async fn a_commit_delivers_its_records_without_waiting_for_a_tick() {
     let driver = tokio::spawn(host.clone().serve(
         wake_rx,
         shutdown.clone(),
-        std::time::Duration::from_secs(3600),
+        super::KernelSchedule::uniform(std::time::Duration::from_secs(3600)),
     ));
     host.start_process(&spec).await.unwrap();
 
@@ -8595,7 +8596,8 @@ async fn a_projection_failure_is_repaired_before_the_completion_event() {
     );
 
     stored.disarm();
-    host.recover(SystemClock.now_ms()).await.unwrap();
+    // A10: projection repair is its own loop, not part of the recovery scan.
+    assert_eq!(host.repair_projections().await, 0);
     assert_eq!(
         completed.load(Ordering::SeqCst),
         1,

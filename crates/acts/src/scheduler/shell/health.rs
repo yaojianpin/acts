@@ -86,6 +86,14 @@ pub struct SchedulerHealth {
     pub retry: LoopHealth,
     /// The terminal-run cleanup loop (aggregate/row/workdir reclamation).
     pub cleanup: LoopHealth,
+    /// The ready/timer pass (durable ready queue and `DispatchTimeout` rounds).
+    pub ready: LoopHealth,
+    /// The recovery scanner (exceptional operations only).
+    pub recovery: LoopHealth,
+    /// The outbox retry pass (lost confirmations, deferred transports).
+    pub outbox: LoopHealth,
+    /// The projection repair pass (lagging rows, repair queue, boot catch-up).
+    pub projection: LoopHealth,
 }
 
 /// Consecutive-failure tracker of one periodic loop.
