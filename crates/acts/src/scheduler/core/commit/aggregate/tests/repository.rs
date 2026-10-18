@@ -96,7 +96,7 @@ fn recovery_pages_are_stable_non_overlapping_and_skip_terminal_rows() {
         first
             .operations
             .iter()
-            .map(|op| op.id.sequence)
+            .map(|candidate| candidate.operation.id.sequence)
             .collect::<Vec<_>>(),
         [0, 1]
     );
@@ -104,7 +104,7 @@ fn recovery_pages_are_stable_non_overlapping_and_skip_terminal_rows() {
         second
             .operations
             .iter()
-            .map(|op| op.id.sequence)
+            .map(|candidate| candidate.operation.id.sequence)
             .collect::<Vec<_>>(),
         [3, 4]
     );

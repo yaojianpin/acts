@@ -329,6 +329,26 @@ impl Decision {
             admission,
         }
     }
+
+    /// The decision a recovery commit implies (A7). Recovery changes only the
+    /// operation lifecycle, never the aggregate's business state, so the
+    /// transition is the empty plan at the committed version: it is never
+    /// committed, and the project step it feeds touches no execution row. The
+    /// process-level half is [`Self::committed`]'s — the same state yields the
+    /// same decision on the normal and the recovery path.
+    pub(crate) fn recovered(snapshot: &ProcessSnapshot, admission: AdmissionDirective) -> Self {
+        let transition = TransitionPlan {
+            process_id: snapshot.process_id.clone(),
+            expected: snapshot.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        };
+        Self::committed(transition, snapshot, admission)
+    }
 }
 
 #[cfg(test)]
@@ -543,6 +563,53 @@ mod tests {
             AdmissionDirective::Drive(SlotDirective::NoSlot),
             "a finished run needs no slot for its remaining bookkeeping"
         );
+    }
+
+    #[test]
+    fn normal_and_recovery_commits_of_one_state_decide_alike() {
+        for state in [
+            TaskState::Created,
+            TaskState::Ready,
+            TaskState::Running,
+            TaskState::Waiting,
+            TaskState::Completed,
+            TaskState::Failed,
+            TaskState::Aborted,
+            TaskState::Cancelled,
+        ] {
+            let snapshot = snapshot(state);
+            let admission = AdmissionDirective::Drive(SlotDirective::Keep);
+            let normal = Decision::committed(
+                TransitionPlan {
+                    process_id: snapshot.process_id.clone(),
+                    expected: snapshot.version.clone(),
+                    task_creates: vec![],
+                    state_changes: vec![],
+                    variable_writes: vec![],
+                    source_operation: None,
+                    operations: vec![],
+                    outbox: vec![],
+                },
+                &snapshot,
+                admission,
+            );
+            let recovered = Decision::recovered(&snapshot, admission);
+            assert_eq!(recovered.process_status, normal.process_status);
+            assert_eq!(recovered.settlement, normal.settlement);
+            assert_eq!(recovered.lifecycle, normal.lifecycle);
+            assert_eq!(recovered.admission, normal.admission);
+            assert_eq!(
+                recovered.transition.expected, snapshot.version,
+                "the empty plan names the committed version it must never write"
+            );
+            assert_eq!(recovered.transition.process_id, snapshot.process_id);
+            assert!(recovered.transition.state_changes.is_empty());
+            assert!(recovered.transition.task_creates.is_empty());
+            assert!(recovered.transition.variable_writes.is_empty());
+            assert!(recovered.transition.operations.is_empty());
+            assert!(recovered.transition.outbox.is_empty());
+            assert_eq!(recovered.transition.source_operation, None);
+        }
     }
 
     #[test]

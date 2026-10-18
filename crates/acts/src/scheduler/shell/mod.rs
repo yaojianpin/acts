@@ -44,7 +44,7 @@ use crate::{
     scheduler::{
         core::{
             commit::{
-                aggregate::{ProcessSnapshot, TaskSnapshot},
+                aggregate::{ProcessSnapshot, RecoveryCandidate, TaskSnapshot},
                 command::{ActionCommand, ActionKind, ActionPlanner},
             },
             decision::{
@@ -56,8 +56,7 @@ use crate::{
                 effect::EffectKey,
                 model_graph::NodeId,
                 operation::{
-                    ClaimToken, OperationEvent, OperationId, OperationKind, OperationRecord,
-                    OperationState,
+                    ClaimToken, OperationEvent, OperationId, OperationKind, OperationState,
                 },
                 task_graph::TaskId,
                 transition_plan::{
@@ -85,7 +84,9 @@ use crate::{
                 timeout::{Dispatch, DispatchCommand, Round, RoundCommand},
                 upward::Upward,
             },
-            recovery::planner::{RecoveryDisposition, RecoveryPlanner, RecoveryReport},
+            recovery::planner::{
+                EffectReceipt, Observed, RecoveryDirective, RecoveryReport, recover_operation,
+            },
         },
         durable::async_document_store::{
             AsyncProcessRepository, AsyncRecoveryRepository, KvDocumentStore, ReclaimOutcome,
@@ -140,16 +141,12 @@ const ACTION_ATTEMPTS: usize = 8;
 const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
 
-/// What recovery could prove about one `EffectUnknown` operation (A1c).
-enum EffectReconcile {
-    /// The executor observed the effect applied; the plan was replayed.
-    Applied,
-    /// The executor observed it not applied and the effect is idempotent;
-    /// the operation is back in the retry queue.
-    Retried,
-    /// Nothing could be proven (or the effect is not idempotent): a human
-    /// must reconcile it.
-    Manual,
+/// The executor's proof about one `EffectUnknown` operation (A1c): the fact
+/// Core's recovery decision reads, plus the payload only the shell can hand to
+/// the normal effect planner when the decision says `ReplayEffect`.
+struct ObservedEffect {
+    receipt: EffectReceipt,
+    observation: Option<effects::EffectObservation>,
 }
 
 /// The fence one delivery attempt uses. The normal path applies it only in
@@ -2298,7 +2295,7 @@ impl KernelHost {
         event: OperationEvent,
     ) -> Result<(
         crate::scheduler::core::model::operation::OperationRecord,
-        crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        crate::scheduler::durable::document_store::LoadedProcess,
     )> {
         match self
             .processes
@@ -2312,9 +2309,9 @@ impl KernelHost {
             .await
             .map_err(runtime)?
         {
-            crate::scheduler::durable::async_document_store::OperationCommitOutcome::Committed { operation, snapshot }
-            | crate::scheduler::durable::async_document_store::OperationCommitOutcome::AlreadyCommitted { operation, snapshot } => {
-                Ok((operation, snapshot))
+            crate::scheduler::durable::async_document_store::OperationCommitOutcome::Committed { operation, loaded }
+            | crate::scheduler::durable::async_document_store::OperationCommitOutcome::AlreadyCommitted { operation, loaded } => {
+                Ok((operation, loaded))
             }
             crate::scheduler::durable::async_document_store::OperationCommitOutcome::Conflict { .. } => {
                 Err(conflict(format!("claim conflict on operation {id:?}")))
@@ -2403,89 +2400,66 @@ impl KernelHost {
             .is_some_and(|snapshot| decision::run_settled(&snapshot)))
     }
 
-    /// Reconcile one `EffectUnknown` operation from the executor's own
-    /// observation (A1c).
+    /// Ask the executor for its proof about one `EffectUnknown` operation
+    /// (A1c).
     ///
-    /// The order is the protocol: ask the executor by the operation's stable
-    /// effect key, then
-    /// - `Applied`/`Failed` ⇒ replay the plan without running the effect;
-    /// - `NotApplied` + a declared-idempotent effect ⇒ put the operation back
-    ///   in the ready queue under the same key;
-    /// - anything else ⇒ leave it for a human (never wake it).
-    async fn reconcile_unknown_effect(
-        &self,
-        operation: &OperationRecord,
-    ) -> Result<EffectReconcile> {
-        if operation.kind != OperationKind::ApplyAction
-            || !matches!(operation.state, OperationState::EffectUnknown { .. })
+    /// This is the observation half of recovery: it performs the executor IO
+    /// by the operation's stable effect key and converts the answer into the
+    /// fact Core's `RecoverOperation` reads. It never decides what the answer
+    /// means — replay, retry and manual are [`recover_operation`]'s call.
+    async fn observe_effect(&self, observed: &Observed) -> Result<Option<ObservedEffect>> {
+        if observed.kind != OperationKind::ApplyAction
+            || !matches!(
+                observed.persisted_phase,
+                OperationState::EffectUnknown { .. }
+            )
         {
-            return Ok(EffectReconcile::Manual);
+            return Ok(None);
         }
-        let Some(loaded) = self.load(&operation.id.process_id).await? else {
-            return Ok(EffectReconcile::Manual);
+        let Some(loaded) = self.load(&observed.operation_id.process_id).await? else {
+            return Ok(None);
         };
-        let Some(task) = loaded.snapshot.tasks.get(&operation.id.task) else {
-            return Ok(EffectReconcile::Manual);
+        let Some(task) = loaded.snapshot.tasks.get(&observed.operation_id.task) else {
+            return Ok(None);
         };
         let model_node = task.model_node.clone();
         let Some((runner, request)) =
-            self.step_effect(&loaded.snapshot, &operation.id.task, &model_node)?
+            self.step_effect(&loaded.snapshot, &observed.operation_id.task, &model_node)?
         else {
-            return Ok(EffectReconcile::Manual);
+            return Ok(None);
         };
-        let key = EffectKey::of(&operation.id);
+        let key = EffectKey::of(&observed.operation_id);
         let observation = match runner.observe(&key).await {
             Ok(observation) => observation,
             Err(error) => {
                 tracing::warn!(
-                    operation = ?operation.id,
+                    operation = ?observed.operation_id,
                     error = %error,
                     "querying the effect observation failed; manual reconciliation still owns the operation"
                 );
-                return Ok(EffectReconcile::Manual);
+                return Ok(Some(ObservedEffect {
+                    receipt: EffectReceipt::Unknown,
+                    observation: None,
+                }));
             }
         };
-        match observation {
-            observation @ (effects::EffectObservation::Applied(_)
-            | effects::EffectObservation::Failed(_)) => {
-                match self
-                    .converge_observed_effect(&operation.id, observation)
-                    .await
-                {
-                    Ok(true) => Ok(EffectReconcile::Applied),
-                    Ok(false) => Ok(EffectReconcile::Manual),
-                    Err(error) => {
-                        tracing::warn!(
-                            operation = ?operation.id,
-                            error = %error,
-                            "replaying an observed effect failed; the operation stays unknown"
-                        );
-                        Ok(EffectReconcile::Manual)
-                    }
-                }
-            }
-            effects::EffectObservation::NotApplied => {
-                // Re-running can only be safe when the effect itself is
-                // provably idempotent; the executor keeps the same key, so a
-                // duplicate delivery is deduplicated on its side.
-                if !runner.idempotent(&request) {
-                    return Ok(EffectReconcile::Manual);
-                }
-                match self.retry_unknown_effect(operation).await {
-                    Ok(true) => Ok(EffectReconcile::Retried),
-                    Ok(false) => Ok(EffectReconcile::Manual),
-                    Err(error) => {
-                        tracing::warn!(
-                            operation = ?operation.id,
-                            error = %error,
-                            "re-queuing an idempotent effect failed; the next scan retries"
-                        );
-                        Ok(EffectReconcile::Manual)
-                    }
-                }
-            }
-            effects::EffectObservation::Unknown => Ok(EffectReconcile::Manual),
-        }
+        let receipt = match &observation {
+            effects::EffectObservation::Applied(_) => EffectReceipt::Applied,
+            effects::EffectObservation::Failed(_) => EffectReceipt::Failed,
+            // Re-running can only be safe when the effect itself is provably
+            // idempotent; the executor keeps the same key, so a duplicate
+            // delivery is deduplicated on its side.
+            effects::EffectObservation::NotApplied => EffectReceipt::NotApplied {
+                idempotent: runner.idempotent(&request),
+            },
+            effects::EffectObservation::Unknown => EffectReceipt::Unknown,
+        };
+        let observation = matches!(receipt, EffectReceipt::Applied | EffectReceipt::Failed)
+            .then_some(observation);
+        Ok(Some(ObservedEffect {
+            receipt,
+            observation,
+        }))
     }
 
     /// The unknown effects of one run, in operation order (A1c).
@@ -2605,13 +2579,19 @@ impl KernelHost {
         self.recover(now_ms).await
     }
 
-    /// Re-derive exceptional work from the recovery index. Normal
-    /// `Pending`/`RetryScheduled` operations are not woken here: they own a
-    /// durable ready record and the driver's due pass is their liveness source.
-    /// Recovery handles what that path cannot: an expired claim is reclaimed,
-    /// a committed-but-unfinalized operation is completed, effect-unknown and
-    /// quarantined operations are surfaced for manual reconciliation, and a
-    /// missing ready record (an older database, a damaged index) is repaired.
+    /// Re-derive exceptional work from the recovery index.
+    ///
+    /// This method is only the IO shell around
+    /// [`recover_operation`](crate::scheduler::core::recovery::planner::recover_operation)
+    /// (A7): the paging walk, one [`Observed`] per row, and the directive the
+    /// pure decision names. Normal `Pending`/`RetryScheduled` operations are
+    /// not woken here: they own a durable ready record and the driver's due
+    /// pass is their liveness source. Recovery handles what that path cannot:
+    /// an expired claim is reclaimed, a committed-but-unfinalized operation is
+    /// completed through the normal post-commit program, effect-unknown and
+    /// quarantined operations follow the executor's proof or go to a human,
+    /// and a missing ready record (an older database, a damaged index) is
+    /// repaired.
     pub(crate) async fn recover(&self, now_ms: i64) -> Result<RecoveryReport> {
         let mut report = RecoveryReport::default();
         // One boot pass: rebuild the derived indexes from the authoritative
@@ -2657,122 +2637,9 @@ impl KernelHost {
             if page.operations.is_empty() && page.next.is_none() {
                 break;
             }
-            for operation in page.operations {
+            for candidate in page.operations {
                 report.scanned += 1;
-                match RecoveryPlanner::classify(&operation, now_ms) {
-                    RecoveryDisposition::RepairReady => {
-                        if self
-                            .processes
-                            .repair_ready(&operation.id.process_id, now_ms, self.timer_poll_ms)
-                            .await
-                            .map_err(runtime)?
-                        {
-                            self.ready_metrics.lock().repaired += 1;
-                            report.ready_repaired.push(operation.id);
-                            self.ready.notify_one();
-                        }
-                    }
-                    RecoveryDisposition::AwaitOwner => {
-                        report.awaiting_owner.push(operation.id);
-                    }
-                    RecoveryDisposition::ReclaimExpired => {
-                        // A4: the reclaim is a command of the same pid — it
-                        // takes the lane, held for the event alone: the
-                        // reconciliation the event's outcome can ask for
-                        // re-acquires the lane itself (`converge`/`retry`),
-                        // and the lane is not reentrant. The revision guard
-                        // the event carries stays the fence against a claim
-                        // that moved since the scan.
-                        let reclaimed = {
-                            let _lane = self.lock_command_lane(&operation.id.process_id).await;
-                            self.operation_event(
-                                &operation.id,
-                                operation.revision,
-                                OperationEvent::ReleaseExpiredClaim { now_ms },
-                            )
-                            .await
-                        };
-                        match reclaimed {
-                            Ok((reclaimed, _)) => match reclaimed.state {
-                                OperationState::RetryScheduled { .. } => {
-                                    report.reclaimed.push(reclaimed.id.clone());
-                                    self.wake(&reclaimed.id);
-                                }
-                                OperationState::EffectUnknown { .. } => {
-                                    match self.reconcile_unknown_effect(&reclaimed).await {
-                                        Ok(EffectReconcile::Applied) => {
-                                            report.effect_applied.push(reclaimed.id)
-                                        }
-                                        Ok(EffectReconcile::Retried) => {
-                                            report.effect_retried.push(reclaimed.id)
-                                        }
-                                        Ok(EffectReconcile::Manual) => {
-                                            report.reconciliation_required.push(reclaimed.id)
-                                        }
-                                        Err(error) => {
-                                            tracing::debug!(
-                                                operation = ?reclaimed.id,
-                                                error = %error,
-                                                "effect observation reconciliation failed; next scan retries"
-                                            );
-                                            report.reconciliation_required.push(reclaimed.id);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            },
-                            Err(error) => {
-                                #[cfg(test)]
-                                eprintln!("reclaim {operation:?} failed: {error}");
-                                tracing::debug!(operation = ?operation.id, error = %error, "reclaim lost; next scan retries");
-                            }
-                        }
-                    }
-                    RecoveryDisposition::FinalizeCommit => {
-                        let commit = match &operation.state {
-                            OperationState::Committed(commit) => commit.clone(),
-                            _ => continue,
-                        };
-                        // A4: same as the reclaim — a command of this pid
-                        // under the lane, fenced by the revision it carries.
-                        let _lane = self.lock_command_lane(&operation.id.process_id).await;
-                        match self
-                            .operation_event(
-                                &operation.id,
-                                operation.revision,
-                                OperationEvent::Complete { commit },
-                            )
-                            .await
-                        {
-                            Ok((finalized, _)) => report.finalized.push(finalized.id),
-                            Err(error) => {
-                                tracing::debug!(operation = ?operation.id, error = %error, "finalize lost; next scan retries");
-                            }
-                        }
-                    }
-                    RecoveryDisposition::ManualReconciliation => {
-                        match self.reconcile_unknown_effect(&operation).await {
-                            Ok(EffectReconcile::Applied) => {
-                                report.effect_applied.push(operation.id)
-                            }
-                            Ok(EffectReconcile::Retried) => {
-                                report.effect_retried.push(operation.id)
-                            }
-                            Ok(EffectReconcile::Manual) => {
-                                report.reconciliation_required.push(operation.id)
-                            }
-                            Err(error) => {
-                                tracing::debug!(
-                                    operation = ?operation.id,
-                                    error = %error,
-                                    "effect observation reconciliation failed; next scan retries"
-                                );
-                                report.reconciliation_required.push(operation.id);
-                            }
-                        }
-                    }
-                    RecoveryDisposition::IgnoreTerminal => {}
-                }
+                self.recover_observed(candidate, now_ms, &mut report).await;
             }
             cursor = page.next;
             if cursor.is_none() {
@@ -2780,6 +2647,261 @@ impl KernelHost {
             }
         }
         Ok(report)
+    }
+
+    /// One observed operation, from the observation to the executed decision.
+    ///
+    /// This is the IO half of [`recover_operation`]. It collects the
+    /// executor's proof when the decision asks for one, commits the command
+    /// Core names under the pid's command lane (the same lane and the same
+    /// revision fence a normal operation uses), and runs the directive. No
+    /// branch here decides what a phase means: `ReclaimReady` versus
+    /// `ReclaimUnknown`, replay versus retry, and finalize are Core's answers.
+    ///
+    /// A command that loses its guard is left to the next scan — the state it
+    /// was formed from moved on, so the new state will be observed afresh.
+    async fn recover_observed(
+        &self,
+        candidate: RecoveryCandidate,
+        now_ms: i64,
+        report: &mut RecoveryReport,
+    ) {
+        let mut observed = Observed::from_record(&candidate.operation, candidate.version, now_ms);
+        // The payload of an `Applied`/`Failed` observation, kept for the
+        // `ReplayEffect` directive. Core sees only the receipt.
+        let mut effect = None;
+        loop {
+            let decision = recover_operation(&observed);
+            match decision.directive {
+                RecoveryDirective::AwaitOwner => {
+                    report.awaiting_owner.push(observed.operation_id);
+                    return;
+                }
+                RecoveryDirective::IgnoreTerminal => return,
+                RecoveryDirective::RepairReady => {
+                    match self
+                        .processes
+                        .repair_ready(
+                            &observed.operation_id.process_id,
+                            now_ms,
+                            self.timer_poll_ms,
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            self.ready_metrics.lock().repaired += 1;
+                            report.ready_repaired.push(observed.operation_id);
+                            self.ready.notify_one();
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::debug!(
+                                operation = ?observed.operation_id,
+                                error = %error,
+                                "repairing the ready record failed; next scan retries"
+                            );
+                        }
+                    }
+                    return;
+                }
+                RecoveryDirective::ReclaimReady => {
+                    let Some(command) = decision.command else {
+                        tracing::debug!(
+                            operation = ?observed.operation_id,
+                            "reclaim decision carried no command"
+                        );
+                        return;
+                    };
+                    // A4: the reclaim is a command of the same pid — it takes
+                    // the lane for the event alone. The revision guard the
+                    // event carries stays the fence against a claim that moved
+                    // since the scan.
+                    let reclaimed = {
+                        let _lane = self
+                            .lock_command_lane(&observed.operation_id.process_id)
+                            .await;
+                        self.operation_event(
+                            &observed.operation_id,
+                            command.expected_revision,
+                            command.event,
+                        )
+                        .await
+                    };
+                    match reclaimed {
+                        Ok((reclaimed, _)) => {
+                            report.reclaimed.push(reclaimed.id.clone());
+                            // The event's own commit wrote the ready record;
+                            // the wake is that record's accelerator, not a
+                            // second business decision.
+                            self.wake(&reclaimed.id);
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                operation = ?observed.operation_id,
+                                error = %error,
+                                "reclaim lost; next scan retries"
+                            );
+                        }
+                    }
+                    return;
+                }
+                RecoveryDirective::ReclaimUnknown => {
+                    let Some(command) = decision.command else {
+                        tracing::debug!(
+                            operation = ?observed.operation_id,
+                            "reclaim decision carried no command"
+                        );
+                        return;
+                    };
+                    let reclaimed = {
+                        let _lane = self
+                            .lock_command_lane(&observed.operation_id.process_id)
+                            .await;
+                        self.operation_event(
+                            &observed.operation_id,
+                            command.expected_revision,
+                            command.event,
+                        )
+                        .await
+                    };
+                    match reclaimed {
+                        Ok((reclaimed, loaded)) => {
+                            // The commit turned the operation `EffectUnknown`.
+                            // Observe the new state and let Core decide again;
+                            // the effect itself is never re-driven here.
+                            observed =
+                                Observed::from_record(&reclaimed, loaded.snapshot.version, now_ms);
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                operation = ?observed.operation_id,
+                                error = %error,
+                                "reclaim lost; next scan retries"
+                            );
+                            return;
+                        }
+                    }
+                }
+                RecoveryDirective::FinalizeCommit => {
+                    let Some(command) = decision.command else {
+                        tracing::debug!(
+                            operation = ?observed.operation_id,
+                            "finalize decision carried no command"
+                        );
+                        return;
+                    };
+                    // A4: the close is a command of the same pid, fenced by
+                    // the operation revision. The lane is dropped before the
+                    // post-commit program, which may report lifecycle and
+                    // deliver records.
+                    let finalized = {
+                        let _lane = self
+                            .lock_command_lane(&observed.operation_id.process_id)
+                            .await;
+                        self.operation_event(
+                            &observed.operation_id,
+                            command.expected_revision,
+                            command.event,
+                        )
+                        .await
+                    };
+                    match finalized {
+                        Ok((finalized, mut loaded)) => {
+                            // A6/A7: the same post-commit program a normal
+                            // `dispatch` runs on the snapshot its commit
+                            // returned — rows current, then lifecycle, outbox
+                            // (nothing new here), then admission.
+                            let admission = self.admissions.lock().directive(&loaded.snapshot);
+                            let decision = Decision::recovered(&loaded.snapshot, admission);
+                            if let Err(error) = self
+                                .execute_decision(
+                                    &mut loaded,
+                                    &decision,
+                                    operation::Projection::Touched,
+                                    &[],
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    operation = ?finalized.id,
+                                    error = %error,
+                                    "executing a finalize commit's decision failed; the recovery pass retries the rest"
+                                );
+                            }
+                            report.finalized.push(finalized.id);
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                operation = ?observed.operation_id,
+                                error = %error,
+                                "finalize lost; next scan retries"
+                            );
+                        }
+                    }
+                    return;
+                }
+                RecoveryDirective::ObserveEffect => match self.observe_effect(&observed).await {
+                    Ok(Some(proof)) => {
+                        effect = proof.observation;
+                        observed = observed.with_effect_receipt(proof.receipt);
+                    }
+                    Ok(None) => {
+                        report.reconciliation_required.push(observed.operation_id);
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            operation = ?observed.operation_id,
+                            error = %error,
+                            "effect observation failed; next scan retries"
+                        );
+                        report.reconciliation_required.push(observed.operation_id);
+                        return;
+                    }
+                },
+                RecoveryDirective::ReplayEffect => {
+                    let Some(observation) = effect.take() else {
+                        report.reconciliation_required.push(observed.operation_id);
+                        return;
+                    };
+                    match self
+                        .converge_observed_effect(&observed.operation_id, observation)
+                        .await
+                    {
+                        Ok(true) => report.effect_applied.push(observed.operation_id),
+                        Ok(false) => report.reconciliation_required.push(observed.operation_id),
+                        Err(error) => {
+                            tracing::warn!(
+                                operation = ?observed.operation_id,
+                                error = %error,
+                                "replaying an observed effect failed; the operation stays unknown"
+                            );
+                            report.reconciliation_required.push(observed.operation_id);
+                        }
+                    }
+                    return;
+                }
+                RecoveryDirective::RetryEffect => {
+                    match self.retry_unknown_effect(&observed.record()).await {
+                        Ok(true) => report.effect_retried.push(observed.operation_id),
+                        Ok(false) => report.reconciliation_required.push(observed.operation_id),
+                        Err(error) => {
+                            tracing::warn!(
+                                operation = ?observed.operation_id,
+                                error = %error,
+                                "re-queuing an idempotent effect failed; the next scan retries"
+                            );
+                            report.reconciliation_required.push(observed.operation_id);
+                        }
+                    }
+                    return;
+                }
+                RecoveryDirective::Manual => {
+                    report.reconciliation_required.push(observed.operation_id);
+                    return;
+                }
+            }
+        }
     }
 
     /// Deliver the records one operation just committed and persist every

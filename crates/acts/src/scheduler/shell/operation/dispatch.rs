@@ -200,13 +200,34 @@ impl KernelHost {
             self.wake(operation);
         }
         operation_trace::end(operation_trace::WAKE, phase);
-        // The read model follows the same commit — the snapshot that commit
-        // returned, never a fresh load: a load is a second read that can
-        // already be older than a concurrent operation's commit, and projecting it
-        // would write that operation's rows away with an older state (the
-        // projection's write order must be the commit order). It runs before
-        // any external observer sees the commit: the lifecycle events and the
-        // outbox transport below.
+        self.execute_decision(&mut loaded, &decision, projection, &receipt.new_outbox)
+            .await
+    }
+
+    /// Execute Core's [`Decision`] for one committed snapshot, in the order
+    /// the durability contracts require.
+    ///
+    /// The normal [`KernelHost::dispatch`] and recovery's `FinalizeCommit`
+    /// both run this (A7): a state has one post-commit program, whichever path
+    /// committed it. The order is the contract:
+    ///
+    /// 1. the read model follows the commit — the snapshot the commit
+    ///    returned, never a fresh load: a load is a second read that can
+    ///    already be older than a concurrent commit, and projecting it would
+    ///    write that commit's rows away with an older state;
+    /// 2. only then does an external observer see it — the lifecycle event
+    ///    first, then the outbox transport and its one batch confirmation
+    ///    (A1b). A failed projection withholds both and leaves the records
+    ///    `Pending`;
+    /// 3. admission last: a slot the decision frees goes back to the parked
+    ///    queue now rather than on the driver's next tick.
+    pub(in crate::scheduler::shell) async fn execute_decision(
+        &self,
+        loaded: &mut crate::scheduler::durable::document_store::LoadedProcess,
+        decision: &Decision,
+        projection: Projection,
+        new_outbox: &[crate::scheduler::core::outbox::records::OutboxId],
+    ) -> Result<()> {
         let phase = operation_trace::start();
         let projected = match projection {
             Projection::Whole => self.project(&loaded.snapshot).await,
@@ -258,10 +279,9 @@ impl KernelHost {
             // record the confirmation could not settle stays `Pending`; the
             // outbox pass owns the retry.
             let phase = operation_trace::start();
-            self.deliver_committed_outbox(&mut loaded, &receipt.new_outbox)
-                .await;
+            self.deliver_committed_outbox(loaded, new_outbox).await;
             operation_trace::end(operation_trace::DELIVER, phase);
-        } else if !receipt.new_outbox.is_empty() {
+        } else if !new_outbox.is_empty() {
             // Keep the deliverable work visible to the outbox pass (the
             // records are already `Pending`; the pass re-reads them).
             self.deliver.notify_one();

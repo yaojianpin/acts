@@ -131,7 +131,7 @@ pub(crate) struct CommitToken {
 /// `ResolveEffectNotApplied` is emitted by recovery when an executor's
 /// observation proves the effect did not run and the effect is idempotent
 /// (A1c). `RenewClaim`, `Quarantine`, `ReleaseQuarantine` and `Supersede` are
-/// transitions of the operation lifecycle `RecoveryPlanner` classifies and
+/// transitions of the operation lifecycle recovery classifies and
 /// `snapshot_codec` persists (the states they produce are part of the durable
 /// V2 format, tags 5–7), but no in-tree caller emits them today. Kept as the
 /// lifecycle's stated vocabulary rather than deleted, because deleting the

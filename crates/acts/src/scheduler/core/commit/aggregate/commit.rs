@@ -144,7 +144,7 @@ pub(crate) fn advance_transition(
         // what the next scan wakes either way.
         //
         // `Committed` stays a persisted state: the V2 tags decode it and
-        // `RecoveryPlanner::FinalizeCommit` still finishes the aggregates a
+        // recovery's `FinalizeCommit` directive still finishes the aggregates a
         // writer from before this fold left there. No operation produces it any more.
         let committed = operation
             .evolve(OperationEvent::Commit {

@@ -132,7 +132,7 @@ impl KernelHost {
             heartbeat_revision: 0,
         };
         let phase = operation_trace::start();
-        let (prepared, snapshot) = self
+        let (prepared, loaded) = self
             .operation_event(
                 id,
                 record.revision,
@@ -150,7 +150,7 @@ impl KernelHost {
                 claim,
             },
             revision: prepared.revision,
-            snapshot,
+            snapshot: loaded.snapshot,
             now_ms: now,
         }))
     }

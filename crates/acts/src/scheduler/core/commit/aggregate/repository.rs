@@ -22,9 +22,19 @@ pub(crate) struct RecoveryCursor {
     pub(crate) operation: Option<crate::scheduler::core::model::operation::OperationId>,
 }
 
+/// One recovery-index row with the aggregate revision it was read at. A7's
+/// [`Observed`](crate::scheduler::core::recovery::planner::Observed) needs that
+/// revision as an observed fact, so the scan hands it over instead of making
+/// recovery load the aggregate a second time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecoveryCandidate {
+    pub(crate) operation: OperationRecord,
+    pub(crate) version: ProcessVersion,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecoveryPage {
-    pub(crate) operations: Vec<OperationRecord>,
+    pub(crate) operations: Vec<RecoveryCandidate>,
     pub(crate) next: Option<RecoveryCursor>,
 }
 
@@ -121,17 +131,29 @@ impl RecoveryRepository for MemoryProcessRepository {
         let mut operations = self
             .processes
             .values()
-            .flat_map(|snapshot| snapshot.operations.values().cloned())
-            .filter(|operation| !operation.is_retired())
+            .flat_map(|snapshot| {
+                let version = snapshot.version.clone();
+                snapshot
+                    .operations
+                    .values()
+                    .filter(|operation| !operation.is_retired())
+                    .cloned()
+                    .map(move |operation| RecoveryCandidate {
+                        operation,
+                        version: version.clone(),
+                    })
+            })
             .collect::<Vec<_>>();
         operations.sort_by(|left, right| {
-            left.id
+            left.operation
+                .id
                 .process_id
-                .cmp(&right.id.process_id)
-                .then_with(|| operation_order(&left.id, &right.id))
+                .cmp(&right.operation.id.process_id)
+                .then_with(|| operation_order(&left.operation.id, &right.operation.id))
         });
         if let Some(cursor) = after {
-            operations.retain(|operation| {
+            operations.retain(|candidate| {
+                let operation = &candidate.operation;
                 operation.id.process_id > cursor.process_key
                     || (operation.id.process_id == cursor.process_key
                         && cursor
@@ -149,8 +171,8 @@ impl RecoveryRepository for MemoryProcessRepository {
                 )
             })?;
             Some(RecoveryCursor {
-                process_key: last.id.process_id.clone(),
-                operation: Some(last.id.clone()),
+                process_key: last.operation.id.process_id.clone(),
+                operation: Some(last.operation.id.clone()),
             })
         } else {
             None

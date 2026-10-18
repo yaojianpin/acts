@@ -281,7 +281,12 @@ impl AsyncProcessRepository {
                 // Same: the operation moved on after the index was scanned.
                 continue;
             }
-            operations.push(operation.clone());
+            operations.push(
+                crate::scheduler::core::commit::aggregate::RecoveryCandidate {
+                    operation: operation.clone(),
+                    version: process.snapshot.version.clone(),
+                },
+            );
         }
         Ok(RecoveryPage { operations, next })
     }
@@ -312,16 +317,13 @@ impl AsyncProcessRepository {
         match outcome {
             ReplaceOutcome::Committed(write) => {
                 loaded.install_replace_documents(write);
-                Ok(OperationCommitOutcome::Committed {
-                    operation,
-                    snapshot: loaded.snapshot,
-                })
+                Ok(OperationCommitOutcome::Committed { operation, loaded })
             }
             ReplaceOutcome::AlreadyCommitted(process) => {
                 let operation = authoritative_operation(&process, id)?;
                 Ok(OperationCommitOutcome::AlreadyCommitted {
                     operation,
-                    snapshot: process.snapshot.clone(),
+                    loaded: *process,
                 })
             }
             ReplaceOutcome::Conflict => Ok(OperationCommitOutcome::Conflict {}),
@@ -1092,14 +1094,16 @@ fn authoritative_operation(
 pub(crate) enum OperationCommitOutcome {
     Committed {
         operation: crate::scheduler::core::model::operation::OperationRecord,
-        /// The snapshot this commit installed. Handed back so the driver does
-        /// not have to decode the whole aggregate again to form the operation's plan.
-        snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        /// The aggregate this commit installed, with its exact bytes. Handed
+        /// back so a caller forms its plan from the committed state and — for
+        /// recovery's finalize (A7) — runs the same post-commit program as the
+        /// normal dispatch, without a second load that could already be older.
+        loaded: LoadedProcess,
     },
     AlreadyCommitted {
         operation: crate::scheduler::core::model::operation::OperationRecord,
         /// The authoritative aggregate another writer installed.
-        snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        loaded: LoadedProcess,
     },
     Conflict {},
 }
@@ -1770,7 +1774,9 @@ mod tests {
     #[tokio::test]
     async fn a_committed_operation_left_by_an_older_writer_is_finalized() {
         use crate::scheduler::core::model::operation::{CommitToken, OperationEvent};
-        use crate::scheduler::core::recovery::planner::{RecoveryDisposition, RecoveryPlanner};
+        use crate::scheduler::core::recovery::planner::{
+            Observed, RecoveryDirective, recover_operation,
+        };
 
         let claim = ClaimToken {
             owner: "runtime-a".into(),
@@ -1810,8 +1816,13 @@ mod tests {
         repository.create(&process, 0, 800).await.unwrap();
 
         assert_eq!(
-            RecoveryPlanner::classify(&committed, 0),
-            RecoveryDisposition::FinalizeCommit,
+            recover_operation(&Observed::from_record(
+                &committed,
+                process.version.clone(),
+                0
+            ))
+            .directive,
+            RecoveryDirective::FinalizeCommit,
             "the older writer's state is finalized, not re-driven"
         );
         let outcome = repository
@@ -2025,7 +2036,8 @@ mod tests {
         let mut cursor = None;
         loop {
             let page = recovery.recoverable_page(cursor.as_ref(), 1).await.unwrap();
-            for operation in page.operations {
+            for candidate in page.operations {
+                let operation = candidate.operation;
                 assert!(
                     !seen.contains(&operation.id),
                     "a pagination walk may not repeat an operation"
