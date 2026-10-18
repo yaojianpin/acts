@@ -616,6 +616,16 @@ Shell 只做:load -> call Core -> commit Decision -> execute committed EffectInt
 **验收**:删除 shell 中重复的 completion/settle/admission 判定;Core 单测覆盖终态与 admission;
 新增一种 operation 不再同时改 Core/Shell/Recovery/Projection 四处。
 
+**落地(2026-10-18,详见 notes §10「A6 完成」)**:新增 `core/decision.rs`。
+`Decision { transition, process_status, settlement: Settlement { run, projection }, lifecycle, admission }`
+由 `Decision::committed(transition, snapshot, admission)` 产出;`transition` 承载 aggregate changes /
+operations to create / source operation / outbox,timer 与 effect intent 分别是
+`DispatchTimeout`/`ApplyAction` 的 operation intent。`run_settled`/`projection_settled`/
+`ProcessStatus`/`LifecycleDirective`/`place`/`resume_operation` 是该模块里唯一的判定来源。
+Shell 的 `dispatch` 在 commit 后构造 Decision 并按 A5/A1b 顺序执行;`Admissions` 只保留集合与
+`directive()/apply()`;`report_lifecycle` 执行 lifecycle directive;`facts` 与 `projection` 的重复谓词已删。
+`OperationKind::is_schedulable` 移到 enum 旁。`recover()` 的编排未改(留给 A7)。
+
 #### A7 — Recovery 变成统一 Command
 
 **现状**:`RecoveryPlanner::classify` 是 core 纯函数,但 `recover()` 的编排、wake/reclaim/finalize 分支在 shell;

@@ -3437,6 +3437,87 @@ cargo fmt --all --check -> OK
   至少等于 task/vars 行版本。
 - 不做 A6 的 Core Decision、A7 的统一 Recovery Command;不改 effect/outbox payload 与 A1b 顺序;不改 A4 lane。
 
+### A6 完成(2026-10-18):Shell 变薄,Core 输出完整 Decision
+
+**任务**:§11 D 的 A6(P1)。把 settle/lifecycle/admission 的判定从 `shell/mod.rs`、`operation/dispatch.rs`、
+`facts.rs`、`projection.rs` 收进 `core/decision.rs`;Shell 只保留 load → plan → commit → 执行 Decision 的
+IO 顺序。本笔不改 effect 语义、outbox payload/topic、A1b 顺序、A4 lane、A5 持久 revision/repair queue、A11 回收判定。
+
+**事实与契约(判定来源)**
+
+- `TransitionPlan` 已表达**提交写什么**:`task_creates`/`state_changes`/`variable_writes`(aggregate changes)、
+  `source_operation`(本批关闭的 operation)、`operations`(新建 operation;`DispatchTimeout` 是 timer,
+  `ApplyAction` 是 effect intent)、`outbox`。它**不表达提交对 run 的含义**。
+- `dispatch` 在 commit 之后补做的判定:去重后的 wake(纯 IO 顺序)、`project`/`project_touched`(IO + A5 顺序)、
+  `report_lifecycle`(业务语义:何时 alive/terminal、failed root 是 error)、
+  `deliver_committed_outbox`(A1b 顺序 + transport IO)、`refresh_proc_row`(A11 的 `removable` 派生)、
+  `place_run`/`admit_run`(业务语义:slot 释放/准入 + shell 的 in-memory 集合)。
+- `recover` 的 special-case:boot `repair_all_ready`/`catch_up_projections`、`RecoveryPlanner::classify` 的
+  state 分类、`ReclaimExpired`/`FinalizeCommit` 的 lane 内 event、effect observation 的人工分流。
+  其中 classify 与状态迁移已是 core;`recover()` 的编排仍是 shell,**统一 Command 留给 A7**,本笔不提前做。
+- 归入 Core 的业务语义:`run_settled`(slot/lifecycle)、`projection_settled`/`is_reclaimable`(回收)、
+  `ProcessStatus`、lifecycle 事件种类与 failed root 的 error facts、admission 规则、parked run 的 admission
+  operation 身份(`resume_operation`)。
+- 留在 Shell 的 IO/顺序:A5 的“行 current 后才能让 lifecycle/transport 看见”、A1b 的“commit 后发送 +
+  一次批量 confirm”、A11 的“先 `removable` 再原子 reclaim”、A4 的 lane、wake/队列、in-memory slot 集合本身。
+- **Decision 形态**(`core/decision.rs`,value-only、无 IO/tokio/store,`Clone/Debug/Eq`):
+  `Decision { transition, process_status, settlement, lifecycle, admission }`。
+  - `process_status`: `Pending | Running | Completed | Failed | Terminated`(由 root task state 派生);
+  - `settlement`: `Settlement { run, projection }`,分别就是 `run_settled` 与 `projection_settled`;
+  - `lifecycle`: `Started | Completed | Errored { code, message }`;`None` = 无 root,不可上报;
+  - `admission`: `Park | Drive(Keep | Release | Take | NoSlot)`;输入是 shell 观察到的
+    `SlotObservation { standing: Parked|Holding|Unplaced, cap, active }` 加快照的 root state/settled。
+  - 设计词的映射(不复制 plan 字段):aggregate changes = `transition.{task_creates,state_changes,
+    variable_writes}`;operations to create/timers/effect intents = `transition.operations`;
+    operations to close = `transition.source_operation`;outbox records = `transition.outbox`。
+    effect 仍由原 operation 在 commit 前执行(A1a/A1c),Decision 不跨 effect/transport。
+
+**协议**
+
+- `Decision::committed(transition, snapshot, admission)` 是 commit 后的唯一总入口;Shell 的 `dispatch`
+  用它一次性取得 lifecycle/settlement/status/admission,并按 A5/A1b/A4 的顺序执行。
+- `Admissions` 只保留状态与执行:`directive()` 调 `decision::place(...)`(纯规则),
+  `apply()` 执行 `Park/Release/Take/Keep/NoSlot` 并把 freed slot 的 admission operation 交给 `admit_run`;
+  `place_run` 自身只剩下取锁、取 directive、apply。
+- `report_lifecycle` 改为执行 `decision::lifecycle(snapshot)` 的 directive;`report_lifecycle_decision`
+  只负责 message 形状、sink 与 once-per-phase 去重。`exposes` 校验仍留在 message 层(它需要
+  `crate::Message`/model),但“完成/错误/进行中”的判定在 Core。
+- `project`/`project_touched` 的 settled 重试分支、`Runtime`/`projection` 的回收判定都直接引用
+  `decision::run_settled` / `decision::projection_settled`;`shell/facts.rs` 的重复实现已删除。
+- `OperationKind::is_schedulable()` 移到 enum 旁(`core/model/operation.rs`),`core/ready.rs` 不再维护
+  第二份 kind 名单;新增 operation 的 Core 改动收敛为 enum/codec + `is_schedulable` + plan/Decision 分支,
+  Recovery 仍按 operation state 分类、Projection 不匹配 kind。
+- 未改:effect/outbox payload 与 topic、A1b 的 Pending→project→deliver→batch confirm、A4 的 lane 边界、
+  A11 的 reclaim 顺序与判定、A5 的 store-level revision/repair queue。
+
+**测试**
+
+- Core 新增 6 个单测:`run_settled` 与 `projection_settled` 的区分(pending outbox 只阻止回收)、
+  空/无 root 快照、root state → status/lifecycle 映射、failed root 的 durable error facts、
+  parked/held/unplaced 的 admission 决策(含 cap 满 park、settled release、terminal root no-slot)、
+  `Decision::committed` 同时携带 plan 与全部 process directive。
+- 既有 A1a/A1b/A1c/A2/A3/A4/A5/A11、outbox/reliability/effect 套件全部保留。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 925 passed, 0 failed, 1 ignored (176.47s)
+cargo test -p acts --lib scheduler::core::decision -> 6 passed
+cargo test -p acts --lib reliability:: -> 65 passed
+cargo test -p acts --lib outbox -> 32 passed
+cargo test -p acts --lib effect -> 26 passed
+cargo test -p acts --lib reclaim -> 8 passed
+cargo test -p acts --lib projection -> 9 passed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK
+cargo fmt --all --check -> OK
+```
+
+**边界**
+
+- 不做 A7 的统一 Recovery Command;`recover()` 的编排/分支本笔未改,只把其投影/生命周期路径接到 Core。
+- 不做 A8 的额度拆分、A9 的 durable handle、A10 的调度器拆分;不缩短 tick。
+- `Decision` 不序列化到 store:它是 commit 后的纯值,持久化格式未变(golden 不变)。
+
 ---
 
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
@@ -3456,8 +3537,9 @@ cargo fmt --all --check -> OK
 > A1a 已完成;A2(durable ready queue)已完成(§10);A11(终态回收 + PID 复用)已完成(§10);
 > A1b(提交后发送 + 每 operation 一笔批量确认)已完成(§10「A1b 完成」);
 > A1c(effect 幂等协议)已完成(§10「A1c 完成」);A3(折叠纯内部 hop)已完成(§10「A3 完成」);
-> A4(每 Process 单写者 command lane)已完成(§10「A4 完成」);A5(projection 版本协议)已完成(§10「A5 完成」)。
-> **当前执行项是 A6(Shell 变薄,Core 输出完整 Decision;§11 D)**,其后 A7/A8/A9/A10。
+> A4(每 Process 单写者 command lane)已完成(§10「A4 完成」);A5(projection 版本协议)已完成(§10「A5 完成」);
+> A6(Shell 变薄,Core 输出完整 Decision)已完成(§10「A6 完成」)。
+> **当前执行项是 A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`;§11 D)**,其后 A8/A9/A10。
 > 第二波 P1/L* **暂缓,不删除**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
@@ -3537,7 +3619,7 @@ cargo fmt --all --check -> OK
 > **effect/commit 顺序、正常路径的活性来源、同一 Process 的写者模型、投影协议、Shell 仍承担状态机语义、
 > 以及终态 ProcessSnapshot/投影/索引的回收与 PID 复用**。
 > 执行顺序:**A1a → A2 → A11 → A1b(批量 confirm) → A1c → A3/A4/A5 → A6 → A7/A8/A9/A10**。
-> A1a/A2/A11/A1b/A1c/A3/A4 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
+> A1a/A2/A11/A1b/A1c/A3/A4/A5/A6 已完成并分别记录在 §10;A1b 的 per-record 试点保持回退(见 §10「A1b 试点回退」),
 > 正常路径不得恢复 per-record claim/confirm;A1c 的自动重试只对 executor observation 证明 not-applied
 > 且包显式声明幂等的 effect 生效。
 > 第二波 P1/L* 暂缓,不删除。
@@ -3551,7 +3633,7 @@ cargo fmt --all --check -> OK
 | **A3** | 折叠纯内部 hop:Planner 一次跑到下一个外部边界;branch/join/next/终态/纯传播/纯级联不单独立 operation | #3 | P1 | A1/A2 | **已做(§10「A3 完成」)**。验收:线性 3 节点 claim/commit 从 9 降到 6(`ExecuteTask` + `ApplyAction`,无纯 hand-off 落盘);branch/join/catch/next/终态与 skip/abort 级联、rewind 都在产生者提交内折叠;行为、消息、行投影、lifecycle 不变;fold 失败回退原计划,effect/CAS 语义不退 |
 | **A4** | 每 Process 单写者 command lane:正常/客户端动作/恢复 command 串行决定状态;effect 可并发;observation 回 lane;CAS 只做恢复/fencing | #4 | P1 | A2 | **已做(§10「A4 完成」)**。验收:同一 pid 的并发 client action 恰一个决策、loser 为决策性拒绝、`action_replans()==0`、aggregate guard 冲突为 0;不同 pid 的 effect 在 `Barrier(2)` 会合、各自提交;effect 窗口内同一 pid 的 command 可执行,effect 后冲突落 `EffectUnknown`(不重跑)。`commit_transition` 的 domain `VersionConflict` Err 在 effect 后也按 A1a 分类 |
 | **A5** | projection 正式协议:每行持久化 `source_aggregate_revision`;store-level 条件写;启动增量补投影;repair queue;API lag/强读 aggregate;lifecycle 后置或显式契约 | #5 | P1 | — | **已做(§10「A5 完成」)**。验收:旧投影不能覆盖新投影(store guard + 持久 revision);重启不丢版本(boot catch-up);消息/完成事件消费者只能在行 current 后看到提交;lag/failed/repaired 有指标 |
-| **A6** | Shell 变薄:Core 输出完整 `Decision`(aggregate changes/operations/effect intents/outbox/timers/process status/admission directives);Shell 只做 IO/commit/execute | #6 | P1 | A3/A4/A5 | 未做。验收:settle/lifecycle/admission 规则进入 Core 或 policy;新增 operation 不再改四处 |
+| **A6** | Shell 变薄:Core 输出完整 `Decision`(aggregate changes/operations/effect intents/outbox/timers/process status/admission directives);Shell 只做 IO/commit/execute | #6 | P1 | A3/A4/A5 | **已做(§10「A6 完成」)**。验收:`core/decision.rs` 的 `Decision { transition, process_status, settlement, lifecycle, admission }` 由 `Decision::committed` 产出;`run_settled`/`projection_settled`/lifecycle/admission/resume-operation 规则只在 Core;`Admissions`/`report_lifecycle`/`place_run` 只执行 directive;`OperationKind::is_schedulable` 与 enum 同处;Recovery 按 state 分类、Projection 不匹配 kind |
 | **A7** | Recovery 统一成 `RecoverOperation(observed) -> Decision`:恢复层只收集 observed;正常/恢复共用 transition/commit 与 per-pid lane | #7 | P1 | A2/A4 | 未做。验收:恢复不再自行决定 wake/reclaim/finalize;正常/恢复同状态同 Decision |
 | **A8** | Admission 分离:execution/effect/recovery/reconciliation quarantine/projection 各自额度;manual reconciliation 不占正常 slot;cancel 立即释放 | #8 | P1 | A2/A4 | 未做。验收:manual run 不阻塞新 run;cancel 后 slot 立即可用;parked 准入不依赖 tick |
 | **A9** | durable run handle:`start()` 返回可 `wait()` 的 handle;先查终态→订阅→复查;event channel 只做通知;示例改先注册或 `wait()` | #9 | P2 | A1/A5 | 未做。验收:check-subscribe race 不存在;重启后仍可等待 |
@@ -3579,63 +3661,74 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:A6 —— Shell 变薄,Core 输出完整 Decision(§11 D,P1)
+# 当前任务:A7 —— Recovery 统一成 `RecoverOperation(observed) -> Decision`(§11 D,P1)
 
-**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A6 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A6;
-§10「A5 完成」「A4 完成」「A3 完成」「A11 完成」。当前缺口:settle/completion/lifecycle/admission 判定仍散在
-`shell/mod.rs`、`shell/operation/dispatch.rs`、`shell/facts.rs` 与 `shell/planning.rs`;新增一种 operation 仍要
-同时改 Core/Shell/Recovery/Projection 多处。`run_settled` 与 `projection_settled` 已在 A5 分别命名,但
-“何时完成、何时释放 slot、何时上报、何时允许回收”仍不是 Core 的一个输出。
+**依据**:`KERNEL_CUTOVER_NOTES.md` §11 D 的 A7 行;`KERNEL_REFACTOR_DESIGN.md` §3.10 的 A7;
+§10「A6 完成」「A4 完成」「A2 完成」「A1c 完成」「A11 完成」。当前缺口:`RecoveryPlanner::classify` 已是
+Core 纯函数,但 `recover()` 的编排与 `AwaitOwner`/`ReclaimExpired`/`FinalizeCommit`/`ManualReconciliation`/
+`RepairReady` 分支仍在 `shell/mod.rs`;正常路径与恢复路径共享 `OperationEvent`,却没有统一的
+`Command -> Decision` 入口。`FinalizeCommit` 只关闭 operation,不执行 A6 定义的 post-commit Decision
+(project → lifecycle → outbox → admission),恢复后的同一状态可能与正常路径得到不同结果。
 
-**目标**:Core 输出完整的 `Decision { aggregate_changes, operations_to_create, operations_to_close,
-effect_intents, outbox_records, timers, process_status, admission_directives }`;Shell 只做
-load → call Core → commit Decision → execute committed EffectIntent → feed Observation back。
-settle/lifecycle/admission 规则进入 Core 或显式的 policy 模块;Shell 不再用调用顺序补业务判断。
+**目标**:恢复层只收集
+`Observed { operation_id, persisted_phase, lease, claim, aggregate_revision, effect_receipt, now }`,
+交给 Core 的 `RecoverOperation(observed) -> Decision`;正常与恢复共用同一个 transition/commit 协议、
+同一个 per-pid command lane、同一个 post-commit Decision 执行器。恢复不再自行决定 wake/reclaim/finalize
+的业务语义。
 
 **本笔内容**
 
 1. **事实与契约**
-   - 画清当前 Decision 的“事实来源”:`TransitionPlan` 已有哪些字段、`dispatch` 在 commit 之后补做了哪些判断
-     (`report_lifecycle`、`place_run`/`admit_run`、`deliver_committed_outbox`、`refresh_proc_row`)、
-     `recover` 的 special-case;列出其中哪些是业务语义、哪些是 IO 顺序。
-   - 定义 `Decision` 的形态与位置(Core 纯类型、可序列化/可测试);明确 `process_status` 与
-     admission directive 的取值域;保持 A4 lane 边界:Decision 的产生不跨 effect/transport。
-   - 明确 `run_settled`(slot/lifecycle)与 `projection_settled`(可回收)在 Decision 中的表达方式;
-     Shell 只执行,不重新推导。
+   - 画清当前恢复事实:`RecoveryPlanner::classify` 的 state 分类、`OperationRecord` 的 phase/claim/lease、
+     `commit_operation_event` 的 CAS、`recovery_index` 分页、`repair_ready`/boot catch-up、
+     effect observation(`Applied`/`Failed`/`NotApplied`/`Unknown`)与人工闭环。
+   - 列出 `recover()` 中哪些是**业务语义**(何时 reclaim、何时 finalize、何时 wake、
+     `EffectUnknown` 是否重试/人工)、哪些是 **IO 顺序**(分页游标、lane 获取、event 提交、repair queue)。
+   - 定义 `Observed` 的取值域与来源;决定 `RecoverOperation` 的 Decision 形态:优先复用 A6 的
+     `Decision { transition, process_status, settlement, lifecycle, admission }`,把恢复特有结果放进显式的
+     `RecoveryDirective`(wake/reclaim/finalize/manual/repair),不要把业务判断留在 shell 的分支里。
+   - 明确同一 operation state 在正常路径与恢复路径必须得到同一 Decision(或同一组 directive);
+     `EffectUnknown` 的人工分流仍按 A1c,不放宽幂等声明。
 2. **协议**
-   - 把 settle/lifecycle/admission 判定移入 Core(或 `core/policy`),让正常路径与 Recovery 共用同一入口;
-     A5 的“行 current 后才允许外部观察者”顺序不变。
-   - 新增 operation 时只需在 Core 增加 plan/Decision 分支,Shell/Recovery/Projection 不再各加一处。
-   - 不改 effect 语义、outbox payload/topic/A1b 顺序、channel ack/delivery 行语义、A11 回收判定。
+   - Core 增加唯一的 `RecoverOperation` 入口(纯函数/`ActPlan`),`RecoveryPlanner::classify` 成为它的实现细节;
+     `recover()` 只做 observe → 取 lane → call Core → commit/execute。
+   - `FinalizeCommit` 走与正常 `dispatch` 相同的 post-commit 执行顺序:行 current → lifecycle →
+     outbox(仍按 A1b 的批量 confirm)→ admission。A5 的“行 current 后才允许外部观察者”顺序不变。
+   - 恢复的 reclaim/finalize 仍是同一 pid 的 command,持 A4 lane;event 的 revision guard 仍是 fence。
+   - 不改 effect 语义、outbox payload/topic、channel ack/delivery 行语义、A11 的回收判定与顺序。
 3. **测试**
-   - Core 单测覆盖终态、lifecycle 决策、admission/slot 决策与 `run_settled`/`projection_settled` 的区分。
-   - 既有 A1a/A1b/A1c/A2/A3/A4/A5/A11、outbox、reliability、effect 套件绿;新增 operation 的改动面用测试/
-     代码审查固定。
+   - Core 单测覆盖 `Observed` → Decision/directive:expired claim、live owner、committed-finalize、
+     `EffectUnknown`/`Quarantined`、pending/retry 的 ready repair、terminal ignore。
+   - 同一状态经正常路径与恢复路径得到同一 Decision/directive(表驱动测试)。
+   - 既有 reliability、A1a/A1b/A1c/A2/A3/A4/A5/A6/A11、outbox、effect 套件绿;恢复测试断言
+     `Observed` 与 Decision,不依赖 shell 调用顺序。
 
 **边界**
 
-- 不做 A7 的统一 Recovery Command、不做 A8 的 admission 额度拆分、不做 A9 的 durable handle;
-- 不缩短 tick、不把活性转嫁 recovery 扫描;不改 A5 的持久 revision/repair queue 语义;
-- A4 的 lane 边界不改;投影写入不得让 lane 跨 effect 或 transport 持有。
+- 不做 A8 的 admission 额度拆分、不做 A9 的 durable handle、不做 A10 的调度器拆分;
+- 不缩短 tick、不把正常活性转嫁 recovery 扫描;不改 A5 的持久 revision/repair queue 语义;
+- A4 的 lane 边界不改;恢复不得在 effect/transport 期间持有 lane;
+- 本笔只统一恢复入口与 post-commit 执行,不引入跨进程 exactly-once。
 
 **验收**
 
-- `settled`/lifecycle/admission 规则只在 Core/policy 一处;Shell 只做 IO 与执行顺序;
-- 新增 operation 不再同时改 Core/Shell/Recovery/Projection 四处;
+- 恢复层不再自行决定 wake/reclaim/finalize 的业务语义;正常/恢复同状态同 Decision;
+- `FinalizeCommit` 与正常 `dispatch` 共用 post-commit 执行顺序;
 - `cargo test -p acts --lib --tests` 与 reliability/effect/outbox/A1*/A11 套件绿;
-- 写 §10「A6 完成」,§11 D 状态更新,§12 原地指向下一项(A7)。
+- 写 §10「A7 完成」,§11 D 状态更新,§12 原地指向下一项(A8)。
 
 # 限制与约束
 
-- **先读**:§11 D A6、设计 §3.10 A6、`shell/operation/dispatch.rs`、`shell/mod.rs`
-  (`report_lifecycle`/`place_run`/`admit_run`/`recover`/`project`)、`shell/facts.rs`、`shell/planning.rs`、
-  `core/model/transition_plan.rs`、`core/plan/**`。
+- **先读**:§11 D A7、设计 §3.10 A7、`core/recovery/planner.rs`、`core/recovery/{recovery_entry,recovery_index}.rs`、
+  `core/model/operation.rs`、`core/decision.rs`、`shell/mod.rs`(`recover`/`tick`/`reconcile_unknown_effect`/
+  `converge_observed_effect`/`retry_unknown_effect`)、`shell/operation/{mod,prepare,dispatch}.rs`、
+  `durable/async_document_store.rs`(`recoverable_page`/`commit_operation_event`/`repair_ready`)。
 - 不改业务流程/消息 payload/outbox 顺序;effect 仍由原 operation 承载并保留 A1c 的稳定 key。
 - WIP 旁置口径同 C8b;生产代码与文档分开提交,提交前过 §11.C 门禁。
 
 # 交付
 
-Core `Decision` + Shell 只执行 + settle/lifecycle/admission 单一来源
+`RecoverOperation(observed) -> Decision` + 正常/恢复共用 commit 与 post-commit 执行器
 → 更新 §10/§11/§12。
 ```
 
