@@ -278,7 +278,6 @@ impl KernelHost {
     /// operation needed nothing — a wake redelivered for an already-terminal
     /// operation, a run parked by the slot cap, or a timer with nothing due.
     pub(in crate::scheduler::shell) async fn execute_one(&self, id: &OperationId) -> Result<bool> {
-        operation_trace::operation();
         // A4: this turn holds the pid's command lane — claim, plan and commit
         // decide inside it, so no client action or recovery disposition of
         // the same run plans beside this operation on the same revision. The
@@ -298,13 +297,10 @@ impl KernelHost {
         })?;
         let mut operation = claimed.operation(&mut lane);
         // Phases 2 and 3 — perform and plan: the kind's own work and the
-        // transition that work implies. One timer covers both, exactly the
-        // span the pre-split `PLAN` stage measured.
-        let phase = operation_trace::start();
+        // transition that work implies.
         let outcome = driver.run(self, &mut operation).await?;
         let effect_started = outcome.ran_external_effect();
         if matches!(outcome, Outcome::Nothing) {
-            operation_trace::end(operation_trace::PLAN, phase);
             // The work turned out to be nothing after all: the claim goes back
             // and the release writes the ready record the driver defers to the
             // next poll. The release is best-effort — recovery's lease expiry
@@ -319,12 +315,8 @@ impl KernelHost {
             return Ok(false);
         }
         let plan = match driver.next(self, &operation, outcome).await {
-            Ok(plan) => {
-                operation_trace::end(operation_trace::PLAN, phase);
-                plan
-            }
+            Ok(plan) => plan,
             Err(error) => {
-                operation_trace::end(operation_trace::PLAN, phase);
                 if effect_started && let Err(mark_error) = self.mark_effect_unknown(&claimed).await
                 {
                     tracing::warn!(

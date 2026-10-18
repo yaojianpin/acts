@@ -1,5 +1,4 @@
 mod health;
-mod perf_probe;
 mod scheduler_split;
 mod state;
 mod tree;

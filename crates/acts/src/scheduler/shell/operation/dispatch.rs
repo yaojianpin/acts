@@ -103,7 +103,6 @@ impl KernelHost {
         } else {
             plan
         };
-        let phase = operation_trace::start();
         let (receipt, mut loaded) = match self
             .processes
             .commit_transition(&plan, SystemClock.now_ms(), self.timer_poll_ms)
@@ -181,7 +180,6 @@ impl KernelHost {
                 return Err(conflict(format!("commit conflict on operation {id:?}")));
             }
         };
-        operation_trace::end(operation_trace::COMMIT, phase);
         // The commit closed the operation inside its batch (see
         // `advance_transition`): there is no second, close-only commit to run.
         // Core's whole post-commit rule is one value (A6): the plan plus what
@@ -190,7 +188,6 @@ impl KernelHost {
         // durability contracts require.
         let admission = self.admissions.lock().directive(&loaded.snapshot);
         let decision = Decision::committed(plan, &loaded.snapshot, admission);
-        let phase = operation_trace::start();
         for operation in &receipt.new_operations {
             // A timer armed by an execution's *start* operation waits for its
             // first tick: the legacy engine had no round before its first
@@ -210,7 +207,6 @@ impl KernelHost {
             }
             self.wake(operation);
         }
-        operation_trace::end(operation_trace::WAKE, phase);
         self.execute_decision(&mut loaded, &decision, projection, &receipt.new_outbox)
             .await
     }
@@ -239,7 +235,6 @@ impl KernelHost {
         projection: Projection,
         new_outbox: &[crate::scheduler::core::outbox::records::OutboxId],
     ) -> Result<()> {
-        let phase = operation_trace::start();
         // A run handle waits on the aggregate, not on the lifecycle event:
         // the commit that settled the run is already durable and readable
         // here, so wake every waiter now. The projection below can withhold
@@ -273,7 +268,6 @@ impl KernelHost {
                 self.project_touched(&loaded.snapshot, &touched).await
             }
         };
-        operation_trace::end(operation_trace::PROJECT, phase);
         // A6/A5: an external observer — the lifecycle sink and the outbox
         // transport — sees a commit only after its rows are current. If the
         // projection failed, the run is in the repair queue and this commit's
@@ -288,17 +282,13 @@ impl KernelHost {
             // freshly committed state: a start while it is alive, one terminal
             // event once every execution settled. A closed sink or an absent
             // one makes this a no-op.
-            let phase = operation_trace::start();
             self.report_lifecycle_decision(&loaded.snapshot, decision.lifecycle.as_ref());
-            operation_trace::end(operation_trace::LIFECYCLE, phase);
             // The commit's own outbox records are now visible to the
             // transport — after the aggregate commit and after the projection
             // — and their outcomes are persisted in one batch confirmation. A
             // record the confirmation could not settle stays `Pending`; the
             // outbox pass owns the retry.
-            let phase = operation_trace::start();
             self.deliver_committed_outbox(loaded, new_outbox).await;
-            operation_trace::end(operation_trace::DELIVER, phase);
         } else if !new_outbox.is_empty() {
             // Keep the deliverable work visible to the outbox pass (the
             // records are already `Pending`; the pass re-reads them).
@@ -309,7 +299,6 @@ impl KernelHost {
         // waited longest starts now instead of on the driver's next tick. The
         // directive was decided from the committed snapshot; the shell only
         // mutates its own set and wakes the admitted operation.
-        let phase = operation_trace::start();
         let freed = {
             let mut admissions = self.admissions.lock();
             admissions.note_quarantined(&loaded.snapshot.process_id, decision.quarantined);
@@ -318,7 +307,6 @@ impl KernelHost {
         if let Some(admission) = freed {
             self.admit_run(&admission).await?;
         }
-        operation_trace::end(operation_trace::PLACE2, phase);
         Ok(())
     }
 }

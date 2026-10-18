@@ -51,7 +51,6 @@ impl KernelHost {
             return Ok(None);
         }
         let now = SystemClock.now_ms();
-        let phase = operation_trace::start();
         let Some(snapshot) = self.load(&id.process_id).await? else {
             // A ready/recovery/wake record whose aggregate is already gone
             // (an interrupted cleanup, or an older orphan index): there is no
@@ -65,7 +64,6 @@ impl KernelHost {
             return Ok(None);
         };
         let snapshot = snapshot.snapshot;
-        operation_trace::end(operation_trace::LOAD, phase);
         // The slot policy for this run, before it is driven: a parked run
         // waits, a run this driver never admitted (one already in flight when
         // it booted) takes a slot or parks, and a run that settled already —
@@ -74,9 +72,7 @@ impl KernelHost {
         // longest. A parked run's ready record is deferred by the driver, so
         // this remains the cold path it was.
         if slot == Slot::Policy {
-            let phase = operation_trace::start();
             let (placed, admission) = self.place_run(&snapshot);
-            operation_trace::end(operation_trace::PLACE1, phase);
             if let Some(admission) = admission {
                 self.admit_run(&admission).await?;
             }
@@ -131,7 +127,6 @@ impl KernelHost {
             lease_until_ms: now + LEASE_MS,
             heartbeat_revision: 0,
         };
-        let phase = operation_trace::start();
         let (prepared, loaded) = self
             .operation_event(
                 id,
@@ -139,7 +134,6 @@ impl KernelHost {
                 OperationEvent::ClaimAndPrepare(claim.clone()),
             )
             .await?;
-        operation_trace::end(operation_trace::CLAIM, phase);
         debug_assert!(matches!(prepared.state, OperationState::CommitPrepared(_)));
 
         Ok(Some(Claimed {
