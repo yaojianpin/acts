@@ -12,13 +12,13 @@ pub struct Config {
 /// otherwise: one week of hourly files.
 pub const DEFAULT_LOG_MAX_FILES: usize = 168;
 
-/// Concurrent external effects a host runs when `[data].effect_concurrency`
+/// Concurrent external effects a host runs when top-level `effect_concurrency`
 /// does not say otherwise (A8). Effects run outside the pid's command lane, so
 /// this is the one bound that can be reached by ordinary parallel workflows.
 pub(crate) const DEFAULT_EFFECT_CONCURRENCY: usize = 256;
 
 /// Concurrent recovery, reconciliation or projection commands a host runs when
-/// the matching `[data]` key does not say otherwise (A8). These are control
+/// the matching top-level key does not say otherwise (A8). These are control
 /// plane passes; a handful is enough, and each has its own budget.
 pub(crate) const DEFAULT_CONTROL_CONCURRENCY: usize = 16;
 

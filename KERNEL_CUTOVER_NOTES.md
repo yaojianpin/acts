@@ -3667,7 +3667,7 @@ cancel/终态决策在同一 `Decision` 里释放 slot;parked 准入由释放方
 
 **配置与指标**
 
-- `[data]` 新增 `effect_concurrency` / `recovery_concurrency` / `reconciliation_concurrency` /
+- 顶层新增 `effect_concurrency` / `recovery_concurrency` / `reconciliation_concurrency` /
   `projection_concurrency`(默认 256/16/16/16,`0` = 无界);`cache_cap` 仍是 execution 的上限。
   `AdmissionCaps` 由 `KernelHost::new_with_caps` 接收,Runtime 从 `Config` 构造。
 - `AdmissionMetrics { execution: QuotaMetrics, parked, effect, recovery, reconciliation,

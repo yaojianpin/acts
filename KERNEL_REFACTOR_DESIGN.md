@@ -657,7 +657,7 @@ projection concurrency。`ManualReconciliation` 不占正常 execution slot;canc
   `NoSlot`(manual 路径不占 execution 额度)。
 - 五类额度显式化:`AdmissionCategory::{Execution, Effect, Recovery, Reconciliation, Projection}`;
   execution 由 `Admissions { cap, active, parked }` 承载,其余四类各有独立计数器与 cap
-  (`decision::quota(cap, active)`,0 = 无界)。配置为 `[data] effect_concurrency /
+  (`decision::quota(cap, active)`,0 = 无界)。配置为顶层 `effect_concurrency /
   recovery_concurrency / reconciliation_concurrency / projection_concurrency`(默认 256/16/16/16),
   metrics 由 `AdmissionMetrics` 暴露并写入 tick 的 `kernel admission` 日志。
 - `mark_effect_unknown` 在标记成功的同一决策里释放 execution slot 并直接 `admit_run` 队首;
