@@ -322,6 +322,21 @@ pub trait KvStore: Send + Sync {
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
+/// A projection's already-read view of the stored row.
+///
+/// The projector reads a row once to derive timings and the terminal
+/// transition, then writes it. Passing that read back to
+/// [`crate::store::Store::write_projection`] lets the conditional write
+/// compare against it and use its exact bytes as the batch guard instead of
+/// re-reading the same row; the store re-reads by itself when the guard fails,
+/// so a writer outside this process still wins the race exactly as before.
+pub(crate) enum ProjectionHint<T> {
+    /// The row was absent when the caller read it.
+    Absent,
+    /// The row's decoded value and its exact stored bytes.
+    Existing(T, Vec<u8>),
+}
+
 /// Outcome of a conditional projection write
 /// ([`crate::store::Store::write_projection`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1133,7 +1133,7 @@ impl KernelHost {
     async fn project_touched(
         &self,
         snapshot: &ProcessSnapshot,
-        touched: &std::collections::BTreeSet<String>,
+        touched: &std::collections::BTreeSet<crate::scheduler::core::model::task_graph::TaskId>,
     ) -> bool {
         let projector = self.projection.read().clone();
         let Some(projector) = projector else {

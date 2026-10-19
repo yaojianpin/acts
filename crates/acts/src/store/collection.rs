@@ -1,8 +1,8 @@
 use super::map_db_err;
 use crate::store::{
     ConditionalWrite, DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore,
-    OrderBy, PageData, Query, ScanOperation, ScanOptions, Sort, StoreBatchOp, StoreGuard,
-    query::FilterType,
+    OrderBy, PageData, ProjectionHint, Query, ScanOperation, ScanOptions, Sort, StoreBatchOp,
+    StoreGuard, query::FilterType,
 };
 use crate::utils::consts::{KEY_SEP, KEY_SEP_SUCC};
 use crate::{ActError, Result};
@@ -312,6 +312,28 @@ impl<T> KvCollection<T> {
         T: DbCollectionIden,
     {
         let id = extract_id(new_json)?;
+        let previous = self
+            .read_json(&id)
+            .await?
+            .map(|old_json| self.index_keys(&old_json, &id));
+        self.update_ops_json_against(new_json, previous)
+    }
+
+    /// [`Self::update_ops_json`] with the stored document's index keys
+    /// already computed by the caller (`None` when it saw no stored row).
+    ///
+    /// A projection reads the row once and hands that read to the conditional
+    /// write (see [`Self::write_if_newer_with`]); recomputing the old index
+    /// keys from the same bytes avoids a second read of the same document.
+    fn update_ops_json_against(
+        &self,
+        new_json: &JsonValue,
+        previous: Option<Vec<String>>,
+    ) -> Result<Vec<StoreBatchOp>>
+    where
+        T: DbCollectionIden,
+    {
+        let id = extract_id(new_json)?;
         let new_bytes = serde_json::to_vec(new_json).map_err(map_db_err)?;
         let new_index = self.index_keys(new_json, &id);
         let mut ops = Vec::with_capacity(new_index.len() + 1);
@@ -322,9 +344,7 @@ impl<T> KvCollection<T> {
         // what a query sees, and a missing key is index damage that
         // `rebuild_index` repairs explicitly, never something an update heals
         // by accident.
-        let mut old_index: Option<HashSet<String>> = None;
-        if let Some(old_json) = self.read_json(&id).await? {
-            let previous = self.index_keys(&old_json, &id);
+        let old_index: Option<HashSet<String>> = previous.map(|previous| {
             let new_keys: HashSet<&str> = new_index.iter().map(String::as_str).collect();
             for idx_key in &previous {
                 if !new_keys.contains(idx_key.as_str()) {
@@ -333,8 +353,8 @@ impl<T> KvCollection<T> {
                     });
                 }
             }
-            old_index = Some(previous.into_iter().collect());
-        }
+            previous.into_iter().collect()
+        });
         ops.push(StoreBatchOp::Put {
             key: self.data_key(&id),
             value: new_bytes,
@@ -944,12 +964,7 @@ where
     }
 
     async fn find_opt(&self, id: &str) -> crate::Result<Option<Self::Item>> {
-        let key = self.data_key(id);
-        let Some(data) = self.kv.one(&key).await? else {
-            return Ok(None);
-        };
-        let json: JsonValue = serde_json::from_slice(&data).map_err(map_db_err)?;
-        Ok(Some(T::upcast(json)?))
+        Ok(self.find_with_bytes(id).await?.map(|(row, _)| row))
     }
 
     async fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
@@ -1120,6 +1135,24 @@ where
     }
 }
 
+impl<T> KvCollection<T>
+where
+    T: DbCollectionIden + DeserializeOwned,
+{
+    /// One stored row with the exact bytes it was decoded from.
+    ///
+    /// A projection hands both to [`Self::write_if_newer_with`], so the
+    /// conditional write does not re-read the document it just read.
+    pub(crate) async fn find_with_bytes(&self, id: &str) -> crate::Result<Option<(T, Vec<u8>)>> {
+        let key = self.data_key(id);
+        let Some(bytes) = self.kv.one(&key).await? else {
+            return Ok(None);
+        };
+        let json: JsonValue = serde_json::from_slice(&bytes).map_err(map_db_err)?;
+        Ok(Some((T::upcast(json)?, bytes)))
+    }
+}
+
 /// How often a projection write re-reads after a concurrent writer moved the
 /// row between the read and the guarded batch. A few losses are a normal race
 /// (two instances over one database); a run of them is damage, and the caller
@@ -1153,11 +1186,21 @@ where
     /// no revision (a pre-A5 row), which is older than every aggregate
     /// version. Rows whose stored/incoming bodies are identical are not
     /// rewritten.
-    pub(crate) async fn write_if_newer<R, F>(
+    ///
+    /// `hint` is the row as the caller last read it ([`ProjectionHint`]).
+    /// The compare, the index diff and the batch guard use it directly, so a
+    /// projection does not pay a second read of the same row; the projector
+    /// serializes one run's writes with its per-pid lock, so the hint is the
+    /// stored row for the whole projection. A writer outside this process can
+    /// still move it, and then the guard fails and the next attempt re-reads
+    /// from the store. `None` reads the row first (the plain conditional
+    /// write).
+    pub(crate) async fn write_if_newer_with<R, F>(
         &self,
         row: &T,
         revision: F,
         allow_equal: bool,
+        hint: Option<ProjectionHint<T>>,
     ) -> crate::Result<ConditionalWrite>
     where
         R: Ord,
@@ -1167,15 +1210,24 @@ where
         let id = extract_id(&json)?;
         let key = self.data_key(&id);
         let incoming = revision(row);
+        let mut hint = hint;
         for _ in 0..CONDITIONAL_WRITE_ATTEMPTS {
             let _lock = lock_docs([key.clone()]).await;
-            let stored_bytes = self.kv.one(&key).await?;
-            let stored = match &stored_bytes {
-                Some(bytes) => {
-                    let json: JsonValue = serde_json::from_slice(bytes).map_err(map_db_err)?;
-                    Some(T::upcast(json)?)
+            let (stored, stored_bytes) = match hint.take() {
+                Some(ProjectionHint::Absent) => (None, None),
+                Some(ProjectionHint::Existing(stored, bytes)) => (Some(stored), Some(bytes)),
+                None => {
+                    let bytes = self.kv.one(&key).await?;
+                    let stored = match &bytes {
+                        Some(bytes) => {
+                            let json: JsonValue =
+                                serde_json::from_slice(bytes).map_err(map_db_err)?;
+                            Some(T::upcast(json)?)
+                        }
+                        None => None,
+                    };
+                    (stored, bytes)
                 }
-                None => None,
             };
             let Some(incoming) = incoming.as_ref() else {
                 return Ok(ConditionalWrite::Stale);
@@ -1196,7 +1248,14 @@ where
                     return Ok(ConditionalWrite::Stale);
                 }
             }
-            let ops = self.update_ops_json(&json).await?;
+            let previous_index = match &stored_bytes {
+                Some(bytes) => {
+                    let stored: JsonValue = serde_json::from_slice(bytes).map_err(map_db_err)?;
+                    Some(self.index_keys(&stored, &id))
+                }
+                None => None,
+            };
+            let ops = self.update_ops_json_against(&json, previous_index)?;
             let guard = match stored_bytes {
                 Some(bytes) => StoreGuard::holds(key.clone(), bytes),
                 None => StoreGuard::absent(key.clone()),

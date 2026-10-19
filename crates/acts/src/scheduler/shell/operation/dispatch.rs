@@ -245,24 +245,29 @@ impl KernelHost {
         let projected = match projection {
             Projection::Whole => self.project(&loaded.snapshot).await,
             Projection::Touched => {
-                let touched: std::collections::BTreeSet<String> = decision
+                // Task identities, not wires: the projector compares them
+                // against the snapshot's instances directly, so a hop does
+                // not hash the wire of a row it will not write.
+                let touched: std::collections::BTreeSet<
+                    crate::scheduler::core::model::task_graph::TaskId,
+                > = decision
                     .transition
                     .state_changes
                     .iter()
-                    .map(|change| change.task.wire(&loaded.snapshot.process_id))
+                    .map(|change| change.task.clone())
                     .chain(
                         decision
                             .transition
                             .task_creates
                             .iter()
-                            .map(|create| create.task.wire(&loaded.snapshot.process_id)),
+                            .map(|create| create.task.clone()),
                     )
                     .chain(
                         decision
                             .transition
                             .variable_writes
                             .iter()
-                            .map(|write| write.scope.wire(&loaded.snapshot.process_id)),
+                            .map(|write| write.scope.clone()),
                     )
                     .collect();
                 self.project_touched(&loaded.snapshot, &touched).await

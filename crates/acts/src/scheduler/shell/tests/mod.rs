@@ -8627,6 +8627,63 @@ async fn a_restart_catches_up_only_the_rows_that_lag() {
     );
 }
 
+/// The prepared model is cached by the durable `__model` value, not by pid:
+/// a reclaimed pid that starts a different run projects the new model, never
+/// the previous run's cached declaration.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reused_pid_projects_its_own_model() {
+    const PID: &str = "p-projection-model-cache";
+    let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let store = Arc::new(crate::store::Store::new(kv));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+    let projector = RowProjector::new(store.clone(), writer, None);
+
+    let first = crate::model::Workflow::new()
+        .with_id("wf-cache-a")
+        .with_name("model-a")
+        .with_step(|step| step.with_id("a"));
+    let spec = ProcessSpec::from_workflow(PID, &first, &|_| None).unwrap();
+    projector
+        .project(&spec.seed_snapshot().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.procs().find_opt(PID).await.unwrap().unwrap().name,
+        "model-a"
+    );
+
+    // A11 reclaims the old run; the same pid starts a different model.
+    projector.forget_process(PID);
+    projector.resume(PID);
+    let second = crate::model::Workflow::new()
+        .with_id("wf-cache-b")
+        .with_name("model-b")
+        .with_step(|step| step.with_id("b"));
+    let spec = ProcessSpec::from_workflow(PID, &second, &|_| None).unwrap();
+    let mut snapshot = spec.seed_snapshot().unwrap();
+    snapshot.version.process += 1;
+    projector.project(&snapshot).await.unwrap();
+
+    assert_eq!(
+        store.procs().find_opt(PID).await.unwrap().unwrap().name,
+        "model-b",
+        "the cached declaration must be keyed by the durable model"
+    );
+    let b_id = crate::utils::Id::new(PID, &tid_of(PID, "b", 0)).id();
+    let row = store.tasks().find_opt(&b_id).await.unwrap().unwrap();
+    assert_eq!(row.name, "");
+    assert!(
+        row.node_data.contains("\"id\":\"b\""),
+        "the new run's node data comes from its own model: {}",
+        row.node_data
+    );
+}
+
 /// A5: a projection failure is queued, withholds the completion event, and is
 /// repaired by the recovery pass — after which the observer sees the row.
 #[tokio::test(flavor = "multi_thread")]

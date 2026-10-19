@@ -62,12 +62,18 @@ impl Store {
     /// The read model's conditional write (A5): apply `row` only when its
     /// source revision is newer than the stored row's (equal only when
     /// `allow_equal` asks for an explicit repair). See
-    /// [`KvCollection::write_if_newer`] for the compare-and-swap.
+    /// [`KvCollection::write_if_newer_with`] for the compare-and-swap.
+    ///
+    /// `hint` is the row the caller already read (see
+    /// [`super::ProjectionHint`]); the compare, the index diff and the batch
+    /// guard use it instead of re-reading the same document. A lost guard
+    /// re-reads from the store, so a concurrent writer still wins.
     pub(crate) async fn write_projection<T, R, F>(
         &self,
         row: &T,
         revision: F,
         allow_equal: bool,
+        hint: Option<super::ProjectionHint<T>>,
     ) -> Result<super::ConditionalWrite>
     where
         T: DbCollectionIden
@@ -83,7 +89,18 @@ impl Store {
         F: Fn(&T) -> Option<R>,
     {
         KvCollection::<T>::new(&T::iden(), self.kv.clone())
-            .write_if_newer(row, revision, allow_equal)
+            .write_if_newer_with(row, revision, allow_equal, hint)
+            .await
+    }
+
+    /// One projection row with its exact stored bytes, for
+    /// [`Self::write_projection`]'s hint. `None` when the row is absent.
+    pub(crate) async fn find_projection_row<T>(&self, id: &str) -> Result<Option<(T, Vec<u8>)>>
+    where
+        T: DbCollectionIden + DeserializeOwned + Send + Sync + 'static,
+    {
+        KvCollection::<T>::new(&T::iden(), self.kv.clone())
+            .find_with_bytes(id)
             .await
     }
 

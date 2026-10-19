@@ -87,7 +87,7 @@ use crate::{
             transition_plan::ProcessVersion,
         },
     },
-    store::{ConditionalWrite, DbCollectionIden, Store, data},
+    store::{ConditionalWrite, DbCollectionIden, ProjectionHint, Store, data},
     utils::consts,
 };
 
@@ -166,6 +166,24 @@ struct ProjectionCounters {
     repaired: u64,
 }
 
+/// A durable model as the projection reads it: the id-assigned, validated
+/// form (what `node_data`/`node_facts` address) and the exact JSON the proc
+/// row carries.
+///
+/// The model is immutable for the life of a run (`__model` is a private
+/// root-scope fact), so a projection derives it once instead of
+/// deserializing, cloning and validating the whole declaration on every
+/// commit. Entries are keyed by the raw durable value, so a deployment that
+/// reuses a pid with a different model cannot hit a stale entry.
+struct CachedModel {
+    model: crate::model::Workflow,
+    json: String,
+}
+
+/// A bound on the prepared models held in memory. Models are few in a
+/// deployment; the cap only stops an unbounded set of one-off runs.
+const MODEL_CACHE_LIMIT: usize = 64;
+
 /// Materializes the legacy rows of one aggregate.
 #[derive(Clone)]
 pub(crate) struct RowProjector {
@@ -208,6 +226,8 @@ pub(crate) struct RowProjector {
         Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Read-model counters (see [`ProjectionMetrics`]).
     counters: Arc<parking_lot::Mutex<ProjectionCounters>>,
+    /// Prepared models by their raw durable JSON (see [`CachedModel`]).
+    models: Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<CachedModel>>>>,
     /// The durable repair queue's in-memory view: one entry per pid whose
     /// rows may be behind its aggregate, with the instant the repair was
     /// first noticed.
@@ -234,6 +254,7 @@ impl RowProjector {
             projected: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             reclaimed: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
             process_locks: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            models: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             counters: Arc::new(parking_lot::Mutex::new(ProjectionCounters::default())),
             repairs: Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new())),
         }
@@ -314,8 +335,44 @@ impl RowProjector {
         self.counters.lock().failed += 1;
     }
 
+    /// The run's prepared model, derived once per distinct durable value.
+    ///
+    /// `None` when the aggregate predates the model fact (nothing to project
+    /// the rows from).
+    fn prepared_model(&self, snapshot: &ProcessSnapshot) -> Result<Option<Arc<CachedModel>>> {
+        let Some(raw) = root_variable(snapshot, super::model::MODEL_VAR)? else {
+            return Ok(None);
+        };
+        if let Some(cached) = self.models.lock().get(&raw) {
+            return Ok(Some(cached.clone()));
+        }
+        let model = serde_json::from_str::<crate::model::Workflow>(&raw)
+            .map_err(|err| ActError::Runtime(format!("aggregate model is invalid: {err}")))?
+            .prepared()?;
+        let cached = Arc::new(CachedModel {
+            json: model.to_json()?,
+            model,
+        });
+        let mut models = self.models.lock();
+        if models.len() >= MODEL_CACHE_LIMIT {
+            models.clear();
+        }
+        models.insert(raw, cached.clone());
+        Ok(Some(cached))
+    }
+
     /// The store-level conditional write (A5), with the projector's counters.
-    async fn write<T, F>(&self, row: &T, revision: F, allow_equal: bool) -> Result<ConditionalWrite>
+    ///
+    /// `hint` is the row the caller just read; the conditional write uses it
+    /// instead of reading the same document again (see
+    /// [`ProjectionHint`]).
+    async fn write<T, F>(
+        &self,
+        row: &T,
+        revision: F,
+        allow_equal: bool,
+        hint: Option<ProjectionHint<T>>,
+    ) -> Result<ConditionalWrite>
     where
         T: DbCollectionIden
             + serde::Serialize
@@ -330,7 +387,7 @@ impl RowProjector {
     {
         match self
             .store
-            .write_projection(row, revision, allow_equal)
+            .write_projection(row, revision, allow_equal, hint)
             .await
         {
             Ok(outcome) => Ok(outcome),
@@ -447,13 +504,12 @@ impl RowProjector {
 
     /// Project the proc row plus the named instances' rows; `None` projects
     /// every instance. An operation only changes a handful of executions, so
-    /// the driver passes the ones the commit touched instead of rewriting
-    /// every row of the run. Since C5 a row is one *instance* (keyed by
-    /// `pid + wire`), so the touched set carries the instances' wires.
+    /// the driver passes the ones the commit touched instead of walking (and
+    /// hashing the wire of) every execution of the run.
     pub(crate) async fn project_nodes(
         &self,
         snapshot: &ProcessSnapshot,
-        instances: Option<&std::collections::BTreeSet<String>>,
+        instances: Option<&std::collections::BTreeSet<TaskId>>,
     ) -> Result<ProjectionReport> {
         self.project_inner(snapshot, instances, false).await
     }
@@ -461,20 +517,18 @@ impl RowProjector {
     async fn project_inner(
         &self,
         snapshot: &ProcessSnapshot,
-        instances: Option<&std::collections::BTreeSet<String>>,
+        instances: Option<&std::collections::BTreeSet<TaskId>>,
         allow_equal: bool,
     ) -> Result<ProjectionReport> {
         let _guard = self.process_lock(&snapshot.process_id).lock_owned().await;
         if self.is_reclaimed(&snapshot.process_id) {
             return Ok(ProjectionReport::default());
         }
-        let Some(model) = model_of(snapshot)? else {
+        let Some(model) = self.prepared_model(snapshot)? else {
             // An aggregate seeded before the model fact existed: nothing to
             // project the rows from.
             return Ok(ProjectionReport::default());
         };
-        let model = model.prepared()?;
-        let mut report = ProjectionReport::default();
 
         // The proc row is derived from the root task's state. Whenever it is
         // projected, project the root task row too: otherwise a commit that
@@ -484,21 +538,77 @@ impl RowProjector {
             .tasks
             .keys()
             .filter(|id| id.node.as_str() == consts::TASK_ROOT_TID)
-            .min_by_key(|id| id.generation);
-        for task_id in snapshot.tasks.keys() {
-            let wire = task_id.wire(&snapshot.process_id);
-            let is_root = root.is_some_and(|root| root == task_id);
-            if let Some(instances) = instances
-                && !instances.contains(&wire)
-                && !is_root
-            {
-                continue;
+            .min_by_key(|id| id.generation)
+            .cloned();
+        let mut report = match instances {
+            Some(instances) => {
+                let selected: Vec<TaskId> = instances
+                    .iter()
+                    .filter(|id: &&TaskId| snapshot.tasks.contains_key(*id))
+                    .cloned()
+                    .collect();
+                let mut report = self
+                    .project_task_rows(snapshot, &model.model, &selected, allow_equal)
+                    .await?;
+                if let Some(root) = &root
+                    && !instances.contains(root)
+                    && snapshot.tasks.contains_key(root)
+                {
+                    report.merge(
+                        self.project_task_rows(
+                            snapshot,
+                            &model.model,
+                            std::slice::from_ref(root),
+                            allow_equal,
+                        )
+                        .await?,
+                    );
+                }
+                report
             }
+            None => {
+                let selected: Vec<TaskId> = snapshot.tasks.keys().cloned().collect();
+                self.project_task_rows(snapshot, &model.model, &selected, allow_equal)
+                    .await?
+            }
+        };
+        // The proc row is the summary row: write it last so a reader that sees
+        // the terminal proc state can also see the task rows it summarizes.
+        if self.claim(snapshot, "proc", allow_equal) {
+            match self
+                .project_proc(snapshot, &model.model, &model.json, allow_equal)
+                .await
+            {
+                Ok(rows) => report.merge(rows),
+                Err(error) => {
+                    self.release(snapshot, "proc");
+                    self.record(report);
+                    return Err(error);
+                }
+            }
+        }
+        self.record(report);
+        Ok(report)
+    }
+
+    /// Project the named instances' task/vars rows. Partial work is counted
+    /// before a failure is returned; the failed row's claim is released so a
+    /// retry may write it.
+    async fn project_task_rows(
+        &self,
+        snapshot: &ProcessSnapshot,
+        model: &crate::model::Workflow,
+        task_ids: &[TaskId],
+        allow_equal: bool,
+    ) -> Result<ProjectionReport> {
+        let mut report = ProjectionReport::default();
+        for task_id in task_ids {
+            let wire = task_id.wire(&snapshot.process_id);
             if !self.claim(snapshot, &wire, allow_equal) {
                 continue;
             }
             match self
-                .project_task(snapshot, &model, task_id, &wire, allow_equal)
+                .project_task(snapshot, model, task_id, &wire, allow_equal)
                 .await
             {
                 Ok(rows) => report.merge(rows),
@@ -512,19 +622,6 @@ impl RowProjector {
                 }
             }
         }
-        // The proc row is the summary row: write it last so a reader that sees
-        // the terminal proc state can also see the task rows it summarizes.
-        if self.claim(snapshot, "proc", allow_equal) {
-            match self.project_proc(snapshot, &model, allow_equal).await {
-                Ok(rows) => report.merge(rows),
-                Err(error) => {
-                    self.release(snapshot, "proc");
-                    self.record(report);
-                    return Err(error);
-                }
-            }
-        }
-        self.record(report);
         Ok(report)
     }
 
@@ -543,9 +640,10 @@ impl RowProjector {
         let Some(model) = model_of(snapshot)? else {
             return Ok(ProjectionReport::default());
         };
+        let model_json = model.to_json()?;
         let mut report = ProjectionReport::default();
         if self.claim(snapshot, "proc", true) {
-            match self.project_proc(snapshot, &model, true).await {
+            match self.project_proc(snapshot, &model, &model_json, true).await {
                 Ok(rows) => report.merge(rows),
                 Err(error) => {
                     self.release(snapshot, "proc");
@@ -562,6 +660,7 @@ impl RowProjector {
         &self,
         snapshot: &ProcessSnapshot,
         model: &crate::model::Workflow,
+        model_json: &str,
         allow_equal: bool,
     ) -> Result<ProjectionReport> {
         let Some(root) = snapshot
@@ -579,8 +678,11 @@ impl RowProjector {
             .map(|task| task.state)
             .unwrap_or(TaskState::Created);
 
-        let collection = self.store().procs();
-        let existing = collection.find_opt(&snapshot.process_id).await?;
+        let stored = self
+            .store()
+            .find_projection_row::<data::Proc>(&snapshot.process_id)
+            .await?;
+        let existing = stored.as_ref().map(|(row, _)| row);
         let now = crate::utils::time::time_millis();
         let row = data::Proc {
             source_revision: snapshot.version.encode(),
@@ -591,19 +693,23 @@ impl RowProjector {
             start_time: if state == TaskState::Created {
                 0
             } else {
-                stamp(existing.as_ref().map(|row| row.start_time), now)
+                stamp(existing.map(|row| row.start_time), now)
             },
             end_time: if state.is_terminal() {
-                stamp(existing.as_ref().map(|row| row.end_time), now)
+                stamp(existing.map(|row| row.end_time), now)
             } else {
                 0
             },
-            timestamp: stamp(existing.as_ref().map(|row| row.timestamp), now),
-            model: model.to_json()?,
+            timestamp: stamp(existing.map(|row| row.timestamp), now),
+            model: model_json.to_string(),
             env: self.proc_env(snapshot, &root)?,
             err: error_of(snapshot, &root),
             removable: self.removable(snapshot).await?,
             v: data::Proc::version(),
+        };
+        let hint = match stored {
+            Some((row, bytes)) => ProjectionHint::Existing(row, bytes),
+            None => ProjectionHint::Absent,
         };
         let mut report = ProjectionReport::default();
         let outcome = self
@@ -611,6 +717,7 @@ impl RowProjector {
                 &row,
                 |row: &data::Proc| Self::row_version(&row.source_revision),
                 allow_equal,
+                Some(hint),
             )
             .await?;
         report.record(outcome);
@@ -695,8 +802,21 @@ impl RowProjector {
         // carry (the root's is the workflow's `model.name`).
         let facts = node_facts(model, node_id);
         let row_id = crate::utils::Id::new(&snapshot.process_id, wire).id();
-        let collection = self.store().tasks();
-        let existing = collection.find_opt(&row_id).await?;
+        // One read serves the timing stamps, the terminal transition and the
+        // conditional write (via the hint), instead of three reads of the
+        // same row.
+        let stored = self
+            .store()
+            .find_projection_row::<data::Task>(&row_id)
+            .await?;
+        let existing = stored.as_ref().map(|(row, _)| row);
+        // A task that just turned terminal settles its channel deliveries —
+        // the legacy writer's close. An un-acked delivery of a finished task
+        // can never be acked into anything else, and a row left open would
+        // keep the whole run (and its directory) out of the sweeper's reach.
+        // Deliveries key on the message `tid` — the wire since C5.
+        let was_terminal =
+            existing.is_some_and(|row| LegacyTaskState::from(row.state.as_str()).is_completed());
         let now = crate::utils::time::time_millis();
         let row = data::Task {
             source_revision: snapshot.version.encode(),
@@ -724,15 +844,19 @@ impl RowProjector {
             start_time: if task.state == TaskState::Created {
                 0
             } else {
-                stamp(existing.as_ref().map(|row| row.start_time), now)
+                stamp(existing.map(|row| row.start_time), now)
             },
             end_time: if task.state.is_terminal() {
-                stamp(existing.as_ref().map(|row| row.end_time), now)
+                stamp(existing.map(|row| row.end_time), now)
             } else {
                 0
             },
-            timestamp: stamp(existing.as_ref().map(|row| row.timestamp), now),
+            timestamp: stamp(existing.map(|row| row.timestamp), now),
             v: data::Task::version(),
+        };
+        let task_hint = match stored {
+            Some((row, bytes)) => ProjectionHint::Existing(row, bytes),
+            None => ProjectionHint::Absent,
         };
         let mut report = ProjectionReport::default();
         let task_outcome = self
@@ -740,6 +864,7 @@ impl RowProjector {
                 &row,
                 |row: &data::Task| Self::row_version(&row.source_revision),
                 allow_equal,
+                Some(task_hint),
             )
             .await?;
         report.record(task_outcome);
@@ -750,15 +875,6 @@ impl RowProjector {
             return Ok(report);
         }
 
-        // A task that just turned terminal settles its channel deliveries —
-        // the legacy writer's close. An un-acked delivery of a finished task
-        // can never be acked into anything else, and a row left open would
-        // keep the whole run (and its directory) out of the sweeper's reach.
-        // Deliveries key on the message `tid` — the wire since C5.
-        let was_terminal = existing
-            .as_ref()
-            .map(|row| LegacyTaskState::from(row.state.as_str()).is_completed())
-            .unwrap_or(false);
         if task.state.is_terminal() && !was_terminal {
             self.store()
                 .close_deliveries(&snapshot.process_id, wire)
@@ -769,6 +885,14 @@ impl RowProjector {
         if data.is_empty() {
             return Ok(report);
         }
+        let vars_hint = match self
+            .store()
+            .find_projection_row::<data::TaskVars>(&row_id)
+            .await?
+        {
+            Some((row, bytes)) => ProjectionHint::Existing(row, bytes),
+            None => ProjectionHint::Absent,
+        };
         let row = data::TaskVars {
             source_revision: snapshot.version.encode(),
             id: row_id.clone(),
@@ -787,6 +911,7 @@ impl RowProjector {
                 &row,
                 |row: &data::TaskVars| Self::row_version(&row.source_revision),
                 allow_equal,
+                Some(vars_hint),
             )
             .await?;
         report.record(vars_outcome);
