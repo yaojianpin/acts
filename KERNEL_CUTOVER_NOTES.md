@@ -4629,6 +4629,102 @@ cargo test -p acts-acl -> 13+10 passed;cargo test -p acts-expr --all-features ->
 
 ---
 
+### L6 完成(2026-10-19):投影单次成本(3 读 → 1 读 + 模型缓存 + 按实例触达)
+
+**任务**:§11 B 的 L6。§10「P1 完成」把行投影量到 0.25–0.43 ms/op(6.4–11.1%)。本笔先按同一形状重测,
+再在“降频”与“wake 驱动/合批”之间取证。**结论:取“降低单次投影成本”,不取降频,也不取 wake 驱动/合批**
+(理由见末尾)。三项改动各自独立可回滚。
+
+**改动**(生产代码)
+
+- **一次行读满足三处需要**:新增 `store::ProjectionHint`(`Absent` / `Existing(行, 精确字节)`)、
+  `Store::find_projection_row`、`KvCollection::find_with_bytes`;`write_if_newer_with` 用调用方刚读到的行
+  做版本比较与 batch guard、用同一份字节算旧索引键。改前每写一行要读三次数据行(`find_opt`、`write_if_newer`
+  的 guard 读、`update_ops_json` 的 `read_json`);改后一次。guard 失败仍按原路径重读并重判,`allow_equal`、
+  `Stale`/`Unchanged` 分类、索引 key 的 delete/put 口径均未改。
+- **prepared model 缓存**:`RowProjector` 以 `__model` 的原始持久 JSON 为键缓存 `Workflow`(已 assign ids +
+  validate)和 proc 行用的 `to_json` 结果;有界 64 条,超限整体清空。模型对一次 run 不可变,缓存只省每跳重复的
+  deserialize / clone / validate / serialize;键是原始值,pid 复用换模型不会命中旧条目。
+- **`Projection::Touched` 携带 `TaskId` 而不是 wire**:投影只遍历提交触达的实例,不再为 snapshot 里每个实例
+  算一次 SHA-256 wire;根行仍随 proc 行一起投影(保持“proc 可见时根行也可见”)。
+- **未改**:持久化键布局、`source_revision` 的编码/比较、A5 的 store-level 条件写与 repair queue、
+  A1b 的“提交 → 投影 → lifecycle → 发送 → 一批确认”顺序、A11 回收判定。无 golden/行断言变化、无 CHANGELOG BREAKING。
+
+**探针形状**(临时,交付前已删;可按此重建)
+
+- `Engine` + `CountingStore`(`MemoryStore` 装饰器:按 `procs`/`tasks`/`vars` 数据 key 统计 `one`/`many`
+  与 batch 内 put/delete,guard 单列),每轮 fresh engine;release、`--test-threads=1`;completion/error
+  信号后做 **2 ms × 3 quiet drain**。
+- **engine**:30 步扁平 `Workflow`(31 节点,无包 effect);**simple**:`examples/simple/model.yml` + `input=10`。
+- stage = `project_inner` 的 frame(取模型)、每个任务行投影、proc 行投影、行 find、条件写;
+  `operations` = `execute_one` 进入次数(含 completion 后的 no-op ready 扫描)。后者 run 间会漂
+  (本轮 engine 62–124、simple 185–194 次),因此**收益只按 stage 计时与行 key 计数判断**,wall 不作证据。
+
+**结果(best of 3,release,内存 store,同机)**
+
+两边的总行写逐字相同(engine **246**、simple **513**),用它归一表里的 per-op 列。
+
+| 量 | engine 改前 | engine 改后 | simple 改前 | simple 改后 |
+|---|---:|---:|---:|---:|
+| 数据行读/每写一行 | 3.00 | **1.00** | 3.00 | **1.00** |
+| 数据行读总数/run | 738 | **246** | 1,406 | **513** |
+| `proj.frame` ms/call | 0.0648 | **0.0090**(−86.1%) | 0.0351 | **0.0028**(−92.0%) |
+| `proj.task` ms/call | 0.1268 | **0.1193**(−5.9%) | 0.1076 | **0.1024**(−4.8%) |
+| `proj.proc` ms/call | 0.1765 | **0.1501**(−15.0%) | 0.1036 | **0.0860**(−17.0%) |
+| `proj.write` ms/call | 0.0904 | **0.0743**(−17.8%) | 0.0521 | **0.0431**(−17.3%) |
+| `proj.read` ms/call | 0.0278 | 0.0317 | 0.0177 | 0.0186 |
+| 投影合计 ms/run(frame+task+proc) | 38.4 | **31.9**(−16.9%) | 44.0 | **37.6**(−14.5%) |
+| 投影 ms/已执行 op(engine 62 / simple 111) | 0.620 | **0.514** | 0.396 | **0.339** |
+
+- guard 读与行写次数**未变**(engine 246、simple 513/run):省的是同一行的重复读与重复 decode。
+  `proj.read` 单次略升是返回值多带一份精确字节,属噪声量级。
+- **wall 不可比**:同一份代码的 engine best run 只有 62 次 attempt(completion 后没有 tail no-op),
+  另一轮 119 次;simple 同理。按投影合计/run 的 −14.5…−16.9% 换算,占 engine wall 约 2.2%、simple 约 1.7%
+  —— `[INFERENCE:投影合计/run ÷ 同轮 wall]`。投影已不是主要矛盾。
+
+**为什么另两个方向不做**
+
+- **降频(跳过未变化的行)**:任务行已只写 `Touched` 的实例。根行/proc 行即使可见内容不变,也必须推进
+  `source_revision`:否则 `Runtime::read_proc` 的强读、boot catch-up 与 A5 的 lag 定义都会把该行判为落后,
+  等于改 A5 的 current 契约(本笔边界禁止)。按“忽略 revision 比较后跳过”估算可把 engine 行写从 246 降到
+  约 120,但会把“读一次触发一次 repair”变成常态,并与 repair queue 的持久判据冲突 ⇒ **不做**。
+- **wake 驱动/延迟合批**:A5/A1b 的顺序是“行 current → lifecycle → outbox → 批量确认”;把投影推迟到提交后
+  的通知会让观察者先看到未 current 的提交。把同一 snapshot 的多行并成一次 guarded batch 在内存 store 上
+  只省 batch 往返,而实测剩余成本在 JSON 构造/索引 diff(`proj.write` 改后仍 0.043–0.074 ms/call),
+  且会扩大 A5 失败后的重试面 ⇒ **不做**。
+
+**测试**
+
+- 新增 `a_reused_pid_projects_its_own_model`:模型缓存以持久 `__model` 为键 —— 回收后的 pid 换一个模型,
+  proc 行与任务行必须来自新模型,而不是缓存里的旧声明。
+- A5 既有的 `an_older_projection_cannot_overwrite_a_newer_one` 继续覆盖 hint 的 guard 失败回流:注入的
+  新行让旧 batch 的 guard 失败,重读后为 `Stale`;`a_restart_catches_up_only_the_rows_that_lag` 覆盖
+  persisted revision 的重启判据;`a_projection_failure_is_repaired_before_the_completion_event` 覆盖
+  顺序契约(行失败时 completion 事件被压住)。
+- **验证**
+
+```text
+cargo test -p acts --lib --tests -> 941 passed, 0 failed, 0 ignored (150.53 s)
+cargo test -p acts --lib projection -> 9 passed (含新增用例)
+cargo test -p acts-store --features sled,sqlite --test mem --test sled --test sqlite --test engine_sqlite
+  -> mem 94 / sled 96 / sqlite 97 / engine_sqlite 2 passed, 0 failed
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> OK (EXIT 0)
+cargo fmt --check -> EXIT 0
+```
+
+- **postgres 未跑**:`localhost:5433` 无服务(`Test-NetConnection` = False),按 §11.C 的服务依赖口径
+  如实记录;未据此改写代码。
+
+**边界/剩余**
+
+- 只做 L6;未动 L7,未改 `procs`/`tasks`/`vars` 行表的去留、节点寻址/action target、A5/A1b/A11 协议。
+- hint 的正确性依赖投影的 per-pid 锁:同进程内该 pid 的行写(投影、repair、cleanup)串行;跨进程仍由
+  `source_revision` + exact guard 决出胜者,guard 失败即退回重读,与改前同一条路径。
+- `proj.task` 剩余成本主要是 `node_data` 序列化与行 JSON 构造;`proj.proc` 剩余成本是 env/error 派生与
+  整份 model JSON 的 clone。二者都不再由读次数主导;进一步下降要动读模型口径(§10「读模型行表去留」)。
+
+---
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4651,7 +4747,7 @@ cargo test -p acts-acl -> 13+10 passed;cargo test -p acts-expr --all-features ->
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L3、L4、L5、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L3 完成」「L4 完成」「L5 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L6**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L3、L4、L5、L6、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L3 完成」「L4 完成」「L5 完成」「L6 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L7**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4697,7 +4793,7 @@ cargo test -p acts-acl -> 13+10 passed;cargo test -p acts-expr --all-features ->
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L3、L4、L5、L8、L9、L10、L11、L12 已完成,§12 当前指向 L6。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L3、L4、L5、L6、L8、L9、L10、L11、L12 已完成,§12 当前指向 L7。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
@@ -4707,7 +4803,7 @@ cargo test -p acts-acl -> 13+10 passed;cargo test -p acts-expr --all-features ->
 | **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | **已做(§10「L3 完成」)**。选**永久边界**:sealed 是 effect prepare 的 per-evaluation 授权/解析结果,不进聚合/投影/`proc:get`,恢复不重建;`TaskVars.sealed` 保留字段并继续写空串(行格式不变);设计见 `KERNEL_REFACTOR_DESIGN.md` §3.11;doc-only,零行为变更 |
 | **L4** | 逐项绑定 `index`/`value` 的上浮:给一个不参与折叠的载体,或写成永久边界 | 原 §7b | **已做(§10「L4 完成」)**。选**实现**:`__fanout_index`/`__fanout_value` 私有载体,`scope_vars` 以 `index`/`value` 别名求值;完成不折叠、不进 vars 行、不进入 `outputs` 或 message `inputs`;恢复从聚合重建;设计见 `KERNEL_REFACTOR_DESIGN.md` §3.12;CHANGELOG BREAKING |
 | **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | **已做(§10「L5 完成」)**。两项独立落地:①未变化的派生索引/恢复条目不再重写(guard 保留)、行更新只写新增索引键;②claim 复用 `prepare` 的预检 load 作为 CAS token。engine 探针 62 op:总写 44.23 → 26.00/op(−41.2%),行索引 25.66 → 8.45/op,aggregate load 3 → 2/op,写字节不变(省的均为空值索引键) |
-| **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
+| **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | **已做(§10「L6 完成」)**。取“降低单次投影成本”:行数据读 3 → 1/写(hint 复用 find 的结果做比较/guard/旧索引键)、prepared model 缓存、`Touched` 用 `TaskId` 不再对全 snapshot 算 wire。release/内存 store:engine 投影合计 38.4 → 31.9 ms/run(−16.9%)、simple 44.0 → 37.6(−14.5%),行读 738 → 246 / 1,406 → 513;降频与 wake 驱动/合批明确不做(会改 A5 current 与 A1b 顺序)。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
 | **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
 | **L8** | **减字节:整包聚合 → append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**:head + base + 每 commit 的变更日志;阈值(32)压缩;懒迁移旧 V2/V3;golden 重冻结 + CHANGELOG BREAKING | 原 §1.b③ / §1.b(i)② / §1.b(iii) | **已做(§10「L8 完成」)**。验收:同一探针 187 commits 聚合写 205,207 B 总量 / 1,097 B/commit(改前每 commit 一个整包文档,终态 50,249 B;§5i 形状 14.7 MB),普通 commit 只写 head+一个变更 entry,每 32 个 commit 才写一次 base;旧 V2/V3 迁移/中断重入/guard 冲突/reclaim 全绿;golden 新族 fingerprint 冻结;`-p acts --lib --tests` 绿 |
 | **L9** | **退役 Phase 0:删动态 act 死簇与 legacy 事件面** —— `Context::build_acts`/`dyn_build_act`/`NodeTree::append_node`、`package/core/{block,parallel,sequence}.rs` 的三个调用点;`Emitter::on_proc`/`on_task`/`emit_proc_event`/`emit_task_event*`/`TaskExtra`;确认零调用的 `Process`/`Task` 方法(`create_task`/`print`/`into_data`/`task_by_*`、`unique_id`/`into_data_vars`/`is_vars_dirty` 等) | 设计 §3.7(d)⑤ + 2026-10-17 评估 | **已做(§10「L9 完成」)**。生产侧 `git grep "build_acts\|dyn_build_act\|append_node\|emit_proc_event\|on_proc("` = 0(历史注释除外);`-p acts --lib --tests` **958 passed**;行/消息/`tree_output` 逐字断言不变;clippy/fmt 绿。**BREAKING**:legacy 事件面与零调用 `Process`/`Task` 方法移除 |
@@ -4773,40 +4869,47 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:L6 —— 投影降频或 wake 驱动(§11 B)
+# 当前任务:L7 —— 文档收口(§11 B)
 
-**依据**:§11 B 的 L6(原 §1.c / §9.3.3)。§10「P1 完成」把 engine 形状的行投影量到
-**0.428 ms/op(11.1%)**:`proj.frame` 0.58 call/op、`proj.task` 1.93 call/op、`proj.proc` 0.58 call/op、
-`proj.read` 2.50 call/op、`proj.write` 3.08 call/op。§5j 已做“行内容未变则不写”,§10「L5 完成」又去掉了
-行更新里未变索引键的重写;剩下的成本主要是**每 hop 为被触达的每一行读旧行、构造并比较 JSON**,以及
-`project_touched` 的调用节奏。先把当前形状重新量一遍,再决定降频还是改成 wake 驱动。
+**依据**:§11 B 的 L7(原 §4)。P1–L6/L8–L12 已把 kernel 切换、身份、投影、存储与 run handle 收口,
+但用户面文档仍可能描述已不存在的形状:`kernel_engine` 字段(已删)、`cache_cap` 的旧“常驻进程缓存”
+语义(现在是“在飞 run 数上限”,超出即 park)、以及 README/`lib.rs` 顶部注释里残留的 legacy 引擎说法。
+本笔**只改文档/注释**,不改任何运行时行为。
 
-**目标**(二选一或组合,各自可独立回滚):
+**先读**
 
-1. **降频/按可见状态投影**:只在提交真的改变了行的可见内容时投影该行;利用 A5 的 claim 表与持久
-   revision,避免每 hop 对同一行重复读-比较。不得跳过“行 current 才能让 lifecycle/outbox 看见”的契约。
-2. **wake 驱动/合批**:把同步 `execute_decision` 里的 per-hop 投影改成由提交后的通知驱动、按批落行,
-   或把同一 snapshot 的多行投影合并成一次有界批。合批不得让外部观察者(lifecycle、outbox transport)
-   看到尚未 current 的行,也不得改变 `Projection::Touched`/`Whole` 的语义边界。
+- `crates/acts/src/lib.rs` 顶部(当前只有一行 `//!` + `include_str!`,确认是否要补 crate 概述);
+- `crates/acts/README.md`(crate 的 `#![doc]` 来源)与仓库根 `README.md`;
+- `CHANGELOG.md` 里 `cache_cap`/`kernel`/legacy 的现有条目(它们是历史记录,**不要改写历史**);
+- `KERNEL_CUTOVER_NOTES.md` §10 的 L5/L6 与 §11 B 状态。
+
+**目标**
+
+1. **`crates/acts/README.md` / `lib.rs` 顶部**:把当前架构说清楚 —— 唯一引擎是 kernel(scheduler),
+   `Engine`/`Runtime`/store 的关系,`proc:get` 读投影行,以及 `cache_cap` = 同时在飞(非终态)run 数上限
+   (超出 park,settle 后按 `__created` FIFO 准入)。只写已实现的事实,不写路线图。
+2. **`CHANGELOG.md`**:在**当前未发布段**补一条 `docs` 记录本笔;不要改历史条目(尤其不要重写旧的
+   `cache_cap`/eviction 叙述)。若发现 `kernel_engine` 之类已删除符号仍在**用户面**文档里,改成现状。
+3. **`README.md`(根)**:`./install`、示例命令、配置表如仍有 legacy 引擎/`act_rs` 之类的过期说法,
+   按现状修正;示例必须能对应仓库里真实存在的命令/文件。
+4. 全文搜索并清零用户面文档中的 `kernel_engine`(测试函数名可以保留,它们描述历史覆盖):
+   `rg -n "kernel_engine" README.md crates/acts/README.md doc/`。
 
 **边界**
 
-- 只做 L6;不提前做 L7,不改 `procs`/`tasks`/`vars` 行表的去留(§10 待决)。
-- 不改 A5 的持久 `source_revision`、store-level 条件写与 repair queue 协议;不改 A1b 的
-  “提交后投影 → 发送 → 一批确认”顺序;不改 A11 回收判定。
-- 不把“缩短 tick”当作降频手段;性能对照只用同一探针形状,别把引擎级用例的 tick 主导误当 hop 吞吐(§5f)。
-- 探针/临时插桩只留在工作区,不提交;生产代码与文档分开提交。
+- 只做 L7:**不改生产代码、不改测试、不改行为、不改持久化格式、不动 manifest**。
+  文档必须描述已实现的行为;发现代码与文档不一致时,以代码为准并在 §10 记录差异(不要顺手改代码)。
+- 不改写 `CHANGELOG.md` 的历史条目,只追加当前段;不改 `KERNEL_CUTOVER_NOTES.md` 的既有记录。
+- 不新增路线图/未实现能力的描述。
 
 **验收**
 
-- 用 §10「P1 完成」的探针形状(30 步 engine + `examples/simple`,release、内存 store;必要时补 sled)
-  给出改前/改后的 `proj.*` ms/op 与行读/写次数/op;若某方向收益不足,明确写“放弃/不做”,不要静默降级。
-- §10 写「L6 完成」(含探针形状、后端、release/debug);`cargo test -p acts --lib --tests`;
-  动到 store 面时跑 `-p acts-store --features sled,sqlite,postgres`(postgres 需要 `localhost:5433`
-  的 Postgres 16,缺服务就如实记录);不改 manifest 就不跑 `cargo deny`。
-- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
-- 若改持久化键布局/公开面:按既有 codec/upcast 规则同步 golden/row 断言,并在 CHANGELOG 记 BREAKING。
-- 更新 §11 B 状态;§12 原地指向下一项(L7)。
+- 用户面文档里不再出现 `kernel_engine`;`cache_cap` 的表述与 §10「P2 完成」/CHANGELOG `feat(acts)` 条目一致;
+  README 的命令/路径逐条在仓库中存在。
+- 文档-only 门禁:`cargo fmt --check`、`cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`
+  仍绿(`cargo test -p acts --lib --tests` 可选,若未改代码可不重跑,但要在 §10 写明)。
+- §10 写「L7 完成」(列出改了哪些文件、搜索证据);更新 §11 B 状态;§12 原地指向下一项
+  (§11 B 已无剩余项时,改为“第二波完成,等待用户裁决下一阶段”)。
 
 # 限制与约束
 
