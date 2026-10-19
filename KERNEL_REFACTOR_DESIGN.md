@@ -815,6 +815,54 @@ A11 的存储目标是“恢复所需的最小状态”,不是历史归档;终�
   不存在跨 effect / 跨重启的 lineage pin。公开文档已按这个口径改写。
 - predicate:该 seam 不调用 `prepare`,所以不 seal;谓词里的 `$target.key` 解析为空(既有行为,仅登记)。
 
+### 3.12 逐项 `index`/`value` 的上浮边界(L4,2026-10-19)
+
+**决定:实现一个不参与折叠的载体,不把它写成已知边界。** §11 B 的 L4 二选一,这里明确取“实现”。
+
+**事实(代码位置,实现前)**
+
+- 写入点:`scheduler/shell/operation/action.rs::param_fanout_children` 为每个 `in` 项写
+  `index`/`value`(与模板 vars 一起)到 `<step>#item` 这一代的 scope。
+- 求值:act params / predicate / effect 的变量空间来自 `scheduler/shell/facts.rs::scope_vars`
+  (scope 链,nearer wins);`${{ value }}`/`${{ index }}` 因此可用。
+- 上浮:`scheduler/shell/operation/propagate.rs` 在 completed execution 上把自身 scope 的
+  非引擎变量折进 parent(过滤 `is_engine_fact`: `__` 私有名与 `auto`)。`index`/`value` 不在过滤表里,
+  所以折进祖先 scope;`exposes` 为空时 `process_message` 又把根 scope 的整份变量空间当 outputs。
+- 行投影:`projection.rs::scope_data` 过滤私有名与 `auto`,所以 public 的 `index`/`value` 也进 vars 行。
+- 消息:act payload 的 `inputs` 来自 `facts.rs::input_vars`(同样过滤私有名与 `auto`),所以也见过它们。
+
+**载体选择:把逐项绑定写成 engine-private scope 变量。**
+
+- `utils::consts::FANOUT_INDEX_VAR = "__fanout_index"`、`FANOUT_VALUE_VAR = "__fanout_value"`。
+  fan-out 只写这两个名字;它们不是 run data。
+- `scope_vars` 在每一层 scope 处理完 public 变量后,把私有绑定作为 `index`/`value` 的**回退**别名加入
+  (同层或更近层的同名 workflow 变量优先)。于是:
+  - `${{ index }}`/`${{ value }}`、predicate、effect params 的求值路径不变;
+  - `is_private_key` 让 `PropagateTask` 的折叠、`scope_data` 行投影、`input_vars` 消息 `inputs`、
+    `root_variables` outputs 全部自动跳过它们;
+  - `$data()`/`$inputs()` 在 item 自己的 scope 内仍看到 `index`/`value`(headless scope 由 `scope_vars` 构建),
+    但那是该次求值的内存视图,不会写回聚合。
+- 与 legacy 的差异:legacy 把两者放在 act 的 **options**,不在 task data;本实现放在私有的 scope 变量并
+  以同名别名求值,因此读面效果相同(不是 run data、不上浮),但没有把它们塞进 `options`
+  —— per-item options 需要按实例持久化 options,而 options 目前是模型节点级、由 start 一次解析并 pin 在
+  `__options`;每代一份 options 会新增持久化形状,而收益只是 `$options().index` 这种 legacy 读法。
+  逐项绑定仍可通过 `${{ index }}`/`${{ value }}` 读取(模板 acts 的实际用法)。
+
+**恢复/重放**
+
+- 绑定随 fan-out 的 transition 写入 run 的聚合(`ProcessSnapshot.variables`),是普通字符串值;
+  重启后 `scope_vars` 从同一聚合重建别名,恢复的 start/propagate 操作读到同一对值。
+- 不需要 codec/upcast 或行格式变更:私有名只是变量 key 的取值,持久化形状不变;
+  新代码读旧聚合里 public 的 `index`/`value` 仍按普通变量解析(未完成的旧 run 不丢绑定),
+  旧代码读新聚合则会看到私有名并在读面过滤掉。
+
+**影响面**
+
+- `outputs`(无 `exposes` 时)、task vars 行的 `data`、act message 的 `inputs`:不再出现 `index`/`value`。
+- act message 的 `params` 仍带求值后的逐项值(它们是 act 的输入事实,不是 run data)。
+- 不再有“完成的 item 用 `value` 覆盖祖先/根 scope 同名变量”的碰撞:折叠只看 public 变量。
+- 不改 outbox/aggregate/recovery 语义;无 `unsafe`;`procs`/`tasks`/`vars` 行表去留仍按 §10 待决。
+
 ---
 
 ## 4. 实施计划(提交切分)

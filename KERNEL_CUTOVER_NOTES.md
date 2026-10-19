@@ -4481,6 +4481,59 @@ BREAKING 行(仅文档口径澄清)。
 - `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check` 绿。
 - 未改 manifest,未跑 `cargo deny`;未改行为/持久化/公开面,其余 per-crate 套件未跑。
 
+### L4 完成(2026-10-19):逐项 `index`/`value` 用私有载体,不参与上浮
+
+**任务**:§11 B 的 L4(原 §7b)。先核实现状,再在“实现”与“写成永久边界”之间二选一。
+**选择:实现 —— 把逐项绑定写成 engine-private scope 变量(`__fanout_index`/`__fanout_value`),不写成边界。**
+设计口径写在 `KERNEL_REFACTOR_DESIGN.md` §3.12。
+
+**现状(实现前已核实)**
+
+- 写入点:`scheduler/shell/operation/action.rs::param_fanout_children` 给每个 `in` 项写 `index`/`value`
+  到 `<step>#item` 这一代的 scope。
+- 求值:`scheduler/shell/facts.rs::scope_vars` 的 scope 链(nearer wins)让 `${{ index }}`/`${{ value }}`
+  在模板 acts 里可读。
+- 上浮:`scheduler/shell/operation/propagate.rs` 在 completed execution 上把自身 scope 的非引擎变量折进
+  parent(过滤 `is_engine_fact`);`index`/`value` 不在过滤表里 ⇒ 进入祖先 scope,并在无 `exposes` 时进入 run
+  的 outputs。
+- 其它读面:`projection.rs::scope_data`(vars 行)与 `facts.rs::input_vars`(act message 的 `inputs`)同样只
+  过滤私有名与 `auto`,所以都携带了它们。
+- 恢复:绑定本来就在聚合变量里,重启后由 `scope_vars` 从同一聚合重建;问题是它们会继续上浮。
+
+**改动(生产代码)**
+
+- `utils/consts.rs`:新增 `pub(crate) FANOUT_INDEX_VAR = "__fanout_index"`、`FANOUT_VALUE_VAR = "__fanout_value"`。
+- `scheduler/shell/operation/action.rs::param_fanout_children`:改写成这两个私有名;`index`/`value`
+  的公开读法由 `scope_vars` 的别名提供。
+- `scheduler/shell/facts.rs::scope_vars`:每层 scope 处理完 public 变量后,把私有绑定作为 `index`/`value`
+  的**回退**别名加入(同层/更近层的同名变量优先)。因此 params/predicate/effect 的求值路径不变;
+  而 `is_private_key` 让 `PropagateTask`、行投影、message `inputs`、`root_variables` outputs 自动跳过它们。
+- 不改行格式、消息 payload 形状或 `ProcessSnapshot` 编码:私有名只是变量 key,持久化形状不变;
+  旧聚合里 public 的 `index`/`value` 仍按普通变量解析(未完成的旧 run 不丢绑定)。
+
+**测试**
+
+- `reliability::parallel::a_uses_param_fan_out_instantiates_one_template_per_item`(原地加强):仍断言
+  `parallel`/`sequence` 各两个模板代、private 绑定 `("0","\"u1\"")`/`("1","\"u2\"")`、两种接纳边,
+  且每项 act 的 `params` 解析出 `0=u1`/`1=u2`;新增断言:act message 的 `inputs`、`<step>#item` 的 vars 行
+  `data`、run 的 outputs 都不含 `index`/`value`。
+- 新增 `reliability::parallel::a_param_fan_out_binding_survives_a_restart_between_items`:
+  `sequence{in}` + irq;第一项等待时重启,恢复后的引擎在第二项 start 时才解析 `${{ index }}`/`${{ value }}`,
+  断言第二项 act 的 params 仍为 `1`/`u2`、`inputs` 不含绑定、恢复后的 outputs 不含绑定。
+- `cargo test -p acts --lib reliability::parallel` = **7 passed / 0 failed**(含上述两条)。
+
+**验收**
+
+- `cargo test -p acts --lib --tests` = **938 passed / 0 failed**(净 +1 = 新增恢复 cell;153.9 s)。
+  中间一次同命令重跑翻 1 条,但 `grep` 只保留了结果行、未捕获用例名;随后 `--no-fail-fast` 全量重跑
+  **938 passed / 0 failed**,本笔相关的 `reliability::parallel` 7 条在模块内连跑绿。按 §10「Feature B 完成」
+  已登记的“并行负载翻转族”处理,未在本笔修。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings` = **EXIT 0**;
+  `cargo fmt --check` = 干净。
+- 未改 manifest,未跑 `cargo deny`;只改 `crates/acts`,其余 per-crate 套件未跑(与 L3 同口径)。
+- CHANGELOG:以 **BREAKING** 记录公开读面变化(无 `exposes` 时的 outputs、vars 行 `data`、act message 的
+  `inputs` 不再携带逐项绑定;`${{ index }}`/`${{ value }}` 不变)。
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4503,7 +4556,7 @@ BREAKING 行(仅文档口径澄清)。
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L3、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L3 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L4**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L3、L4、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L3 完成」「L4 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L5**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4549,7 +4602,7 @@ BREAKING 行(仅文档口径澄清)。
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L3、L8、L9、L10、L11、L12 已完成,§12 当前指向 L4。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L3、L4、L8、L9、L10、L11、L12 已完成,§12 当前指向 L5。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
@@ -4557,7 +4610,7 @@ BREAKING 行(仅文档口径澄清)。
 | **L1** | 删死掉的 `ops` 族(**BREAKING**):`Store::ops()`/`StoreIden::Ops`/`store/data/op.rs` + `remove_proc_rows` 家族清单那一行;先决定老库 `ops-*` 孤儿行的处理(接受 / 保留只删不建 / 一次性清理) | 原 §5 | **已做(§10「L1 完成」)**。孤儿行选“接受”;生产侧 `git grep "Store::ops\|StoreIden::Ops\|data::Op"` = 0;`remove_proc_rows` 仍以同一原子批删除 tasks/vars/messages/deliveries/proc;`-p acts --lib --tests` **937 passed**(净 −4 = `op.rs` 自带单测随类型删除);per-crate/clippy/fmt 见 §10;CHANGELOG 已记 **BREAKING** |
 | **L2** | 聚合文档回收/归档:~~先定保留策略 / pid 复用语义 / 历史取舍~~ **已由 A11 取代**。A11 明确:存储只服务恢复,终态且消息全部投递/结算后回收;不做历史归档;回收后 PID 可复用,旧 pid 重复执行由业务系统负责 | 原 §6;2026-10-17 用户裁决 | **被 A11 取代**(设计见 `KERNEL_REFACTOR_DESIGN.md` §3.10);不再单独执行 |
 | **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | **已做(§10「L3 完成」)**。选**永久边界**:sealed 是 effect prepare 的 per-evaluation 授权/解析结果,不进聚合/投影/`proc:get`,恢复不重建;`TaskVars.sealed` 保留字段并继续写空串(行格式不变);设计见 `KERNEL_REFACTOR_DESIGN.md` §3.11;doc-only,零行为变更 |
-| **L4** | 逐项绑定 `index`/`value` 的上浮:给一个不参与折叠的载体,或写成永久边界 | 原 §7b | 未做(证据见 §10「Feature B 完成」§4) |
+| **L4** | 逐项绑定 `index`/`value` 的上浮:给一个不参与折叠的载体,或写成永久边界 | 原 §7b | **已做(§10「L4 完成」)**。选**实现**:`__fanout_index`/`__fanout_value` 私有载体,`scope_vars` 以 `index`/`value` 别名求值;完成不折叠、不进 vars 行、不进入 `outputs` 或 message `inputs`;恢复从聚合重建;设计见 `KERNEL_REFACTOR_DESIGN.md` §3.12;CHANGELOG BREAKING |
 | **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | 未做,**低优先**:§10「P6-1」已证与 hop 吞吐无关(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义 |
 | **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
 | **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
@@ -4625,52 +4678,43 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:L4 —— 决定逐项 `index`/`value` 的上浮边界(§11 B)
+# 当前任务:L5 —— 索引键合并/懒写与 `load1` 少一次(§11 B)
 
-**依据**:§11 B 的 L4(原 §7b);§10「Feature B 完成」§4 的登记:参数式 fan-out 把
-`index`/`value` 写成模板 execution 自己的 scope 变量(因此 `${{ value }}` 可用),而
-completed execution 的非引擎变量会沿 `PropagateTask` 折进父作用域 —— 于是它们出现在
-祖先作用域与 run 的 outputs(`examples/approve` 的 outputs 里就有 `index`/`value`)。legacy 把
-这两者放在 act 的 options(不是 task data),没有这一路上浮。本条要么给逐项绑定一个
-不参与折叠的载体,要么把它写成永久已知边界。二选一,不混做。
+**依据**:§11 B 的 L5(原 §1.b① / §1.b(i)①)。§10「P6-1」已证明这两处与 hop 吞吐无关
+(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义,
+因此优先级低;先把收益量出来,再决定动哪一块。
 
-**目标**:先核实现状(`param_fanout_children` 写入点、`PropagateTask`/scope 折叠规则、
-`scope_vars`/`outputs`/消息与 `proc:get` 的可见性、重启/恢复后是否仍可见),然后**明确选择
-其一**,把选择、理由与影响面写进 §10「L4 完成」。
+**目标**:按两项分别取证、分别改(能独立回滚):
 
-1. 若选“写成永久已知边界”:
-   - 在设计/相关 API doc 写清:`index`/`value` 是逐项 execution 的普通 scope 变量,会随
-     非引擎变量一起上浮;哪些读面(outputs/祖先 scope/消息)因此能看到它们,以及为什么
-     不改(与 legacy options 语义的差异是有意保留还是已知偏差)。
-   - 不改行格式、消息 payload 或 `ProcSnapshot` 的既有语义,只登记。
-2. 若选“实现”:
-   - 说明载体选择(例如 scope 变量上的“不折叠”标记、execution 专属元数据、或映射到 act
-     options),以及为什么它不会破坏 `${{ value }}`/`${{ index }}` 的求值与恢复路径。
-   - 恢复/重放必须仍能从持久化聚合理出同一绑定;`outputs`/`proc:get`/消息的可见性要有
-     测试;不引入 `unsafe`,不顺手改 outbox/aggregate/recovery 的其他语义。
-   - 若动持久化格式或公开面,按既有 codec/upcast 规则,golden/row 断言与 CHANGELOG 同步。
+1. **索引键合并/懒写**:`tasks` 家族的索引写(~9 写/hop)与 `kernel/indexes`
+   (recovery/outbox/ready,~18.6 写/hop)。合并同一 commit 的索引键或对未变化的派生索引懒写。
+   不改 A5 的 revision guard 语义、A2 的 ready 语义、A11 的“聚合+索引同一原子批回收”。
+2. **load 路径少一次读**:按 §10「P6-1」的探针形状定位 `load1`,把 claim 提前、预检挪后再取数
+   (或等价地消除一次重复读)。不得改变 effect 前预检的拒绝语义,也不得改变 A1a 的
+   `EffectUnknown` 分类。
 
 **边界**
 
-- 只做 L4;不提前做 §11 B 的 L5-L7,不顺手改 `procs`/`tasks`/`vars` 行表的去留(§10 已登记为待决)。
+- 只做 L5;不提前做 §11 B 的 L6/L7;不顺手改 `procs`/`tasks`/`vars` 行表的去留(§10 已登记为待决)。
 - 不顺手改节点寻址/action target(§10「Feature B 完成」§4 的相邻边界;需要时另立任务)。
-- 生产代码与文档分开提交;探针/临时插桩不提交。
+- 探针/临时插桩只留在工作区,不提交;生产代码与文档分开提交。
 
 **验收**
 
-- 选择与理由、影响面写入 §10「L4 完成」;若实现,相关行为有测试;若写边界,文档明确。
-- 视改动面按 §11.C 跑 `-p acts --lib --tests` 与受影响的 per-crate 套件;
-  `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
-- 若改持久化格式或公开面:CHANGELOG 记 BREAKING;不改 manifest 就不跑 `cargo deny`。
-- §10 写「L4 完成」并更新 §11 B 状态;§12 原地指向下一项(L5)。
+- §10 写「L5 完成」,给出改前/改后数值(写次数/字节,注明探针形状、后端与 release/debug);
+  若无收益,明确写“放弃/不做”,不要静默降级。
+- `cargo test -p acts --lib --tests`;动到 store 面时跑 `-p acts-store --features sled,sqlite,postgres`
+  (postgres 需要 `localhost:5433` 的 Postgres 16,缺服务就如实记录);不改 manifest 就不跑 `cargo deny`。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
+- 若改持久化键布局/公开面:按既有 codec/upcast 规则同步 golden/row 断言,并在 CHANGELOG 记 BREAKING。
+- 更新 §11 B 状态;§12 原地指向下一项(L6)。
 
 # 限制与约束
 
-- **先读**:§10「Feature B 完成」§4、§10「L3 完成」;
-  `scheduler/shell/mod.rs` 的 `param_fanout_children`/`scope_vars`、
-  `scheduler/core/plan/**` 的 `PropagateTask` 折叠规则、`scheduler/shell/projection.rs` 的
-  `scope_data`、`model/info.rs`/`export/executor` 的 outputs 与 `proc:get` 读面。
-- 遵守 §11.C 门禁;改到 store/CLI/server 面时跑完整 per-crate 套件;不改 manifest 就不跑 `cargo deny`。
-- 探针与临时插桩不提交;生产代码与文档分开提交,提交前过 §11.C 门禁。
+- **先读**:§10「P6-1」「A2 完成」「A5 完成」「A11 完成」;
+  `scheduler/durable/document_store.rs`/`async_document_store.rs` 的索引键与原子提交、
+  `store/collection.rs` 的派生索引写、`scheduler/runtime.rs` 与 `scheduler/shell/operation/dispatch.rs`
+  的 load/claim/预检路径。
+- 遵守 §11.C 门禁;探针与临时插桩不提交;生产代码与文档分开提交。
 ```
 
