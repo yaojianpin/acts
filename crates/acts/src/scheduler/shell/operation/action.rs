@@ -69,7 +69,7 @@ impl KernelHost {
                 {
                     let mut plan = self.container_fanout_plan(snapshot, &command)?;
                     if let Some(outcome) = effect {
-                        self.fold_effect_outcome(snapshot, task_id, outcome, &mut plan);
+                        self.fold_effect_outcome(task_id, outcome, &mut plan);
                         plan.validate().map_err(runtime)?;
                     }
                     return Ok(plan);
@@ -83,7 +83,7 @@ impl KernelHost {
                     let mut plan =
                         self.park_for_children_plan(snapshot, id, task_id, task, claim, &inputs)?;
                     if let Some(outcome) = effect {
-                        self.fold_effect_outcome(snapshot, task_id, outcome, &mut plan);
+                        self.fold_effect_outcome(task_id, outcome, &mut plan);
                         plan.validate().map_err(runtime)?;
                     }
                     return Ok(plan);
@@ -98,7 +98,7 @@ impl KernelHost {
                     "task.completed",
                 )?;
                 if let Some(outcome) = effect {
-                    self.fold_effect_outcome(snapshot, task_id, outcome, &mut plan);
+                    self.fold_effect_outcome(task_id, outcome, &mut plan);
                 }
                 // The act's Completed message rides the completion record.
                 if let Some(payload) = self.operation_message_payload(
@@ -360,14 +360,12 @@ impl KernelHost {
         Ok(plan)
     }
 
-    /// Fold one package outcome into the operation's plan: the returned outputs and
-    /// the headless task's own data become the acting scope's writes, and the
-    /// process env the package set merges into the run's durable env map on
-    /// the root scope. All of it commits with the completion, so a crash
-    /// before the commit re-runs the package against the same pre-state.
+    /// Fold one package outcome into the operation's plan: the returned
+    /// outputs become the acting scope's writes. They commit with the
+    /// completion, so a crash before the commit re-runs the package against
+    /// the same pre-state.
     fn fold_effect_outcome(
         &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         outcome: &effects::EffectOutcome,
         plan: &mut TransitionPlan,
@@ -380,30 +378,6 @@ impl KernelHost {
                     value,
                 });
             }
-        }
-        for (name, value) in &outcome.data {
-            plan.variable_writes.push(VariableWrite {
-                scope: task_id.clone(),
-                name: name.clone(),
-                value: value.to_string(),
-            });
-        }
-        if !outcome.env.is_empty() {
-            let Some(root) = root_task(snapshot) else {
-                return;
-            };
-            let mut map: serde_json::Map<String, serde_json::Value> = projection::env_map(snapshot)
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            for (name, value) in &outcome.env {
-                map.insert(name.clone(), value.clone());
-            }
-            plan.variable_writes.push(VariableWrite {
-                scope: root,
-                name: projection::ENV_MAP_VAR.to_string(),
-                value: serde_json::Value::Object(map).to_string(),
-            });
         }
     }
 

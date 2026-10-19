@@ -2798,14 +2798,12 @@ async fn kernel_engine_keeps_a_run_with_an_open_delivery() {
     runtime.close().await;
 }
 
-/// The package write-back: what a Func package leaves in its context —
-/// the returned outputs, the task data it wrote, the process env it
-/// set — commits with the completion, the env on the run's root scope,
-/// where a later task's `$env` reads it and the projected proc row carries
-/// it.
+/// The package write-back: only the outputs a Func package returns commit
+/// with the completion. The headless scope has no package-facing env or data
+/// setter, so there is no other value to fold into the run.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
-async fn effect_write_back_folds_into_the_process() {
+async fn effect_outputs_are_the_only_package_write_back() {
     struct WriteBack;
     #[async_trait::async_trait]
     impl crate::package::ActPackage for WriteBack {
@@ -2832,18 +2830,14 @@ async fn effect_write_back_folds_into_the_process() {
             ctx: &crate::Context,
             _params: &serde_json::Value,
         ) -> crate::Result<Option<crate::Vars>> {
-            ctx.set_env("GREETING", "hi");
-            // A1c: the package sees the stable operation-derived key, and the
-            // private carrier never becomes durable run data (asserted below).
-            let effect_key = ctx
-                .effect_key()
-                .expect("a package effect carries its stable key");
-            ctx.task().update_data(
-                &crate::Vars::new()
-                    .with("written", 7)
-                    .with("effect_key", effect_key),
-            );
-            Ok(Some(crate::Vars::new().with("output", 1)))
+            // A1c: the package sees the stable operation-derived key, and it
+            // never becomes durable run data (asserted below).
+            let key_seen = ctx.effect_key().is_some();
+            Ok(Some(
+                crate::Vars::new()
+                    .with("output", 1)
+                    .with("key_seen", key_seen),
+            ))
         }
     }
     struct ReadEnv;
@@ -2942,26 +2936,14 @@ async fn effect_write_back_folds_into_the_process() {
             .cloned()
     };
     assert_eq!(var("s1", "output").as_deref(), Some("1"));
-    assert_eq!(var("s1", "written").as_deref(), Some("7"));
-    // The package saw the key of the ApplyAction operation that ran it; the
-    // key is the durable operation identity, not a random per-call token.
-    let apply = snapshot
-        .operations
-        .values()
-        .find(|record| {
-            record.kind == crate::scheduler::core::model::operation::OperationKind::ApplyAction
-                && record.id.task.node.as_str() == "s1"
-        })
-        .expect("the step's effect operation");
-    let expected = format!(
-        "\"{}\"",
-        crate::scheduler::core::model::effect::EffectKey::of(&apply.id).wire()
-    );
-    assert_eq!(var("s1", "effect_key").as_deref(), Some(expected.as_str()));
-    // The env the package set is the run's, read back by the next task.
-    assert_eq!(var("s2", "seen").as_deref(), Some("\"hi\""));
-    // …and it is projected into the run's row, exactly like the legacy
-    // process env.
+    // A1c: the package saw the stable operation-derived key; it is not a
+    // durable run variable.
+    assert_eq!(var("s1", "key_seen").as_deref(), Some("true"));
+    // No package-facing task-data setter exists, so nothing else is folded.
+    assert!(var("s1", "written").is_none());
+    // The env is read-only: the next task sees no package-written value.
+    assert_eq!(var("s2", "seen").as_deref(), Some("null"));
+    // …and the projected proc row carries no package-written env either.
     let row = runtime
         .store()
         .procs()
@@ -2969,8 +2951,8 @@ async fn effect_write_back_folds_into_the_process() {
         .await
         .expect("the proc row");
     assert!(
-        row.env.contains("\"GREETING\":\"hi\""),
-        "the proc env must carry the package env: {}",
+        !row.env.contains("GREETING"),
+        "the proc env must not carry a package write: {}",
         row.env
     );
     assert!(

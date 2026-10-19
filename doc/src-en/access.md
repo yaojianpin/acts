@@ -386,13 +386,14 @@ than placing the run outside the root it was given. An empty `workdir` is a
 config error rather than "no directory control".
 
 The root travels the same private route as the scope authority — it is part of
-it: sealed into the process env under a key the workflow's `$env` proxy
-refuses, persisted with the process, and never a start option, so a caller
-cannot name the directory a run is confined to. The **run's own directory**
-(`<root>/<pid>`) is what an act reads through `Context::workdir()` and what a
-script reads as `$env.WORK_DIR` — the same directory under two names, neither
-of them the configured root. `$env.WORK_DIR` is engine-owned, so a write to that
-name is dropped and a run cannot redefine where it runs. The directory lives
+it: sealed into the process env under a key `$env` never exposes, persisted
+with the process, and never a start option, so a caller cannot name the
+directory a run is confined to. The **run's own directory** (`<root>/<pid>`)
+is what an act reads through `Context::workdir()` and what a script reads as
+`$env.WORK_DIR` — the same directory under two names, neither of them the
+configured root. `$env` is read-only: `$env.WORK_DIR` is answered by the
+engine, no member of `$env` can be assigned to, and there is no run-time env
+setter. The directory lives
 exactly as long as the process's durable rows: the sweeper removes it with them
 (a finished run whose delivery errored and awaits a manual retry keeps its row,
 and its directory with it), and a start that never became durable removes its

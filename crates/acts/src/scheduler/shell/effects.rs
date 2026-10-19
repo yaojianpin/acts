@@ -57,17 +57,9 @@ pub(crate) struct ResolvedEffect {
 /// same atomic commit that completes the execution.
 #[derive(Clone, Debug)]
 pub(crate) struct EffectOutcome {
-    /// The package's returned outputs — the legacy
-    /// `task.update_data(&vars)`, written to the acting scope.
+    /// The package's returned outputs — the only way a package changes the
+    /// run's variables. The host writes them to the acting scope.
     pub(crate) outputs: Option<Vars>,
-    /// The headless task's own data *beyond what the seam seeded* — a package
-    /// that wrote task data directly. Only the delta: echoing the seeded
-    /// scope back would shadow an ancestor's variable with a local copy.
-    pub(crate) data: Vec<(String, serde_json::Value)>,
-    /// The process env the package wrote through `Context::set_env`. Folds
-    /// into the run's durable env map, so every later task of the run reads
-    /// it as `$env.X`.
-    pub(crate) env: Vec<(String, serde_json::Value)>,
 }
 
 /// What an executor can prove about one effect key (A1c).
@@ -146,9 +138,8 @@ impl PackageEffectRunner {
     /// process over the declaring model with one task on the acting node (see
     /// [`super::scope`]). The run's caller authority travels with it, so the
     /// seal below reads the scopes its starter owns and no others; the run's
-    /// own directory (`<workdir>/<pid>`) and the durable env map are seeded,
-    /// so `$env.WORK_DIR` and `$env.X` answer exactly what the legacy process
-    /// env answered.
+    /// own directory (`<workdir>/<pid>`) and the workflow's declared env are
+    /// seeded, so `$env.WORK_DIR` and `$env.X` answer read-only values.
     fn headless(&self, request: &EffectRequest) -> Result<(Arc<Scope>, Arc<ScopeTask>, Context)> {
         super::scope::headless_scope(&self.runtime, &request.scope)
     }
@@ -184,10 +175,10 @@ impl EffectRunner for PackageEffectRunner {
         // Irq act whose seal is refused failed instead of waiting forever.
         let (process, task, ctx) = self.headless(&request)?;
         // The stable effect identity travels into the package's own process
-        // env under a private key: `Context::effect_key` answers it, the
-        // workflow's `$env` proxy refuses it, and the write-back below filters
-        // it out (`is_private_key`), so it never becomes durable run data.
-        ctx.set_env(consts::EFFECT_KEY, key.wire());
+        // env under a private key: `Context::effect_key` answers it and the
+        // read-only `$env` never exposes a private key, so it never becomes
+        // durable run data.
+        process.with_env_mut(|env| env.set(consts::EFFECT_KEY, key.wire()));
         ctx.prepare().await?;
         if definition.run_as() != ActRunAs::Func {
             // The package itself only executes for Func: Irq waits for the
@@ -219,17 +210,11 @@ impl EffectRunner for PackageEffectRunner {
             }
         };
 
-        // The write-back: what the package left in the headless scope beyond
-        // what the seam seeded — its own task data and the process env — and
-        // the outputs it returned. All of it folds into the operation's atomic
-        // commit, so a crash before the commit re-runs the package with the
-        // same pre-state (the legacy `exec` → persist ordering).
-        let env = non_private(process.env());
-        Ok(EffectOutcome {
-            outputs,
-            data: data_delta(&task, &request.scope.vars),
-            env,
-        })
+        // The write-back: only the outputs the package returned. They fold
+        // into the operation's atomic commit, so a crash before the commit
+        // re-runs the package with the same pre-state (the legacy `exec` →
+        // persist ordering).
+        Ok(EffectOutcome { outputs })
     }
 
     fn idempotent(&self, request: &EffectRequest) -> bool {
@@ -245,51 +230,17 @@ impl EffectRunner for PackageEffectRunner {
 
 impl EffectOutcome {
     pub(crate) fn empty() -> Self {
-        Self {
-            outputs: None,
-            data: Vec::new(),
-            env: Vec::new(),
-        }
+        Self { outputs: None }
     }
 
     /// A manually reconciled applied effect: the operator proved the external
     /// work happened, but the package's returned values were not captured.
-    /// Only the declared outputs can be supplied; task/env deltas are empty.
+    /// Only the declared outputs can be supplied.
     pub(crate) fn from_outputs(outputs: Vars) -> Self {
         Self {
             outputs: Some(outputs),
-            data: Vec::new(),
-            env: Vec::new(),
         }
     }
-}
-
-/// The non-private entries of one var map, in iteration order.
-fn non_private(vars: Vars) -> Vec<(String, serde_json::Value)> {
-    vars.iter()
-        .filter(|(name, _)| !crate::utils::consts::is_private_key(name))
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
-}
-
-/// The headless task data beyond the seeded scope: a key the seam did not
-/// seed, or one whose value the package changed. Echoing an unchanged seeded
-/// value back would shadow an ancestor's variable with a local copy.
-fn data_delta(
-    task: &Arc<ScopeTask>,
-    seeded: &[(String, String)],
-) -> Vec<(String, serde_json::Value)> {
-    task.data()
-        .iter()
-        .filter(|(name, _)| !crate::utils::consts::is_private_key(name))
-        .filter(|(name, value)| {
-            !seeded.iter().any(|(seeded_name, raw)| {
-                seeded_name.as_str() == name.as_str()
-                    && serde_json::from_str::<serde_json::Value>(raw).ok().as_ref() == Some(value)
-            })
-        })
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
 }
 
 /// Turns package outputs into aggregate variable writes (the aggregate's

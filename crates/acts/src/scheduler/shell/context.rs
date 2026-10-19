@@ -229,23 +229,9 @@ impl Context {
         Ok(())
     }
 
-    pub fn set_env<T>(&self, name: &str, value: T)
-    where
-        T: Serialize + Clone,
-    {
-        // The workdir is engine-owned (it is what `$env.WORK_DIR` reads):
-        // answering it from a stored value would let a script redefine where
-        // its run is. A write is dropped, like the private keys in `$env`.
-        if name == consts::ENV_WORK_DIR {
-            return;
-        }
-        // in context, the global env is not writable
-        // just set the value to local env of the process
-        self.proc.with_env_mut(|data| {
-            data.set(name, value);
-        });
-    }
-
+    /// Read one environment value. The process env is read-only: it is built
+    /// from the run's declared `env`, the engine's own keys and the host
+    /// environment, and nothing at run time can change it.
     pub fn get_env<T>(&self, name: &str) -> Option<T>
     where
         T: for<'de> Deserialize<'de> + Clone,

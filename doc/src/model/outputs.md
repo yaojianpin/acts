@@ -13,8 +13,7 @@ steps:
     - id: step1
       uses: acts.app.javascript
       params: |
-        let a = $get("a");
-        $set("result", a * 2);
+        return { result: ${{ a }} * 2 };
 ```
 
 `exposes` 项省略 `type` 时不会默认当作 `string`：导出时按变量在运行时的实际类型

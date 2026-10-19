@@ -468,6 +468,15 @@ impl ProcessSpec {
         for var in &workflow.vars {
             seed_variables.push((None, var.name.clone(), var.value.to_string()));
         }
+        // The workflow's declared env is read-only run state: it is what
+        // `$env.X` answers for every task, and no effect can change it.
+        if !workflow.env.is_empty() {
+            seed_variables.push((
+                None,
+                crate::scheduler::shell::projection::ENV_MAP_VAR.to_string(),
+                serde_json::Value::from(workflow.env()).to_string(),
+            ));
+        }
         // The model itself is part of the aggregate: the fan-out operation reads
         // the nested structure from the snapshot.
         seed_variables.push((

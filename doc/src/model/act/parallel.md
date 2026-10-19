@@ -43,8 +43,7 @@ steps:
     - id: step1
       uses: acts.app.javascript
       params: |
-        let list = ["u1", "u2", "u3"];
-        $set("items", list);
+        return { items: ["u1", "u2", "u3"] };
     - id: step2
       uses: acts.core.parallel
       params:

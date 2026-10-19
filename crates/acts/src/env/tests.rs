@@ -283,30 +283,29 @@ async fn env_get_a_name_the_expression_builds() {
     });
 }
 
+/// Expressions are read-only: the setters are gone and `$env` cannot be
+/// assigned to. Variables change only through a package's returned outputs.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn env_task_set() {
+async fn env_expressions_are_read_only() {
     let env = Environment::new();
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
     let (_engine, context) = start_completed(&workflow, Vars::new()).await;
     Context::scope(&context, || {
-        env.eval::<()>("$set('a', 100)").unwrap();
-        assert_eq!(context.task().data().get::<i64>("a"), Some(100));
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_task_multi_eval() {
-    let env = Environment::new();
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
-    Context::scope(&context, || {
-        env.eval::<()>("$set('a', 100)").unwrap();
-        env.eval::<()>("$set('b', 200)").unwrap();
-        assert!(env.eval::<bool>("a < b").unwrap());
+        for source in [
+            "$set('a', 100)",
+            "$set_process_var('a', 100)",
+            "$set_step_value('step1', 'a', 100)",
+            "$env.TEST1 = 'value'",
+        ] {
+            assert!(
+                env.eval::<serde_json::Value>(source).is_err(),
+                "{source} must be rejected"
+            );
+        }
+        assert_eq!(context.task().data().get::<i64>("a"), Some(10));
     });
 }
 
@@ -319,12 +318,33 @@ async fn env_private_keys_are_engine_only() {
     let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_engine, context) = start_completed(&workflow, Vars::new()).await;
-    context.set_env(crate::utils::consts::PROC_OWNER, "forged");
+    context
+        .proc
+        .with_env_mut(|env| env.set(crate::utils::consts::PROC_OWNER, "forged"));
 
     Context::scope(&context, || {
         let read =
             env.eval::<serde_json::Value>(&format!("$env.{}", crate::utils::consts::PROC_OWNER));
         assert!(read.is_err(), "private key must not be readable");
+    });
+}
+
+/// A workflow's declared `env` is readable as `$env.X` and cannot be changed
+/// at run time.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_workflow_env_is_read_only() {
+    let env = Environment::new();
+    let workflow = Workflow::new()
+        .with_env("TEST1", "value")
+        .with_step(|step| step.with_id("step1"));
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
+    Context::scope(&context, || {
+        assert_eq!(env.eval::<String>("$env.TEST1").unwrap(), "value");
+        assert!(
+            env.eval::<serde_json::Value>("$env.TEST1 = 'other'")
+                .is_err()
+        );
     });
 }
 

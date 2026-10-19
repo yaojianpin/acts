@@ -41,9 +41,9 @@ pub(crate) struct ScopeSpec {
     /// The acting execution's scope chain (nearest wins) as JSON strings,
     /// seeded into the headless task so `$`-expressions resolve.
     pub(crate) vars: Vec<(String, String)>,
-    /// The run's durable env map (`__env`), seeded into the headless process
-    /// env so `$env.X` answers what an earlier effect wrote through
-    /// `Context::set_env` — the legacy process env, shared by every task.
+    /// The run's declared env map (`__env`), seeded into the headless process
+    /// env so `$env.X` answers the workflow's `env` entries — read-only state,
+    /// shared by every task.
     pub(crate) env: Vec<(String, serde_json::Value)>,
     /// The run's caller authority: the legacy process's `PROC_OWNER`. The
     /// headless scope seals snapshot data under it (a run nobody sealed
@@ -86,7 +86,10 @@ impl Scope {
         f(&self.env.read())
     }
 
-    pub fn with_env_mut<F: FnOnce(&mut Vars)>(&self, f: F) {
+    /// Engine-only writes: the scope's env is built when the scope is created
+    /// (owner, workdir, the run's declared env) and one private key is added
+    /// for the effect seam. No package-facing setter exists.
+    pub(crate) fn with_env_mut<F: FnOnce(&mut Vars)>(&self, f: F) {
         f(&mut self.env.write());
     }
 
@@ -101,11 +104,6 @@ impl Scope {
     pub fn workdir(&self) -> Option<std::path::PathBuf> {
         self.with_env(|env| env.get::<std::path::PathBuf>(consts::PROC_WORKDIR))
     }
-
-    /// The `$set_process_var` write. The headless scope has no root task, so
-    /// the write lands nowhere — what an effect scope writes is folded into
-    /// the operation's commit, and the aggregate is the record.
-    pub fn set_data(&self, _vars: &Vars) {}
 }
 
 /// The node content a headless task needs: exactly what the legacy `Task`
@@ -187,19 +185,18 @@ impl ScopeTask {
         self.data.read().clone()
     }
 
-    pub fn set_data_with<F: FnOnce(&mut Vars)>(&self, f: F) {
+    /// Engine-only: seed the acting execution's inputs.
+    pub(crate) fn set_data_with<F: FnOnce(&mut Vars)>(&self, f: F) {
         f(&mut self.data.write());
     }
 
-    pub fn set_data(&self, vars: &Vars) {
+    /// Engine-only: seed the acting execution's scope chain. A package
+    /// changes variables by returning its outputs, never by writing here.
+    pub(crate) fn update_data(&self, vars: &Vars) {
         let mut data = self.data.write();
         for (name, value) in vars.iter() {
             data.set(name, value);
         }
-    }
-
-    pub fn update_data(&self, vars: &Vars) {
-        self.set_data(vars);
     }
 
     pub(crate) fn set_sealed(&self, name: &str, value: Vars) {

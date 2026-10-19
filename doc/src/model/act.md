@@ -55,6 +55,5 @@
 # 执行脚本
 - uses: acts.app.javascript
   params: |
-    let x = $get("a");
-    $set("result", x * 2);
+    return { result: ${{ a }} * 2 };
 ```

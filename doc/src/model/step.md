@@ -46,10 +46,10 @@ steps:
 steps:
     - id: add
       while: index < input
-      uses: acts.app.javascript
-      params: |
-          $set("value", value + index);
-          $set("index", index + 1);
+      uses: acts.transform.set
+      params:
+          value: ${{ value + index }}
+          index: ${{ index + 1 }}
 
     - id: end
 ```

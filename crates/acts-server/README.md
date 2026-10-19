@@ -281,7 +281,7 @@ and a **root**: each run gets its own directory `<workdir>/<pid>` and its
 filesystem access is confined to that one. The process id becomes a path segment
 (so one that is not a single safe component is refused), acts read the directory
 through `Context::workdir()`, and a script reads the same directory as
-`$env.WORK_DIR` (engine-owned: a write to that name is dropped). The directory is
+`$env.WORK_DIR` (`$env` is read-only). The directory is
 removed together with the run's rows — once the run finished and every delivery
 of its messages settled — so it does not accumulate one directory per historical
 process; a run whose row is kept (an errored delivery awaiting a manual retry)

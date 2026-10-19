@@ -93,11 +93,10 @@ use crate::{
 
 use std::sync::Arc;
 
-/// The root-scope variable holding the process env a package wrote through
-/// `Context::set_env`. Private (`__`-prefixed), so it never leaks into the
+/// The root-scope variable holding the run's declared env (the workflow's
+/// `env` entries). Private (`__`-prefixed), so it never leaks into the
 /// expression variable space, but the effect seam seeds the headless scope's
-/// env from it — `$env.X` answers the same value for every later task of the
-/// run, exactly like the legacy process env.
+/// env from it — `$env.X` answers the same value for every task, read-only.
 pub(crate) const ENV_MAP_VAR: &str = "__env";
 
 /// The kernel's durable auto/waiting decision variable: engine state, not
@@ -759,8 +758,8 @@ impl RowProjector {
     }
 
     /// The process env, as the legacy proc row carries it: the caller
-    /// authority, the run's directory, and whatever a package wrote through
-    /// `Context::set_env` (the durable `__env` map).
+    /// authority, the run's directory, and the workflow's declared `env`
+    /// (the durable `__env` map).
     fn proc_env(&self, snapshot: &ProcessSnapshot, root: &TaskId) -> Result<String> {
         let mut env = Vars::new();
         if let Some(owner) = snapshot
@@ -935,8 +934,7 @@ impl RowProjector {
     }
 }
 
-/// The process env a package wrote through `Context::set_env`, read from the
-/// durable root-scope map.
+/// The run's declared env, read from the durable root-scope map.
 pub(crate) fn env_map(snapshot: &ProcessSnapshot) -> Result<Vec<(String, serde_json::Value)>> {
     let Some(raw) = root_variable(snapshot, ENV_MAP_VAR)? else {
         return Ok(Vec::new());

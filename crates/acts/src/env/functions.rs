@@ -95,28 +95,6 @@ fn builtin(name: &str) -> Option<Value> {
 
             Ok(from_json(value.unwrap_or(JsonValue::Null)))
         }),
-        "$set" => Value::function(|args| {
-            arity("$set", args, 2, 2)?;
-            let name = str_arg("$set", args, 0)?;
-            let value = json_arg("$set", args, 1)?;
-            let vars = Vars::new().with(name.as_str(), value);
-            Context::with(|ctx| ctx.task().update_data(&vars));
-
-            Ok(Value::Null)
-        }),
-        "$set_process_var" => Value::function(|args| {
-            arity("$set_process_var", args, 2, 2)?;
-            let name = str_arg("$set_process_var", args, 0)?;
-            let value = json_arg("$set_process_var", args, 1)?;
-            let vars = Vars::new().with(name.as_str(), value);
-            // The write lands in the headless scope's own data; what an
-            // effect scope writes is folded into the operation's commit (see
-            // `scheduler::shell::effects`), and nothing else is persisted —
-            // the aggregate is the record.
-            Context::with(|ctx| ctx.proc.set_data(&vars));
-
-            Ok(Value::Null)
-        }),
         "$inputs" => Value::function(|args| {
             arity("$inputs", args, 0, 0)?;
 
@@ -183,15 +161,6 @@ fn builtin(name: &str) -> Option<Value> {
             // `step_data`), so a step id names no readable scope here.
             Ok(Value::Null)
         }),
-        "$set_step_value" => Value::function(|args| {
-            arity("$set_step_value", args, 3, 3)?;
-            let _nid = str_arg("$set_step_value", args, 0)?;
-            let _name = str_arg("$set_step_value", args, 1)?;
-            let _value = json_arg("$set_step_value", args, 2)?;
-            // The kernel's scope carries only the acting execution (see
-            // `step_data`), so a step id names no writable scope here.
-            Ok(Value::Null)
-        }),
         "$steps" => Value::function(|args| {
             arity("$steps", args, 0, 0)?;
             // The kernel's scope carries only the acting execution (see
@@ -233,17 +202,6 @@ fn str_arg(name: &str, args: &[Value], index: usize) -> std::result::Result<Stri
                 other.type_name()
             ),
         }),
-        None => Err(ExprError::Function {
-            name: name.to_string(),
-            message: format!("argument {} is missing", index + 1),
-        }),
-    }
-}
-
-/// The `index`-th argument as JSON, which is the form the engine stores.
-fn json_arg(name: &str, args: &[Value], index: usize) -> std::result::Result<JsonValue, ExprError> {
-    match args.get(index) {
-        Some(value) => value.to_json(),
         None => Err(ExprError::Function {
             name: name.to_string(),
             message: format!("argument {} is missing", index + 1),
