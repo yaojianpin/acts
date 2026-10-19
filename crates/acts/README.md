@@ -10,6 +10,30 @@ Unlike traditional workflow engines (such as BPMN). Acts uses a message-driven a
 
 Acts uses Step, Branch, Act to build the workflow. Step and Branch are the workflow stucture to run in sequence or to step into different branch by condition. Act is responsible for the action execution.
 
+## Architecture
+
+The kernel in `scheduler` is the engine. `Engine::builder().start()` returns an
+`Engine` that owns one runtime, and the runtime owns the durable store and one
+kernel host. A started run is a durable aggregate in the store (its tasks,
+variables, operations and outbox records); the kernel loads that aggregate,
+performs the act or client step, and commits the transition together with the
+outbox records it produces. The aggregate is the authority, so a client action
+(`act:*`, `proc:*`) is always re-planned against the aggregate that is loaded,
+not against an in-memory process object.
+
+The `procs`, `tasks` and `vars` rows are a read model projected from the
+aggregates; each row records the aggregate revision it was derived from.
+`proc:get` (and `proc().get(pid)`) answers from those rows, and its task read
+runs the strong-read repair: a run whose rows lag its aggregate is re-projected
+from the aggregate before its tasks are read.
+
+`cache_cap` bounds the runs in flight at once — runs started and not yet
+terminal — not a resident-process cache. A start beyond the cap is parked: its
+aggregate and process row are created (the row's state is `None`), but it runs
+no hop; when a run settles and frees a slot, the parked run with the oldest
+`__created` stamp is admitted first. The default is 1024, and a negative value
+means no bound. `EngineBuilder::cache_size` sets the same value.
+
 ## Key Features
 
 ### Fast
@@ -39,11 +63,12 @@ The lib size is about 4.6mb now.
 
 ### Extensiable
 
-- store collection extension
-  support creating external store, please refer to the code under `crates/acts-store/src/postgres`.
+- store extension
+  support creating an external store: implement `KvStore` and see the backends under
+  `crates/acts-store/src` (`postgres`, `sqlite`, `sled`).
 
-- pakcage extension
-  support creating custom package, please refer to the code under `example/custom_pakcage`.
+- package extension
+  support creating a custom package, please refer to the code under `examples/custom_package`.
 
 ## Installation
 
@@ -65,7 +90,7 @@ for a checkout.
 
 ## Quickstart
 
-1. Create and start the workflow engine by `engine.new()`.
+1. Create and start the workflow engine with `Engine::builder().start()`.
 2. Load a yaml model to create a `workflow`.
 3. Deploy the model in step 2 by `engine.executor(&principal).model()`.
 4. Config events by `engine.channel()`.
@@ -419,12 +444,12 @@ depends on it) and passed to `set_store` the same way.
 
 ## Package
 
-Please see the example `example/pakcage`.
+Please see `examples/custom_package`.
 
 ## Acts-Server
 
 Create a acts-server to interact with clients based on grpc.
-please see more from [`acts-server`](https://github.com/yaojianpin/acts-server)
+please see more from [`crates/acts-server`](https://github.com/yaojianpin/acts/tree/main/crates/acts-server)
 
 ## Client channels
 
@@ -439,9 +464,9 @@ acts:
 - runtime
 
   - [x] model (Workflow, Branch, Step, Act)
-  - [x] scheduler (Config, Builder, Node, Process, Task, Queue, Event)
+  - [x] kernel scheduler (durable aggregates, outbox, recovery, row projection)
   - [x] javascript runner
-  - [x] cache
+  - [x] in-flight run cap (`cache_cap`)
   - [x] plugin register
   - [x] package register
   - [x] snapshot register

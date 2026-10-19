@@ -1,4 +1,18 @@
 //! A lightweight, fast, tiny, extensiable workflow engine
+//!
+//! [`Engine::builder`] starts an engine from a workflow model. The started
+//! [`Engine`] owns its runtime, and the runtime owns the durable store and the
+//! kernel that drives every run: a run is an aggregate in the store, and each
+//! transition (an act's effect, a client action, a timer) is a commit against
+//! that aggregate. The `procs`/`tasks`/`vars` rows are a read model projected
+//! from the aggregates; `proc:get` answers from those rows, and its task read
+//! re-projects a run whose rows lag its aggregate first.
+//!
+//! `cache_cap` bounds the runs in flight at once — runs started and not yet
+//! terminal. A start beyond it is parked (its aggregate and `None` process row
+//! exist, but it runs no hop) until a settled run frees a slot; the parked run
+//! with the oldest `__created` stamp is admitted first. A negative value means
+//! no bound.
 
 // `include_str!` is resolved against this file when the crate is built, and the
 // crate is also built from the tarball `cargo package` makes — whose root is
