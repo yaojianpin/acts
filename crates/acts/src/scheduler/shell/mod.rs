@@ -2831,7 +2831,7 @@ impl KernelHost {
         crate::scheduler::core::model::operation::OperationRecord,
         crate::scheduler::durable::document_store::LoadedProcess,
     )> {
-        match self
+        let outcome = self
             .processes
             .commit_operation_event(
                 id,
@@ -2841,8 +2841,47 @@ impl KernelHost {
                 self.timer_poll_ms,
             )
             .await
-            .map_err(runtime)?
-        {
+            .map_err(runtime)?;
+        Self::operation_event_outcome(id, outcome)
+    }
+
+    /// [`Self::operation_event`] for a caller that already holds the
+    /// aggregate it decided on (the claim path's pre-claim load): the commit
+    /// uses those documents as its CAS token instead of reading the same
+    /// aggregate a second time.
+    async fn operation_event_from(
+        &self,
+        loaded: crate::scheduler::durable::document_store::LoadedProcess,
+        id: &OperationId,
+        expected_revision: u64,
+        event: OperationEvent,
+    ) -> Result<(
+        crate::scheduler::core::model::operation::OperationRecord,
+        crate::scheduler::durable::document_store::LoadedProcess,
+    )> {
+        let outcome = self
+            .processes
+            .commit_operation_event_from(
+                loaded,
+                id,
+                expected_revision,
+                event,
+                SystemClock.now_ms(),
+                self.timer_poll_ms,
+            )
+            .await
+            .map_err(runtime)?;
+        Self::operation_event_outcome(id, outcome)
+    }
+
+    fn operation_event_outcome(
+        id: &OperationId,
+        outcome: crate::scheduler::durable::async_document_store::OperationCommitOutcome,
+    ) -> Result<(
+        crate::scheduler::core::model::operation::OperationRecord,
+        crate::scheduler::durable::document_store::LoadedProcess,
+    )> {
+        match outcome {
             crate::scheduler::durable::async_document_store::OperationCommitOutcome::Committed { operation, loaded }
             | crate::scheduler::durable::async_document_store::OperationCommitOutcome::AlreadyCommitted { operation, loaded } => {
                 Ok((operation, loaded))

@@ -300,9 +300,33 @@ impl AsyncProcessRepository {
         now_ms: i64,
         poll_ms: i64,
     ) -> Result<OperationCommitOutcome, AsyncRepositoryError> {
-        let mut loaded = self.load(&id.process_id).await?.ok_or_else(|| {
+        let loaded = self.load(&id.process_id).await?.ok_or_else(|| {
             AsyncRepositoryError::Domain(CommitError::ProcessNotFound(id.process_id.clone()))
         })?;
+        self.commit_operation_event_from(loaded, id, expected_revision, event, now_ms, poll_ms)
+            .await
+    }
+
+    /// [`Self::commit_operation_event`] for a caller that has just loaded the
+    /// same aggregate under the pid's command lane (the claim path). The
+    /// loaded documents are the CAS token, so the write is exactly as guarded
+    /// as a fresh read; a stale observation loses its guard and is re-read /
+    /// reported as a conflict the same way. This saves one whole aggregate
+    /// load per claim.
+    pub(crate) async fn commit_operation_event_from(
+        &self,
+        mut loaded: LoadedProcess,
+        id: &crate::scheduler::core::model::operation::OperationId,
+        expected_revision: u64,
+        event: crate::scheduler::core::model::operation::OperationEvent,
+        now_ms: i64,
+        poll_ms: i64,
+    ) -> Result<OperationCommitOutcome, AsyncRepositoryError> {
+        if loaded.snapshot.process_id != id.process_id {
+            return Err(AsyncRepositoryError::Domain(CommitError::ForeignOperation(
+                id.clone(),
+            )));
+        }
         // The advance runs on the loaded aggregate itself: this repository owns
         // it and drops it on failure (the caller reports and recovery
         // re-derives the operation), so the whole-aggregate clone is not needed.
@@ -2481,6 +2505,57 @@ mod tests {
                 "{pid}'s head was rewritten by the retry"
             );
         }
+    }
+
+    /// A commit that leaves a derived index (and a per-operation recovery
+    /// entry) byte-identical does not rewrite it: the key's exact guard is
+    /// still in the batch, but the identical write is left out. Before L5 the
+    /// same batch carried a mutation for every derived key on every commit.
+    #[tokio::test]
+    async fn a_commit_that_leaves_derived_indexes_unchanged_does_not_rewrite_them() {
+        use crate::scheduler::durable::snapshot_codec::LogChanges;
+
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv)));
+        let source = snapshot(true);
+        let loaded = repository.create(&source, 0, 800).await.unwrap();
+
+        // Move one task's revision only: the Claimed operation (and therefore
+        // the recovery index and its entry) cannot move, and the outbox/ready
+        // indexes stay empty.
+        let mut replacement = loaded.snapshot.clone();
+        replacement.version.process += 1;
+        let task = replacement.tasks.keys().next().unwrap().clone();
+        replacement.tasks.get_mut(&task).unwrap().revision += 1;
+        let mut changes = LogChanges::default();
+        changes.tasks.insert(task);
+
+        let entries = recovery_entries(&loaded.snapshot);
+        let InstallWrite {
+            transaction, write, ..
+        } = build_replace_transaction(&loaded, &replacement, &entries, None, &changes).unwrap();
+        assert!(
+            write.recovery_index.is_some(),
+            "the operation is still in recovery"
+        );
+        assert!(write.outbox_index.is_none());
+        assert!(write.ready.is_none());
+        let index_mutations: Vec<&str> = transaction
+            .mutations()
+            .iter()
+            .filter_map(|mutation| match mutation {
+                crate::scheduler::durable::document_store::DocumentMutation::Put {
+                    key, ..
+                }
+                | crate::scheduler::durable::document_store::DocumentMutation::Delete { key } => {
+                    key.starts_with("kernel/indexes/").then_some(key.as_str())
+                }
+            })
+            .collect();
+        assert!(
+            index_mutations.is_empty(),
+            "unchanged derived documents must not be rewritten: {index_mutations:?}"
+        );
     }
 
     /// A normal commit appends one small log entry and never rewrites the

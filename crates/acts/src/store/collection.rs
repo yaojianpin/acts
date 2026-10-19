@@ -291,9 +291,10 @@ impl<T> KvCollection<T> {
     }
 
     /// The mutations [`DbCollection::update`] would apply: drop the old index
-    /// keys the new document no longer carries (keys re-created with the same
-    /// value are left alone — a delete+put of one key is a no-op), then write
-    /// the data row and the new index rows.
+    /// keys the new document no longer carries, then write the data row and
+    /// only the index keys the document adds. A key both versions carry is
+    /// left untouched — rewriting an identical key cannot change a query's
+    /// answer and only makes a real backend do redundant work per update.
     ///
     /// The caller MUST hold the lock of every document it writes (see
     /// [`lock_docs`]) until that batch is applied: the dropped keys are the
@@ -314,19 +315,34 @@ impl<T> KvCollection<T> {
         let new_bytes = serde_json::to_vec(new_json).map_err(map_db_err)?;
         let new_index = self.index_keys(new_json, &id);
         let mut ops = Vec::with_capacity(new_index.len() + 1);
+        // Index rows keep their exact key (and an empty value) as long as the
+        // indexed value does not move. Dropping the old keys the new document
+        // no longer carries and writing only the keys it adds leaves every
+        // unchanged key untouched: a re-put of an identical key cannot change
+        // what a query sees, and a missing key is index damage that
+        // `rebuild_index` repairs explicitly, never something an update heals
+        // by accident.
+        let mut old_index: Option<HashSet<String>> = None;
         if let Some(old_json) = self.read_json(&id).await? {
+            let previous = self.index_keys(&old_json, &id);
             let new_keys: HashSet<&str> = new_index.iter().map(String::as_str).collect();
-            for idx_key in self.index_keys(&old_json, &id) {
+            for idx_key in &previous {
                 if !new_keys.contains(idx_key.as_str()) {
-                    ops.push(StoreBatchOp::Delete { key: idx_key });
+                    ops.push(StoreBatchOp::Delete {
+                        key: idx_key.clone(),
+                    });
                 }
             }
+            old_index = Some(previous.into_iter().collect());
         }
         ops.push(StoreBatchOp::Put {
             key: self.data_key(&id),
             value: new_bytes,
         });
         for idx_key in new_index {
+            if old_index.as_ref().is_some_and(|old| old.contains(&idx_key)) {
+                continue;
+            }
             ops.push(StoreBatchOp::Put {
                 key: idx_key,
                 value: vec![],
@@ -1286,8 +1302,72 @@ impl Expr {
 #[cfg(test)]
 mod tests {
     use super::{JsonValue, encode_key_str, json_value_to_key_str};
-    use crate::store::Expr;
+    use crate::store::{DbCollectionIden, Expr};
     use serde_json::json;
+
+    #[derive(Debug, serde::Deserialize, serde::Serialize)]
+    struct Row {
+        id: String,
+        pid: String,
+        tid: String,
+        state: String,
+        v: i32,
+    }
+
+    impl DbCollectionIden for Row {
+        fn iden() -> String {
+            "testrows".into()
+        }
+        fn indexed_fields() -> &'static [&'static str] {
+            &["pid", "tid", "state"]
+        }
+    }
+
+    #[tokio::test]
+    async fn update_writes_only_index_keys_the_document_adds() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let collection: KvCollection<Row> = KvCollection::new("testrows", kv.clone());
+        let previous = Row {
+            id: "r1".into(),
+            pid: "p1".into(),
+            tid: "t1".into(),
+            state: "running".into(),
+            v: 0,
+        };
+        kv.put(
+            &collection.data_key("r1"),
+            serde_json::to_vec(&previous).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let next = Row {
+            state: "completed".into(),
+            ..previous
+        };
+        let ops = collection.update_ops(&next).await.unwrap();
+        let keys: Vec<&str> = ops
+            .iter()
+            .map(|op| match op {
+                StoreBatchOp::Put { key, .. } | StoreBatchOp::Delete { key } => key.as_str(),
+            })
+            .collect();
+        // The data row, the drop of the old state key and the write of the new
+        // one. `pid` and `tid` are byte-identical keys in both versions and
+        // stay untouched (not deleted, not rewritten).
+        assert_eq!(keys.len(), 3, "{keys:?}");
+        assert!(keys.iter().any(|key| key.ends_with("id-r1")));
+        assert!(
+            keys.iter().any(|key| key.contains("-state-completed-")),
+            "the new state index row must be written: {keys:?}"
+        );
+        assert!(
+            !keys
+                .iter()
+                .any(|key| key.contains("-pid-") || key.contains("-tid-")),
+            "unchanged pid/tid index rows must not be touched: {keys:?}"
+        );
+    }
 
     #[test]
     fn encode_key_str_passthrough() {

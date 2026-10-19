@@ -51,7 +51,12 @@ impl KernelHost {
             return Ok(None);
         }
         let now = SystemClock.now_ms();
-        let Some(snapshot) = self.load(&id.process_id).await? else {
+        // This load is the claim's CAS token too: the pre-claim checks below
+        // (`place_run`, the operation state, the kind's precheck) all decide
+        // against exactly the documents the claim commit guards, so committing
+        // the claim from a second read of the same aggregate would only decode
+        // the same bytes again.
+        let Some(loaded) = self.load(&id.process_id).await? else {
             // A ready/recovery/wake record whose aggregate is already gone
             // (an interrupted cleanup, or an older orphan index): there is no
             // work to drive. Skipping keeps the pass alive instead of failing
@@ -63,7 +68,7 @@ impl KernelHost {
             );
             return Ok(None);
         };
-        let snapshot = snapshot.snapshot;
+        let snapshot = &loaded.snapshot;
         // The slot policy for this run, before it is driven: a parked run
         // waits, a run this driver never admitted (one already in flight when
         // it booted) takes a slot or parks, and a run that settled already —
@@ -72,7 +77,7 @@ impl KernelHost {
         // longest. A parked run's ready record is deferred by the driver, so
         // this remains the cold path it was.
         if slot == Slot::Policy {
-            let (placed, admission) = self.place_run(&snapshot);
+            let (placed, admission) = self.place_run(snapshot);
             if let Some(admission) = admission {
                 self.admit_run(&admission).await?;
             }
@@ -101,7 +106,7 @@ impl KernelHost {
         if let Some(driver) = driver(record.kind) {
             let pending = Pending {
                 id,
-                snapshot: &snapshot,
+                snapshot,
                 now_ms: now,
             };
             if matches!(driver.precheck(self, &pending).await?, Precheck::Ignore) {
@@ -128,7 +133,8 @@ impl KernelHost {
             heartbeat_revision: 0,
         };
         let (prepared, loaded) = self
-            .operation_event(
+            .operation_event_from(
+                loaded,
                 id,
                 record.revision,
                 OperationEvent::ClaimAndPrepare(claim.clone()),

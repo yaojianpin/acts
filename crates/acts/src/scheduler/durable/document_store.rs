@@ -488,6 +488,26 @@ fn index_guards(
     Ok(transaction)
 }
 
+/// Write a derived index only when it actually changed. The guard for the key
+/// is already in the transaction, so leaving the mutation out keeps the
+/// compare-and-swap contract intact while sparing a backend a write whose
+/// bytes are identical to the stored ones (an index key is either present with
+/// its exact bytes or absent — there is nothing else to heal here).
+fn write_index_if_changed(
+    transaction: DocumentTransaction,
+    key: &str,
+    original: Option<&[u8]>,
+    replacement: Option<&[u8]>,
+) -> Result<DocumentTransaction, DocumentStoreError> {
+    if original == replacement {
+        return Ok(transaction);
+    }
+    match replacement {
+        Some(bytes) => transaction.put(key, bytes.to_vec()),
+        None => transaction.delete(key),
+    }
+}
+
 pub(crate) fn build_replace_transaction(
     loaded: &LoadedProcess,
     replacement_snapshot: &ProcessSnapshot,
@@ -516,18 +536,24 @@ pub(crate) fn build_replace_transaction(
     write.recovery_index = recovery_index;
     write.outbox_index = outbox_index;
     write.ready = replacement_ready.map(ToOwned::to_owned);
-    transaction = match &write.recovery_index {
-        Some(index) => transaction.put(&recovery_key, index.clone())?,
-        None => transaction.delete(&recovery_key)?,
-    };
-    transaction = match &write.outbox_index {
-        Some(index) => transaction.put(&outbox_key, index.clone())?,
-        None => transaction.delete(&outbox_key)?,
-    };
-    transaction = match &write.ready {
-        Some(index) => transaction.put(&ready_key, index.clone())?,
-        None => transaction.delete(&ready_key)?,
-    };
+    transaction = write_index_if_changed(
+        transaction,
+        &recovery_key,
+        loaded.original_recovery_index(),
+        write.recovery_index.as_deref(),
+    )?;
+    transaction = write_index_if_changed(
+        transaction,
+        &outbox_key,
+        loaded.original_outbox_index(),
+        write.outbox_index.as_deref(),
+    )?;
+    transaction = write_index_if_changed(
+        transaction,
+        &ready_key,
+        loaded.original_ready_index(),
+        write.ready.as_deref(),
+    )?;
     transaction =
         replace_recovery_entries(transaction, current_recovery_entries, replacement_snapshot)?;
     transaction.validate()?;
@@ -538,8 +564,9 @@ pub(crate) fn build_replace_transaction(
 /// aggregate and its outbox index can move: the confirmation advances outbox
 /// records without changing tasks, operations or variables, so the recovery
 /// index (and its per-operation entry documents) and the ready index are
-/// guarded but not rewritten. Rewriting an unchanged derived index would make
-/// the normal path pay for work that cannot have changed.
+/// guarded but not rewritten. The outbox index itself is written only when its
+/// bytes differ from the observed document. Rewriting an unchanged derived
+/// index would make the normal path pay for work that cannot have changed.
 pub(crate) struct OutboxConfirmWrite {
     pub(crate) transaction: DocumentTransaction,
     pub(crate) write: ReplaceWrite,
@@ -567,10 +594,12 @@ pub(crate) fn build_outbox_confirm_transaction(
     let (mut transaction, mut write) =
         install_aggregate(loaded, replacement, &changes, transaction)?;
     write.outbox_index = outbox_index;
-    transaction = match &write.outbox_index {
-        Some(index) => transaction.put(&outbox_key, index.clone())?,
-        None => transaction.delete(&outbox_key)?,
-    };
+    transaction = write_index_if_changed(
+        transaction,
+        &outbox_key,
+        loaded.original_outbox_index(),
+        write.outbox_index.as_deref(),
+    )?;
     transaction.validate()?;
     Ok(OutboxConfirmWrite { transaction, write })
 }
@@ -595,6 +624,11 @@ fn replace_recovery_entries(
         }
     }
     for (key, value) in replacement_entries {
+        // The key's exact bytes are already guarded above; an entry that did
+        // not move (another operation's pending revision) needs no write.
+        if current_entries.get(&key) == Some(&value) {
+            continue;
+        }
         transaction = transaction.put(key, value)?;
     }
     Ok(transaction)
