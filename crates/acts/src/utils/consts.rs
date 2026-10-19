@@ -19,6 +19,20 @@ pub const TASK_COST: &str = "__cost";
 /// state).
 pub const TASK_TIMEOUTS: &str = "__timeouts";
 
+/// The per-item bindings a param fan-out (`acts.core.parallel{in}` /
+/// `acts.core.sequence{in}`) pins on each item's template execution: the
+/// item's position and value.
+///
+/// They are private (`__`-prefixed) on purpose — engine facts, not run data:
+/// they never fold into an ancestor scope (`PropagateTask` skips private
+/// names), never reach a task's projected row, a run's outputs or a message's
+/// `inputs`, and a workflow variable of the same public name is therefore
+/// never shadowed by them. Expressions still read them as `index`/`value` (the
+/// names the container packages' inline acts declare), through the alias in
+/// `scheduler::shell::facts::scope_vars`.
+pub(crate) const FANOUT_INDEX_VAR: &str = "__fanout_index";
+pub(crate) const FANOUT_VALUE_VAR: &str = "__fanout_value";
+
 pub const ACT_TO: &str = "to";
 
 pub const TASK_ROOT_TID: &str = "$";

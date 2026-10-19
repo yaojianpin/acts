@@ -668,9 +668,11 @@ fn package_block_workflow(mode: &str) -> Workflow {
 #[derive(Clone, Debug)]
 struct AnnouncedAct {
     nid: String,
+    tid: String,
     key: String,
     value: String,
     index: String,
+    inputs: crate::Vars,
 }
 
 /// The messages a cell has seen, shared with the engine's handler.
@@ -702,9 +704,11 @@ fn capture_act_items(engine: &Engine) -> Announced {
             };
             rec.lock().push(AnnouncedAct {
                 nid: e.nid.clone(),
+                tid: e.tid.clone(),
                 key: text("key"),
                 value: text("value"),
                 index: text("index"),
+                inputs: e.inputs.clone(),
             });
         }
     });
@@ -733,6 +737,10 @@ async fn item_generations(engine: &Engine, pid: &str) -> Vec<u64> {
 
 /// The `(index, value)` bindings the param fan-out left on the template
 /// executions' own scopes, sorted by index: the item facts the acts read.
+///
+/// They live under the engine-private names the fan-out writes: the public
+/// `index`/`value` are the alias `scope_vars` answers inside the item's scope,
+/// never aggregate data (see [`crate::utils::consts::FANOUT_INDEX_VAR`]).
 async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
     let snapshot = process_snapshot(engine, pid).await;
     let mut bindings: Vec<(String, String)> = snapshot
@@ -747,11 +755,30 @@ async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
                     .cloned()
                     .unwrap_or_default()
             };
-            (read("index"), read("value"))
+            (
+                read(crate::utils::consts::FANOUT_INDEX_VAR),
+                read(crate::utils::consts::FANOUT_VALUE_VAR),
+            )
         })
         .collect();
     bindings.sort();
     bindings
+}
+
+/// The outputs of the run's completed `workflow` message — the surface
+/// `exposes`/`proc:get` consumers read a run's result from.
+fn capture_workflow_outputs(engine: &Engine) -> Arc<Mutex<Option<crate::Vars>>> {
+    let seen: Arc<Mutex<Option<crate::Vars>>> = Arc::new(Mutex::new(None));
+    let rec = seen.clone();
+    engine.channel().on_message(move |e| {
+        let rec = rec.clone();
+        async move {
+            if e.r#type == "workflow" && e.state == MessageState::Completed {
+                *rec.lock() = Some(e.outputs.clone());
+            }
+        }
+    });
+    seen
 }
 
 /// The predecessor edges of the template executions, by generation: the fact
@@ -807,6 +834,7 @@ async fn a_uses_param_fan_out_instantiates_one_template_per_item_inner() {
     for (package, chained) in [("acts.core.parallel", false), ("acts.core.sequence", true)] {
         let engine = engine_on(FaultKv::new().store()).await;
         let seen = capture_act_items(&engine);
+        let outputs = capture_workflow_outputs(&engine);
         let pid = start_run(&engine, &package_items_workflow(package)).await;
 
         wait_completed(&engine, &pid).await;
@@ -865,6 +893,44 @@ async fn a_uses_param_fan_out_instantiates_one_template_per_item_inner() {
             vec!["0=u1".to_string(), "1=u2".to_string()],
             "({package}) the act of each item resolves that item's `index`/`value`: {announced:?}"
         );
+        // The binding is engine data, not run data: it is not carried in the
+        // act message's `inputs`, not projected into the template's task row,
+        // and not folded up into the run's outputs (legacy kept the same two
+        // on the act's options, so none of these surfaces ever held them).
+        assert!(
+            announced.iter().all(|act| {
+                act.inputs.get_value("index").is_none() && act.inputs.get_value("value").is_none()
+            }),
+            "({package}) a per-item binding is not message `inputs`: {announced:?}"
+        );
+        let rows = read_proc(&engine, &pid).await;
+        let item_rows = rows.task_by_nid("step1#item");
+        assert!(
+            !item_rows.is_empty(),
+            "({package}) the template executions are projected"
+        );
+        assert!(
+            item_rows.iter().all(|row| {
+                row.data().get_value("index").is_none() && row.data().get_value("value").is_none()
+            }),
+            "({package}) a per-item binding is not task row data: {:?}",
+            item_rows
+                .iter()
+                .map(|row| row.data().to_string())
+                .collect::<Vec<_>>()
+        );
+        let what = format!("({package}) the workflow completion message of {pid}");
+        poll_until_dumped(
+            &what,
+            || async { outputs.lock().is_some() },
+            || dump_state(&engine, &pid),
+        )
+        .await;
+        let outputs = outputs.lock().clone().unwrap();
+        assert!(
+            outputs.get_value("index").is_none() && outputs.get_value("value").is_none(),
+            "({package}) a per-item binding must not reach the run's outputs: {outputs:?}"
+        );
         assert_eq!(
             decided_state(&engine, &pid, "step1").await,
             Some(TaskState::Completed),
@@ -874,6 +940,130 @@ async fn a_uses_param_fan_out_instantiates_one_template_per_item_inner() {
         sweep_until_gone(&engine, &pid).await;
         engine.close().await;
     }
+}
+
+/// A `sequence{in}` fixture whose items wait for a client: the first item's
+/// irq act is live while the second item's template has not started yet, so a
+/// restart can be taken between them.
+fn package_recovery_workflow() -> Workflow {
+    let mut step = Step::new();
+    step.id = "step1".to_string();
+    step.uses = Some("acts.core.sequence".to_string());
+    step.params = json!({
+        "in": ["u1", "u2"],
+        "acts": [{
+            "id": "item_act",
+            "uses": "acts.core.irq",
+            "params": {
+                "key": "item",
+                "index": "${{ index }}",
+                "value": "${{ value }}",
+            },
+        }],
+    });
+    workflow_with(step)
+}
+
+/// A restart between a sequence's items must rebuild the second item's
+/// `index`/`value` from the durable aggregate: the bindings are written when
+/// the fan-out commits, and the second item's start resolves its params only
+/// after the recovered engine admits it. The same binding is still engine
+/// data, so the restarted run's outputs do not carry it.
+///
+/// A failure would mean the binding lived only in the pre-restart headless
+/// scope (the second act's params would fail to resolve), or that replaying
+/// the completion leaked it upward.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_param_fan_out_binding_survives_a_restart_between_items() {
+    bounded(
+        "a_param_fan_out_binding_survives_a_restart_between_items",
+        a_param_fan_out_binding_survives_a_restart_between_items_inner(),
+    )
+    .await;
+}
+
+async fn a_param_fan_out_binding_survives_a_restart_between_items_inner() {
+    let kv = FaultKv::new();
+    let store = kv.store();
+    let engine = engine_on(store.clone()).await;
+    let seen = capture_act_items(&engine);
+    let pid = start_run(&engine, &package_recovery_workflow()).await;
+
+    let what = format!("the first sequence item of {pid} to wait for its act");
+    poll_until_dumped(
+        &what,
+        || async { seen.lock().iter().any(|act| act.key == "item") },
+        || dump_state(&engine, &pid),
+    )
+    .await;
+    let first = seen
+        .lock()
+        .iter()
+        .find(|act| act.key == "item")
+        .cloned()
+        .expect("the poll saw the first item");
+    assert_eq!(
+        (first.index.as_str(), first.value.as_str()),
+        ("0", "u1"),
+        "the first item resolves its own binding before the restart"
+    );
+
+    // The crash leaves the first act waiting; the second item's template is
+    // still `Created`, so its start — and its `${{ index }}`/`${{ value }}`
+    // resolution — happens only on the recovered engine.
+    let reloaded = restart(&engine, store.clone()).await;
+    let seen2 = capture_act_items(&reloaded);
+    let outputs = capture_workflow_outputs(&reloaded);
+
+    complete_act(&reloaded, &pid, &first.tid).await.unwrap();
+
+    let what = format!("the second sequence item of {pid} after the restart");
+    poll_until_dumped(
+        &what,
+        || async {
+            seen2
+                .lock()
+                .iter()
+                .any(|act| act.key == "item" && act.value == "u2")
+        },
+        || dump_state(&reloaded, &pid),
+    )
+    .await;
+    let second = seen2
+        .lock()
+        .iter()
+        .find(|act| act.key == "item" && act.value == "u2")
+        .cloned()
+        .expect("the poll saw the second item");
+    assert_eq!(
+        (second.index.as_str(), second.value.as_str()),
+        ("1", "u2"),
+        "the recovered engine rebuilds the item binding from the aggregate"
+    );
+    assert!(
+        second.inputs.get_value("index").is_none() && second.inputs.get_value("value").is_none(),
+        "the rebuilt binding stays out of the act message's `inputs`: {:?}",
+        second.inputs
+    );
+    complete_act(&reloaded, &pid, &second.tid).await.unwrap();
+
+    wait_completed(&reloaded, &pid).await;
+    let what = format!("the workflow completion message of {pid} after the restart");
+    poll_until_dumped(
+        &what,
+        || async { outputs.lock().is_some() },
+        || dump_state(&reloaded, &pid),
+    )
+    .await;
+    let outputs = outputs.lock().clone().unwrap();
+    assert!(
+        outputs.get_value("index").is_none() && outputs.get_value("value").is_none(),
+        "a per-item binding must not reach the recovered run's outputs: {outputs:?}"
+    );
+
+    sweep_until_gone(&reloaded, &pid).await;
+    reloaded.close().await;
 }
 
 /// The block's inline acts are model children now: both declared acts run and

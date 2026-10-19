@@ -79,6 +79,14 @@ pub(super) fn auto_decision(
 /// own `$cost()`/`$cost_in(...)` read (frozen by the tick that dispatched a
 /// timeout branch), so it travels with the scope — a timeout branch's effect
 /// params answer the same cost the legacy branch task did.
+///
+/// The param fan-out's per-item bindings are the other exception, in the
+/// opposite direction: they are stored privately
+/// (`FANOUT_INDEX_VAR`/`FANOUT_VALUE_VAR`) so they can never fold into an
+/// ancestor scope or reach a row, a run's outputs or a message's `inputs`, but
+/// inside the item's own scope they answer as `index`/`value` — the names the
+/// container packages' inline acts read. The alias is a fallback: a workflow
+/// variable of the same name in this or a nearer scope wins.
 pub(crate) fn scope_vars(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     scope: &crate::scheduler::core::model::task_graph::TaskId,
@@ -104,6 +112,23 @@ pub(crate) fn scope_vars(
                 && !merged.iter().any(|(existing, _)| existing == name)
             {
                 merged.push((name.clone(), value.clone()));
+            }
+        }
+        // The fan-out's private item facts, under the public names the
+        // templates' acts read. Only when the name is not already answered by
+        // this or a nearer scope: an explicit workflow variable wins.
+        for (private, public) in [
+            (crate::utils::consts::FANOUT_INDEX_VAR, "index"),
+            (crate::utils::consts::FANOUT_VALUE_VAR, "value"),
+        ] {
+            if merged.iter().any(|(existing, _)| existing == public) {
+                continue;
+            }
+            if let Some(raw) = snapshot
+                .variables
+                .get(&(scope.clone(), private.to_string()))
+            {
+                merged.push((public.to_string(), raw.clone()));
             }
         }
     }

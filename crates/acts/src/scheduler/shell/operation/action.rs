@@ -758,7 +758,11 @@ impl KernelHost {
     /// the item's index and value on its options). The count is a run-time
     /// fact, so the children share the template's model node and take
     /// successive generations of it; each carries its item on its own scope as
-    /// `index`/`value`.
+    /// engine-private facts (`FANOUT_INDEX_VAR`/`FANOUT_VALUE_VAR`) that
+    /// `scope_vars` answers as `index`/`value`. They are deliberately not run
+    /// data: a completing item does not fold them into its parent, and no row,
+    /// run output or message `inputs` carries them (legacy kept the same two
+    /// on the act's options).
     ///
     /// `parallel` admits its items together (`Entry`, all sourced by the
     /// container); `sequence` chains them (`Entry` then `Queued` behind the
@@ -820,9 +824,21 @@ impl KernelHost {
             .iter()
             .enumerate()
             .map(|(index, item)| {
+                // Private (engine-fact) names: the binding is readable as
+                // `index`/`value` inside the item's scope (see `scope_vars`),
+                // but it is not run data — completing the template does not
+                // fold it into the parent, and no row/output/message `inputs`
+                // surface carries it. Legacy put the two on the act's options,
+                // so neither did it.
                 let mut vars = vec![
-                    ("index".to_string(), serde_json::json!(index).to_string()),
-                    ("value".to_string(), item.to_string()),
+                    (
+                        crate::utils::consts::FANOUT_INDEX_VAR.to_string(),
+                        serde_json::json!(index).to_string(),
+                    ),
+                    (
+                        crate::utils::consts::FANOUT_VALUE_VAR.to_string(),
+                        item.to_string(),
+                    ),
                 ];
                 vars.extend(template_vars.iter().cloned());
                 ContainerChild {
