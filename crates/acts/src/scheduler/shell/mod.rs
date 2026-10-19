@@ -462,10 +462,52 @@ pub(crate) enum ProcessEvent {
 pub(crate) type LifecycleSink = Box<dyn Fn(&crate::Message, ProcessEvent) + Send + Sync>;
 
 /// Which runs were already reported: a start once, a terminal once.
+///
+/// `started_at` is the fallback wall-clock anchor for a host with no read
+/// model (the kernel's own tests): the projected proc row is the primary
+/// source of a run's window, but a lifecycle message must still carry a start
+/// and an end when there is no row to read.
 #[derive(Default)]
 struct ReportedRuns {
     started: std::collections::HashSet<String>,
     finished: std::collections::HashSet<String>,
+    started_at: std::collections::HashMap<String, i64>,
+}
+
+impl ReportedRuns {
+    /// The start instant of `pid`: the projected proc row when it has one,
+    /// otherwise the instant this host first reported the run (a host without
+    /// a read model), otherwise now. Remembered for the terminal event, whose
+    /// message must span the same window.
+    fn stamp_start(&mut self, pid: &str, times: Option<(i64, i64)>) -> i64 {
+        let now = crate::utils::time::time_millis();
+        let start = times
+            .map(|(start, _)| start)
+            .filter(|start| *start > 0)
+            .or_else(|| self.started_at.get(pid).copied())
+            .unwrap_or(now);
+        self.started_at.insert(pid.to_string(), start);
+        start
+    }
+
+    /// Stamp a terminal lifecycle message with the run's window. The projected
+    /// proc row is authoritative; without one the host's recorded start and
+    /// its own clock close the window, so `Message::cost()` is never the
+    /// meaningless `0 - 0`.
+    fn stamp_terminal(&mut self, message: &mut crate::Message, times: Option<(i64, i64)>) {
+        let now = crate::utils::time::time_millis();
+        let start = times
+            .map(|(start, _)| start)
+            .filter(|start| *start > 0)
+            .or_else(|| self.started_at.remove(&message.pid))
+            .unwrap_or(now);
+        let end = times
+            .map(|(_, end)| end)
+            .filter(|end| *end > 0)
+            .unwrap_or(now);
+        message.start_time = start;
+        message.end_time = end.max(start);
+    }
 }
 
 /// The configured bounds of the five admission categories (A8). Execution
@@ -1201,7 +1243,7 @@ impl KernelHost {
                     // A commit whose projection failed withheld its lifecycle
                     // event (see `dispatch`); the repair is where the
                     // observer gets to see the now-projected state.
-                    self.report_lifecycle(&loaded.snapshot);
+                    self.report_lifecycle(&loaded.snapshot).await;
                     true
                 }
                 Err(error) => {
@@ -1460,22 +1502,42 @@ impl KernelHost {
     /// The legacy engine emitted both, so both paths stay — neither replaces
     /// the other, and they carry different fact sets (`process_message` here,
     /// the task payload there).
-    fn report_lifecycle(
+    async fn report_lifecycle(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     ) {
         let directive = decision::lifecycle(snapshot);
-        self.report_lifecycle_decision(snapshot, directive.as_ref());
+        let times = match directive {
+            Some(_) => self.proc_times(&snapshot.process_id).await,
+            None => None,
+        };
+        self.report_lifecycle_decision(snapshot, directive.as_ref(), times);
+    }
+
+    /// The run's projected `(start_time, end_time)` when a read model is
+    /// attached. The projection has already run for this commit (A5/A6), so
+    /// the proc row is current; `None` means no projector, or a row that does
+    /// not exist yet (a lifecycle message then falls back to the host's own
+    /// clock).
+    async fn proc_times(&self, process_id: &str) -> Option<(i64, i64)> {
+        let projector = self.projection.read().clone()?;
+        projector.proc_times(process_id).await.ok().flatten()
     }
 
     /// Execute the lifecycle directive Core already decided. The shell owns
     /// only the message shape, the sink and the once-per-phase bookkeeping;
     /// *whether* the run is alive or settled (and whether a terminal root is an
     /// error) is [`crate::scheduler::core::decision::lifecycle`].
+    ///
+    /// `times` is the run's projected window. A projected row is the same
+    /// wall-clock fact a `proc:get` reader sees, so `Message::cost()` on the
+    /// completion event is the run's real cost; when no row exists (a host
+    /// without a read model) the host's own clock supplies the window.
     fn report_lifecycle_decision(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         directive: Option<&LifecycleDirective>,
+        times: Option<(i64, i64)>,
     ) {
         let lifecycle = self.lifecycle.read();
         let Some(sink) = lifecycle.as_ref() else {
@@ -1491,7 +1553,10 @@ impl KernelHost {
         match directive {
             LifecycleDirective::Started => {
                 if reported.started.insert(snapshot.process_id.clone()) {
-                    let message = process_message(snapshot, &root);
+                    let mut message = process_message(snapshot, &root);
+                    let start = reported.stamp_start(&message.pid, times);
+                    message.start_time = start;
+                    message.end_time = 0;
                     sink(&message, ProcessEvent::Started);
                 }
             }
@@ -1500,6 +1565,7 @@ impl KernelHost {
                     return;
                 }
                 let mut message = process_message(snapshot, &root);
+                reported.stamp_terminal(&mut message, times);
                 // The legacy `on_proc` handler validates the model's
                 // `exposes` against the completed outputs; a mismatch is
                 // reported as an error on the same completion event.
@@ -1516,6 +1582,7 @@ impl KernelHost {
                     return;
                 }
                 let mut payload = process_message(snapshot, &root);
+                reported.stamp_terminal(&mut payload, times);
                 payload.set_err(code, message);
                 sink(&payload, ProcessEvent::Errored);
             }
@@ -2718,6 +2785,19 @@ impl KernelHost {
                 "options": model.options,
             }),
         );
+        // The declared options (the legacy `Task::create_message` options
+        // set): a package-less step announced the options its declaration
+        // carried, which is what a channel filter's `tag` matches. A `uses`
+        // step's act payload carries the resolved options already.
+        let options = find_step_in_model(&model, node)
+            .map(|step| step.options.clone())
+            .unwrap_or_default();
+        if !options.is_empty() {
+            inputs.insert(
+                crate::utils::consts::ACT_OPTIONS_KEY.to_string(),
+                serde_json::to_value(options).unwrap_or(serde_json::Value::Null),
+            );
+        }
         let mut payload = serde_json::json!({
             "tid": task_id.wire(&snapshot.process_id),
             "nid": node,

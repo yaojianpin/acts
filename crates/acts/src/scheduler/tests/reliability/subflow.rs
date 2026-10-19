@@ -476,9 +476,9 @@ impl KvStore for SubflowKv {
 /// act completes with the child's start.)
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals() {
+async fn sch_subflow_store_that_refuses_the_child_start_degrades_the_parent_and_heals() {
     bounded(
-        "a_store_that_refuses_the_child_start_degrades_the_parent_and_heals",
+        "sch_subflow_store_that_refuses_the_child_start_degrades_the_parent_and_heals",
         a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inner(),
     )
     .await;
@@ -617,9 +617,9 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
 /// run it was and is never resurrected, duplicated or re-driven.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once() {
+async fn sch_subflow_restart_between_the_child_start_and_its_completion_recovers_both_once() {
     bounded(
-        "a_restart_between_the_child_start_and_its_completion_recovers_both_once",
+        "sch_subflow_restart_between_the_child_start_and_its_completion_recovers_both_once",
         a_restart_between_the_child_start_and_its_completion_recovers_both_once_inner(),
     )
     .await;
@@ -747,9 +747,9 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
 /// (at the handoff).
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_child_completion_is_refused_and_starts_no_second_child() {
+async fn sch_subflow_duplicate_child_completion_is_refused_and_starts_no_second_child() {
     bounded(
-        "a_duplicate_child_completion_is_refused_and_starts_no_second_child",
+        "sch_subflow_duplicate_child_completion_is_refused_and_starts_no_second_child",
         a_duplicate_child_completion_is_refused_and_starts_no_second_child_inner(),
     )
     .await;
@@ -843,9 +843,9 @@ async fn a_duplicate_child_completion_is_refused_and_starts_no_second_child_inne
 /// branched container, the shape the kernel's fan-out/fan-in actually runs.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn two_subflow_branches_start_two_children_and_the_parent_completes_once() {
+async fn sch_subflow_two_subflow_branches_start_two_children_and_the_parent_completes_once() {
     bounded(
-        "two_subflow_branches_start_two_children_and_the_parent_completes_once",
+        "sch_subflow_two_subflow_branches_start_two_children_and_the_parent_completes_once",
         two_subflow_branches_start_two_children_and_the_parent_completes_once_inner(),
     )
     .await;

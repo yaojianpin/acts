@@ -64,6 +64,20 @@ fn catch_snapshot(c1: TaskState, c2: TaskState) -> ProcessSnapshot {
             .variables
             .insert((id(task, 0), SIGN_VAR.to_string()), SIGN_CATCH.to_string());
     }
+    // A skipped catcher in these fixtures is one its own guard did not select
+    // (the catch fan-out writes the marker with the skip); a catcher the
+    // client skipped carries no marker and counts as caught.
+    for (task, state) in [("c1", c1), ("c2", c2)] {
+        if state == TaskState::Skipped {
+            snapshot.variables.insert(
+                (
+                    id(task, 0),
+                    crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR.to_string(),
+                ),
+                "true".to_string(),
+            );
+        }
+    }
     snapshot
 }
 
@@ -110,6 +124,26 @@ fn catch_join_catches_when_a_catcher_did_not_skip() {
         assert_eq!(change.to, TaskState::Completed);
         assert_eq!(operation.kind, OperationKind::PropagateTask);
     }
+}
+
+/// A catcher the client selected and then skipped is *caught*: the act folds
+/// into its handler execution, so a client skip is a plain `Skipped` without
+/// the guard marker (the legacy `catch_as_skip`, where the handler's step
+/// completed while its act was skipped). Only a handler its own predicate did
+/// not select resumes the error.
+#[test]
+fn catch_join_catches_a_client_skipped_handler() {
+    let graph = catch_graph();
+    let mut snapshot = catch_snapshot(TaskState::Skipped, TaskState::Skipped);
+    snapshot.variables.remove(&(
+        id("c1", 0),
+        crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR.to_string(),
+    ));
+    let outcome = CatchJoin::plan((&graph, &snapshot), &catch_command()).unwrap();
+    let Some(CatchJoinOutcome::Caught(change, _)) = outcome else {
+        panic!("a client-skipped handler is still a caught error");
+    };
+    assert_eq!(change.to, TaskState::Completed);
 }
 
 #[test]
@@ -194,6 +228,15 @@ fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
         snapshot
             .variables
             .insert((id("c1", 0), SIGN_VAR.to_string()), SIGN_CATCH.to_string());
+        if handler == TaskState::Skipped {
+            snapshot.variables.insert(
+                (
+                    id("c1", 0),
+                    crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR.to_string(),
+                ),
+                "true".to_string(),
+            );
+        }
         snapshot
     };
     // Triggered by the timeout branch's settlement, not the handler's: the

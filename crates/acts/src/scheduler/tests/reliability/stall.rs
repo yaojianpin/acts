@@ -745,9 +745,9 @@ impl KvStore for DocCutKv {
 /// projection cannot shift it.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_cut_swept_across_a_completion_converges_at_every_write_boundary() {
+async fn sch_stall_cut_swept_across_a_completion_converges_at_every_write_boundary() {
     bounded(
-        "a_cut_swept_across_a_completion_converges_at_every_write_boundary",
+        "sch_stall_cut_swept_across_a_completion_converges_at_every_write_boundary",
         cut_sweep_inner(),
     )
     .await;
@@ -889,9 +889,9 @@ async fn boot_with_recovery_cut(store: Arc<dyn KvStore>, kv: &Arc<DocCutKv>, pid
 /// `pending`, the act still waits — so it cannot pass vacuously.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stalled_operation_is_redriven_by_the_recovery_pass() {
+async fn sch_stall_stalled_operation_is_redriven_by_the_recovery_pass() {
     bounded(
-        "a_stalled_operation_is_redriven_by_the_recovery_pass",
+        "sch_stall_stalled_operation_is_redriven_by_the_recovery_pass",
         stalled_redriven_inner(),
     )
     .await;
@@ -945,9 +945,9 @@ async fn stalled_redriven_inner() {
 /// timer's.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stalled_operation_is_redriven_by_the_timer() {
+async fn sch_stall_stalled_operation_is_redriven_by_the_timer() {
     bounded(
-        "a_stalled_operation_is_redriven_by_the_timer",
+        "sch_stall_stalled_operation_is_redriven_by_the_timer",
         stalled_timer_inner(),
     )
     .await;
@@ -995,9 +995,9 @@ async fn stalled_timer_inner() {
 /// made.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stalled_operation_survives_a_second_restart() {
+async fn sch_stall_stalled_operation_survives_a_second_restart() {
     bounded(
-        "a_stalled_operation_survives_a_second_restart",
+        "sch_stall_stalled_operation_survives_a_second_restart",
         second_restart_inner(),
     )
     .await;
@@ -1065,9 +1065,9 @@ async fn second_restart_inner() {
 /// no resident object, so what it defers is the *operation*.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_run_parked_at_boot_waits_for_a_slot_and_converges() {
+async fn sch_stall_run_parked_at_boot_waits_for_a_slot_and_converges() {
     bounded(
-        "a_run_parked_at_boot_waits_for_a_slot_and_converges",
+        "sch_stall_run_parked_at_boot_waits_for_a_slot_and_converges",
         boot_slot_inner(),
     )
     .await;

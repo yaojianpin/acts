@@ -245,9 +245,9 @@ async fn crash_and_reboot(engine: &Engine, store: Arc<dyn KvStore>, kv: &CutKv) 
 /// rewind running once rather than merely a generation appearing.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery() {
+async fn sch_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery() {
     bounded(
-        "a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery",
+        "sch_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery",
         a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(),
     )
     .await;
@@ -375,9 +375,9 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
 /// failure healed without rewinding twice.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once() {
+async fn sch_back_store_fault_at_the_backs_durable_step_surfaces_and_heals_once() {
     bounded(
-        "a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once",
+        "sch_back_store_fault_at_the_backs_durable_step_surfaces_and_heals_once",
         a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner(),
     )
     .await;
@@ -479,9 +479,9 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
 /// live — rather than about a task identity the kernel does not keep.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_back_is_refused_without_a_second_rewind() {
+async fn sch_back_duplicate_back_is_refused_without_a_second_rewind() {
     bounded(
-        "a_duplicate_back_is_refused_without_a_second_rewind",
+        "sch_back_duplicate_back_is_refused_without_a_second_rewind",
         a_duplicate_back_is_refused_without_a_second_rewind_inner(),
     )
     .await;
@@ -570,9 +570,9 @@ async fn a_duplicate_back_is_refused_without_a_second_rewind_inner() {
 /// work.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn back_racing_complete_converges_on_one_terminal_decision() {
+async fn sch_back_racing_complete_converges_on_one_terminal_decision() {
     bounded(
-        "back_racing_complete_converges_on_one_terminal_decision",
+        "sch_back_racing_complete_converges_on_one_terminal_decision",
         back_racing_complete_converges_on_one_terminal_decision_inner(),
     )
     .await;

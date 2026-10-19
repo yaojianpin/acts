@@ -192,9 +192,9 @@ async fn has_pending_operation(engine: &Engine, pid: &str, tid: &str) -> bool {
 /// act, and the run still finishes through the one redo the client drove.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_cancel_is_refused_and_the_rewind_runs_once() {
+async fn sch_cancel_duplicate_cancel_is_refused_and_the_rewind_runs_once() {
     bounded(
-        "a_duplicate_cancel_is_refused_and_the_rewind_runs_once",
+        "sch_cancel_duplicate_cancel_is_refused_and_the_rewind_runs_once",
         a_duplicate_cancel_is_refused_and_the_rewind_runs_once_inner(),
     )
     .await;
@@ -268,9 +268,9 @@ async fn a_duplicate_cancel_is_refused_and_the_rewind_runs_once_inner() {
 /// own durable step.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_once() {
+async fn sch_cancel_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_once() {
     bounded(
-        "a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_once",
+        "sch_cancel_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_once",
         a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_once_inner(),
     )
     .await;
@@ -350,9 +350,9 @@ async fn a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_on
 /// the run settles once either way. Several rounds cover the interleavings.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn cancel_racing_next_converges_on_one_terminal_decision() {
+async fn sch_cancel_racing_next_converges_on_one_terminal_decision() {
     bounded(
-        "cancel_racing_next_converges_on_one_terminal_decision",
+        "sch_cancel_racing_next_converges_on_one_terminal_decision",
         cancel_racing_next_converges_on_one_terminal_decision_inner(),
     )
     .await;
@@ -462,9 +462,9 @@ async fn cancel_racing_next_converges_on_one_terminal_decision_inner() {
 /// action would drop the cancel.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery() {
+async fn sch_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery() {
     bounded(
-        "a_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery",
+        "sch_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery",
         a_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(),
     )
     .await;

@@ -1,6 +1,9 @@
 pub mod core;
 pub mod transform;
 
+#[cfg(test)]
+mod tests;
+
 use crate::{
     ActError, Config, Engine, Result, Store, Vars, Workflow, data, scheduler::Context,
     store::DbCollectionIden,

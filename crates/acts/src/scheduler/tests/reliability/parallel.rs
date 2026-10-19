@@ -342,9 +342,9 @@ async fn no_created_for(seen: &Arc<Mutex<Vec<(String, String)>>>, tid: &str) {
 /// execution behind.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_branch_row_projection_is_absorbed_and_the_join_runs_once() {
+async fn sch_parallel_failed_branch_row_projection_is_absorbed_and_the_join_runs_once() {
     bounded(
-        "a_failed_branch_row_projection_is_absorbed_and_the_join_runs_once",
+        "sch_parallel_failed_branch_row_projection_is_absorbed_and_the_join_runs_once",
         a_failed_branch_row_projection_is_absorbed_and_the_join_runs_once_inner(),
     )
     .await;
@@ -405,9 +405,10 @@ async fn a_failed_branch_row_projection_is_absorbed_and_the_join_runs_once_inner
 /// engine.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_settled_one() {
+async fn sch_parallel_restart_with_a_branch_in_flight_re_drives_without_re_running_the_settled_one()
+{
     bounded(
-        "a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_settled_one",
+        "sch_parallel_restart_with_a_branch_in_flight_re_drives_without_re_running_the_settled_one",
         a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_settled_one_inner(),
     )
     .await;
@@ -476,9 +477,9 @@ async fn a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_sett
 /// generation for its node, a second operation record, or a join that ran twice.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_branch_completion_is_refused_without_a_second_generation() {
+async fn sch_parallel_duplicate_branch_completion_is_refused_without_a_second_generation() {
     bounded(
-        "a_duplicate_branch_completion_is_refused_without_a_second_generation",
+        "sch_parallel_duplicate_branch_completion_is_refused_without_a_second_generation",
         a_duplicate_branch_completion_is_refused_without_a_second_generation_inner(),
     )
     .await;
@@ -570,9 +571,9 @@ async fn a_duplicate_branch_completion_is_refused_without_a_second_generation_in
 /// or left a task non-terminal.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn concurrent_sibling_completions_join_the_container_exactly_once() {
+async fn sch_parallel_concurrent_sibling_completions_join_the_container_exactly_once() {
     bounded(
-        "concurrent_sibling_completions_join_the_container_exactly_once",
+        "sch_parallel_concurrent_sibling_completions_join_the_container_exactly_once",
         concurrent_sibling_completions_join_the_container_exactly_once_inner(),
     )
     .await;
@@ -820,9 +821,9 @@ async fn item_predecessors(engine: &Engine, pid: &str) -> Vec<(u64, Vec<String>)
 /// the wrong admission shape, or a container that never joined.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_uses_param_fan_out_instantiates_one_template_per_item() {
+async fn sch_parallel_uses_param_fan_out_instantiates_one_template_per_item() {
     bounded(
-        "a_uses_param_fan_out_instantiates_one_template_per_item",
+        "sch_parallel_uses_param_fan_out_instantiates_one_template_per_item",
         a_uses_param_fan_out_instantiates_one_template_per_item_inner(),
     )
     .await;
@@ -975,9 +976,9 @@ fn package_recovery_workflow() -> Workflow {
 /// the completion leaked it upward.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_param_fan_out_binding_survives_a_restart_between_items() {
+async fn sch_parallel_param_fan_out_binding_survives_a_restart_between_items() {
     bounded(
-        "a_param_fan_out_binding_survives_a_restart_between_items",
+        "sch_parallel_param_fan_out_binding_survives_a_restart_between_items",
         a_param_fan_out_binding_survives_a_restart_between_items_inner(),
     )
     .await;
@@ -1076,9 +1077,9 @@ async fn a_param_fan_out_binding_survives_a_restart_between_items_inner() {
 /// never joined.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_block_packages_inline_acts_run_as_children_in_both_modes() {
+async fn sch_parallel_block_packages_inline_acts_run_as_children_in_both_modes() {
     bounded(
-        "a_block_packages_inline_acts_run_as_children_in_both_modes",
+        "sch_parallel_block_packages_inline_acts_run_as_children_in_both_modes",
         a_block_packages_inline_acts_run_as_children_in_both_modes_inner(),
     )
     .await;

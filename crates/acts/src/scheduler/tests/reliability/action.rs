@@ -317,9 +317,9 @@ fn is_decision_negative(error: &ActError) -> bool {
 /// recovered through is the aggregate commit itself.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweeps() {
+async fn sch_action_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweeps() {
     bounded(
-        "a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweeps",
+        "sch_action_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweeps",
         a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweeps_inner(),
     )
     .await;
@@ -437,9 +437,9 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
 /// it — and the run always reaches the decision it raced for.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn racing_completes_converge_on_one_decision_and_one_effect() {
+async fn sch_action_racing_completes_converge_on_one_decision_and_one_effect() {
     bounded(
-        "racing_completes_converge_on_one_decision_and_one_effect",
+        "sch_action_racing_completes_converge_on_one_decision_and_one_effect",
         racing_completes_converge_on_one_decision_and_one_effect_inner(),
     )
     .await;
@@ -533,9 +533,9 @@ async fn racing_completes_converge_on_one_decision_and_one_effect_inner() {
 /// the preflight, before the durable intent, so the aggregate is untouched.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_complete_is_refused_without_effect() {
+async fn sch_action_duplicate_complete_is_refused_without_effect() {
     bounded(
-        "a_duplicate_complete_is_refused_without_effect",
+        "sch_action_duplicate_complete_is_refused_without_effect",
         a_duplicate_complete_is_refused_without_effect_inner(),
     )
     .await;
@@ -629,9 +629,9 @@ async fn a_duplicate_complete_is_refused_without_effect_inner() {
 /// prove was not applied.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_once() {
+async fn sch_action_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_once() {
     bounded(
-        "a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_once",
+        "sch_action_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_once",
         a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_once_inner(),
     )
     .await;
@@ -819,9 +819,9 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
 /// propagation, and re-applies only the client's decision, exactly once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node() {
+async fn sch_action_crash_after_the_chain_propagated_keeps_one_child_per_node() {
     bounded(
-        "a_crash_after_the_chain_propagated_keeps_one_child_per_node",
+        "sch_action_crash_after_the_chain_propagated_keeps_one_child_per_node",
         a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner(),
     )
     .await;

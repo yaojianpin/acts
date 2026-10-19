@@ -578,7 +578,15 @@ impl KernelHost {
                 {
                     PredicateValue::True => {}
                     PredicateValue::False => {
-                        plan = crate::scheduler::core::plan::container::ContainerChildPlan::Skip
+                        plan = crate::scheduler::core::plan::container::ContainerChildPlan::Skip;
+                        // The handler's own selection did not match. Mark it
+                        // like a guard skip so the catch join can tell it from
+                        // a handler the client selected and then skipped
+                        // (`catch_as_skip` is still a caught error).
+                        vars.push((
+                            crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR.to_string(),
+                            serde_json::json!(true).to_string(),
+                        ));
                     }
                     PredicateValue::Null => vars.push((
                         BRANCH_ERROR_VAR.to_string(),

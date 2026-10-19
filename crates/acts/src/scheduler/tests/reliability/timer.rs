@@ -1,19 +1,19 @@
-//! TIMER reliability cells: the engine's two store-facing background loops —
-//! the message-retry timer (unacknowledged deliveries re-sent until their
-//! retries exhaust into `Error`) and the schedule-trigger timer (due
-//! `schedule` rows fired and rolled forward) — crossed with a store outage, an
-//! engine restart, an exhausted retry budget, and a redelivery's channel
-//! scope.
+//! TIMER reliability cells: the engine's message-retry timer
+//! (unacknowledged deliveries re-sent until their retries exhaust into
+//! `Error`) crossed with a store outage, an engine restart, an exhausted retry
+//! budget, and a redelivery's channel scope.
 //!
-//! Both loops belong to the kernel: their rows are the kernel's projection
-//! (`deliveries`/`events`) and the two loops run outside the driver, because
-//! they are not part of the operation protocol and must not delay it. A cell
-//! therefore reads the loops' effects off the row collections and the engine's
-//! own channels — a re-send is an `emit_delivery` to the owning channel, a
-//! trigger fire is the `events` due query plus `fire_schedule` — and never
-//! through a resident scheduler object the cutover removed. A failing store is
+//! The loop belongs to the kernel: its rows are the kernel's projection
+//! (`deliveries`) and it runs outside the driver, because it is not part of
+//! the operation protocol and must not delay it. A cell therefore reads the
+//! loop's effects off the row collections and the engine's own channels — a
+//! re-send is an `emit_delivery` to the owning channel — and never through a
+//! resident scheduler object the cutover removed. A failing store is
 //! reported through [`Runtime::scheduler_health`](crate::scheduler::Runtime::scheduler_health),
 //! which is what a cell polls instead of sleeping.
+//!
+//! The schedule-trigger timer's cells live beside this file in
+//! [`super::super::schedule`], together with their shared fixture.
 //!
 //! Several of these properties are also pinned at the store level
 //! (`crates/acts/src/store/store.rs`: `retry_scan_rearms_open_rows_and_errors_the_exhausted`,
@@ -30,7 +30,7 @@ use serial_test::serial;
 use crate::config::ConfigData;
 use crate::data::DeliveryStatus;
 use crate::scheduler::runtime::TEST_TICK_MS;
-use crate::scheduler::shell::health::{DEGRADE_AFTER, HealthState};
+use crate::scheduler::shell::health::HealthState;
 use crate::utils::test::USES_SET;
 use crate::{ChannelOptions, Message, Store};
 
@@ -86,60 +86,6 @@ async fn deliveries_of(store: &Store, pid: &str) -> Vec<crate::data::Delivery> {
         .rows
 }
 
-/// How many processes of one model are live. Every fired process of the
-/// schedule fixtures waits in an irq act, so the count only grows — the
-/// settled-process sweeper never reclaims them.
-async fn proc_count(store: &Store, mid: &str) -> usize {
-    store
-        .procs()
-        .query(
-            &Query::new()
-                .limit(1000)
-                .filter(Filter::and().expr(Expr::eq("mid", mid.to_string()))),
-        )
-        .await
-        .unwrap()
-        .count
-}
-
-/// A schedule-trigger model whose fired processes stay alive (the same irq act
-/// that waits for a response nobody sends), so every fire leaves exactly one
-/// more running process. The trigger is assigned directly because
-/// [`Workflow::with_trigger`] takes a plain `fn` and the cron is the cell's own.
-fn schedule_model(id: &str, cron: &str) -> Workflow {
-    let mut model = Workflow::new().with_id(id).with_step(|step| {
-        step.with_id("s1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    model.on = vec![crate::Trigger {
-        id: "tick".to_string(),
-        kind: "schedule".to_string(),
-        schedule: Some(cron.to_string()),
-        ..Default::default()
-    }];
-    model
-}
-
-/// Deploy a schedule model and answer the `events` row id of its trigger.
-async fn deploy_schedule(engine: &Engine, model_id: &str, cron: &str) -> String {
-    engine
-        .executor(&crate::Principal::unrestricted())
-        .model()
-        .deploy(&schedule_model(model_id, cron), None)
-        .await
-        .unwrap();
-    format!("{model_id}:tick")
-}
-
-/// Make a schedule row due in the past without recording a fire — the
-/// duplicate view of a due moment the crash window between starting a process
-/// and rolling the row leaves behind.
-async fn make_row_due(store: &Store, trigger_id: &str) {
-    let mut evt = store.events().find(trigger_id).await.unwrap();
-    evt.next_run = crate::utils::time::time_millis() - 1000;
-    store.events().update(&evt).await.unwrap();
-}
-
 // ---------------------------------------------------------------------------
 // RETRY × DB失败 — the scan across a store outage
 // ---------------------------------------------------------------------------
@@ -160,9 +106,9 @@ async fn make_row_due(store: &Store, trigger_id: &str) {
 /// row directly.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn message_retry_survives_store_outage_and_rearms_on_heal() {
+async fn sch_timer_message_retry_survives_store_outage_and_rearms_on_heal() {
     bounded(
-        "message_retry_survives_store_outage_and_rearms_on_heal",
+        "sch_timer_message_retry_survives_store_outage_and_rearms_on_heal",
         message_retry_survives_store_outage_and_rearms_on_heal_inner(),
     )
     .await;
@@ -274,9 +220,9 @@ async fn message_retry_survives_store_outage_and_rearms_on_heal_inner() {
 /// engine-level half across a restart.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn message_retry_resumes_after_restart_and_errored_stays_dead() {
+async fn sch_timer_message_retry_resumes_after_restart_and_errored_stays_dead() {
     bounded(
-        "message_retry_resumes_after_restart_and_errored_stays_dead",
+        "sch_timer_message_retry_resumes_after_restart_and_errored_stays_dead",
         message_retry_resumes_after_restart_and_errored_stays_dead_inner(),
     )
     .await;
@@ -433,272 +379,6 @@ async fn poll_first_delivery(engine: &Engine, store: &Store, pid: &str) -> crate
 }
 
 // ---------------------------------------------------------------------------
-// SCHEDULE × restart
-// ---------------------------------------------------------------------------
-
-/// A deployed schedule trigger keeps firing after the engine is replaced over
-/// the same store: the single trigger row advances (`last_run`/`next_run`), new
-/// processes appear, and the restart must not duplicate the trigger row — a
-/// second row would double-fire every tick.
-///
-/// The row is the timer's durable state and the fresh engine re-reads it at
-/// boot, so nothing about the trigger lives in the engine that died.
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn a_schedule_trigger_fires_after_an_engine_restart() {
-    bounded(
-        "a_schedule_trigger_fires_after_an_engine_restart",
-        a_schedule_trigger_fires_after_an_engine_restart_inner(),
-    )
-    .await;
-}
-
-async fn a_schedule_trigger_fires_after_an_engine_restart_inner() {
-    let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let model_id = "sch-timer-restart";
-
-    // phase 1: deploy an every-second schedule and wait for a fire
-    let engine = engine_on(store.clone()).await;
-    let trigger_id = deploy_schedule(&engine, model_id, "* * * * * *").await;
-    let store1 = engine.runtime().store();
-
-    let what = format!("the schedule {trigger_id} to fire on the first engine");
-    poll_until(&what, || async {
-        store1
-            .events()
-            .find(&trigger_id)
-            .await
-            .map(|e| e.last_run > 0)
-            .unwrap_or(false)
-    })
-    .await;
-    let last_run_1 = store1.events().find(&trigger_id).await.unwrap().last_run;
-    let what = format!("the fire to start a process of {model_id}");
-    poll_until(&what, || async { proc_count(&store1, model_id).await > 0 }).await;
-    let n1 = proc_count(&store1, model_id).await;
-
-    engine.close().await;
-
-    // phase 2: the restarted engine keeps the trigger firing
-    let engine2 = engine_on(store.clone()).await;
-    let store2 = engine2.runtime().store();
-
-    let what = format!("the schedule {trigger_id} to fire again on the restarted engine");
-    poll_until(&what, || async {
-        store2
-            .events()
-            .find(&trigger_id)
-            .await
-            .map(|e| e.last_run > last_run_1)
-            .unwrap_or(false)
-    })
-    .await;
-    let evt = store2.events().find(&trigger_id).await.unwrap();
-    assert!(
-        evt.next_run > evt.last_run,
-        "the restarted timer must roll the schedule forward"
-    );
-    let what = format!("the restart fire of {model_id} to start a process");
-    poll_until(&what, || async { proc_count(&store2, model_id).await > n1 }).await;
-
-    // the trigger row itself was not duplicated by the restart: exactly one
-    // schedule row for the model, or every tick would fire it twice
-    let rows = store2
-        .events()
-        .query(
-            &Query::new().limit(1000).filter(
-                Filter::and()
-                    .expr(Expr::eq("kind", "schedule"))
-                    .expr(Expr::eq("mid", model_id)),
-            ),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.count, 1,
-        "the restart must not duplicate the schedule trigger row"
-    );
-    assert_eq!(rows.rows[0].id, trigger_id);
-
-    engine2.close().await;
-}
-
-// ---------------------------------------------------------------------------
-// SCHEDULE × duplicate due fire
-// ---------------------------------------------------------------------------
-
-/// A due fire seen again — the crash window between starting the process and
-/// rolling the row re-surfaces the same due moment — must start exactly one
-/// process, never a burst: the kernel's roll-forward is at-least-once, so the
-/// *start* may be re-driven, but the process must be unique per due fire.
-///
-/// The kernel keeps the due moment in the row's `next_run`; rolling it forward
-/// inside the fire is what closes the window. A row left due starts exactly one
-/// more process each time it is seen due, which is the accounting this cell
-/// pins: one due moment, one process.
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_due_schedule_fire_starts_exactly_one_process() {
-    bounded(
-        "a_duplicate_due_schedule_fire_starts_exactly_one_process",
-        a_duplicate_due_schedule_fire_starts_exactly_one_process_inner(),
-    )
-    .await;
-}
-
-async fn a_duplicate_due_schedule_fire_starts_exactly_one_process_inner() {
-    let engine = engine_on(Arc::new(MemoryStore::new())).await;
-    let store = engine.runtime().store();
-    let model_id = "sch-timer-dup";
-
-    // a daily cron: the row is never naturally due during the test, so every
-    // process that appears is accounted for by a due fire below
-    let trigger_id = deploy_schedule(&engine, model_id, "0 0 3 * * *").await;
-    let evt = store.events().find(&trigger_id).await.unwrap();
-    assert!(
-        evt.next_run > crate::utils::time::time_millis(),
-        "deploy must arm the schedule in the future"
-    );
-
-    // ticks pass: nothing is due, nothing starts
-    tokio::time::sleep(Duration::from_millis(TEST_TICK_MS * 3)).await;
-    assert_eq!(
-        proc_count(&store, model_id).await,
-        0,
-        "a far-future schedule must not fire"
-    );
-
-    // the same due moment surfaces again (crash between start and row roll)
-    make_row_due(&store, &trigger_id).await;
-    let what = format!("the due fire of {model_id} to start a process");
-    poll_until(&what, || async { proc_count(&store, model_id).await >= 1 }).await;
-    let fired = store.events().find(&trigger_id).await.unwrap();
-    assert!(fired.last_run > 0, "the fire must be recorded");
-    assert!(
-        fired.next_run > crate::utils::time::time_millis(),
-        "the fire must roll the row to the next cron time"
-    );
-
-    // more ticks pass: the consumed due moment must not repeat itself
-    tokio::time::sleep(Duration::from_millis(TEST_TICK_MS * 3)).await;
-    assert_eq!(
-        proc_count(&store, model_id).await,
-        1,
-        "one due fire must start exactly one process, never a burst"
-    );
-    let settled = store.events().find(&trigger_id).await.unwrap();
-    assert_eq!(
-        settled.last_run, fired.last_run,
-        "no further fire may happen while the row is not due"
-    );
-
-    // a second due fire: again exactly one process, so the accounting between
-    // due moments and processes stays 1:1
-    make_row_due(&store, &trigger_id).await;
-    let what = format!("the second due fire of {model_id} to start a process");
-    poll_until(&what, || async { proc_count(&store, model_id).await >= 2 }).await;
-    tokio::time::sleep(Duration::from_millis(TEST_TICK_MS * 2)).await;
-    assert_eq!(
-        proc_count(&store, model_id).await,
-        2,
-        "each due moment must map to exactly one process"
-    );
-    let settled = store.events().find(&trigger_id).await.unwrap();
-    assert!(
-        settled.last_run > fired.last_run,
-        "the second due fire must be recorded in its turn"
-    );
-    assert!(
-        settled.next_run > crate::utils::time::time_millis(),
-        "the row must be rolled to the future again"
-    );
-
-    engine.close().await;
-}
-
-// ---------------------------------------------------------------------------
-// SCHEDULE × DB失败 — the trigger loop degrades and recovers
-// ---------------------------------------------------------------------------
-
-/// A store that keeps failing the trigger timer's due query must leave the loop
-/// reporting itself `Degraded` — from [`DEGRADE_AFTER`] consecutive failed
-/// ticks it skips ticks instead of hammering the store — and the first clean
-/// tick after the store answers must bring it back to `Healthy` with no restart
-/// and no separate recovery path. The recovered loop is live again, which the
-/// cell proves by firing a due row.
-///
-/// A whole-store outage is the harness's seam; the failed tick is the trigger
-/// loop's one store round trip, and [`Runtime::scheduler_health`] is where it
-/// says so.
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn the_trigger_loop_degrades_under_a_down_store_and_recovers() {
-    bounded(
-        "the_trigger_loop_degrades_under_a_down_store_and_recovers",
-        the_trigger_loop_degrades_under_a_down_store_and_recovers_inner(),
-    )
-    .await;
-}
-
-async fn the_trigger_loop_degrades_under_a_down_store_and_recovers_inner() {
-    let kv = OutageKv::new();
-    let engine = engine_on(kv.store()).await;
-    let store = engine.runtime().store();
-    let model_id = "sch-timer-down";
-
-    // a far-future schedule: nothing is due until the cell says so, so the only
-    // state under observation is the loop's own health
-    let trigger_id = deploy_schedule(&engine, model_id, "0 0 3 * * *").await;
-    assert_eq!(
-        proc_count(&store, model_id).await,
-        0,
-        "a far-future schedule must not fire"
-    );
-
-    // the store goes away: the streak grows and the loop reports degraded,
-    // skipping ticks rather than polling at the tick rate
-    kv.down();
-    let reads_before = kv.reads();
-    let what = "the trigger loop to report degraded while its store reads fail";
-    poll_until(what, || async {
-        let health = engine.runtime().scheduler_health().trigger;
-        health.state == HealthState::Degraded && health.backoff_ticks > 0
-    })
-    .await;
-    let health = engine.runtime().scheduler_health().trigger;
-    assert!(
-        health.consecutive_failures >= DEGRADE_AFTER,
-        "a degrading loop must have failed at least {DEGRADE_AFTER} ticks in a row: {health:?}"
-    );
-    assert!(
-        kv.reads() > reads_before,
-        "the degraded loop must have attempted the store"
-    );
-
-    // the store comes back: one clean tick clears the state
-    kv.heal();
-    poll_until(
-        "the trigger loop to recover once the store answers",
-        || async {
-            let health = engine.runtime().scheduler_health().trigger;
-            health.state == HealthState::Healthy
-                && health.consecutive_failures == 0
-                && health.backoff_ticks == 0
-        },
-    )
-    .await;
-
-    // ...and the recovered loop is live: it fires a row that is now due
-    make_row_due(&store, &trigger_id).await;
-    let what = format!("the recovered trigger loop to fire the due row of {model_id}");
-    poll_until(&what, || async { proc_count(&store, model_id).await > 0 }).await;
-    let fired = store.events().find(&trigger_id).await.unwrap();
-    assert!(fired.last_run > 0, "the fire must be recorded");
-
-    engine.close().await;
-}
-
-// ---------------------------------------------------------------------------
 // RETRY × 未确认 — a bare re-send keeps one delivery
 // ---------------------------------------------------------------------------
 
@@ -711,9 +391,9 @@ async fn the_trigger_loop_degrades_under_a_down_store_and_recovers_inner() {
 /// than the store test's returned row.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unacked_delivery_is_re_sent_with_its_own_row() {
+async fn sch_timer_unacked_delivery_is_re_sent_with_its_own_row() {
     bounded(
-        "an_unacked_delivery_is_re_sent_with_its_own_row",
+        "sch_timer_unacked_delivery_is_re_sent_with_its_own_row",
         an_unacked_delivery_is_re_sent_with_its_own_row_inner(),
     )
     .await;
@@ -794,9 +474,9 @@ async fn an_unacked_delivery_is_re_sent_with_its_own_row_inner() {
 /// being re-sent.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unacked_delivery_exhausts_its_retries_into_error() {
+async fn sch_timer_unacked_delivery_exhausts_its_retries_into_error() {
     bounded(
-        "an_unacked_delivery_exhausts_its_retries_into_error",
+        "sch_timer_unacked_delivery_exhausts_its_retries_into_error",
         an_unacked_delivery_exhausts_its_retries_into_error_inner(),
     )
     .await;
@@ -878,9 +558,9 @@ async fn an_unacked_delivery_exhausts_its_retries_into_error_inner() {
 /// not its own.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_redelivery_reaches_only_its_owning_channel() {
+async fn sch_timer_redelivery_reaches_only_its_owning_channel() {
     bounded(
-        "a_redelivery_reaches_only_its_owning_channel",
+        "sch_timer_redelivery_reaches_only_its_owning_channel",
         a_redelivery_reaches_only_its_owning_channel_inner(),
     )
     .await;
@@ -1003,9 +683,9 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
 /// cannot hold it out of the sweeper.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_delivery_stored_after_its_task_closed_is_born_settled() {
+async fn sch_timer_delivery_stored_after_its_task_closed_is_born_settled() {
     bounded(
-        "a_delivery_stored_after_its_task_closed_is_born_settled",
+        "sch_timer_delivery_stored_after_its_task_closed_is_born_settled",
         a_delivery_stored_after_its_task_closed_is_born_settled_inner(),
     )
     .await;

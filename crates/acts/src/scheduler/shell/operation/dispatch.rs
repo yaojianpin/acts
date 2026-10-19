@@ -287,7 +287,11 @@ impl KernelHost {
             // freshly committed state: a start while it is alive, one terminal
             // event once every execution settled. A closed sink or an absent
             // one makes this a no-op.
-            self.report_lifecycle_decision(&loaded.snapshot, decision.lifecycle.as_ref());
+            let times = match decision.lifecycle {
+                Some(_) => self.proc_times(&loaded.snapshot.process_id).await,
+                None => None,
+            };
+            self.report_lifecycle_decision(&loaded.snapshot, decision.lifecycle.as_ref(), times);
             // The commit's own outbox records are now visible to the
             // transport — after the aggregate commit and after the projection
             // — and their outcomes are persisted in one batch confirmation. A

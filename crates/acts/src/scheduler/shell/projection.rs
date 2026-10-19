@@ -483,6 +483,22 @@ impl RowProjector {
         self.store.clone()
     }
 
+    /// The run's projected wall-clock window `(start_time, end_time)`, or
+    /// `None` while its proc row does not exist.
+    ///
+    /// The aggregate keeps no clocks: the projection stamps the proc row's
+    /// times when the run is first seen started and finished (see the module
+    /// docs). A lifecycle event is reported after that projection (A5/A6), so
+    /// its message carries the same window a row reader sees — `cost()` works
+    /// on the completion event instead of subtracting two zeroes.
+    pub(crate) async fn proc_times(&self, process_id: &str) -> Result<Option<(i64, i64)>> {
+        Ok(self
+            .store
+            .find_projection_row::<data::Proc>(process_id)
+            .await?
+            .map(|(row, _)| (row.start_time, row.end_time)))
+    }
+
     /// Project the whole process (proc row, task rows, vars rows) from the
     /// committed snapshot. Idempotent: projecting the same snapshot twice
     /// writes the same rows, and a row already at the snapshot's revision is

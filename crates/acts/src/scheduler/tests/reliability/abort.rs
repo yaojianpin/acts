@@ -231,9 +231,9 @@ async fn wait_rows_terminal(engine: &Engine, pid: &str) -> Arc<ProcRead> {
 /// re-read exactly once, and recovery adds no second decision.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_restart_never_reapplies_a_decided_abort() {
+async fn sch_abort_restart_never_reapplies_a_decided_abort() {
     bounded(
-        "a_restart_never_reapplies_a_decided_abort",
+        "sch_abort_restart_never_reapplies_a_decided_abort",
         a_restart_never_reapplies_a_decided_abort_inner(),
     )
     .await;
@@ -306,9 +306,9 @@ async fn a_restart_never_reapplies_a_decided_abort_inner() {
 /// operations may not undo.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn an_abort_on_a_waiting_act_decides_the_act_and_the_run() {
+async fn sch_abort_on_a_waiting_act_decides_the_act_and_the_run() {
     bounded(
-        "an_abort_on_a_waiting_act_decides_the_act_and_the_run",
+        "sch_abort_on_a_waiting_act_decides_the_act_and_the_run",
         an_abort_on_a_waiting_act_decides_the_act_and_the_run_inner(),
     )
     .await;
@@ -375,9 +375,9 @@ async fn an_abort_on_a_waiting_act_decides_the_act_and_the_run_inner() {
 /// the act exactly once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_shutdown_decides_nothing_and_the_run_resumes_undecided() {
+async fn sch_abort_shutdown_decides_nothing_and_the_run_resumes_undecided() {
     bounded(
-        "a_shutdown_decides_nothing_and_the_run_resumes_undecided",
+        "sch_abort_shutdown_decides_nothing_and_the_run_resumes_undecided",
         a_shutdown_decides_nothing_and_the_run_resumes_undecided_inner(),
     )
     .await;
@@ -530,9 +530,9 @@ fn failing_probe_workflow() -> Workflow {
 /// surface the kernel has.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran() {
+async fn sch_abort_failing_effect_cannot_undo_an_abort_decided_while_it_ran() {
     bounded(
-        "a_failing_effect_cannot_undo_an_abort_decided_while_it_ran",
+        "sch_abort_failing_effect_cannot_undo_an_abort_decided_while_it_ran",
         a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner(),
     )
     .await;
@@ -635,9 +635,9 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
 /// twice.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once() {
+async fn sch_abort_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once() {
     bounded(
-        "a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once",
+        "sch_abort_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once",
         a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(),
     )
     .await;
@@ -707,9 +707,9 @@ async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(
 /// finished run still sweeps.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_abort_delivery_is_refused_without_effect() {
+async fn sch_abort_duplicate_abort_delivery_is_refused_without_effect() {
     bounded(
-        "a_duplicate_abort_delivery_is_refused_without_effect",
+        "sch_abort_duplicate_abort_delivery_is_refused_without_effect",
         a_duplicate_abort_delivery_is_refused_without_effect_inner(),
     )
     .await;
@@ -784,9 +784,9 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
 /// downstream act — or a second generation of it — fails it.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn an_abort_leaves_no_live_downstream_act() {
+async fn sch_abort_leaves_no_live_downstream_act() {
     bounded(
-        "an_abort_leaves_no_live_downstream_act",
+        "sch_abort_leaves_no_live_downstream_act",
         an_abort_leaves_no_live_downstream_act_inner(),
     )
     .await;
@@ -880,9 +880,9 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
 /// contract, never weakened to a "not both accepted" shape.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn an_abort_racing_a_completion_converges_on_one_terminal_decision() {
+async fn sch_abort_racing_a_completion_converges_on_one_terminal_decision() {
     bounded(
-        "an_abort_racing_a_completion_converges_on_one_terminal_decision",
+        "sch_abort_racing_a_completion_converges_on_one_terminal_decision",
         an_abort_racing_a_completion_converges_on_one_terminal_decision_inner(),
     )
     .await;

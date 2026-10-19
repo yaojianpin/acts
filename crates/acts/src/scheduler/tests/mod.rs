@@ -6,4 +6,6 @@
 //! of that machinery, not any one layer. Living here, beside the layers, is what
 //! keeps the module's outward surface (`mod.rs`) to what a serving path needs.
 
+pub(crate) mod flow;
 mod reliability;
+mod schedule;

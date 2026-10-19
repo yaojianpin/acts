@@ -248,9 +248,9 @@ where
 /// arise, because there is nothing to replay or drop.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload() {
+async fn sch_remove_refused_remove_consumes_nothing_and_is_not_replayed_on_reload() {
     bounded(
-        "a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload",
+        "sch_remove_refused_remove_consumes_nothing_and_is_not_replayed_on_reload",
         a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload_inner(),
     )
     .await;
@@ -347,9 +347,9 @@ async fn a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload_inner()
 /// waits), so the work happens exactly once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once() {
+async fn sch_remove_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once() {
     bounded(
-        "a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once",
+        "sch_remove_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once",
         a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once_inner(),
     )
     .await;
@@ -441,9 +441,9 @@ async fn a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_on
 /// propagated or scheduled anything, so the normal path still completes once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_remove_delivery_is_refused_without_effect() {
+async fn sch_remove_duplicate_remove_delivery_is_refused_without_effect() {
     bounded(
-        "a_duplicate_remove_delivery_is_refused_without_effect",
+        "sch_remove_duplicate_remove_delivery_is_refused_without_effect",
         a_duplicate_remove_delivery_is_refused_without_effect_inner(),
     )
     .await;
@@ -552,9 +552,9 @@ async fn a_duplicate_remove_delivery_is_refused_without_effect_inner() {
 /// there, so it can never hold the run out of the sweeper.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_completed_run_is_swept_with_its_message_and_delivery_rows() {
+async fn sch_remove_completed_run_is_swept_with_its_message_and_delivery_rows() {
     bounded(
-        "a_completed_run_is_swept_with_its_message_and_delivery_rows",
+        "sch_remove_completed_run_is_swept_with_its_message_and_delivery_rows",
         a_completed_run_is_swept_with_its_message_and_delivery_rows_inner(),
     )
     .await;

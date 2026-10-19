@@ -123,8 +123,17 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
 
 /// Drain a delivery pass into engine messages: the driver's transport runs
 /// the records through [`message_from_record`] and forwards the results.
+///
+/// The outbox payload carries no wall-clock facts (the aggregate has no
+/// clocks), so the forwarder stamps the message's window as it observes the
+/// execution: a `created` record opens it, a terminal record closes it. The
+/// first and the last message of one execution instance therefore span the
+/// same interval a client sees on the run's lifecycle event, and
+/// `Message::cost()` is a real duration on every terminal message.
 pub(crate) struct MessageForwarder<F> {
     emit: F,
+    /// The instant each `(pid, tid)` was first announced as `created`.
+    started: std::collections::HashMap<(String, String), i64>,
 }
 
 impl<F> MessageForwarder<F>
@@ -132,7 +141,10 @@ where
     F: FnMut(&Message),
 {
     pub(crate) fn new(emit: F) -> Self {
-        Self { emit }
+        Self {
+            emit,
+            started: std::collections::HashMap::new(),
+        }
     }
 }
 
@@ -142,7 +154,21 @@ where
 {
     fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
         match message_from_record(record) {
-            Some(message) => {
+            Some(mut message) => {
+                let now = crate::utils::time::time_millis();
+                let key = (message.pid.clone(), message.tid.clone());
+                if message.state == MessageState::Created {
+                    message.start_time = now;
+                    self.started.insert(key, now);
+                } else if message.state.is_completed() {
+                    // A terminal record closes the window: the first `created`
+                    // this forwarder saw is the start. Without one (a message
+                    // observed after a restart, or a task skipped before it was
+                    // ever announced) the window is the delivery instant, which
+                    // keeps `end_time` a real timestamp and `cost()` non-negative.
+                    message.start_time = self.started.remove(&key).unwrap_or(now);
+                    message.end_time = now.max(message.start_time);
+                }
                 (self.emit)(&message);
                 DeliveryOutcome::Delivered {
                     receipt: "message".into(),
@@ -351,5 +377,36 @@ mod tests {
         assert!(message_from_record(&record("task.propagated", "")).is_none());
         assert!(message_from_record(&record("task.completed", "")).is_none());
         assert!(message_from_record(&record("fanout.selected", "{}")).is_none());
+    }
+
+    /// The forwarder stamps the window the payload cannot carry: the first
+    /// `created` record opens it and the terminal record closes it, so every
+    /// terminal task/act message has a non-zero end and a real `cost()`.
+    #[test]
+    fn a_forwarded_message_window_spans_created_to_terminal() {
+        let payload = serde_json::json!({
+            "nid": "s1",
+            "tid": "t1",
+            "name": "s1",
+            "kind": "step",
+            "inputs": {},
+            "mid": "wf1",
+        })
+        .to_string();
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        {
+            let sink = seen.clone();
+            let mut forwarder =
+                MessageForwarder::new(move |message: &Message| sink.lock().push(message.clone()));
+            forwarder.deliver(&record("message.created", &payload));
+            forwarder.deliver(&record("task.completed", &payload));
+        }
+        let seen = seen.lock();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].start_time > 0, "created opens the window");
+        assert_eq!(seen[0].end_time, 0, "the window is still open");
+        assert_eq!(seen[1].start_time, seen[0].start_time);
+        assert!(seen[1].end_time >= seen[1].start_time);
+        assert_eq!(seen[1].cost(), seen[1].end_time - seen[1].start_time);
     }
 }

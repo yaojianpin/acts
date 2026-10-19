@@ -57,9 +57,9 @@ async fn waiting_run(engine: &Engine) -> (String, String) {
 /// settles in the client's error and sweeps cleanly.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once() {
+async fn sch_error_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once() {
     bounded(
-        "a_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once",
+        "sch_error_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once",
         a_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once_inner(),
     )
     .await;
@@ -125,9 +125,9 @@ async fn a_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once_inn
 /// reading as waiting. The run sweeps cleanly.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act() {
+async fn sch_error_failed_projection_keeps_the_decision_and_never_resurrects_the_act() {
     bounded(
-        "a_failed_projection_keeps_the_decision_and_never_resurrects_the_act",
+        "sch_error_failed_projection_keeps_the_decision_and_never_resurrects_the_act",
         a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inner(),
     )
     .await;
@@ -225,9 +225,9 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
 /// about instead of being laundered into a completion.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_duplicate_fail_delivery_is_refused_without_effect() {
+async fn sch_error_duplicate_fail_delivery_is_refused_without_effect() {
     bounded(
-        "a_duplicate_fail_delivery_is_refused_without_effect",
+        "sch_error_duplicate_fail_delivery_is_refused_without_effect",
         a_duplicate_fail_delivery_is_refused_without_effect_inner(),
     )
     .await;
@@ -294,9 +294,9 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
 /// and the run settles once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn fail_racing_complete_converges_on_one_terminal_decision() {
+async fn sch_error_fail_racing_complete_converges_on_one_terminal_decision() {
     bounded(
-        "fail_racing_complete_converges_on_one_terminal_decision",
+        "sch_error_fail_racing_complete_converges_on_one_terminal_decision",
         fail_racing_complete_converges_on_one_terminal_decision_inner(),
     )
     .await;
@@ -368,9 +368,9 @@ async fn fail_racing_complete_converges_on_one_terminal_decision_inner() {
 /// cleanly.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_restart_does_not_reapply_a_decided_fail() {
+async fn sch_error_restart_does_not_reapply_a_decided_fail() {
     bounded(
-        "a_restart_does_not_reapply_a_decided_fail",
+        "sch_error_restart_does_not_reapply_a_decided_fail",
         a_restart_does_not_reapply_a_decided_fail_inner(),
     )
     .await;

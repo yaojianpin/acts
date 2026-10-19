@@ -236,9 +236,9 @@ fn tick_windows(ticks: u64) -> usize {
 /// branch together.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_that_refuses_the_branchs_commit_fires_it_exactly_once() {
+async fn sch_timeout_store_that_refuses_the_branchs_commit_fires_it_exactly_once() {
     bounded(
-        "a_store_that_refuses_the_branchs_commit_fires_it_exactly_once",
+        "sch_timeout_store_that_refuses_the_branchs_commit_fires_it_exactly_once",
         a_store_that_refuses_the_branchs_commit_fires_it_exactly_once_inner(),
     )
     .await;
@@ -343,9 +343,9 @@ async fn a_store_that_refuses_the_branchs_commit_fires_it_exactly_once_inner() {
 /// a branch iff the tick won, one settled state either way.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_completion_racing_the_timeout_tick_converges_exactly_once() {
+async fn sch_timeout_completion_racing_the_timeout_tick_converges_exactly_once() {
     bounded(
-        "a_completion_racing_the_timeout_tick_converges_exactly_once",
+        "sch_timeout_completion_racing_the_timeout_tick_converges_exactly_once",
         a_completion_racing_the_timeout_tick_converges_exactly_once_inner(),
     )
     .await;
@@ -476,9 +476,9 @@ async fn a_completion_racing_the_timeout_tick_converges_exactly_once_inner() {
 /// nothing — one execution and one message per branch, two marker entries.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn each_timeout_branch_fires_once_across_ticks_and_a_restart() {
+async fn sch_timeout_each_timeout_branch_fires_once_across_ticks_and_a_restart() {
     bounded(
-        "each_timeout_branch_fires_once_across_ticks_and_a_restart",
+        "sch_timeout_each_timeout_branch_fires_once_across_ticks_and_a_restart",
         each_timeout_branch_fires_once_across_ticks_and_a_restart_inner(),
     )
     .await;
@@ -574,9 +574,9 @@ async fn each_timeout_branch_fires_once_across_ticks_and_a_restart_inner() {
 /// the generation count is the kernel's own record of the same fact.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_fired_timeout_branch_is_never_dispatched_again() {
+async fn sch_timeout_fired_timeout_branch_is_never_dispatched_again() {
     bounded(
-        "a_fired_timeout_branch_is_never_dispatched_again",
+        "sch_timeout_fired_timeout_branch_is_never_dispatched_again",
         a_fired_timeout_branch_is_never_dispatched_again_inner(),
     )
     .await;
@@ -633,9 +633,9 @@ async fn a_fired_timeout_branch_is_never_dispatched_again_inner() {
 /// branch's absent generation — sampled across ticks and after a fresh boot.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn the_driver_leaves_a_settled_run_alone() {
+async fn sch_timeout_driver_leaves_a_settled_run_alone() {
     bounded(
-        "the_driver_leaves_a_settled_run_alone",
+        "sch_timeout_driver_leaves_a_settled_run_alone",
         the_driver_leaves_a_settled_run_alone_inner(),
     )
     .await;

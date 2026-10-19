@@ -116,7 +116,15 @@ impl ActPlan for CatchJoin {
                 continue;
             }
             handlers += 1;
-            if state != TaskState::Skipped {
+            // A handler skipped by its own guard was not selected (the legacy
+            // `Step::init` predicate), while a handler the client skipped was
+            // selected and ran: the act folds into its step in the kernel, so
+            // the client's skip is the handler execution's `Skipped` state
+            // without the guard marker. The legacy `catch_as_skip` therefore
+            // counts as caught; only guard skips are "no handler matched".
+            let guard_skipped = state == TaskState::Skipped
+                && crate::scheduler::core::plan::propagation::is_guard_skip(snapshot, child);
+            if !guard_skipped {
                 resumed = false;
             }
         }

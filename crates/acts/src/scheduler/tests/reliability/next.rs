@@ -381,9 +381,10 @@ async fn wait_rows_settled(engine: &Engine, pid: &str) {
 /// transition re-persisted it, in the kernel it was always its projection.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_finishes_once() {
+async fn sch_next_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_finishes_once()
+{
     bounded(
-        "a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_finishes_once",
+        "sch_next_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_finishes_once",
         a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_finishes_once_inner(),
     )
     .await;
@@ -496,9 +497,10 @@ async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_fin
 /// the writer's phase marks.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lands_it_once() {
+async fn sch_next_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lands_it_once()
+{
     bounded(
-        "a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lands_it_once",
+        "sch_next_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lands_it_once",
         a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lands_it_once_inner(),
     )
     .await;
@@ -638,9 +640,9 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
 /// the durable remainder of a decision that was made but not carried out.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_propagation_left_pending_by_a_crash_is_redriven_exactly_once() {
+async fn sch_next_propagation_left_pending_by_a_crash_is_redriven_exactly_once() {
     bounded(
-        "a_propagation_left_pending_by_a_crash_is_redriven_exactly_once",
+        "sch_next_propagation_left_pending_by_a_crash_is_redriven_exactly_once",
         a_propagation_left_pending_by_a_crash_is_redriven_exactly_once_inner(),
     )
     .await;
@@ -747,9 +749,9 @@ async fn a_propagation_left_pending_by_a_crash_is_redriven_exactly_once_inner() 
 /// crash left waiting — never a second child scheduled over it.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn an_already_applied_propagation_is_not_re_run_by_recovery() {
+async fn sch_next_already_applied_propagation_is_not_re_run_by_recovery() {
     bounded(
-        "an_already_applied_propagation_is_not_re_run_by_recovery",
+        "sch_next_already_applied_propagation_is_not_re_run_by_recovery",
         an_already_applied_propagation_is_not_re_run_by_recovery_inner(),
     )
     .await;
@@ -877,9 +879,9 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
 /// observed as a second child or a second `propagate:` record.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_child() {
+async fn sch_next_crash_at_each_write_boundary_of_the_propagation_converges_on_one_child() {
     bounded(
-        "a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_child",
+        "sch_next_crash_at_each_write_boundary_of_the_propagation_converges_on_one_child",
         a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_child_inner(),
     )
     .await;
@@ -1079,9 +1081,9 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
 /// aggregate's own state.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_container_completes_only_after_its_last_child_settles() {
+async fn sch_next_container_completes_only_after_its_last_child_settles() {
     bounded(
-        "a_container_completes_only_after_its_last_child_settles",
+        "sch_next_container_completes_only_after_its_last_child_settles",
         a_container_completes_only_after_its_last_child_settles_inner(),
     )
     .await;

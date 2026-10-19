@@ -38,7 +38,10 @@ mod runtime;
 mod shell;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+pub(crate) use self::core::model::task_graph::TaskState;
 
 // The runtime's outward surface: exactly what a consumer outside this module
 // needs — everything else is addressed where it lives, inside the runtime. The

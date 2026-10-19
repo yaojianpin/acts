@@ -275,7 +275,7 @@ async fn engine_event_on_start() {
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_complete() {
     let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(false);
+    let sig = engine.signal((String::new(), 0i64, 0i64, 0i64));
     let s1 = sig.clone();
     let mid = utils::longid();
     let workflow = Workflow::new()
@@ -284,9 +284,8 @@ async fn engine_event_on_complete() {
 
     engine.channel().on_complete(move |e| {
         let s1 = s1.clone();
-        let mid = mid.clone();
         async move {
-            s1.send(e.mid == mid);
+            s1.send((e.mid.clone(), e.start_time, e.end_time, e.cost()));
         }
     });
 
@@ -301,8 +300,21 @@ async fn engine_event_on_complete() {
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
     executor.proc().start(&workflow.id, options).await.unwrap();
-    let ret = sig.recv().await;
-    assert!(ret);
+    let (completed_mid, start_time, end_time, cost) = sig.recv().await;
+    assert_eq!(completed_mid, mid);
+    // The completion event is the run's lifecycle message: its window is the
+    // projected proc row's, so `cost()` reads the real run duration instead of
+    // subtracting two zeroes.
+    assert!(start_time > 0, "completion message must carry start_time");
+    assert!(
+        end_time >= start_time,
+        "completion message end_time {end_time} precedes start_time {start_time}"
+    );
+    assert_eq!(
+        cost,
+        end_time - start_time,
+        "cost must be the end-to-start window, not 0"
+    );
 }
 
 #[serial]
