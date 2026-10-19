@@ -380,12 +380,160 @@ fn compile_glob(pattern: &str, field: &str) -> globset::GlobMatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::compile_glob;
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn invalid_glob_falls_back_to_match_all() {
         let matcher = compile_glob("[", "type");
         assert!(matcher.is_match("act"));
         assert!(matcher.is_match(""));
+    }
+
+    fn glob_all() -> GlobSet {
+        (
+            compile_glob("*", "type"),
+            compile_glob("*", "state"),
+            compile_glob("*", "uses"),
+            Vec::new(),
+        )
+    }
+
+    /// A message whose process has no rows left needs no delivery row: there
+    /// is nothing left to ack, and the channel is handed the message anyway.
+    #[tokio::test]
+    async fn an_ack_delivery_of_a_gone_process_stores_nothing() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let runtime = engine.runtime();
+        let msg = Message {
+            id: "m1".to_string(),
+            pid: "never-existed".to_string(),
+            tid: "t1".to_string(),
+            ..Default::default()
+        };
+        let stored = store_if(&runtime, true, "chan", "{}", &msg).await.unwrap();
+        assert_eq!(stored, None);
+    }
+
+    /// A store failure drops the message instead of handing the handler an
+    /// event that cannot be acked.
+    #[tokio::test]
+    async fn a_store_failure_drops_the_message_before_the_handler() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let runtime = engine.runtime();
+        // Closing the runtime stops the write-behind queue, so storing the
+        // delivery fails.
+        runtime.close().await;
+
+        let called = Arc::new(AtomicBool::new(false));
+        let flag = called.clone();
+        let handle: ActWorkflowMessageHandle = Arc::new(move |_| {
+            let flag = flag.clone();
+            Box::pin(async move {
+                flag.store(true, Ordering::SeqCst);
+            })
+        });
+        let msg = Message {
+            id: "m1".to_string(),
+            pid: "p1".to_string(),
+            ..Default::default()
+        };
+        deliver(
+            &glob_all(),
+            &runtime,
+            true,
+            "chan",
+            "{}",
+            &handle,
+            Event::from_inner(msg),
+        )
+        .await;
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "an unstored delivery must not reach the handler"
+        );
+    }
+
+    /// The type matches but the state does not, and the state matches but the
+    /// uses does not: either mismatch drops the event before the handler.
+    #[test]
+    fn is_match_rejects_by_state_and_by_uses() {
+        let event = Event::from_inner(Message::default());
+
+        let by_state = (
+            compile_glob("*", "type"),
+            compile_glob("completed", "state"),
+            compile_glob("*", "uses"),
+            Vec::new(),
+        );
+        assert!(!is_match(&by_state, &event));
+
+        let by_uses = (
+            compile_glob("*", "type"),
+            compile_glob("*", "state"),
+            compile_glob("pkg.act", "uses"),
+            Vec::new(),
+        );
+        assert!(!is_match(&by_uses, &event));
+    }
+
+    /// A delivery is stored only for a non-empty channel id on a message that
+    /// has no delivery row yet; a redelivery and an unnamed channel are
+    /// handed over without storing.
+    #[tokio::test]
+    async fn store_if_skips_an_unnamed_channel_and_a_redelivery() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let runtime = engine.runtime();
+        let msg = Message {
+            id: "m1".to_string(),
+            pid: "never-existed".to_string(),
+            ..Default::default()
+        };
+
+        // No channel id: nothing to name the delivery after.
+        assert_eq!(
+            store_if(&runtime, true, "", "{}", &msg).await.unwrap(),
+            None
+        );
+
+        // Already has a delivery: a redelivery does not create a second row.
+        let redelivery = Message {
+            delivery_id: Some("existing".to_string()),
+            ..msg
+        };
+        assert_eq!(
+            store_if(&runtime, true, "chan", "{}", &redelivery)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Without an ack requirement nothing is stored and the handler receives
+    /// the event unchanged.
+    #[tokio::test]
+    async fn a_broadcast_channel_hands_the_event_straight_over() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let runtime = engine.runtime();
+        let seen = Arc::new(parking_lot::Mutex::new(false));
+        let sink = seen.clone();
+        let handle: ActWorkflowMessageHandle = Arc::new(move |e| {
+            let sink = sink.clone();
+            Box::pin(async move {
+                assert!(e.delivery_id.is_none());
+                *sink.lock() = true;
+            })
+        });
+        deliver(
+            &glob_all(),
+            &runtime,
+            false,
+            "chan",
+            "{}",
+            &handle,
+            Event::from_inner(Message::default()),
+        )
+        .await;
+        assert!(*seen.lock());
     }
 }

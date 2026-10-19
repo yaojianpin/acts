@@ -10,4 +10,7 @@ include!("../proto/acts.grpc.rs");
 
 mod utils;
 
+#[cfg(test)]
+mod tests;
+
 pub use utils::create_seq;

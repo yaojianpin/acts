@@ -68,3 +68,12 @@ mod advance;
 mod canonical;
 mod commit;
 mod repository;
+
+#[test]
+fn commit_errors_render() {
+    assert!(
+        CommitError::EmptyProcessId
+            .to_string()
+            .starts_with("commit error:")
+    );
+}

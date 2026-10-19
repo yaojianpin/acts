@@ -51,6 +51,20 @@ fn operation_event_advances_the_snapshot_it_is_given() {
 }
 
 #[test]
+fn a_foreign_operation_identity_is_refused() {
+    let (mut current, _, claim) = pending_operation_snapshot();
+    let foreign = OperationId {
+        process_id: "other".into(),
+        task: TaskId::new("t1", 0).unwrap(),
+        sequence: 9,
+    };
+    assert_eq!(
+        advance_operation_event(&mut current, &foreign, 0, OperationEvent::Claim(claim)),
+        Err(CommitError::ForeignOperation(foreign))
+    );
+}
+
+#[test]
 fn rejected_operation_event_leaves_its_snapshot_untouched() {
     // The reachable rejection runs before the first mutation, which is
     // what lets the durable repository hand its own snapshot over: an operation

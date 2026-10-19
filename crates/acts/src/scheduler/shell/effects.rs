@@ -268,3 +268,90 @@ mod tests {
         assert!(writes.contains(&("n".to_string(), "2".to_string())));
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::scheduler::core::model::operation::OperationId;
+    use crate::scheduler::core::model::task_graph::TaskId;
+    use crate::store::MemoryStore;
+    use crate::{Config, model::Workflow};
+
+    fn runtime() -> Arc<Runtime> {
+        Runtime::new(&Config::default(), Some(Arc::new(MemoryStore::new()))).unwrap()
+    }
+
+    fn request(package: &str) -> EffectRequest {
+        EffectRequest {
+            scope: super::super::scope::ScopeSpec {
+                process_id: "p-effect".into(),
+                node: "s1".into(),
+                task_id: TaskId::new("s1", 0).unwrap(),
+                model: Workflow::new().with_step(|step| step.with_id("s1")),
+                vars: Vec::new(),
+                env: Vec::new(),
+                owner: crate::ScopePolicy::deny_all(),
+            },
+            package: package.into(),
+        }
+    }
+
+    /// The declared idempotency is read from the registration, and an
+    /// unregistered package is not provably idempotent.
+    #[tokio::test]
+    async fn the_package_idempotency_is_the_registration_declaration() {
+        let runner = PackageEffectRunner::new(runtime());
+        runner.runtime.package().register(
+            "idem",
+            &crate::package::ActPackageRegister {
+                meta: || panic!("unused"),
+                create: |_| panic!("unused"),
+                idempotent: || true,
+            },
+        );
+        runner.runtime.package().register(
+            "plain",
+            &crate::package::ActPackageRegister {
+                meta: || panic!("unused"),
+                create: |_| panic!("unused"),
+                idempotent: || false,
+            },
+        );
+        assert!(runner.idempotent(&request("idem")));
+        assert!(!runner.idempotent(&request("plain")));
+        assert!(!runner.idempotent(&request("missing")));
+    }
+
+    /// A runner that declares nothing is not idempotent and cannot observe
+    /// anything: both defaults keep the operation safe.
+    #[tokio::test]
+    async fn the_runner_defaults_are_conservative() {
+        struct Bare;
+
+        #[async_trait::async_trait]
+        impl EffectRunner for Bare {
+            async fn resolve(&self, _request: &EffectRequest) -> Result<ResolvedEffect> {
+                Ok(ResolvedEffect {
+                    params: serde_json::Value::Null,
+                    options: serde_json::Value::Null,
+                })
+            }
+
+            async fn run(&self, _request: EffectRequest, _key: EffectKey) -> Result<EffectOutcome> {
+                Ok(EffectOutcome::empty())
+            }
+        }
+
+        let request = request("any");
+        assert!(!Bare.idempotent(&request));
+        let operation = OperationId {
+            process_id: "p".into(),
+            task: TaskId::new("s1", 0).unwrap(),
+            sequence: 0,
+        };
+        assert!(matches!(
+            Bare.observe(&EffectKey::of(&operation)).await.unwrap(),
+            EffectObservation::Unknown
+        ));
+    }
+}

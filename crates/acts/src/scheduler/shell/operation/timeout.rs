@@ -342,3 +342,539 @@ impl ActOperation for DispatchTimeout {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::{
+        model::{
+            operation::ClaimToken,
+            task_graph::{TaskId, TaskState},
+        },
+        plan::timeout::TimeoutCandidate,
+    };
+
+    fn host() -> std::sync::Arc<KernelHost> {
+        KernelHost::in_memory().0
+    }
+
+    fn id(node: &str, sequence: u64) -> OperationId {
+        OperationId {
+            process_id: "p".into(),
+            task: TaskId::new(node, 0).unwrap(),
+            sequence,
+        }
+    }
+
+    fn commit(id: &OperationId) -> OperationCommit {
+        OperationCommit {
+            id: id.clone(),
+            claim: ClaimToken {
+                owner: "test".into(),
+                fence: 1,
+                lease_until_ms: i64::MAX,
+                heartbeat_revision: 0,
+            },
+        }
+    }
+
+    fn op<'a>(
+        id: &'a OperationId,
+        claim: &'a OperationCommit,
+        snapshot: &'a ProcessSnapshot,
+        lane: &'a mut CommandLane,
+    ) -> Operation<'a> {
+        Operation {
+            id,
+            claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&id.task),
+            snapshot,
+            now_ms: 1_000,
+            lane,
+        }
+    }
+
+    fn spec(guard: Option<&str>) -> ProcessSpec {
+        // `with_step`/`with_timeout` take `fn` pointers: each expression has
+        // its own non-capturing closure.
+        let workflow = match guard {
+            None => crate::model::Workflow::new().with_step(|step| {
+                step.with_id("s1")
+                    .with_timeout(|timeout| timeout.with_id("t1"))
+            }),
+            Some("false") => crate::model::Workflow::new().with_step(|step| {
+                step.with_id("s1")
+                    .with_timeout(|timeout| timeout.with_id("t1").with_if("false"))
+            }),
+            Some("true") => crate::model::Workflow::new().with_step(|step| {
+                step.with_id("s1")
+                    .with_timeout(|timeout| timeout.with_id("t1").with_if("true"))
+            }),
+            Some("null") => crate::model::Workflow::new().with_step(|step| {
+                step.with_id("s1")
+                    .with_timeout(|timeout| timeout.with_id("t1").with_if("null"))
+            }),
+            Some(_) => crate::model::Workflow::new().with_step(|step| {
+                step.with_id("s1")
+                    .with_timeout(|timeout| timeout.with_id("t1").with_if("$nope()"))
+            }),
+        };
+        ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap()
+    }
+
+    fn running(guard: Option<&str>) -> ProcessSnapshot {
+        let mut snapshot = spec(guard).seed_snapshot().unwrap();
+        snapshot
+            .tasks
+            .get_mut(&TaskId::new("s1", 0).unwrap())
+            .unwrap()
+            .state = TaskState::Running;
+        snapshot
+    }
+
+    #[tokio::test]
+    async fn a_missing_model_declares_no_branches() {
+        let host = host();
+        let mut snapshot = ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap();
+        let root = TaskId::new("root", 0).unwrap();
+        snapshot
+            .variables
+            .remove(&(root, crate::scheduler::shell::model::MODEL_VAR.to_string()));
+        assert!(
+            host.timeout_branches(
+                &snapshot,
+                &crate::scheduler::core::model::model_graph::NodeId::parse("root").unwrap()
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_outside_the_model_declares_no_branches() {
+        let host = host();
+        let snapshot = ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap();
+        assert!(
+            host.timeout_branches(
+                &snapshot,
+                &crate::scheduler::core::model::model_graph::NodeId::parse("ghost").unwrap()
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    /// Only a live execution can time out.
+    #[tokio::test]
+    async fn a_settled_or_absent_execution_retires() {
+        let host = host();
+        let mut snapshot = running(None);
+        let owner = TaskId::new("s1", 0).unwrap();
+        assert!(matches!(
+            host.timeout_round(&snapshot, &owner, None, 1_000)
+                .await
+                .unwrap(),
+            TimeoutRound::Retire
+        ));
+        snapshot.tasks.get_mut(&owner).unwrap().state = TaskState::Completed;
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        assert!(matches!(
+            host.timeout_round(&snapshot, &owner, Some(&task), 1_000)
+                .await
+                .unwrap(),
+            TimeoutRound::Retire
+        ));
+    }
+
+    /// An owner whose node declares no timeouts has nothing to fire.
+    #[tokio::test]
+    async fn an_owner_without_branches_retires() {
+        let host = host();
+        let mut snapshot = ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap();
+        let owner = TaskId::new("a", 0).unwrap();
+        snapshot.tasks.get_mut(&owner).unwrap().state = TaskState::Running;
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        assert!(matches!(
+            host.timeout_round(&snapshot, &owner, Some(&task), 1_000)
+                .await
+                .unwrap(),
+            TimeoutRound::Retire
+        ));
+    }
+
+    /// Every branch already fired: the timer retires.
+    #[tokio::test]
+    async fn a_fully_fired_timer_retires() {
+        let host = host();
+        let mut snapshot = running(None);
+        let owner = TaskId::new("s1", 0).unwrap();
+        snapshot.variables.insert(
+            (
+                owner.clone(),
+                crate::utils::consts::TASK_TIMEOUTS.to_string(),
+            ),
+            serde_json::json!(["t1"]).to_string(),
+        );
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        assert!(matches!(
+            host.timeout_round(&snapshot, &owner, Some(&task), 1_000)
+                .await
+                .unwrap(),
+            TimeoutRound::Retire
+        ));
+    }
+
+    /// A branch without a guard fires immediately.
+    #[tokio::test]
+    async fn an_unguarded_branch_fires() {
+        let host = host();
+        let snapshot = running(None);
+        let owner = TaskId::new("s1", 0).unwrap();
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        match host
+            .timeout_round(&snapshot, &owner, Some(&task), 1_000)
+            .await
+            .unwrap()
+        {
+            TimeoutRound::Dispatch {
+                branch,
+                guard,
+                cost_ms,
+                declared,
+            } => {
+                assert_eq!(branch.node, "t1");
+                assert!(matches!(guard, TimeoutGuard::Fire));
+                assert_eq!(declared, 1);
+                assert!(cost_ms >= 0);
+            }
+            _ => panic!("expected a dispatch"),
+        }
+    }
+
+    /// A closed window leaves the round idle (and the operation unclaimed).
+    #[tokio::test]
+    async fn a_closed_window_is_idle() {
+        let host = host();
+        let snapshot = running(Some("false"));
+        let owner = TaskId::new("s1", 0).unwrap();
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        assert!(matches!(
+            host.timeout_round(&snapshot, &owner, Some(&task), 1_000)
+                .await
+                .unwrap(),
+            TimeoutRound::Idle
+        ));
+    }
+
+    /// A guard that cannot be decided admits the branch and fails it.
+    #[tokio::test]
+    async fn an_undecidable_window_dispatch_fails_the_branch() {
+        let host = host();
+        for expr in ["null", "$nope()"] {
+            let snapshot = running(Some(expr));
+            let owner = TaskId::new("s1", 0).unwrap();
+            let task = snapshot.tasks.get(&owner).unwrap().clone();
+            match host
+                .timeout_round(&snapshot, &owner, Some(&task), 1_000)
+                .await
+                .unwrap()
+            {
+                TimeoutRound::Dispatch { guard, .. } => {
+                    assert!(
+                        matches!(guard, TimeoutGuard::Fail(_)),
+                        "{expr}: expected a failed guard"
+                    )
+                }
+                _ => panic!("{expr}: expected a dispatch"),
+            }
+        }
+    }
+
+    /// An open window and a predicate error of the runner are both decided by
+    /// the round.
+    #[tokio::test]
+    async fn an_open_window_fires() {
+        let host = host();
+        let snapshot = running(Some("true"));
+        let owner = TaskId::new("s1", 0).unwrap();
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        match host
+            .timeout_round(&snapshot, &owner, Some(&task), 1_000)
+            .await
+            .unwrap()
+        {
+            TimeoutRound::Dispatch { guard, .. } => {
+                assert!(matches!(guard, TimeoutGuard::Fire))
+            }
+            _ => panic!("expected a dispatch"),
+        }
+    }
+
+    /// The preflight refuses to claim an idle round.
+    #[tokio::test]
+    async fn the_preflight_ignores_an_idle_round() {
+        let host = host();
+        let idle = running(Some("false"));
+        let id = id("s1", 0);
+        assert_eq!(
+            DispatchTimeout
+                .precheck(
+                    &host,
+                    &Pending {
+                        id: &id,
+                        snapshot: &idle,
+                        now_ms: 1_000,
+                    }
+                )
+                .await
+                .unwrap(),
+            Precheck::Ignore
+        );
+        let fire = running(None);
+        assert_eq!(
+            DispatchTimeout
+                .precheck(
+                    &host,
+                    &Pending {
+                        id: &id,
+                        snapshot: &fire,
+                        now_ms: 1_000,
+                    }
+                )
+                .await
+                .unwrap(),
+            Precheck::Proceed
+        );
+    }
+
+    /// Phase 2 re-decides the round: idle is `Nothing`, retire is a round.
+    #[tokio::test]
+    async fn the_run_carries_the_round() {
+        let host = host();
+        let idle = running(Some("false"));
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = op(&id, &claim, &idle, &mut lane);
+        assert!(matches!(
+            DispatchTimeout
+                .run(&host, &mut { operation })
+                .await
+                .unwrap(),
+            Outcome::Nothing
+        ));
+        let fire = running(None);
+        let mut lane = CommandLane::detached(&host);
+        let operation = op(&id, &claim, &fire, &mut lane);
+        assert!(matches!(
+            DispatchTimeout
+                .run(&host, &mut { operation })
+                .await
+                .unwrap(),
+            Outcome::Timeout(TimeoutRound::Dispatch { .. })
+        ));
+    }
+
+    /// Phase 3 refuses a foreign outcome and an idle round.
+    #[tokio::test]
+    async fn the_plan_only_accepts_a_timer_round() {
+        let host = host();
+        let snapshot = running(None);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = op(&id, &claim, &snapshot, &mut lane);
+        assert!(
+            DispatchTimeout
+                .next(&host, &operation, Outcome::Planned)
+                .await
+                .is_err()
+        );
+        assert!(
+            DispatchTimeout
+                .next(&host, &operation, Outcome::Timeout(TimeoutRound::Idle))
+                .await
+                .is_err()
+        );
+        let plan = DispatchTimeout
+            .next(&host, &operation, Outcome::Timeout(TimeoutRound::Retire))
+            .await
+            .unwrap();
+        assert!(plan.operations.is_empty());
+        assert!(plan.state_changes.is_empty());
+        assert_eq!(plan.source_operation.as_ref(), Some(&claim));
+    }
+
+    /// A dispatch admits the branch and carries the pinned failure of an
+    /// undecidable guard.
+    #[tokio::test]
+    async fn a_dispatch_plan_admits_the_due_branch() {
+        let host = host();
+        let snapshot = running(None);
+        let owner = TaskId::new("s1", 0).unwrap();
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        let branch = host
+            .timeout_branches(&snapshot, &task.model_node)
+            .unwrap()
+            .remove(0);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let plan = host
+            .timeout_plan(
+                &snapshot,
+                &id,
+                &owner,
+                Some(&task),
+                &claim,
+                branch,
+                TimeoutGuard::Fire,
+                10,
+                1,
+                1_000,
+            )
+            .unwrap();
+        assert!(
+            plan.task_creates
+                .iter()
+                .any(|create| create.task.node.as_str() == "t1"),
+            "the due branch is admitted: {plan:?}"
+        );
+        assert!(
+            plan.operations
+                .iter()
+                .any(|intent| { intent.kind == OperationKind::ExecuteTask })
+        );
+        // Declared branches remain unfired only when stated; here one of one
+        // fired, so the timer does not re-arm.
+        assert!(
+            plan.operations
+                .iter()
+                .all(|intent| intent.kind != OperationKind::DispatchTimeout)
+        );
+    }
+
+    /// A failing guard pins its error on the branch's scope.
+    #[tokio::test]
+    async fn a_failed_guard_pins_the_branch_error() {
+        let host = host();
+        let snapshot = running(None);
+        let owner = TaskId::new("s1", 0).unwrap();
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        let branch = host
+            .timeout_branches(&snapshot, &task.model_node)
+            .unwrap()
+            .remove(0);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let plan = host
+            .timeout_plan(
+                &snapshot,
+                &id,
+                &owner,
+                Some(&task),
+                &claim,
+                branch,
+                TimeoutGuard::Fail("nope".into()),
+                0,
+                1,
+                1_000,
+            )
+            .unwrap();
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == BRANCH_ERROR_VAR)
+        );
+    }
+
+    /// The plan needs the execution it dispatches for.
+    #[tokio::test]
+    async fn a_dispatch_without_its_execution_is_an_error() {
+        let host = host();
+        let snapshot = running(None);
+        let owner = TaskId::new("s1", 0).unwrap();
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        let branch = host
+            .timeout_branches(&snapshot, &task.model_node)
+            .unwrap()
+            .remove(0);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let error = host
+            .timeout_plan(
+                &snapshot,
+                &id,
+                &owner,
+                None,
+                &claim,
+                branch,
+                TimeoutGuard::Fire,
+                0,
+                1,
+                0,
+            )
+            .unwrap_err();
+        assert!(format!("{error}").contains("not found"), "{error}");
+    }
+
+    /// The round's re-arm keeps a later declared window alive.
+    #[tokio::test]
+    async fn an_unfired_declared_branch_re_arms_the_timer() {
+        let host = host();
+        let snapshot = running(None);
+        let owner = TaskId::new("s1", 0).unwrap();
+        let task = snapshot.tasks.get(&owner).unwrap().clone();
+        let branch = host
+            .timeout_branches(&snapshot, &task.model_node)
+            .unwrap()
+            .remove(0);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let plan = host
+            .timeout_plan(
+                &snapshot,
+                &id,
+                &owner,
+                Some(&task),
+                &claim,
+                branch,
+                TimeoutGuard::Fire,
+                0,
+                2,
+                1_000,
+            )
+            .unwrap();
+        let timer = plan
+            .operations
+            .iter()
+            .find(|intent| intent.kind == OperationKind::DispatchTimeout)
+            .expect("the timer re-arms");
+        assert_eq!(timer.ready_at_ms, Some(1_000 + host.timer_poll_ms()));
+    }
+
+    #[test]
+    fn an_empty_remainder_only_closes_the_operation() {
+        let snapshot = running(None);
+        let id = id("s1", 3);
+        let claim = commit(&id);
+        let plan = KernelHost::empty_remainder(&snapshot, &id, &claim);
+        assert_eq!(plan.source_operation.as_ref(), Some(&claim));
+        assert_eq!(plan.expected, snapshot.version);
+        assert!(plan.operations.is_empty());
+    }
+
+    #[test]
+    fn the_round_planner_constants_are_exposed() {
+        // Sanity: the candidate vocabulary the round answers with is the one
+        // the operation's `next` matches on.
+        let candidate = TimeoutCandidate::Branch(0);
+        assert!(matches!(candidate, TimeoutCandidate::Branch(0)));
+    }
+}

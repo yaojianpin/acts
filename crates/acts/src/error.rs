@@ -222,4 +222,80 @@ mod tests {
         assert_eq!(v.message, "error message");
         assert_eq!(v.ecode, "err1");
     }
+
+    #[test]
+    fn error_display_is_json() {
+        let err = Error::new("boom", "e1");
+        assert_eq!(
+            err.to_string(),
+            json!({"ecode": "e1", "message": "boom"}).to_string()
+        );
+    }
+
+    #[test]
+    fn act_error_variants_display_and_is_shutdown() {
+        assert_eq!(ActError::Config("cfg".to_string()).to_string(), "cfg");
+        assert_eq!(ActError::QueueFull.to_string(), "scheduler queue is full");
+        assert_eq!(ActError::Shutdown.to_string(), "scheduler is shutting down");
+        assert_eq!(
+            ActError::LeaseHeld("host".to_string()).to_string(),
+            "database lease is held by another instance: host"
+        );
+        assert_eq!(
+            ActError::LeaseLost.to_string(),
+            "database lease lost: this instance no longer owns the database"
+        );
+
+        assert!(ActError::Shutdown.is_shutdown());
+        assert!(!ActError::QueueFull.is_shutdown());
+    }
+
+    #[test]
+    fn act_error_into_string_and_vars() {
+        let text: String = ActError::Action("action failed".to_string()).into();
+        assert_eq!(text, "action failed");
+
+        let vars: Vars = ActError::Exception {
+            ecode: "e1".to_string(),
+            message: "boom".to_string(),
+        }
+        .into();
+        assert_eq!(vars.get::<String>("ecode").unwrap(), "e1");
+        assert_eq!(vars.get::<String>("message").unwrap(), "boom");
+
+        let vars: Vars = ActError::Action("plain".to_string()).into();
+        assert_eq!(vars.get::<String>("ecode").unwrap(), "");
+        assert_eq!(vars.get::<String>("message").unwrap(), "plain");
+    }
+
+    #[test]
+    fn act_error_io_and_utf8_and_json_conversions() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let err: ActError = io.into();
+        assert!(matches!(err, ActError::IoError(_)));
+        assert!(err.to_string().contains("missing"));
+
+        let back: std::io::Error = err.into();
+        assert!(back.to_string().contains("missing"));
+
+        let utf8 = String::from_utf8(vec![0xff]).unwrap_err();
+        let err: ActError = utf8.into();
+        assert!(matches!(err, ActError::Runtime(_)));
+        assert_eq!(err.to_string(), "Error with utf-8 string convert");
+
+        let json_err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let err: ActError = json_err.into();
+        assert!(matches!(err, ActError::Convert(_)));
+    }
+
+    #[test]
+    fn jsonschema_validation_error_converts() {
+        let schema = json!({ "type": "string" });
+        let value = json!(1);
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let err = validator.validate(&value).unwrap_err();
+        let err: ActError = err.into();
+        assert!(matches!(err, ActError::Runtime(_)));
+        assert!(!err.to_string().is_empty());
+    }
 }

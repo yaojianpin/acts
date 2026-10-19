@@ -26,6 +26,10 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# The coverage cases install a sink subscriber: tracing's field expressions
+# are skipped entirely when no subscriber is interested, so a logged value
+# would otherwise never execute.
+tracing-subscriber = { workspace = true }
 # The ACL cases declare their own users: the registry is a separate crate, and
 # a bare engine refuses every `acl:*` action without it.
 acts-acl = { workspace = true }

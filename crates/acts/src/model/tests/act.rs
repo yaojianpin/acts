@@ -291,3 +291,53 @@ fn model_act_yml_catches_all() {
     let catch = step.catches.first().unwrap();
     assert_eq!(catch.r#if.as_ref().unwrap(), "$ecode() == 'err1'");
 }
+
+#[test]
+fn model_act_model_base_id() {
+    use crate::ModelBase;
+    let act = Act::new().with_id("act-id");
+    assert_eq!(act.id(), "act-id");
+}
+
+#[test]
+fn model_act_constructors() {
+    let parallel = Act::parallel(json!(["a", "b"]));
+    assert_eq!(parallel.uses, "acts.core.parallel");
+    assert_eq!(parallel.params, json!(["a", "b"]));
+
+    let subflow = Act::subflow(json!({ "mid": "m1" }));
+    assert_eq!(subflow.uses, "acts.core.subflow");
+    assert_eq!(subflow.params, json!({ "mid": "m1" }));
+
+    let sequence = Act::sequence(json!([1, 2]));
+    assert_eq!(sequence.uses, "acts.core.sequence");
+    assert_eq!(sequence.params, json!([1, 2]));
+
+    let action = Act::action(Vars::new().with("action", "push"));
+    assert_eq!(action.uses, "acts.core.action");
+    assert_eq!(action.params["action"], "push");
+
+    let block = Act::block(Vars::new().with("key", 1));
+    assert_eq!(block.uses, "acts.core.block");
+    assert_eq!(block.params["key"], 1);
+
+    let code = Act::code("print(1)");
+    assert_eq!(code.uses, "acts.app.javascript");
+    assert_eq!(code.params, json!("print(1)"));
+}
+
+#[test]
+fn model_act_irq_msg_and_run_as() {
+    let irq = Act::irq(|act| act.with_id("irq1"));
+    assert_eq!(irq.uses, "acts.core.irq");
+    assert_eq!(irq.id, "irq1");
+    assert_eq!(irq.run_as(), crate::ActRunAs::Irq);
+
+    let msg = Act::msg(|act| act.with_id("msg1"));
+    assert_eq!(msg.uses, "acts.core.msg");
+    assert_eq!(msg.id, "msg1");
+    assert_eq!(msg.run_as(), crate::ActRunAs::Msg);
+
+    let func = Act::new().with_uses("acts.transform.set");
+    assert_eq!(func.run_as(), crate::ActRunAs::Func);
+}

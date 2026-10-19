@@ -939,4 +939,656 @@ mod tests {
             OperationState::RetryScheduled { attempt: 8 }
         );
     }
+
+    #[test]
+    fn every_operation_kind_is_classified_where_it_is_declared() {
+        for (kind, schedulable) in [
+            (OperationKind::ExecuteTask, true),
+            (OperationKind::PropagateTask, true),
+            (OperationKind::ApplyAction, true),
+            (OperationKind::SkipTask, true),
+            (OperationKind::AbortTask, true),
+            (OperationKind::DispatchTimeout, true),
+            (OperationKind::ReenterTask, true),
+            (OperationKind::DeliverMessage, false),
+            (OperationKind::FireTrigger, false),
+            (OperationKind::RunPostCommit, false),
+        ] {
+            assert_eq!(kind.is_schedulable(), schedulable, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_effect_can_be_claimed_under_the_next_fence() {
+        let unknown = OperationRecord {
+            id: id(),
+            kind: OperationKind::ApplyAction,
+            state: OperationState::EffectUnknown { attempt: 3 },
+            revision: 1,
+        };
+        assert!(
+            unknown
+                .clone()
+                .evolve(OperationEvent::Claim(ClaimToken {
+                    fence: 3,
+                    ..claim()
+                }))
+                .is_err(),
+            "the claim must advance past the unknown attempt"
+        );
+        let claimed = unknown
+            .evolve(OperationEvent::ClaimAndPrepare(ClaimToken {
+                fence: 4,
+                ..claim()
+            }))
+            .unwrap();
+        assert_eq!(
+            claimed.state,
+            OperationState::CommitPrepared(ClaimToken {
+                fence: 4,
+                ..claim()
+            })
+        );
+    }
+
+    #[test]
+    fn a_prepared_claim_renews_and_quarantines() {
+        let current = ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 7,
+            lease_until_ms: 100,
+            heartbeat_revision: 0,
+        };
+        let prepared = OperationRecord {
+            id: id(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::CommitPrepared(current.clone()),
+            revision: 1,
+        };
+        let renewed = ClaimToken {
+            lease_until_ms: 200,
+            heartbeat_revision: 1,
+            ..current.clone()
+        };
+        assert_eq!(
+            prepared
+                .clone()
+                .evolve(OperationEvent::RenewClaim {
+                    current: current.clone(),
+                    renewed,
+                })
+                .unwrap()
+                .state,
+            OperationState::CommitPrepared(ClaimToken {
+                lease_until_ms: 200,
+                heartbeat_revision: 1,
+                ..current.clone()
+            })
+        );
+        assert_eq!(
+            prepared
+                .evolve(OperationEvent::Quarantine {
+                    claim: current,
+                    reason: "operator".into(),
+                })
+                .unwrap()
+                .state,
+            OperationState::Quarantined {
+                reason: "operator".into()
+            }
+        );
+    }
+
+    #[test]
+    fn supersede_accepts_every_unstarted_state_but_only_a_newer_generation() {
+        for state in [
+            OperationState::RetryScheduled { attempt: 2 },
+            OperationState::EffectUnknown { attempt: 2 },
+        ] {
+            let operation = OperationRecord {
+                id: id(),
+                kind: OperationKind::ExecuteTask,
+                state,
+                revision: 0,
+            };
+            assert!(
+                operation
+                    .clone()
+                    .evolve(OperationEvent::Supersede { by_generation: 3 })
+                    .is_err(),
+                "an equal generation must not supersede"
+            );
+            assert_eq!(
+                operation
+                    .evolve(OperationEvent::Supersede { by_generation: 4 })
+                    .unwrap()
+                    .state,
+                OperationState::Superseded { by_generation: 4 }
+            );
+        }
+    }
+
+    #[test]
+    fn transition_errors_render_both_variants() {
+        let invalid = OperationTransitionError::InvalidTransition {
+            from: OperationState::Pending,
+            event: OperationEvent::Complete { commit: commit() },
+        };
+        assert!(invalid.to_string().contains("invalid operation transition"));
+        assert_eq!(
+            OperationTransitionError::RevisionOverflow.to_string(),
+            "operation revision overflow"
+        );
+    }
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+
+    fn id() -> OperationId {
+        OperationId {
+            process_id: "p1".into(),
+            task: TaskId::new("t1", 3).unwrap(),
+            sequence: 9,
+        }
+    }
+
+    fn claim() -> ClaimToken {
+        ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 7,
+            lease_until_ms: i64::MAX,
+            heartbeat_revision: 0,
+        }
+    }
+
+    fn commit() -> CommitToken {
+        CommitToken {
+            process_version: 11,
+            digest: "digest".into(),
+        }
+    }
+
+    #[test]
+    fn claim_and_prepare_requires_a_valid_fresh_claim() {
+        let pending = OperationRecord::pending(id(), OperationKind::ExecuteTask);
+        for invalid in [
+            ClaimToken {
+                owner: " ".into(),
+                ..claim()
+            },
+            ClaimToken {
+                fence: 0,
+                ..claim()
+            },
+        ] {
+            assert!(
+                pending
+                    .clone()
+                    .evolve(OperationEvent::ClaimAndPrepare(invalid))
+                    .is_err(),
+                "the guard rejects an unpersistable claim"
+            );
+        }
+        let retried = OperationRecord {
+            id: id(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::RetryScheduled { attempt: 5 },
+            revision: 1,
+        };
+        assert!(
+            retried
+                .clone()
+                .evolve(OperationEvent::ClaimAndPrepare(ClaimToken {
+                    fence: 5,
+                    ..claim()
+                }))
+                .is_err(),
+            "the fence must advance past the attempt"
+        );
+        assert_eq!(
+            retried
+                .evolve(OperationEvent::ClaimAndPrepare(ClaimToken {
+                    fence: 6,
+                    ..claim()
+                }))
+                .unwrap()
+                .state,
+            OperationState::CommitPrepared(ClaimToken {
+                fence: 6,
+                ..claim()
+            })
+        );
+    }
+
+    #[test]
+    fn renew_requires_the_current_claim_owner_fence_and_revision() {
+        let current = ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 7,
+            lease_until_ms: 100,
+            heartbeat_revision: 2,
+        };
+        let operation = OperationRecord {
+            id: id(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::Claimed(current.clone()),
+            revision: 1,
+        };
+        let renew = |current: ClaimToken, renewed: ClaimToken| {
+            operation
+                .clone()
+                .evolve(OperationEvent::RenewClaim { current, renewed })
+                .is_ok()
+        };
+        let renewed = ClaimToken {
+            lease_until_ms: 200,
+            heartbeat_revision: 3,
+            ..current.clone()
+        };
+        assert!(renew(current.clone(), renewed));
+        // A different expected claim.
+        assert!(!renew(
+            ClaimToken {
+                fence: 8,
+                ..current.clone()
+            },
+            ClaimToken {
+                lease_until_ms: 200,
+                heartbeat_revision: 3,
+                ..current.clone()
+            },
+        ));
+        // A different owner.
+        assert!(!renew(
+            current.clone(),
+            ClaimToken {
+                owner: "runtime-b".into(),
+                lease_until_ms: 200,
+                heartbeat_revision: 3,
+                ..current.clone()
+            },
+        ));
+        // A different fence.
+        assert!(!renew(
+            current.clone(),
+            ClaimToken {
+                fence: 8,
+                lease_until_ms: 200,
+                heartbeat_revision: 3,
+                ..current.clone()
+            },
+        ));
+        // A heartbeat that did not advance by exactly one.
+        assert!(!renew(
+            current.clone(),
+            ClaimToken {
+                lease_until_ms: 200,
+                heartbeat_revision: 4,
+                ..current.clone()
+            },
+        ));
+    }
+
+    #[test]
+    fn commit_and_complete_require_the_exact_token() {
+        let claim = claim();
+        let commit = commit();
+        let prepared = OperationRecord {
+            id: id(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::CommitPrepared(claim.clone()),
+            revision: 1,
+        };
+        assert!(
+            prepared
+                .clone()
+                .evolve(OperationEvent::Commit {
+                    claim: ClaimToken {
+                        fence: 8,
+                        ..claim.clone()
+                    },
+                    commit: commit.clone(),
+                })
+                .is_err()
+        );
+        let committed = prepared
+            .evolve(OperationEvent::Commit {
+                claim,
+                commit: commit.clone(),
+            })
+            .unwrap();
+        assert!(
+            committed
+                .clone()
+                .evolve(OperationEvent::Complete {
+                    commit: CommitToken {
+                        process_version: 12,
+                        digest: "other".into(),
+                    },
+                })
+                .is_err()
+        );
+        assert!(matches!(
+            committed
+                .evolve(OperationEvent::Complete { commit })
+                .unwrap()
+                .state,
+            OperationState::Completed(_)
+        ));
+    }
+
+    #[test]
+    fn retry_and_unknown_attempts_must_match_the_fence_and_be_positive() {
+        let current = ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 7,
+            lease_until_ms: 100,
+            heartbeat_revision: 0,
+        };
+        let claimed = OperationRecord {
+            id: id(),
+            kind: OperationKind::ApplyAction,
+            state: OperationState::Claimed(current.clone()),
+            revision: 1,
+        };
+        for attempt in [0, 6, 7] {
+            // 7 is the fence (accepted); 0 and 6 are rejected.
+            let retry = claimed.clone().evolve(OperationEvent::ScheduleRetry {
+                claim: current.clone(),
+                attempt,
+            });
+            assert_eq!(retry.is_ok(), attempt == 7, "retry attempt {attempt}");
+            let unknown = claimed.clone().evolve(OperationEvent::MarkEffectUnknown {
+                claim: current.clone(),
+                attempt,
+            });
+            assert_eq!(unknown.is_ok(), attempt == 7, "unknown attempt {attempt}");
+        }
+        // Resolving a proven-not-applied effect requires a positive attempt
+        // that matches the persisted one.
+        let unknown = OperationRecord {
+            id: id(),
+            kind: OperationKind::ApplyAction,
+            state: OperationState::EffectUnknown { attempt: 4 },
+            revision: 1,
+        };
+        assert!(
+            unknown
+                .clone()
+                .evolve(OperationEvent::ResolveEffectNotApplied { attempt: 0 })
+                .is_err()
+        );
+        assert!(
+            unknown
+                .evolve(OperationEvent::ResolveEffectNotApplied { attempt: 4 })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn release_expired_claim_requires_an_expired_claim_with_a_storable_fence() {
+        let prepared = OperationRecord {
+            id: id(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::CommitPrepared(ClaimToken {
+                lease_until_ms: 100,
+                ..claim()
+            }),
+            revision: 1,
+        };
+        assert!(
+            prepared
+                .clone()
+                .evolve(OperationEvent::ReleaseExpiredClaim { now_ms: 99 })
+                .is_err(),
+            "a live prepared claim cannot be released"
+        );
+        // A fence above u32::MAX cannot be reported as an attempt, so the
+        // guard refuses instead of truncating.
+        let overflowing = OperationRecord {
+            id: id(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::Claimed(ClaimToken {
+                fence: u64::from(u32::MAX) + 1,
+                lease_until_ms: 100,
+                ..claim()
+            }),
+            revision: 1,
+        };
+        assert!(
+            overflowing
+                .evolve(OperationEvent::ReleaseExpiredClaim { now_ms: 200 })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn quarantine_needs_a_reason_and_release_needs_a_positive_attempt() {
+        let current = claim();
+        let claimed = OperationRecord {
+            id: id(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::Claimed(current.clone()),
+            revision: 1,
+        };
+        assert!(
+            claimed
+                .clone()
+                .evolve(OperationEvent::Quarantine {
+                    claim: current.clone(),
+                    reason: " ".into(),
+                })
+                .is_err(),
+            "an empty reason is not a quarantine"
+        );
+        let quarantined = claimed
+            .evolve(OperationEvent::Quarantine {
+                claim: current,
+                reason: "hold".into(),
+            })
+            .unwrap();
+        assert!(
+            quarantined
+                .clone()
+                .evolve(OperationEvent::ReleaseQuarantine { next_attempt: 0 })
+                .is_err()
+        );
+        assert!(
+            quarantined
+                .evolve(OperationEvent::ReleaseQuarantine { next_attempt: 1 })
+                .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod state_alternation_tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_effect_is_claimed_by_a_higher_fence() {
+        let id = OperationId {
+            process_id: "p".into(),
+            task: TaskId::new("t", 2).unwrap(),
+            sequence: 1,
+        };
+        let unknown = OperationRecord {
+            id,
+            kind: OperationKind::ApplyAction,
+            state: OperationState::EffectUnknown { attempt: 3 },
+            revision: 1,
+        };
+        let claim = ClaimToken {
+            owner: "w".into(),
+            fence: 4,
+            lease_until_ms: 100,
+            heartbeat_revision: 0,
+        };
+        assert_eq!(
+            unknown
+                .evolve(OperationEvent::Claim(claim.clone()))
+                .unwrap()
+                .state,
+            OperationState::Claimed(claim)
+        );
+    }
+
+    fn record(state: OperationState) -> OperationRecord {
+        OperationRecord {
+            id: OperationId {
+                process_id: "p".into(),
+                task: TaskId::new("t", 2).unwrap(),
+                sequence: 1,
+            },
+            kind: OperationKind::ExecuteTask,
+            state,
+            revision: 1,
+        }
+    }
+
+    fn token(owner: &str, fence: u64, lease_until_ms: i64) -> ClaimToken {
+        ClaimToken {
+            owner: owner.into(),
+            fence,
+            lease_until_ms,
+            heartbeat_revision: 0,
+        }
+    }
+
+    /// Both unstarted-but-retried states require a fresh, valid claim whose
+    /// fence advances past the attempt they carry.
+    #[test]
+    fn retried_and_unknown_claims_require_a_fresh_valid_fence() {
+        for state in [
+            OperationState::RetryScheduled { attempt: 3 },
+            OperationState::EffectUnknown { attempt: 3 },
+        ] {
+            let operation = record(state.clone());
+            for invalid in [
+                token(" ", 4, i64::MAX),
+                token("w", 0, i64::MAX),
+                token("w", 3, i64::MAX),
+                token("w", 2, i64::MAX),
+                token("w", 4, i64::MIN),
+            ] {
+                assert!(
+                    operation
+                        .clone()
+                        .evolve(OperationEvent::Claim(invalid.clone()))
+                        .is_err(),
+                    "{state:?} must refuse {invalid:?}"
+                );
+                assert!(
+                    operation
+                        .clone()
+                        .evolve(OperationEvent::ClaimAndPrepare(invalid.clone()))
+                        .is_err(),
+                    "{state:?} must refuse to prepare {invalid:?}"
+                );
+            }
+            let next = token("w", 4, i64::MAX);
+            assert_eq!(
+                operation
+                    .clone()
+                    .evolve(OperationEvent::Claim(next.clone()))
+                    .unwrap()
+                    .state,
+                OperationState::Claimed(next.clone())
+            );
+            assert_eq!(
+                record(state)
+                    .evolve(OperationEvent::ClaimAndPrepare(next.clone()))
+                    .unwrap()
+                    .state,
+                OperationState::CommitPrepared(next)
+            );
+        }
+    }
+
+    /// A prepared operation can cross the effect boundary or be proven not to
+    /// have crossed it, but only at its own attempt.
+    #[test]
+    fn prepared_unknown_and_resolve_guards_reject_the_wrong_attempt() {
+        let prepared = record(OperationState::CommitPrepared(token("w", 5, 100)));
+        for attempt in [0, 4, 6] {
+            assert!(
+                prepared
+                    .clone()
+                    .evolve(OperationEvent::MarkEffectUnknown {
+                        claim: token("w", 5, 100),
+                        attempt,
+                    })
+                    .is_err(),
+                "attempt {attempt} is not the prepared fence"
+            );
+        }
+        assert_eq!(
+            prepared
+                .evolve(OperationEvent::MarkEffectUnknown {
+                    claim: token("w", 5, 100),
+                    attempt: 5,
+                })
+                .unwrap()
+                .state,
+            OperationState::EffectUnknown { attempt: 5 }
+        );
+
+        let unknown = record(OperationState::EffectUnknown { attempt: 5 });
+        for attempt in [0, 4, 6] {
+            assert!(
+                unknown
+                    .clone()
+                    .evolve(OperationEvent::ResolveEffectNotApplied { attempt })
+                    .is_err(),
+                "attempt {attempt} is not the unknown attempt"
+            );
+        }
+        assert!(
+            record(OperationState::RetryScheduled { attempt: 5 })
+                .evolve(OperationEvent::ResolveEffectNotApplied { attempt: 5 })
+                .is_err(),
+            "only an EffectUnknown operation may be resolved"
+        );
+        assert_eq!(
+            unknown
+                .evolve(OperationEvent::ResolveEffectNotApplied { attempt: 5 })
+                .unwrap()
+                .state,
+            OperationState::RetryScheduled { attempt: 5 }
+        );
+    }
+
+    /// A prepared claim released by its expiry is reconciliation work, and its
+    /// fence must fit the attempt the unknown state stores.
+    #[test]
+    fn prepared_release_expiry_requires_an_expired_storable_fence() {
+        let live = record(OperationState::CommitPrepared(token("w", 5, 100)));
+        assert!(
+            live.evolve(OperationEvent::ReleaseExpiredClaim { now_ms: 99 })
+                .is_err()
+        );
+        let overflowing = record(OperationState::CommitPrepared(token(
+            "w",
+            u64::from(u32::MAX) + 1,
+            100,
+        )));
+        assert!(
+            overflowing
+                .evolve(OperationEvent::ReleaseExpiredClaim { now_ms: 200 })
+                .is_err()
+        );
+        assert_eq!(
+            record(OperationState::CommitPrepared(token(
+                "w",
+                u64::from(u32::MAX),
+                100
+            )))
+            .evolve(OperationEvent::ReleaseExpiredClaim { now_ms: 200 })
+            .unwrap()
+            .state,
+            OperationState::EffectUnknown { attempt: u32::MAX }
+        );
+    }
 }

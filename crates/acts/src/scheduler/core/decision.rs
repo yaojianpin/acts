@@ -867,4 +867,110 @@ mod tests {
             AdmissionDirective::Drive(SlotDirective::Release)
         );
     }
+
+    #[test]
+    fn a_snapshot_without_a_root_resumes_the_seed_operation() {
+        let mut snapshot = snapshot(TaskState::Running);
+        snapshot.tasks.clear();
+        let operation = resume_operation(&snapshot);
+        assert_eq!(operation.process_id, "p");
+        assert_eq!(
+            operation.task.node.as_str(),
+            crate::utils::consts::TASK_ROOT_TID
+        );
+        assert_eq!(operation.task.generation, 0);
+        assert_eq!(operation.sequence, 0);
+    }
+
+    #[test]
+    fn a_root_that_is_absent_from_the_snapshot_reads_as_pending() {
+        let base = snapshot(TaskState::Running);
+        let root = root();
+        // A snapshot whose root key is absent while another task remains has
+        // no root: root_task reports none and the run reads as pending.
+        let mut other = base.clone();
+        other.tasks.remove(&root);
+        other.tasks.insert(
+            TaskId::new("other", 0).unwrap(),
+            TaskSnapshot {
+                model_node: NodeId::parse("other").unwrap(),
+                parent: None,
+                predecessors: vec![],
+                state: TaskState::Running,
+                revision: 0,
+            },
+        );
+        assert_eq!(
+            ProcessStatus::of(&other),
+            ProcessStatus::Pending,
+            "no root means the run has not started"
+        );
+        assert_eq!(root_task(&other), None);
+
+        // An empty aggregate has no root either, and the seed operation is
+        // still well defined.
+        let mut sparse = base;
+        sparse.tasks.clear();
+        assert_eq!(
+            resume_operation(&sparse).task.node.as_str(),
+            crate::utils::consts::TASK_ROOT_TID
+        );
+        assert_eq!(root_state(&sparse), TaskState::Running);
+    }
+    #[test]
+    fn the_failed_root_error_facts_default_and_decode_json() {
+        let mut snapshot = snapshot(TaskState::Failed);
+        let root = root();
+        // Missing facts read as empty text.
+        assert_eq!(
+            lifecycle(&snapshot),
+            Some(LifecycleDirective::Errored {
+                code: String::new(),
+                message: String::new()
+            })
+        );
+        assert_eq!(
+            run_outcome(&snapshot),
+            Some(RunOutcome::Errored {
+                code: String::new(),
+                message: String::new()
+            })
+        );
+        // A raw (non-JSON-string) value passes through unchanged.
+        snapshot
+            .variables
+            .insert((root.clone(), "error.code".into()), "E1".into());
+        // A JSON string is decoded.
+        snapshot.variables.insert(
+            (root, "error.message".into()),
+            serde_json::Value::String("boom".into()).to_string(),
+        );
+        assert_eq!(
+            run_outcome(&snapshot),
+            Some(RunOutcome::Errored {
+                code: "E1".into(),
+                message: "boom".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_terminal_non_failed_root_reports_terminated() {
+        for state in [
+            TaskState::Aborted,
+            TaskState::Cancelled,
+            TaskState::Skipped,
+            TaskState::Removed,
+        ] {
+            let snapshot = snapshot(state);
+            assert_eq!(run_outcome(&snapshot), Some(RunOutcome::Terminated));
+        }
+        // A successful terminal root is a completion.
+        assert_eq!(
+            run_outcome(&snapshot(TaskState::Completed)),
+            Some(RunOutcome::Completed)
+        );
+        // An in-flight run has no outcome yet.
+        assert_eq!(run_outcome(&snapshot(TaskState::Running)), None);
+    }
 }

@@ -20,3 +20,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 url = "2"
+
+[dev-dependencies]
+toml = { workspace = true }

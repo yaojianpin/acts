@@ -67,4 +67,17 @@ mod tests {
         state.data = Some(1);
         assert!(state.data.is_some());
     }
+
+    #[test]
+    fn action_result_debug_reports_its_fields() {
+        let mut state = ActionResult::<i32>::begin();
+        state.end_time = state.start_time + 5;
+        state.data = Some(7);
+        let text = format!("{state:?}");
+        assert!(text.contains("State"), "got: {text}");
+        assert!(text.contains("start_time"), "got: {text}");
+        assert!(text.contains("end_time"), "got: {text}");
+        assert!(text.contains("data: Some(7)"), "got: {text}");
+        assert_eq!(state.cost(), 5);
+    }
 }

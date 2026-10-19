@@ -429,3 +429,88 @@ pub trait DbCollection: Send + Sync {
     /// Remove the document and every index row of it.
     async fn delete(&self, id: &str) -> Result<bool>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[derive(Debug, Deserialize, Serialize, PartialEq)]
+    struct Row {
+        id: String,
+        #[serde(default)]
+        v: i32,
+    }
+
+    impl DbCollectionIden for Row {
+        fn iden() -> String {
+            "modrows".to_string()
+        }
+    }
+
+    #[test]
+    fn map_db_err_wraps_the_message() {
+        let err = serde_json::from_str::<i32>("nope").unwrap_err();
+        let mapped = map_db_err(err);
+        match mapped {
+            ActError::Store(message) => assert!(message.contains("expected")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn page_data_with_rows_and_map_rows_keep_metadata() {
+        let page = PageData {
+            count: 7,
+            page_num: 2,
+            page_count: 4,
+            page_size: 2,
+            rows: vec![1i32, 2],
+        };
+        let replaced = page.with_rows(vec!["a", "b"]);
+        assert_eq!(
+            (
+                replaced.count,
+                replaced.page_num,
+                replaced.page_count,
+                replaced.page_size
+            ),
+            (7, 2, 4, 2)
+        );
+        assert_eq!(replaced.rows, vec!["a", "b"]);
+
+        let page = PageData {
+            count: 2,
+            page_num: 1,
+            page_count: 1,
+            page_size: 10,
+            rows: vec![1i32, 2],
+        };
+        let mapped = page.map_rows(|row| row * 10);
+        assert_eq!(mapped.rows, vec![10, 20]);
+        assert_eq!((mapped.count, mapped.page_size), (2, 10));
+    }
+
+    #[test]
+    fn db_collection_iden_defaults_and_upcast() {
+        assert_eq!(Row::version(), 0);
+        assert!(Row::indexed_fields().is_empty());
+        assert!(Row::ordered_index_fields().is_empty());
+        assert_eq!(Row::iden(), "modrows");
+
+        // The default upcast backfills a missing `v` with 0.
+        let row = Row::upcast(json!({"id": "r1"})).unwrap();
+        assert_eq!(
+            row,
+            Row {
+                id: "r1".into(),
+                v: 0
+            }
+        );
+
+        // An existing v is preserved, and a body that cannot decode fails.
+        let row = Row::upcast(json!({"id": "r2", "v": 3})).unwrap();
+        assert_eq!(row.v, 3);
+        assert!(Row::upcast(json!(42)).is_err());
+    }
+}

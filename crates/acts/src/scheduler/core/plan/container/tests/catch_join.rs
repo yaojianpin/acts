@@ -365,3 +365,88 @@ fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
             .is_none()
     );
 }
+
+#[test]
+fn catch_join_refuses_a_foreign_process_or_stale_graph() {
+    let graph = catch_graph();
+    let snapshot = catch_snapshot(TaskState::Skipped, TaskState::Skipped);
+    let mut command = catch_command();
+    command.process_id = "other".into();
+    assert_eq!(
+        CatchJoin::plan((&graph, &snapshot), &command),
+        Err(ContainerError::WrongProcess)
+    );
+
+    let mut stale = snapshot.clone();
+    stale.version.graph = 7;
+    assert_eq!(
+        CatchJoin::plan((&graph, &stale), &catch_command()),
+        Err(ContainerError::GraphVersionConflict {
+            graph: 1,
+            snapshot: 7
+        })
+    );
+}
+
+#[test]
+fn catch_join_only_decides_a_running_decider_with_children() {
+    // A decider that already left `Running` is owned by that decision.
+    let graph = catch_graph();
+    let mut catch_state = catch_snapshot(TaskState::Skipped, TaskState::Skipped);
+    catch_state.tasks.get_mut(&id("step1", 0)).unwrap().state = TaskState::Completed;
+    assert!(
+        CatchJoin::plan((&graph, &catch_state), &catch_command())
+            .unwrap()
+            .is_none()
+    );
+
+    // A decider without children has no handler set to vote.
+    let childless = {
+        let mut b =
+            crate::scheduler::core::model::task_graph::TaskGraphBuilder::new("p1", 1).unwrap();
+        b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+            id: id("step1", 0),
+            model_node: node("step1"),
+            state: TaskState::Created,
+            revision: 0,
+        })
+        .unwrap();
+        b.set_root(id("step1", 0)).unwrap();
+        b.build().unwrap()
+    };
+    let mut childless_snapshot = snapshot(vec![task("step1", 0, TaskState::Running)]);
+    childless_snapshot.variables.insert(
+        (id("step1", 0), FLOW_VAR.to_string()),
+        FLOW_CATCHES.to_string(),
+    );
+    assert!(
+        CatchJoin::plan(
+            (&childless, &childless_snapshot),
+            &CatchJoinCommand {
+                process_id: "p1".into(),
+                parent: id("step1", 0),
+                source: id("c1", 0),
+            }
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+fn catch_join_requires_its_trigger_to_be_one_of_the_parents_children() {
+    let graph = catch_graph();
+    let snapshot = catch_snapshot(TaskState::Skipped, TaskState::Skipped);
+    assert!(
+        CatchJoin::plan(
+            (&graph, &snapshot),
+            &CatchJoinCommand {
+                process_id: "p1".into(),
+                parent: id("step1", 0),
+                source: id("elsewhere", 0),
+            }
+        )
+        .unwrap()
+        .is_none()
+    );
+}

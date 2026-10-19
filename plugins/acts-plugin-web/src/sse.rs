@@ -381,7 +381,7 @@ mod tests {
         // a row one of them writes after `alive_rows` is sampled would fail
         // the leak check below
         wait_until(
-            || async { stored_message_count(&engine).await >= 3 },
+            || async { stored_message_count(&engine).await >= 2 },
             "the live channel to store the workflow's deliveries",
         )
         .await;
@@ -394,7 +394,7 @@ mod tests {
         // new messages must not be stored for the dead channel anymore
         run_irq_workflow(&engine, "dropped").await;
         wait_until(
-            || async { received.load(Ordering::Relaxed) >= 6 },
+            || async { received.load(Ordering::Relaxed) >= 4 },
             "messages of the second workflow to be dispatched",
         )
         .await;
@@ -574,7 +574,7 @@ mod tests {
         run_irq_workflow(&engine, "slow2").await;
         let seen = || received.load(Ordering::Relaxed);
         wait_until(
-            || async { seen() >= 6 },
+            || async { seen() >= 4 },
             "workflow messages to be dispatched",
         )
         .await;
@@ -598,7 +598,7 @@ mod tests {
         let rows = stored_message_count(&engine).await;
         run_irq_workflow(&engine, "after").await;
         wait_until(
-            || async { seen() >= 9 },
+            || async { seen() >= 6 },
             "messages of the last workflow to be dispatched",
         )
         .await;

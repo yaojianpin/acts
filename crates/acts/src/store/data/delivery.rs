@@ -62,3 +62,35 @@ impl DbCollectionIden for Delivery {
         Self::upcast_current(value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_index_metadata_and_upcast() {
+        assert_eq!(Delivery::iden(), "deliveries");
+        assert!(Delivery::indexed_fields().contains(&"status"));
+        assert_eq!(Delivery::ordered_index_fields(), &["update_time"]);
+        assert_eq!(Delivery::version(), 1);
+
+        let row = Delivery {
+            id: "d1".into(),
+            msg_id: "m1".into(),
+            pid: "p1".into(),
+            status: DeliveryStatus::Acked,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        let restored = Delivery::upcast(json).unwrap();
+        assert_eq!(restored.id, "d1");
+        assert_eq!(restored.status, DeliveryStatus::Acked);
+        assert_eq!(restored.v, 0);
+    }
+
+    #[test]
+    fn delivery_upcast_rejects_missing_required_field() {
+        // `id` is required: upcast reports the deserialization failure.
+        assert!(Delivery::upcast(serde_json::json!({"v": 1})).is_err());
+    }
+}

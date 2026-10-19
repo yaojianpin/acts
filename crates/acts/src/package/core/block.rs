@@ -140,4 +140,20 @@ mod tests {
         serde_json::from_value::<super::BlockPackageParams>(value.clone()).unwrap();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
+
+    /// An act the block params cannot deserialize is the package's input
+    /// error, reported with its package id.
+    #[tokio::test]
+    async fn pack_block_execute_rejects_malformed_acts() {
+        let ctx = crate::package::tests::completed_context().await;
+        let err = super::BlockPackage
+            .execute(&ctx, &serde_json::json!({"acts": [{"id": 1}]}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid ActPackage(acts.core.block)"),
+            "got: {err}"
+        );
+    }
 }

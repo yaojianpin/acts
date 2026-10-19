@@ -1421,10 +1421,12 @@ mod tests {
             "the new state index row must be written: {keys:?}"
         );
         assert!(
-            !keys
-                .iter()
-                .any(|key| key.contains("-pid-") || key.contains("-tid-")),
-            "unchanged pid/tid index rows must not be touched: {keys:?}"
+            !keys.iter().any(|key| key.contains("-pid-")),
+            "unchanged pid index rows must not be touched: {keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|key| key.contains("-tid-")),
+            "unchanged tid index rows must not be touched: {keys:?}"
         );
     }
 
@@ -1694,6 +1696,30 @@ mod tests {
             cmp_json_val(&json!(i64::MAX), &json!(u64::MAX)),
             Ordering::Less
         );
+    }
+
+    /// Mixed signedness has no shared integer view: the sign decides, and two
+    /// non-negative values compare as `u64`; a negative left/right side must
+    /// stay below/above any `u64` above `i64::MAX`.
+    #[test]
+    fn store_cmp_order_numbers_handles_mixed_signedness() {
+        use super::cmp_order_numbers;
+        use std::cmp::Ordering;
+
+        let negative = serde_json::Number::from(-1i64);
+        let small = serde_json::Number::from(0i64);
+        let wide = serde_json::Number::from(u64::MAX);
+        let wide_two = serde_json::Number::from(u64::MAX - 1);
+
+        // Both sides above `i64::MAX` compare as `u64`.
+        assert_eq!(cmp_order_numbers(&wide_two, &wide), Ordering::Less);
+        // i64 left, u64 right: the sign decides, then the magnitudes.
+        assert_eq!(cmp_order_numbers(&negative, &wide), Ordering::Less);
+        assert_eq!(cmp_order_numbers(&small, &wide), Ordering::Less);
+        // u64 left, i64 right: a negative right side is greater than any u64;
+        // otherwise the magnitudes compare.
+        assert_eq!(cmp_order_numbers(&wide, &negative), Ordering::Greater);
+        assert_eq!(cmp_order_numbers(&wide, &small), Ordering::Greater);
     }
 
     #[test]
@@ -2713,7 +2739,10 @@ mod tests {
             vec!["d1"],
             "the value the stored row holds must stay indexed"
         );
-        let dropped = if row.state == "a" { "b" } else { "a" };
+        let dropped = ["a", "b"]
+            .into_iter()
+            .find(|state| *state != row.state.as_str())
+            .expect("the row state is one of the two");
         assert!(
             ids_of(&col, "state", json!(dropped)).await.is_empty(),
             "a value the stored row dropped must not stay indexed"
@@ -2917,5 +2946,674 @@ mod tests {
             ids.iter().all(|id| !held(&key(id))),
             "overlapping mutations must leave no entry behind"
         );
+    }
+
+    // ========== filter tree, validation and index-key edge cases ==========
+
+    #[tokio::test]
+    async fn or_filters_union_nested_filters_and_empty_nodes() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<Doc>::new("orfilters", kv);
+        for (id, state, ts) in [("a", "idle", 1i64), ("b", "running", 2), ("c", "idle", 3)] {
+            col.create(&Doc {
+                id: id.to_string(),
+                state: state.to_string(),
+                timestamp: ts,
+            })
+            .await
+            .unwrap();
+        }
+
+        // OR unions both sides.
+        let page = query(
+            &col,
+            Filter::or()
+                .expr(Expr::eq("state", "running"))
+                .expr(Expr::eq("timestamp", 3)),
+        )
+        .await;
+        assert_eq!(ids(&page), vec!["b", "c"]);
+
+        // A nested filter is recursed into: state idle AND (ts 1 OR ts 3).
+        let page = query(
+            &col,
+            Filter::and().expr(Expr::eq("state", "idle")).push(
+                Filter::or()
+                    .expr(Expr::eq("timestamp", 1))
+                    .expr(Expr::eq("timestamp", 3)),
+            ),
+        )
+        .await;
+        assert_eq!(ids(&page), vec!["a", "c"]);
+
+        // An empty OR matches nothing; an empty nested OR inside AND does not
+        // widen the result.
+        let page = col.query(&Query::new().filter(Filter::or())).await.unwrap();
+        assert_eq!(page.count, 0);
+        let page = query(
+            &col,
+            Filter::and()
+                .expr(Expr::eq("state", "idle"))
+                .push(Filter::or()),
+        )
+        .await;
+        assert_eq!(page.count, 0, "AND with an empty nested OR is empty");
+    }
+
+    #[tokio::test]
+    async fn between_and_in_validation_errors_and_non_exact_shapes() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<Doc>::new("validation", kv);
+        col.create(&Doc {
+            id: "a".into(),
+            state: "idle".into(),
+            timestamp: 5,
+        })
+        .await
+        .unwrap();
+
+        // Between with fewer than two elements is rejected before any scan.
+        let short_between = Expr {
+            key: "timestamp".into(),
+            op: crate::store::ExprOp::Between,
+            value: serde_json::json!([1]),
+        };
+        let err = col
+            .query(&Query::new().filter(Filter::and().expr(short_between)))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Between operator requires"),
+            "{err}"
+        );
+
+        // An empty In list is rejected too.
+        let err = col
+            .query(
+                &Query::new()
+                    .filter(Filter::and().expr(Expr::r#in("timestamp", Vec::<i64>::new()))),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("non-empty array"), "{err}");
+
+        // A Between array that is not exactly two elements falls back to the
+        // in-memory matcher (the index path needs exactly two bounds).
+        let page = query(
+            &col,
+            Filter::and().expr(Expr {
+                key: "timestamp".into(),
+                op: crate::store::ExprOp::Between,
+                value: serde_json::json!([1, 5, 9]),
+            }),
+        )
+        .await;
+        assert_eq!(ids(&page), vec!["a"]);
+
+        // Match is never index-exact: a substring filter uses the data scan.
+        let page = query(&col, Filter::and().expr(Expr::matches("state", "dl"))).await;
+        assert_eq!(ids(&page), vec!["a"]);
+
+        // Match also compares non-string operands by their JSON text (both
+        // sides), so a number field can be matched by a substring.
+        let page = query(&col, Filter::and().expr(Expr::matches("timestamp", "5"))).await;
+        assert_eq!(ids(&page), vec!["a"]);
+        let page = query(
+            &col,
+            Filter::and().expr(Expr {
+                key: "state".into(),
+                op: crate::store::ExprOp::Match,
+                value: serde_json::json!(5),
+            }),
+        )
+        .await;
+        assert_eq!(page.count, 0);
+    }
+
+    /// A zero page size is a caller error, not an empty page.
+    #[tokio::test]
+    async fn query_rejects_a_zero_limit() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<Doc>::new("zerolimit", kv);
+        col.create(&doc("a", "idle", 1)).await.unwrap();
+
+        let err = col.query(&Query::new().limit(0)).await.unwrap_err();
+        assert!(err.to_string().contains("greater than 0"), "{err}");
+    }
+
+    /// The in-memory filter skips a row that does not carry the field at all,
+    /// and a row that carries it but does not match.
+    #[tokio::test]
+    async fn non_indexed_filter_skips_rows_without_the_field() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<Doc>::new("fallback", kv);
+        col.create(&doc("a", "idle", 1)).await.unwrap();
+
+        let page = query(&col, Filter::and().expr(Expr::eq("absent", "x"))).await;
+        assert_eq!(page.count, 0);
+
+        let page = query(&col, Filter::and().expr(Expr::eq("id", "nope"))).await;
+        assert_eq!(page.count, 0);
+    }
+
+    #[tokio::test]
+    async fn and_filter_intersects_disjoint_non_empty_branches() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<Doc>::new("anddisjoint", kv);
+        for (id, state) in [("a", "idle"), ("b", "running")] {
+            col.create(&Doc {
+                id: id.to_string(),
+                state: state.to_string(),
+                timestamp: 1,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Both branches match rows, but no row matches both: the intersection
+        // becomes empty and the remaining branch is skipped.
+        let page = query(
+            &col,
+            Filter::and()
+                .expr(Expr::eq("state", "idle"))
+                .expr(Expr::eq("state", "running"))
+                .expr(Expr::eq("timestamp", 1)),
+        )
+        .await;
+        assert_eq!(page.count, 0);
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SparseDoc {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    }
+
+    impl crate::store::DbCollectionIden for SparseDoc {
+        fn iden() -> String {
+            "sparsedocs".to_string()
+        }
+        fn indexed_fields() -> &'static [&'static str] {
+            &["state"]
+        }
+    }
+
+    #[tokio::test]
+    async fn index_keys_skip_absent_fields() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<SparseDoc>::new("sparsedocs", kv.clone());
+        col.create(&SparseDoc {
+            id: "a".into(),
+            state: None,
+        })
+        .await
+        .unwrap();
+        col.create(&SparseDoc {
+            id: "b".into(),
+            state: Some("idle".into()),
+        })
+        .await
+        .unwrap();
+
+        // The absent field produces no index key, and the document still reads.
+        let all = col.query(&Query::new()).await.unwrap();
+        assert_eq!(all.count, 2);
+        let idle = col
+            .query(&Query::new().filter(Filter::and().expr(Expr::eq("state", "idle"))))
+            .await
+            .unwrap();
+        assert_eq!(idle.count, 1);
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct MixedNumDoc {
+        id: String,
+        ord: JsonValue,
+        #[serde(default)]
+        v: i32,
+    }
+
+    impl crate::store::DbCollectionIden for MixedNumDoc {
+        fn iden() -> String {
+            "mixednumdocs".to_string()
+        }
+        fn indexed_fields() -> &'static [&'static str] {
+            &["ord"]
+        }
+    }
+
+    #[tokio::test]
+    async fn order_by_mixes_strings_and_signed_unsigned_numbers() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<MixedNumDoc>::new("mixednumdocs", kv);
+        for (id, ord) in [
+            ("neg", serde_json::json!(-1)),
+            ("big", serde_json::json!(u64::MAX)),
+            ("five", serde_json::json!(5)),
+            ("seven", serde_json::json!(7)),
+            ("str", serde_json::json!("b")),
+        ] {
+            col.create(&MixedNumDoc {
+                id: id.to_string(),
+                ord,
+                v: 0,
+            })
+            .await
+            .unwrap();
+        }
+        // `ord` is indexed but not an ordered index field, so the fallback
+        // comparison orders the rows in memory.
+        let rows = col
+            .query(&Query::new().order("ord", Sort::Asc).limit(100))
+            .await
+            .unwrap();
+        let got: Vec<String> = rows.rows.iter().map(|d| d.id.clone()).collect();
+        // Numbers sort numerically (signed/unsigned mixes compare by sign and
+        // then magnitude); non-numbers compare by their JSON text, which puts
+        // the quoted string before the digit-leading number texts.
+        assert_eq!(got, vec!["str", "neg", "five", "seven", "big"]);
+    }
+
+    // ========== conditional projection writes ==========
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ProjDoc {
+        id: String,
+        #[serde(default)]
+        source_revision: String,
+        state: String,
+        #[serde(default)]
+        v: i32,
+    }
+
+    impl crate::store::DbCollectionIden for ProjDoc {
+        fn iden() -> String {
+            "projdocs".to_string()
+        }
+        fn indexed_fields() -> &'static [&'static str] {
+            &["state"]
+        }
+    }
+
+    fn proj(id: &str, revision: &str, state: &str) -> ProjDoc {
+        ProjDoc {
+            id: id.to_string(),
+            source_revision: revision.to_string(),
+            state: state.to_string(),
+            v: 0,
+        }
+    }
+
+    fn proj_revision(row: &ProjDoc) -> Option<String> {
+        (!row.source_revision.is_empty()).then(|| row.source_revision.clone())
+    }
+
+    #[tokio::test]
+    async fn conditional_write_covers_absent_identical_and_stale_rows() {
+        use crate::store::ConditionalWrite;
+
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<ProjDoc>::new("projdocs", kv.clone());
+
+        // No stored row (plain read path): the row is applied.
+        let row = proj("a", "2", "idle");
+        let outcome = col
+            .write_if_newer_with(&row, proj_revision, false, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Applied);
+
+        // An identical body is not rewritten.
+        let outcome = col
+            .write_if_newer_with(&row, proj_revision, false, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Unchanged);
+
+        // A row without a revision token cannot be compared: stale.
+        let no_rev = proj("a", "", "running");
+        let outcome = col
+            .write_if_newer_with(&no_rev, proj_revision, false, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Stale);
+
+        // An older revision than the stored one is refused.
+        let older = proj("a", "1", "old");
+        let outcome = col
+            .write_if_newer_with(&older, proj_revision, false, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Stale);
+
+        // Equal revision is refused unless the caller allows equality.
+        let equal = proj("a", "2", "changed");
+        let outcome = col
+            .write_if_newer_with(&equal, proj_revision, false, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Stale);
+        let outcome = col
+            .write_if_newer_with(&equal, proj_revision, true, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Applied);
+        assert_eq!(col.find("a").await.unwrap().state, "changed");
+    }
+
+    #[tokio::test]
+    async fn conditional_write_accepts_pre_revision_rows_and_honours_hints() {
+        use crate::store::{ConditionalWrite, ProjectionHint};
+
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<ProjDoc>::new("projhints", kv.clone());
+
+        // A stored row without a revision field is older than every incoming
+        // aggregate version.
+        let legacy = proj("legacy", "", "old");
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        kv.put(&col.data_key("legacy"), bytes.clone())
+            .await
+            .unwrap();
+        let incoming = proj("legacy", "0.0.1", "new");
+        let outcome = col
+            .write_if_newer_with(&incoming, proj_revision, false, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Applied);
+
+        // ProjectionHint::Absent skips the read and creates the row.
+        let fresh = proj("fresh", "1", "idle");
+        let outcome = col
+            .write_if_newer_with(&fresh, proj_revision, false, Some(ProjectionHint::Absent))
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Applied);
+
+        // ProjectionHint::Existing reuses the caller's read for the compare
+        // and the guard.
+        let stored = proj("fresh", "1", "idle");
+        let bytes = serde_json::to_vec(&stored).unwrap();
+        let outcome = col
+            .write_if_newer_with(
+                &proj("fresh", "2", "next"),
+                proj_revision,
+                false,
+                Some(ProjectionHint::Existing(stored, bytes)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, ConditionalWrite::Applied);
+    }
+
+    /// Kv whose guarded batches never apply, so a conditional write keeps
+    /// losing its guard until it reports the damage.
+    struct NeverApplyKv {
+        inner: crate::store::MemoryStore,
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for NeverApplyKv {
+        async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.one(key).await
+        }
+        async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+            self.inner.put(key, value).await
+        }
+        async fn delete(&self, key: &str) -> crate::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
+            if guards.is_empty() {
+                self.inner.batch(ops, guards).await
+            } else {
+                Ok(false)
+            }
+        }
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: ScanOptions,
+        ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+            self.inner.scan_prefix(key, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_write_reports_a_guard_that_keeps_losing() {
+        let kv: Arc<NeverApplyKv> = Arc::new(NeverApplyKv {
+            inner: crate::store::MemoryStore::new(),
+        });
+        let col = KvCollection::<ProjDoc>::new("projguard", kv);
+        let err = col
+            .write_if_newer_with(&proj("a", "1", "idle"), proj_revision, false, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("kept losing its guard"), "{err}");
+    }
+
+    // ========== helper impls of the test doubles ==========
+
+    #[tokio::test]
+    async fn test_double_iden_and_raw_write_paths_are_exercised() {
+        // Every test document's `iden` is otherwise unused (the collections
+        // are constructed with explicit prefixes).
+        assert_eq!(Row::iden(), "testrows");
+        assert_eq!(Doc::iden(), "messages");
+        assert_eq!(SortDoc::iden(), "messages");
+        assert_eq!(OrderedDoc::iden(), "messages");
+
+        // The pass-through write methods of the counting / unordered wrappers.
+        let counting = Arc::new(CountingKv::default());
+        let counting_kv: Arc<dyn KvStore> = counting.clone();
+        counting_kv.put("raw", b"1".to_vec()).await.unwrap();
+        counting_kv.delete("raw").await.unwrap();
+        assert_eq!(counting.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(counting.deletes.load(Ordering::SeqCst), 1);
+
+        let unordered = Arc::new(UnorderedScanKv {
+            inner: MemoryStore::new(),
+        });
+        let unordered_kv: Arc<dyn KvStore> = unordered.clone();
+        unordered_kv.put("raw", b"1".to_vec()).await.unwrap();
+        unordered_kv.delete("raw").await.unwrap();
+        assert!(unordered.one("raw").await.unwrap().is_none());
+
+        let gated = Arc::new(GatedKv::default());
+        let gated_kv: Arc<dyn KvStore> = gated.clone();
+        gated_kv.put("raw", b"1".to_vec()).await.unwrap();
+        gated_kv.delete("raw").await.unwrap();
+        assert!(gated.one("raw").await.unwrap().is_none());
+    }
+
+    /// Every gated call parks while the gate is armed (that is what makes the
+    /// concurrency tests believable) and completes once it is released.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gated_kv_parks_every_store_call() {
+        let kv = Arc::new(GatedKv::default());
+
+        kv.arm();
+        let put = {
+            let kv = kv.clone();
+            tokio::spawn(async move { kv.put("k", b"1".to_vec()).await })
+        };
+        kv.wait_entered(1).await;
+        kv.disarm();
+        put.await.unwrap().unwrap();
+
+        kv.arm();
+        let one = {
+            let kv = kv.clone();
+            tokio::spawn(async move { kv.one("k").await })
+        };
+        kv.wait_entered(2).await;
+        kv.disarm();
+        assert!(one.await.unwrap().unwrap().is_some());
+
+        kv.arm();
+        let delete = {
+            let kv = kv.clone();
+            tokio::spawn(async move { kv.delete("k").await })
+        };
+        kv.wait_entered(3).await;
+        kv.disarm();
+        delete.await.unwrap().unwrap();
+        assert!(kv.one("k").await.unwrap().is_none());
+    }
+
+    /// A guard-free batch is applied by the never-applying double; only a
+    /// guarded one is refused.
+    #[tokio::test]
+    async fn never_apply_kv_applies_a_guard_free_batch() {
+        let kv: Arc<NeverApplyKv> = Arc::new(NeverApplyKv {
+            inner: crate::store::MemoryStore::new(),
+        });
+        let applied = kv
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "k".into(),
+                    value: b"1".to_vec(),
+                }],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(applied);
+        assert_eq!(kv.one("k").await.unwrap(), Some(b"1".to_vec()));
+    }
+
+    /// The hiding double only hides its one key; every other read passes
+    /// through.
+    #[tokio::test]
+    async fn hidden_read_kv_answers_every_other_key() {
+        let kv = HiddenReadKv {
+            inner: crate::store::MemoryStore::new(),
+            hidden: "hidden".into(),
+        };
+        kv.put("shown", b"1".to_vec()).await.unwrap();
+        assert_eq!(kv.one("shown").await.unwrap(), Some(b"1".to_vec()));
+        assert!(kv.one("hidden").await.unwrap().is_none());
+    }
+
+    /// Kv that hides one stored key from reads, letting `rebuild_index` hit a
+    /// document that vanished between its scan and its re-read.
+    struct HiddenReadKv {
+        inner: crate::store::MemoryStore,
+        hidden: String,
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for HiddenReadKv {
+        async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            if key == self.hidden {
+                return Ok(None);
+            }
+            self.inner.one(key).await
+        }
+        async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+            self.inner.put(key, value).await
+        }
+        async fn delete(&self, key: &str) -> crate::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: ScanOptions,
+        ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+            self.inner.scan_prefix(key, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_index_skips_a_document_deleted_after_the_scan() {
+        let inner = crate::store::MemoryStore::new();
+        let seed = KvCollection::<Doc>::new("rebuildgone", Arc::new(inner));
+        seed.create(&Doc {
+            id: "a".into(),
+            state: "idle".into(),
+            timestamp: 1,
+        })
+        .await
+        .unwrap();
+        let key = seed.data_key("a");
+
+        // Rebuild over a store whose read of `a` reports it gone: the index
+        // wipe happened, the document is skipped, and no key is recreated.
+        let kv = Arc::new(HiddenReadKv {
+            inner: crate::store::MemoryStore::new(),
+            hidden: key.clone(),
+        });
+        kv.put(
+            &key,
+            serde_json::to_vec(&Doc {
+                id: "a".into(),
+                state: "idle".into(),
+                timestamp: 1,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let col = KvCollection::<Doc>::new("rebuildgone", kv);
+        assert_eq!(col.rebuild_index().await.unwrap(), 1);
+    }
+
+    /// Kv whose scans return the given entries verbatim, for exercising the
+    /// ordered-index parser against keys it never gets from a real backend.
+    struct BogusScanKv {
+        inner: crate::store::MemoryStore,
+        entries: Vec<(String, Vec<u8>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for BogusScanKv {
+        async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.one(key).await
+        }
+        async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+            self.inner.put(key, value).await
+        }
+        async fn delete(&self, key: &str) -> crate::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn scan_prefix(
+            &self,
+            _key: &str,
+            _options: ScanOptions,
+        ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+            Ok(self.entries.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn ordered_index_ignores_malformed_and_duplicate_entries() {
+        let entries = vec![
+            // Does not even carry the field prefix.
+            ("other-ord-1-x".to_string(), vec![]),
+            // Carries the prefix but no separator before the id.
+            ("bogus-ord-nosep".to_string(), vec![]),
+            // A valid entry, duplicated: the second one is skipped.
+            ("bogus-ord-1-x".to_string(), vec![]),
+            ("bogus-ord-1-x".to_string(), vec![]),
+            // An id not in the candidate set.
+            ("bogus-ord-1-other".to_string(), vec![]),
+            // A null value is treated as missing.
+            ("bogus-ord-null-y".to_string(), vec![]),
+        ];
+        let col = KvCollection::<OrderedDoc>::new(
+            "bogus",
+            Arc::new(BogusScanKv {
+                inner: crate::store::MemoryStore::new(),
+                entries,
+            }),
+        );
+        let ids: std::collections::HashSet<String> =
+            ["x", "y"].into_iter().map(String::from).collect();
+        let ordered = col.ordered_index_ids(&ids, "ord", false).await.unwrap();
+        // `y` has only a null value: missing rows come first ascending; `x`
+        // appears exactly once from its duplicated entry.
+        assert_eq!(ordered, vec!["y".to_string(), "x".to_string()]);
     }
 }

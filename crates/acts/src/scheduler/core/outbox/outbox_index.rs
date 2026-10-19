@@ -394,4 +394,220 @@ mod tests {
             Err(OutboxIndexError::Truncated)
         );
     }
+
+    #[test]
+    fn projection_names_identity_and_foreign_process_mistakes() {
+        let record = pending("a");
+        // The map key disagrees with the record's own identity.
+        let mismatched = OutboxIndex::project(
+            "p",
+            &HashMap::from([(
+                OutboxId {
+                    process_id: "p".into(),
+                    key: "other".into(),
+                },
+                record.clone(),
+            )]),
+        );
+        assert_eq!(mismatched, Err(OutboxIndexError::IdentityMismatch));
+
+        // The record belongs to another process document.
+        assert!(matches!(
+            OutboxIndex::project("other", &HashMap::from([(record.id.clone(), record)])),
+            Err(OutboxIndexError::ForeignRecord(_))
+        ));
+    }
+
+    #[test]
+    fn projection_of_only_terminal_records_is_none() {
+        let record = pending("a");
+        let delivered = record
+            .evolve(OutboxEvent::Claim {
+                claim: DeliveryClaim {
+                    owner: "w".into(),
+                    fence: 1,
+                    lease_until_ms: 18,
+                    heartbeat_revision: 0,
+                },
+                now_ms: 17,
+            })
+            .unwrap()
+            .evolve(OutboxEvent::ConfirmDelivered {
+                claim: DeliveryClaim {
+                    owner: "w".into(),
+                    fence: 1,
+                    lease_until_ms: 18,
+                    heartbeat_revision: 0,
+                },
+                receipt: "ok".into(),
+                now_ms: 17,
+            })
+            .unwrap();
+        assert!(
+            OutboxIndex::project("p", &HashMap::from([(delivered.id.clone(), delivered)]))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_bad_magic_and_schema() {
+        let record = pending("a");
+        let index = OutboxIndex::project("p", &HashMap::from([(record.id.clone(), record)]))
+            .unwrap()
+            .unwrap();
+        let bytes = OutboxIndexCodec::encode(&index).unwrap();
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            OutboxIndexCodec::decode(&bad_magic),
+            Err(OutboxIndexError::InvalidMagic)
+        );
+        let mut bad_schema = bytes;
+        bad_schema[8..10].copy_from_slice(&3u16.to_be_bytes());
+        assert_eq!(
+            OutboxIndexCodec::decode(&bad_schema),
+            Err(OutboxIndexError::UnsupportedSchema(3))
+        );
+    }
+
+    #[test]
+    fn claimed_entries_round_trip_through_the_codec() {
+        let pending_record = pending("a");
+        let claimed = pending_record
+            .evolve(OutboxEvent::Claim {
+                claim: DeliveryClaim {
+                    owner: "w".into(),
+                    fence: 1,
+                    lease_until_ms: 50,
+                    heartbeat_revision: 0,
+                },
+                now_ms: 17,
+            })
+            .unwrap();
+        let index = OutboxIndex::project("p", &HashMap::from([(claimed.id.clone(), claimed)]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            index.entries[0].state,
+            OutboxIndexState::Claimed { lease_until_ms: 50 }
+        );
+        let bytes = OutboxIndexCodec::encode(&index).unwrap();
+        assert_eq!(OutboxIndexCodec::decode(&bytes).unwrap(), index);
+    }
+
+    #[test]
+    fn decoder_rejects_a_duplicated_entry() {
+        let record = pending("a");
+        let index = OutboxIndex::project("p", &HashMap::from([(record.id.clone(), record)]))
+            .unwrap()
+            .unwrap();
+        let encoded = OutboxIndexCodec::encode(&index).unwrap();
+        let process_length = usize::try_from(encoded_u32(&encoded, 10)).unwrap();
+        let count_offset = 14 + process_length;
+        let entry_at = count_offset + 4;
+        let entry_bytes = encoded[entry_at..].to_vec();
+        let mut duplicated = encoded[..count_offset].to_vec();
+        duplicated.extend_from_slice(&2u32.to_be_bytes());
+        duplicated.extend_from_slice(&entry_bytes);
+        duplicated.extend_from_slice(&entry_bytes);
+        assert!(matches!(
+            OutboxIndexCodec::decode(&duplicated),
+            Err(OutboxIndexError::DuplicateEntry(_))
+        ));
+    }
+
+    #[test]
+    fn validation_names_each_structural_mistake() {
+        let empty_process = OutboxIndex {
+            process_id: " ".into(),
+            entries: vec![OutboxIndexEntry {
+                id: OutboxId {
+                    process_id: "p".into(),
+                    key: "k".into(),
+                },
+                revision: 0,
+                state: OutboxIndexState::DeliveryUnknown,
+            }],
+        };
+        assert_eq!(
+            OutboxIndexCodec::encode(&empty_process),
+            Err(OutboxIndexError::EmptyProcessId)
+        );
+
+        let empty = OutboxIndex {
+            process_id: "p".into(),
+            entries: vec![],
+        };
+        assert_eq!(
+            OutboxIndexCodec::encode(&empty),
+            Err(OutboxIndexError::EmptyIndex)
+        );
+
+        let foreign = OutboxIndex {
+            process_id: "p".into(),
+            entries: vec![OutboxIndexEntry {
+                id: OutboxId {
+                    process_id: "other".into(),
+                    key: "k".into(),
+                },
+                revision: 0,
+                state: OutboxIndexState::DeliveryUnknown,
+            }],
+        };
+        assert!(matches!(
+            OutboxIndexCodec::encode(&foreign),
+            Err(OutboxIndexError::ForeignRecord(_))
+        ));
+
+        let empty_key = OutboxIndex {
+            process_id: "p".into(),
+            entries: vec![OutboxIndexEntry {
+                id: OutboxId {
+                    process_id: "p".into(),
+                    key: " ".into(),
+                },
+                revision: 0,
+                state: OutboxIndexState::DeliveryUnknown,
+            }],
+        };
+        assert_eq!(
+            OutboxIndexCodec::encode(&empty_key),
+            Err(OutboxIndexError::EmptyKey)
+        );
+
+        let entry = |key: &str| OutboxIndexEntry {
+            id: OutboxId {
+                process_id: "p".into(),
+                key: key.into(),
+            },
+            revision: 0,
+            state: OutboxIndexState::DeliveryUnknown,
+        };
+        let duplicate = OutboxIndex {
+            process_id: "p".into(),
+            entries: vec![entry("a"), entry("a")],
+        };
+        assert!(matches!(
+            OutboxIndexCodec::encode(&duplicate),
+            Err(OutboxIndexError::DuplicateEntry(_))
+        ));
+        let unordered = OutboxIndex {
+            process_id: "p".into(),
+            entries: vec![entry("b"), entry("a")],
+        };
+        assert_eq!(
+            OutboxIndexCodec::encode(&unordered),
+            Err(OutboxIndexError::NonCanonicalOrder)
+        );
+    }
+
+    #[test]
+    fn outbox_index_errors_render() {
+        assert!(
+            OutboxIndexError::EmptyIndex
+                .to_string()
+                .starts_with("outbox index error:")
+        );
+    }
 }

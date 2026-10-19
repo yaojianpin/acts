@@ -24,10 +24,14 @@ struct MockService {
     send_body: Option<Vec<u8>>,
     /// when set, every `Send` fails with this status
     send_error: Option<Status>,
+    /// statuses for named actions, checked before `send_error`
+    errors: std::collections::HashMap<String, Status>,
     /// when set, the `OnMessage` handshake fails with this status
     subscribe_error: Option<Status>,
     /// stream items `OnMessage` replays before closing
     script: Vec<Result<Message, Status>>,
+    /// when set, the handshake's options are recorded here
+    seen: Option<std::sync::Arc<parking_lot::Mutex<Option<MessageOptions>>>>,
 }
 
 fn wire(seq: &str, data: &[u8]) -> Message {
@@ -52,7 +56,10 @@ fn payload(id: &str) -> Vec<u8> {
 impl ActsService for MockService {
     type OnMessageStream = MessageStream;
 
-    async fn send(&self, _request: tonic::Request<Message>) -> Result<Response<Message>, Status> {
+    async fn send(&self, request: tonic::Request<Message>) -> Result<Response<Message>, Status> {
+        if let Some(status) = self.errors.get(request.get_ref().name.as_str()) {
+            return Err(status.clone());
+        }
         if let Some(status) = &self.send_error {
             return Err(status.clone());
         }
@@ -66,8 +73,11 @@ impl ActsService for MockService {
 
     async fn on_message(
         &self,
-        _request: tonic::Request<MessageOptions>,
+        request: tonic::Request<MessageOptions>,
     ) -> Result<Response<Self::OnMessageStream>, Status> {
+        if let Some(seen) = &self.seen {
+            *seen.lock() = Some(request.get_ref().clone());
+        }
         if let Some(status) = &self.subscribe_error {
             return Err(status.clone());
         }
@@ -255,6 +265,191 @@ async fn failed_auto_ack_is_reported_and_drops_the_message() {
     }
     // the unacked message is not handed to the message callback
     assert!(messages.try_recv().is_err());
+    assert!(
+        timeout(Duration::from_secs(5), sub.wait())
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    tx.send(()).unwrap();
+}
+
+/// A refresh that fails for a reason other than authentication keeps the
+/// original refusal: the caller learns why the request was refused, not why
+/// the repair failed.
+#[tokio::test]
+async fn refresh_failure_keeps_the_original_authentication_status() {
+    let mut errors = std::collections::HashMap::new();
+    errors.insert(
+        "proc:ls".to_string(),
+        Status::unauthenticated("token expired"),
+    );
+    errors.insert(
+        "acl:refresh".to_string(),
+        Status::internal("refresh exploded"),
+    );
+
+    let (tx, rx) = oneshot::channel();
+    let port = serve_service(
+        MockService {
+            errors,
+            ..Default::default()
+        },
+        rx,
+    )
+    .await;
+    let url = format!("http://{}:{port}", server_addr());
+    let session = crate::SessionTokens {
+        token: "stale".to_string(),
+        refresh_token: "rt".to_string(),
+        expires_at: 1,
+        refresh_expires_at: 2,
+    };
+    let mut client = ActsChannel::connect_with_session(&url, session)
+        .await
+        .unwrap();
+
+    let err = client.send::<()>("proc:ls", Vars::new()).await.unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated);
+    assert_eq!(err.message(), "token expired");
+    tx.send(()).unwrap();
+}
+
+/// A successful refresh rotates the session and retries the refused request.
+#[tokio::test]
+async fn a_refreshed_session_retries_the_refused_request() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "token": "fresh",
+        "refresh_token": "rt2",
+        "expires_in": 60,
+        "refresh_expires_in": 120,
+    }))
+    .unwrap();
+    let mut errors = std::collections::HashMap::new();
+    errors.insert(
+        "proc:ls".to_string(),
+        Status::unauthenticated("token expired"),
+    );
+
+    let (tx, rx) = oneshot::channel();
+    let port = serve_service(
+        MockService {
+            send_body: Some(body),
+            errors,
+            ..Default::default()
+        },
+        rx,
+    )
+    .await;
+    let url = format!("http://{}:{port}", server_addr());
+    let session = crate::SessionTokens {
+        token: "stale".to_string(),
+        refresh_token: "rt".to_string(),
+        expires_at: 1,
+        refresh_expires_at: 2,
+    };
+    let mut client = ActsChannel::connect_with_session(&url, session)
+        .await
+        .unwrap();
+
+    // the retry is refused too (the mock is static), but the session was
+    // rotated before it
+    let err = client.send::<()>("proc:ls", Vars::new()).await.unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated);
+    let rotated = client.session().expect("the session was rotated");
+    assert_eq!(rotated.token, "fresh");
+    assert_eq!(rotated.refresh_token, "rt2");
+    assert_eq!(client.token().as_deref(), Some("fresh"));
+    tx.send(()).unwrap();
+}
+
+/// The selector options reach the server handshake intact.
+#[tokio::test]
+async fn subscription_forwards_its_selectors() {
+    let seen = std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let (tx, rx) = oneshot::channel();
+    let port = serve_service(
+        MockService {
+            seen: Some(seen.clone()),
+            ..Default::default()
+        },
+        rx,
+    )
+    .await;
+    let url = format!("http://{}:{port}", server_addr());
+    let mut client = ActsChannel::connect(&url).await.unwrap();
+
+    let mut options = std::collections::HashMap::new();
+    options.insert("tag".to_string(), "g1".to_string());
+    let sub = client
+        .subscribe(
+            "client-7",
+            |_| {},
+            |_| {},
+            &ActsOptions {
+                r#type: Some("msg".to_string()),
+                state: Some("created".to_string()),
+                uses: Some("@act".to_string()),
+                options,
+                ack: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+
+    let recorded = seen.lock().clone().expect("the handshake was recorded");
+    assert_eq!(recorded.client_id, "client-7");
+    assert_eq!(recorded.r#type, "msg");
+    assert_eq!(recorded.state, "created");
+    assert_eq!(recorded.uses, "@act");
+    assert_eq!(recorded.options.get("tag").map(String::as_str), Some("g1"));
+
+    assert!(
+        timeout(Duration::from_secs(5), sub.wait())
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    tx.send(()).unwrap();
+}
+
+/// `ack` answers whatever the server sent (the mock sends no payload).
+#[tokio::test]
+async fn ack_answers_the_server_value() {
+    let (mut client, tx) = connect(MockService::default()).await;
+    let ret = client.ack("m1").await.unwrap();
+    assert!(ret.data.is_none());
+    assert!(ret.cost() >= 0);
+    tx.send(()).unwrap();
+}
+
+/// The default auto-ack path: a well-formed message is acked and delivered.
+#[tokio::test]
+async fn successful_auto_ack_delivers_the_message() {
+    let (mut client, tx) = connect(MockService {
+        script: vec![Ok(wire("m-1", &payload("m-1")))],
+        ..Default::default()
+    })
+    .await;
+
+    let (msg_tx, mut messages) = mpsc::unbounded_channel();
+    let sub = client
+        .subscribe(
+            "c5",
+            move |m| {
+                msg_tx.send(m.id.clone()).ok();
+            },
+            |_| {},
+            &ActsOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    let id = timeout(Duration::from_secs(5), messages.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(id, "m-1");
     assert!(
         timeout(Duration::from_secs(5), sub.wait())
             .await

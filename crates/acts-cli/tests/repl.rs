@@ -11,14 +11,24 @@
 mod common;
 
 use acts::UserSpec;
-use acts_channel::Vars;
+use acts_channel::{
+    Vars,
+    model::{MessageInfo, PageData, Query},
+};
 use acts_cli::{
     client,
-    cmd::{CommandRunner, model, proc as proc_cmd, snap, task},
+    cmd::{CommandRunner, evt, model, msg, pack, proc as proc_cmd, snap, task},
+    util,
 };
 use anyhow::Context;
 use serde_json::json;
-use std::time::Duration;
+use std::{
+    io::Write,
+    net::TcpListener,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 /// A model whose step waits for a client act (`acts.core.irq`): the run stays
 /// live, so its process and task rows are there to read — a run that finishes
@@ -39,6 +49,14 @@ steps:
 /// time the CLI appends.
 fn body_of(out: &str) -> &str {
     out.split("(elapsed").next().unwrap_or(out)
+}
+
+/// The `total N, page …` count a listing answers with.
+fn page_total(out: &str) -> usize {
+    out.strip_prefix("total ")
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or_default()
 }
 
 /// Deploy a model, then read it back, list it, run it and remove it — the
@@ -290,6 +308,39 @@ async fn the_auth_commands_manage_the_engines_users() {
         assert_eq!(reader["name"], json!("reader"));
         assert_eq!(reader["allow"], json!(["@read"]));
 
+        // every list a user may carry is an edit of that list, and the
+        // enable/disable flags are mutually exclusive
+        cli.run(
+            "auth user set editor --allow @read --deny 'model:rm' --pattern 'orders:*' \
+             --snapshot 'secrets=$subject,team=*' --password s3cret --rm-password old --disable",
+        )
+        .await?;
+        let editor = engine
+            .acl()
+            .get_user("editor")
+            .await
+            .expect("the user the command saved is readable");
+        assert_eq!(editor["deny"], json!(["model:rm"]));
+        assert_eq!(editor["patterns"], json!(["orders:*"]));
+        assert_eq!(editor["enabled"], json!(false));
+        assert!(
+            editor["snapshot"].to_string().contains("secrets"),
+            "the snapshot grants must be saved: {editor}"
+        );
+        cli.run("auth user set editor --enable").await?;
+        assert_eq!(
+            engine.acl().get_user("editor").await.expect("still there")["enabled"],
+            json!(true)
+        );
+        let err = cli
+            .run("auth user set editor --disable --enable")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "unexpected error: {err}"
+        );
+
         // `auth user ls` and `get` read the registry back
         cli.run("auth user ls").await?;
         assert!(
@@ -377,4 +428,541 @@ async fn the_repl_reads_a_line_without_panicking() {
     })
     .await
     .expect("the REPL must read every line without panicking");
+}
+
+/// A model with two irq steps: the first waits for a client act while the
+/// second is still ahead of it, which is the forward work `act cancel` rewinds
+/// (a lone step has nothing to cancel).
+const ACT_MODEL: &str = r#"
+name: acts
+id: acts
+ver: 0.1.0
+steps:
+  - name: first
+    id: first
+    uses: acts.core.irq
+    params:
+      key: cli-act-one
+  - name: second
+    id: second
+    uses: acts.core.irq
+    params:
+      key: cli-act-two
+"#;
+
+/// A model that exposes one manual trigger (`fired`) and one irq step: firing
+/// the trigger starts a run that stays live, which is what the process and
+/// task rows read back.
+const TRIGGER_MODEL: &str = r#"
+name: triggered
+id: triggered
+ver: 0.1.0
+on:
+  - id: fired
+    name: fired
+    kind: manual
+steps:
+  - name: init
+    id: init
+    uses: acts.core.irq
+    params:
+      key: cli-evt
+"#;
+
+/// A package definition the published catalogue can hold: every field the
+/// `Package` wire shape requires.
+const PACKAGE: &str = r#"
+id: cli.package
+name: cli package
+desc: a package published by a test
+icon: icon-cli
+doc: https://example.test/cli
+version: 0.1.0
+schema: {}
+options: null
+run_as: func
+resources: []
+catalog: app
+"#;
+
+static FILE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Write a scratch file for one case, named after the case and unique within
+/// the test process.
+fn scratch_file(name: &str, text: &str) -> PathBuf {
+    let seq = FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("acts-cli-{}-{name}-{seq}", std::process::id()));
+    std::fs::write(&path, text).expect("the scratch file must be writable");
+    path
+}
+
+/// A scratch config directory, so a spawned CLI never reads or writes the
+/// developer's own session.
+fn scratch_dir(name: &str) -> PathBuf {
+    let seq = FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("acts-cli-{}-{name}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the scratch directory must be creatable");
+    dir
+}
+
+/// Run the built binary with `args`, feeding `input` to its stdin.
+fn run_binary(args: &[&str], input: Option<&str>, config: &Path) -> std::process::Output {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_acts-cli"))
+        .args(args)
+        .env("ACTS_CONFIG_DIR", config)
+        .env_remove("ACTS_TOKEN")
+        .env_remove("ACTS_USER")
+        .env_remove("ACTS_PASSWORD")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the CLI binary must start");
+    if let Some(input) = input {
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin is piped")
+            .write_all(input.as_bytes())
+            .expect("the input must be written");
+    }
+    // closing stdin is what lets the REPL see the end of its input
+    drop(child.stdin.take());
+    child.wait_with_output().expect("the CLI binary must exit")
+}
+
+/// The first scheduled task of `pid`: the row appears as the run is
+/// scheduled, so the wait is bounded rather than a fixed sleep.
+async fn wait_task_id(cli: &mut CommandRunner<'_>, pid: &str) -> String {
+    for _ in 0..600 {
+        if let Ok(out) = proc_cmd::get(cli, pid, &None).await
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(body_of(&out))
+        {
+            // Ready/Running both exist while the run schedules; a client
+            // action is accepted once the task is past Ready. (The irq act
+            // row itself stays `running` while it waits for the client.)
+            let task = value["tasks"].as_array().and_then(|tasks| {
+                tasks.iter().find(|task| {
+                    matches!(
+                        task["state"].as_str().unwrap_or_default(),
+                        "running" | "waiting"
+                    )
+                })
+            });
+            if let Some(tid) = task.and_then(|task| task["id"].as_str()) {
+                return tid.to_string();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the task of process '{pid}' never appeared");
+}
+
+/// The package catalogue: publish reads a definition, get prints it back as
+/// yaml, ls pages it, and rm removes it — plus the file errors that never
+/// reach the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_package_commands_publish_read_and_remove() {
+    common::with_server("packages", true, |_engine, url| async move {
+        let mut channel = client::connect(&url, None).await?;
+        let mut cli = CommandRunner::new(&mut channel);
+
+        // the server ships its builtin packages; the published one adds to them
+        let out = pack::ls(&mut cli, &None, &None, &vec![], &vec![]).await?;
+        let builtin = page_total(&out);
+        // the REPL spelling reaches the same command
+        cli.run("package ls").await?;
+
+        let file = scratch_file("package", PACKAGE);
+        let out = pack::publish(&mut cli, &file).await?;
+        assert!(out.contains("true"), "unexpected publish: {out}");
+        let _ = std::fs::remove_file(&file);
+
+        let out = pack::get(&mut cli, "cli.package").await?;
+        assert!(out.contains("cli.package"), "unexpected package: {out}");
+        assert!(
+            out.contains("a package published by a test"),
+            "unexpected package: {out}"
+        );
+
+        let out = pack::ls(&mut cli, &None, &None, &vec![], &vec![]).await?;
+        assert_eq!(page_total(&out), builtin + 1, "unexpected page: {out}");
+        let out = pack::ls(
+            &mut cli,
+            &Some(0),
+            &Some(10),
+            &vec![util::parse_key_value("id~cli").unwrap()],
+            &vec![util::parse_sort("create_time!").unwrap()],
+        )
+        .await?;
+        assert!(out.contains("total 1"), "unexpected page: {out}");
+
+        let out = pack::rm(&mut cli, "cli.package").await?;
+        assert!(out.contains("(elapsed"), "unexpected remove: {out}");
+        let err = pack::get(&mut cli, "cli.package").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("pack:get"),
+            "a refusal must name the action: {err:#}"
+        );
+
+        // a missing file and a malformed definition are reported before the
+        // server is asked anything
+        let missing = std::env::temp_dir().join("acts-cli-no-such-package.yml");
+        let err = pack::publish(&mut cli, &missing).await.unwrap_err();
+        assert!(
+            err.to_string().contains("failed to read the package file"),
+            "unexpected error: {err}"
+        );
+        let malformed = scratch_file("bad-package", "id: [unbalanced");
+        let err = pack::publish(&mut cli, &malformed).await.unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse the package file"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_file(&malformed);
+
+        Ok(())
+    })
+    .await
+    .expect("the package commands must answer");
+}
+
+/// The trigger catalogue: deploy registers the model's `on` entry, ls and get
+/// read it, and start fires it — with and without params.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_event_commands_read_and_fire_a_manual_trigger() {
+    common::with_server("events", true, |_engine, url| async move {
+        let mut channel = client::connect(&url, None).await?;
+        let mut cli = CommandRunner::new(&mut channel);
+
+        let out = evt::ls(&mut cli, &None, &None, &vec![], &vec![]).await?;
+        assert!(out.contains("total 0"), "unexpected page: {out}");
+
+        let missing = std::env::temp_dir().join("acts-cli-no-such-model.yml");
+        let err = model::deploy(&mut cli, &missing).await.unwrap_err();
+        assert!(
+            err.to_string().contains("failed to read the model file"),
+            "unexpected error: {err}"
+        );
+
+        let file = scratch_file("trigger-model.yml", TRIGGER_MODEL);
+        model::deploy(&mut cli, &file).await?;
+        let _ = std::fs::remove_file(&file);
+
+        // the tree spelling is rendered from the model the server holds
+        let out = model::get(&mut cli, "triggered", &Some("tree".to_string())).await?;
+        assert!(out.contains("triggered"), "unexpected tree: {out}");
+
+        let out = evt::ls(&mut cli, &None, &None, &vec![], &vec![]).await?;
+        assert!(out.contains("total 1"), "unexpected page: {out}");
+        let out = evt::ls(
+            &mut cli,
+            &Some(0),
+            &Some(5),
+            &vec![util::parse_key_value("kind=manual").unwrap()],
+            &vec![util::parse_sort("create_time").unwrap()],
+        )
+        .await?;
+        assert!(out.contains("total 1"), "unexpected page: {out}");
+
+        let out = evt::get(&mut cli, "triggered:fired").await?;
+        assert!(out.contains("fired"), "unexpected event: {out}");
+
+        // firing starts the model's run and answers the process id
+        let out = evt::start(&mut cli, "triggered:fired", &Some(json!({"order": 42}))).await?;
+        assert!(out.contains("pid"), "unexpected start answer: {out}");
+        // no payload: the trigger's default params are used
+        let out = evt::start(&mut cli, "triggered:fired", &None).await?;
+        assert!(out.contains("pid"), "unexpected start answer: {out}");
+
+        // the REPL spelling reaches the same command, params parsed as json
+        cli.run("event get triggered:fired").await?;
+        cli.run(r#"event start triggered:fired --params '{"order": 7}'"#)
+            .await?;
+        cli.run("proc ls").await?;
+        cli.run("task ls").await?;
+        cli.run("snapshot ls nothing").await?;
+
+        let err = evt::start(&mut cli, "missing", &None).await.unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("evt:start"), "unexpected error: {text}");
+        let err = evt::get(&mut cli, "missing").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("evt:get"),
+            "unexpected error: {err:#}"
+        );
+
+        Ok(())
+    })
+    .await
+    .expect("the event commands must answer");
+}
+
+/// The message surface over a live subscription: the delivery rows a
+/// subscription creates are read, acked by the id the row names, removed, and
+/// the subscription ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_message_commands_read_and_settle_deliveries() {
+    common::with_server("messages", true, |_engine, url| async move {
+        let mut channel = client::connect(&url, None).await?;
+        let mut cli = CommandRunner::new(&mut channel);
+
+        let out = msg::ls(&mut cli, &None, &None, &vec![], &vec![]).await?;
+        assert!(out.contains("total 0"), "unexpected page: {out}");
+
+        let err = msg::get(&mut cli, "missing").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("msg:get"),
+            "unexpected error: {err:#}"
+        );
+
+        // the housekeeping actions answer even with nothing to settle
+        msg::redo(&mut cli).await?;
+        msg::clear(&mut cli, &None).await?;
+        msg::clear(&mut cli, &Some("no-such-proc".to_string())).await?;
+        let out = msg::rm(&mut cli, "missing").await?;
+        assert!(out.contains("(elapsed"), "unexpected remove: {out}");
+
+        // a subscription makes the engine record a delivery row per event
+        cli.run("message sub cli-msg").await?;
+
+        let file = scratch_file("message-model.yml", MODEL);
+        model::deploy(&mut cli, &file).await?;
+        let _ = std::fs::remove_file(&file);
+        proc_cmd::start(&mut cli, "simple", &Some("pm1".to_string()), &Vars::new()).await?;
+
+        // an independent connection reads the delivery id the row carries
+        let mut probe = client::connect(&url, None).await?;
+        let mut delivery = None;
+        for _ in 0..600 {
+            let resp = probe
+                .send::<PageData<MessageInfo>>("msg:ls", Vars::new().with("query", Query::new()))
+                .await
+                .map_err(|err| client::action_failed("msg:ls", err))?;
+            if let Some(row) = resp.data.and_then(|page| page.rows.into_iter().next()) {
+                delivery = Some(row.id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let id = delivery.expect("the subscription must record a delivery row");
+
+        let out = msg::get(&mut cli, &id).await?;
+        assert!(out.contains(&id), "unexpected message: {out}");
+        let out = msg::ack(&mut cli, &id).await?;
+        assert!(out.contains("(elapsed"), "unexpected ack: {out}");
+
+        let out = msg::ls(
+            &mut cli,
+            &Some(0),
+            &Some(10),
+            &vec![util::parse_key_value("pid=pm1").unwrap()],
+            &vec![util::parse_sort("create_time!").unwrap()],
+        )
+        .await?;
+        assert!(out.contains("total"), "unexpected page: {out}");
+
+        let out = msg::rm(&mut cli, &id).await?;
+        assert!(out.contains("(elapsed"), "unexpected remove: {out}");
+        let out = msg::unsub(&mut cli, "cli-msg").await?;
+        assert!(out.contains("(elapsed"), "unexpected unsub: {out}");
+
+        Ok(())
+    })
+    .await
+    .expect("the message commands must answer");
+}
+
+/// Every `act` verb against live irq tasks: the actions the kernel serves move
+/// their own run, and what the server refuses — push/remove, which have no
+/// kernel action, and the legacy rewind guards (a cancel with no forward step,
+/// a back from a running task) — is reported as an error naming the action.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_act_commands_drive_live_tasks() {
+    common::with_server("acts", true, |_engine, url| async move {
+        let mut channel = client::connect(&url, None).await?;
+        let mut cli = CommandRunner::new(&mut channel);
+
+        let file = scratch_file("act-model.yml", ACT_MODEL);
+        model::deploy(&mut cli, &file).await?;
+        let _ = std::fs::remove_file(&file);
+
+        let pids: Vec<String> = (1..=6).map(|n| format!("pa{n}")).collect();
+        let mut tids = Vec::new();
+        for pid in &pids {
+            proc_cmd::start(&mut cli, "acts", &Some(pid.clone()), &Vars::new()).await?;
+            tids.push(wait_task_id(&mut cli, pid).await);
+        }
+
+        let out = proc_cmd::get(&mut cli, &pids[0], &Some("tree".to_string())).await?;
+        assert!(out.contains(&pids[0]), "unexpected proc: {out}");
+
+        // running -> submitted; a cancel is the legacy rewind, and the
+        // server's guard refuses one with no forward package step to rewind —
+        // the refusal still names the action the user typed
+        cli.run(&format!("act submit {} {} -v answer=42", pids[0], tids[0]))
+            .await?;
+        let err = cli
+            .run(&format!("act cancel {} {}", pids[0], tids[0]))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("act:cancel"),
+            "unexpected error: {err:#}"
+        );
+        // running -> completed, skipped, aborted, failed and backed
+        cli.run(&format!("act complete {} {} -v ok=1", pids[1], tids[1]))
+            .await?;
+        cli.run(&format!("act skip {} {}", pids[2], tids[2]))
+            .await?;
+        cli.run(&format!("act abort {} {}", pids[3], tids[3]))
+            .await?;
+        cli.run(&format!(
+            "act error {} {} E42 -v detail=oops",
+            pids[4], tids[4]
+        ))
+        .await?;
+        // back is the same legacy rewind: a running task is not a backed one
+        let err = cli
+            .run(&format!("act back {} {} to-step", pids[5], tids[5]))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("act:back"),
+            "unexpected error: {err:#}"
+        );
+
+        // push/remove have no kernel action: the refusal names what was asked
+        for verb in ["push", "remove"] {
+            let err = cli
+                .run(&format!("act {verb} {} {}", pids[1], tids[1]))
+                .await
+                .unwrap_err();
+            let text = format!("{err:#}");
+            // `push` reaches the dispatch table as the bare action it names,
+            // `remove` as `act:remove`; both are refused by the server
+            assert!(
+                text.contains(verb),
+                "unexpected error for act {verb}: {text}"
+            );
+        }
+
+        // a run the server never saw is a refusal naming the action
+        let err = cli.run("act submit missing missing").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("act:submit"),
+            "unexpected error: {err:#}"
+        );
+
+        Ok(())
+    })
+    .await
+    .expect("the act commands must answer");
+}
+
+/// `main`'s own paths, run as the shipped binary: clap's help answer, an
+/// argument clap rejects, and a server address that never accepts.
+#[test]
+fn the_binary_answers_help_and_reports_bad_input_and_unreachable_servers() {
+    let dir = scratch_dir("binary-failures");
+
+    let out = run_binary(&["--help"], None, &dir);
+    assert!(out.status.success(), "--help must exit successfully");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("acts-cli"), "unexpected help: {stdout}");
+
+    let out = run_binary(&["bogus"], None, &dir);
+    assert!(
+        !out.status.success(),
+        "an unknown argument must be a failure"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bogus"),
+        "clap's diagnostic must name the argument: {stderr}"
+    );
+
+    // a port nothing listens on: startup reports the address it could not reach
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
+    let port = listener
+        .local_addr()
+        .expect("the bound address")
+        .port()
+        .to_string();
+    drop(listener);
+    let out = run_binary(&["--port", port.as_str()], None, &dir);
+    assert!(
+        !out.status.success(),
+        "an unreachable server must be a failure"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed to connect"),
+        "the startup error must name the failure: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The REPL loop in the shipped binary against a live server: it authenticates
+/// at startup, answers help, runs a command, reports a bad line, and exits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_binary_runs_the_repl_against_a_live_server() {
+    common::with_server("binary-repl", false, |_engine, url| async move {
+        let port = url
+            .rsplit(':')
+            .next()
+            .expect("the url names a port")
+            .to_string();
+
+        let dir = scratch_dir("binary-repl");
+        let out = run_binary(&["--port", &port], Some("\nmodel ls\nbogus\nexit\n"), &dir);
+        assert!(
+            out.status.success(),
+            "the REPL must exit successfully: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("authenticated as anonymous"),
+            "the startup greeting must name the identity: {stdout}"
+        );
+        assert!(
+            stdout.contains("tap 'help'"),
+            "the startup tip must be printed: {stdout}"
+        );
+        assert!(
+            stdout.contains("total 0"),
+            "the command's answer must be printed: {stdout}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("bogus"),
+            "a rejected line must be reported: {stderr}"
+        );
+
+        // an explicit token the server does not accept leaves the caller
+        // anonymous, and the startup says so instead of pretending otherwise
+        let dir = scratch_dir("binary-anonymous");
+        let out = run_binary(
+            &["--port", port.as_str(), "--token", "not-a-token"],
+            Some("exit\n"),
+            &dir,
+        );
+        assert!(
+            out.status.success(),
+            "the anonymous REPL must still start: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("connected anonymously"),
+            "an unusable token must be reported as anonymous: {stdout}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    })
+    .await
+    .expect("the binary must run the REPL against the server");
 }

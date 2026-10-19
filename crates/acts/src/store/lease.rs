@@ -1048,6 +1048,8 @@ mod tests {
     /// all: acquiring on it is an error, not a best-effort lock.
     #[tokio::test]
     async fn a_backend_without_guarded_batches_cannot_lease() {
+        use crate::store::ScanOperation;
+
         struct NoGuards(Arc<dyn KvStore>);
 
         #[async_trait::async_trait]
@@ -1085,11 +1087,21 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let err = DbLease::acquire(store, "a", Duration::from_secs(10))
+        let err = DbLease::acquire(store.clone(), "a", Duration::from_secs(10))
             .await
             .unwrap_err();
         assert!(matches!(err, ActError::Store(_)), "got: {err}");
         assert!(err.to_string().contains("guarded batch"), "got: {err}");
+
+        // The remaining pass-through methods of the wrapper.
+        store.delete("k").await.unwrap();
+        store
+            .scan_prefix(
+                "k",
+                ScanOptions::new(ScanOperation::Eq, "k".to_string(), false),
+            )
+            .await
+            .unwrap();
     }
 
     /// Renewal failing because the store is unreachable does not lose the
@@ -1181,6 +1193,20 @@ mod tests {
         let err = lease.renew_at(12_000).await.unwrap_err();
         assert!(matches!(err, ActError::LeaseLost), "got: {err}");
         assert!(lease.is_lost());
+
+        // The wrapper's remaining pass-through methods.
+        flaky.delete("absent").await.unwrap();
+        flaky
+            .scan_prefix(
+                "absent",
+                crate::store::ScanOptions::new(
+                    crate::store::ScanOperation::Eq,
+                    "absent".to_string(),
+                    false,
+                ),
+            )
+            .await
+            .unwrap();
     }
 
     /// The keeper renews on its interval, releases the row on a graceful stop,
@@ -1247,6 +1273,479 @@ mod tests {
             lease.fenced().put("row", b"x".to_vec()).await.unwrap_err(),
             ActError::LeaseLost
         ));
+        keeper.stop().await;
+    }
+
+    // ========== record helpers, acquisition failures and fenced reads ==========
+
+    #[test]
+    fn lease_record_describe_vacant_and_live() {
+        let vacant = LeaseRecord::vacant(3);
+        assert!(vacant.is_vacant());
+        assert_eq!(vacant.describe(), "released (fence=3)");
+
+        let live = LeaseRecord {
+            owner: "node-a".to_string(),
+            fence: 2,
+            expires_at: crate::utils::time::time_millis() + 10_000,
+        };
+        assert!(!live.is_vacant());
+        let text = live.describe();
+        assert!(text.contains("owner=node-a"), "{text}");
+        assert!(text.contains("fence=2"), "{text}");
+        assert!(text.contains("expires_in="), "{text}");
+        assert!(!live.is_expired_at(0));
+        assert!(live.is_expired_at(i64::MAX));
+    }
+
+    #[tokio::test]
+    async fn lease_debug_owner_and_zero_ttl() {
+        let dbg_store = store().await;
+        let lease = acquire(&dbg_store, "dbg", 1_000).await.unwrap();
+        assert_eq!(lease.owner(), "dbg");
+        let text = format!("{lease:?}");
+        assert!(text.contains("DbLease"), "{text}");
+        assert!(text.contains("dbg"), "{text}");
+        assert!(text.contains("fence"), "{text}");
+        assert!(!lease.is_expired_at(10_999));
+        assert!(lease.is_expired_at(11_000));
+
+        // A lease acquired on the live clock is neither lost nor expired.
+        let live_store = store().await;
+        let live = acquire(&live_store, "live", crate::utils::time::time_millis())
+            .await
+            .unwrap();
+        assert!(!live.is_lost());
+        assert!(!live.is_expired(), "a live lease is not expired");
+
+        // A zero TTL means no expiry: the row never blocks a contender by the
+        // clock, and only an explicit release frees it.
+        let other = store().await;
+        let zero = DbLease::acquire_at(other.clone(), "zero", Duration::ZERO, 1_000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(zero.expires_at(), i64::MAX);
+        assert!(acquire(&other, "later", 0).await.is_none());
+        zero.release().await.unwrap();
+        // Releasing again (nothing held) still marks the handle lost.
+        zero.release().await.unwrap();
+        assert!(matches!(
+            zero.renew_at(2_000).await.unwrap_err(),
+            ActError::LeaseLost
+        ));
+    }
+
+    #[tokio::test]
+    async fn acquire_treats_corrupt_rows_as_held_and_reports_fence_overflow() {
+        let corrupt = store().await;
+        corrupt.put(LEASE_KEY, b"not json".to_vec()).await.unwrap();
+        assert!(
+            acquire(&corrupt, "a", 1_000).await.is_none(),
+            "an unreadable row must be treated as held"
+        );
+
+        let overflow = store().await;
+        let record = LeaseRecord {
+            owner: "dead".to_string(),
+            fence: u64::MAX,
+            expires_at: 0,
+        };
+        overflow
+            .put(LEASE_KEY, serde_json::to_vec(&record).unwrap())
+            .await
+            .unwrap();
+        let err = DbLease::acquire_at(overflow, "a", Duration::from_secs(1), 1_000)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("fence overflow"), "{err}");
+    }
+
+    /// Kv that refuses every guarded batch, so an acquisition never wins.
+    struct RejectGuards(Arc<dyn KvStore>);
+
+    #[async_trait::async_trait]
+    impl KvStore for RejectGuards {
+        async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.0.one(key).await
+        }
+        async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+            self.0.put(key, value).await
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.0.delete(key).await
+        }
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+            if guards.is_empty() {
+                self.0.batch(ops, guards).await
+            } else {
+                Ok(false)
+            }
+        }
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: ScanOptions,
+        ) -> Result<Vec<(String, Vec<u8>)>> {
+            self.0.scan_prefix(key, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn acquire_gives_up_after_repeated_lost_races() {
+        let store: Arc<dyn KvStore> = Arc::new(RejectGuards(store().await));
+        let err = DbLease::acquire(store, "a", Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("could not acquire"), "{err}");
+    }
+
+    /// The rejecting double only refuses guarded batches; an unguarded one is
+    /// applied.
+    #[tokio::test]
+    async fn reject_guards_applies_an_unguarded_batch() {
+        let rejecting: Arc<dyn KvStore> = Arc::new(RejectGuards(store().await));
+        let applied = rejecting
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "k".to_string(),
+                    value: b"v".to_vec(),
+                }],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(applied);
+        assert_eq!(rejecting.one("k").await.unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// The toggling double fails only a guarded batch while the switch is on:
+    /// an unguarded batch and a healthy guarded one both pass through.
+    #[tokio::test]
+    async fn toggle_kv_fails_only_guarded_batches_while_switched_on() {
+        let toggle = Arc::new(ToggleKv {
+            inner: store().await,
+            fail: AtomicBool::new(false),
+        });
+        let kv: Arc<dyn KvStore> = toggle.clone();
+        let put = |value: &[u8]| {
+            vec![StoreBatchOp::Put {
+                key: "k".to_string(),
+                value: value.to_vec(),
+            }]
+        };
+
+        // A healthy guarded batch commits.
+        assert!(kv.batch(&put(b"v1"), &[]).await.unwrap());
+        assert!(
+            kv.batch(&put(b"v2"), &[StoreGuard::holds("k", b"v1".to_vec())])
+                .await
+                .unwrap()
+        );
+        // Switched on: an unguarded batch still passes, a guarded one fails.
+        toggle.fail.store(true, Ordering::SeqCst);
+        assert!(kv.batch(&put(b"v3"), &[]).await.unwrap());
+        let err = kv
+            .batch(&put(b"v4"), &[StoreGuard::holds("k", b"v3".to_vec())])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("injected"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_and_renew_fail_when_nothing_is_held() {
+        let store = store().await;
+        let lease = acquire(&store, "a", 1_000).await.unwrap();
+        assert!(lease.inner.guard().is_ok());
+
+        // Simulate the race the guard defends against: the held row is gone
+        // while the lost flag is not set yet.
+        lease.inner.held.write().take();
+        assert!(matches!(
+            lease.inner.guard().unwrap_err(),
+            ActError::LeaseLost
+        ));
+        assert!(matches!(
+            lease.renew_at(2_000).await.unwrap_err(),
+            ActError::LeaseLost
+        ));
+    }
+
+    /// Kv whose guarded batches can be switched to fail, sharing a real store.
+    struct ToggleKv {
+        inner: Arc<dyn KvStore>,
+        fail: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for ToggleKv {
+        async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.one(key).await
+        }
+        async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+            self.inner.put(key, value).await
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+            if !guards.is_empty() && self.fail.load(Ordering::SeqCst) {
+                return Err(ActError::Store("injected batch failure".to_string()));
+            }
+            self.inner.batch(ops, guards).await
+        }
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: ScanOptions,
+        ) -> Result<Vec<(String, Vec<u8>)>> {
+            self.inner.scan_prefix(key, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn release_reports_a_store_error_but_still_marks_the_lease_lost() {
+        let toggle = Arc::new(ToggleKv {
+            inner: store().await,
+            fail: AtomicBool::new(false),
+        });
+        let lease = DbLease::acquire_at(toggle.clone(), "a", Duration::from_secs(10), 1_000)
+            .await
+            .unwrap()
+            .unwrap();
+        toggle.fail.store(true, Ordering::SeqCst);
+        assert!(lease.release().await.is_err());
+        assert!(lease.is_lost());
+    }
+
+    #[tokio::test]
+    async fn fenced_store_passes_reads_and_writes_and_detects_caller_guard_conflicts() {
+        let store = store().await;
+        store.put("guard", b"kept".to_vec()).await.unwrap();
+        let lease = acquire(&store, "a", 1_000).await.unwrap();
+        let fenced = lease.fenced();
+
+        fenced.put("row", b"v".to_vec()).await.unwrap();
+        assert_eq!(fenced.one("row").await.unwrap(), Some(b"v".to_vec()));
+        let many = fenced
+            .many(&["row".to_string(), "absent".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(many.len(), 2);
+        assert_eq!(
+            fenced
+                .scan_prefix(
+                    "r",
+                    crate::store::ScanOptions::new(
+                        crate::store::ScanOperation::Eq,
+                        "r".to_string(),
+                        false,
+                    ),
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // An empty batch is a no-op success.
+        assert!(fenced.batch(&[], &[]).await.unwrap());
+
+        // The caller's own guard can fail while the lease is still ours: that
+        // is `Ok(false)`, not a lost lease.
+        let applied = fenced
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "guard".to_string(),
+                    value: b"lost".to_vec(),
+                }],
+                &[StoreGuard::holds("guard", b"wrong".to_vec())],
+            )
+            .await
+            .unwrap();
+        assert!(!applied);
+        assert_eq!(store.one("guard").await.unwrap(), Some(b"kept".to_vec()));
+        assert!(!lease.is_lost());
+
+        // A guarded batch whose caller guard holds commits under the lease
+        // guard as well.
+        let applied = fenced
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "guarded".to_string(),
+                    value: b"v2".to_vec(),
+                }],
+                &[StoreGuard::holds("guard", b"kept".to_vec())],
+            )
+            .await
+            .unwrap();
+        assert!(applied);
+        assert_eq!(store.one("guarded").await.unwrap(), Some(b"v2".to_vec()));
+
+        fenced.delete("row").await.unwrap();
+        assert!(fenced.one("row").await.unwrap().is_none());
+    }
+
+    /// Once the lease is marked lost, a *guarded* batch is refused before the
+    /// store is asked (the unguarded path is covered by the stale-fence test).
+    #[tokio::test]
+    async fn a_lost_lease_refuses_a_guarded_batch_without_asking_the_store() {
+        let store = store().await;
+        store.put("guard", b"kept".to_vec()).await.unwrap();
+        let stale = acquire(&store, "a", 1_000).await.unwrap();
+        let stale_store = stale.fenced();
+        let _holder = acquire(&store, "b", 11_000).await.expect("takeover");
+
+        // The failed write marks the lease lost.
+        stale_store
+            .put("row", b"x".to_vec())
+            .await
+            .expect_err("a stale write must be refused");
+        assert!(stale.is_lost());
+
+        let err = stale_store
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "guard".to_string(),
+                    value: b"new".to_vec(),
+                }],
+                &[StoreGuard::holds("guard", b"kept".to_vec())],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActError::LeaseLost), "got: {err}");
+        assert_eq!(store.one("guard").await.unwrap(), Some(b"kept".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn fenced_store_reports_a_lost_lease_on_a_caller_guard_conflict() {
+        let store = store().await;
+        store.put("guard", b"kept".to_vec()).await.unwrap();
+        let stale = acquire(&store, "a", 1_000).await.unwrap();
+        let stale_store = stale.fenced();
+        let holder = acquire(&store, "b", 11_000).await.expect("takeover");
+
+        let err = stale_store
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "guard".to_string(),
+                    value: b"new".to_vec(),
+                }],
+                &[StoreGuard::holds("guard", b"kept".to_vec())],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActError::LeaseLost), "got: {err}");
+        assert!(stale.is_lost());
+        assert_eq!(holder.fence(), 2);
+    }
+
+    #[tokio::test]
+    async fn fenced_write_refused_when_lease_row_is_gone_but_not_marked_lost() {
+        let store = store().await;
+        let lease = acquire(&store, "a", 1_000).await.unwrap();
+        let fenced = FencedStore {
+            inner: store.clone(),
+            lease: lease.inner.clone(),
+        };
+        lease.inner.held.write().take();
+        let err = fenced.put("k", b"v".to_vec()).await.unwrap_err();
+        assert!(matches!(err, ActError::LeaseLost), "got: {err}");
+    }
+
+    #[test]
+    fn parse_record_reports_the_row_size() {
+        let err = parse_record(b"xy").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unreadable database lease row (2 bytes)"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn keeper_retries_a_store_failure_before_expiry() {
+        let toggle = Arc::new(ToggleKv {
+            inner: store().await,
+            fail: AtomicBool::new(false),
+        });
+        let lease = Arc::new(
+            DbLease::acquire_at(
+                toggle.clone(),
+                "keeper",
+                Duration::from_secs(10),
+                crate::utils::time::time_millis(),
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+        toggle.fail.store(true, Ordering::SeqCst);
+        let shutdown = CancellationToken::new();
+        let keeper = LeaseKeeper::start(lease.clone(), Duration::from_millis(5), shutdown.clone());
+        assert!(
+            Arc::ptr_eq(keeper.lease(), &lease),
+            "the keeper must expose the lease it maintains"
+        );
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            !lease.is_lost(),
+            "a before-deadline failure must not be fatal"
+        );
+        assert!(!shutdown.is_cancelled());
+
+        // The graceful stop releases; that release fails too, and the keeper
+        // must still exit (the failure is only logged).
+        tokio::time::timeout(Duration::from_secs(5), keeper.stop())
+            .await
+            .expect("the keeper must stop even when the release fails");
+        assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn keeper_marks_a_lease_lost_when_renewal_fails_past_the_deadline() {
+        let toggle = Arc::new(ToggleKv {
+            inner: store().await,
+            fail: AtomicBool::new(false),
+        });
+        // Acquired against a 1970 clock: its deadline is long past by now.
+        let lease = Arc::new(
+            DbLease::acquire_at(toggle.clone(), "keeper", Duration::from_secs(10), 1_000)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        toggle.fail.store(true, Ordering::SeqCst);
+        let shutdown = CancellationToken::new();
+        let keeper = LeaseKeeper::start(lease.clone(), Duration::from_millis(5), shutdown.clone());
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !shutdown.is_cancelled() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("an expired lease whose renewal fails must stop the engine");
+        assert!(lease.is_lost());
+        keeper.stop().await;
+    }
+
+    /// Registering the engine's token on a lease that is already lost cancels
+    /// it immediately: the instance must not keep running without a lease.
+    #[tokio::test]
+    async fn starting_a_keeper_on_a_lost_lease_stops_the_engine_at_once() {
+        let store = store().await;
+        let lease = Arc::new(acquire(&store, "a", 1_000).await.unwrap());
+        lease.release().await.unwrap();
+        assert!(lease.is_lost());
+
+        let shutdown = CancellationToken::new();
+        let keeper = LeaseKeeper::start(lease, Duration::from_millis(5), shutdown.clone());
+        assert!(
+            shutdown.is_cancelled(),
+            "a lost lease must cancel the shutdown token"
+        );
         keeper.stop().await;
     }
 }

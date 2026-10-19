@@ -332,4 +332,56 @@ mod tests {
         assert_eq!(msg.id, "m1");
         assert_eq!(msg.v, 2);
     }
+
+    #[test]
+    fn message_metadata_and_i64_status_conversion() {
+        assert_eq!(Message::iden(), "messages");
+        assert_eq!(Message::ordered_index_fields(), &["timestamp"]);
+        assert_eq!(Message::version(), 2);
+
+        let values = [
+            (DeliveryStatus::Created, 0i64),
+            (DeliveryStatus::Acked, 1),
+            (DeliveryStatus::Completed, 2),
+            (DeliveryStatus::Error, 3),
+            (DeliveryStatus::Delivered, 4),
+        ];
+        for (status, expected) in values {
+            let as_i64: i64 = status.into();
+            assert_eq!(as_i64, expected);
+        }
+    }
+
+    #[test]
+    fn upcast_rejects_unknown_version() {
+        let err = Message::upcast(message_json(9, false)).unwrap_err();
+        assert!(err.to_string().contains("unsupported message version: 9"));
+    }
+
+    #[test]
+    fn upcast_v0_non_object_and_without_tag_migrates() {
+        // v0 without a tag, and a v0 body that is not an object at all: both
+        // just bump the version and decode.
+        let plain = Message::upcast(message_json(0, false)).unwrap();
+        assert_eq!(plain.v, 2);
+
+        let err = Message::upcast(JsonValue::Null).unwrap_err();
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn upcast_v0_tag_with_non_object_options_keeps_inputs() {
+        let mut map = match message_json(0, false) {
+            JsonValue::Object(map) => map,
+            _ => unreachable!(),
+        };
+        map.insert("tag".to_string(), JsonValue::String("old".to_string()));
+        map.insert(
+            "inputs".to_string(),
+            JsonValue::String("{\"options\":7}".to_string()),
+        );
+        let msg = Message::upcast(JsonValue::Object(map)).unwrap();
+        let inputs: JsonValue = serde_json::from_str(&msg.inputs).unwrap();
+        assert_eq!(inputs["options"], JsonValue::Number(7.into()));
+    }
 }

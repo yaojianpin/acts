@@ -201,3 +201,138 @@ fn payload_to_vars(payload: JsonValue) -> Result<Vars> {
             .map_err(|e| ActError::Convert(format!("invalid trigger payload: {e}"))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Engine, Principal};
+
+    /// A missing payload starts with no options, an object is the options,
+    /// and a scalar is malformed input — not silently dropped.
+    #[test]
+    fn a_trigger_payload_becomes_the_start_options() {
+        assert!(payload_to_vars(JsonValue::Null).unwrap().is_empty());
+        let vars = payload_to_vars(serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(vars.get::<i32>("a"), Some(1));
+        let err = payload_to_vars(serde_json::json!(5)).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid trigger payload"),
+            "got: {err}"
+        );
+    }
+
+    #[derive(Clone)]
+    struct ProbePackage;
+
+    #[async_trait::async_trait]
+    impl crate::ActPackage for ProbePackage {
+        fn new(_: &crate::Config) -> crate::Result<Self> {
+            Ok(Self)
+        }
+
+        fn definition() -> crate::ActPackageDefinition {
+            crate::ActPackageDefinition {
+                id: "export.test.probe",
+                name: "probe",
+                desc: "",
+                icon: "",
+                doc: "",
+                version: "0.1.0",
+                schema: serde_json::json!({}),
+                options: None,
+                run_as: crate::ActRunAs::Func,
+                resources: vec![],
+                catalog: crate::ActPackageCatalog::Event,
+            }
+        }
+
+        async fn start(
+            &self,
+            _rt: &dyn crate::ActPackageRuntime,
+            _params: &JsonValue,
+            _options: &Vars,
+        ) -> crate::Result<Option<Vars>> {
+            Ok(Some(Vars::new().with("started", true)))
+        }
+    }
+
+    /// A hook trigger answers the run's own outputs. A failing run answers
+    /// through the error watcher instead of hanging.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hook_trigger_answers_a_failed_run() {
+        let engine = Engine::builder().start().await.unwrap();
+        let executor = engine.executor(&Principal::unrestricted());
+        let model = Workflow::new()
+            .with_id("evt-hook-error")
+            .with_trigger(|trigger| trigger.with_id("event1").with_kind("hook"))
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    "acts.core.action",
+                    Vars::new().with("action", "error").with(
+                        "options",
+                        Vars::new().with(crate::utils::consts::ACT_ERR_CODE, "E1"),
+                    ),
+                )
+            });
+        executor.model().deploy(&model, None).await.unwrap();
+
+        let ret = executor
+            .evt()
+            .start("evt-hook-error:event1", &JsonValue::Null)
+            .await
+            .unwrap()
+            .expect("the hook answers after the run settles");
+        assert_eq!(
+            ret.get::<String>(crate::utils::consts::ACT_ERR_CODE),
+            Some("E1".to_string()),
+            "the error watcher answers the failed run's outputs: {ret}"
+        );
+    }
+
+    /// Firing a custom-kind trigger with no payload reads the trigger's own
+    /// stored params; an unreadable stored payload is a conversion error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_custom_trigger_reads_its_stored_params() {
+        let engine = Engine::builder()
+            .add_package::<ProbePackage>()
+            .start()
+            .await
+            .unwrap();
+        let executor = engine.executor(&Principal::unrestricted());
+        let model = Workflow::new()
+            .with_id("evt-probe")
+            .with_trigger(|trigger| {
+                trigger
+                    .with_id("event1")
+                    .with_kind("export.test.probe")
+                    .with_params_data(serde_json::json!({"p": 1}))
+            })
+            .with_step(|step| step.with_id("s1"));
+        executor.model().deploy(&model, None).await.unwrap();
+
+        let ret = executor
+            .evt()
+            .start("evt-probe:event1", &JsonValue::Null)
+            .await
+            .unwrap()
+            .expect("the package answers");
+        assert_eq!(ret.get::<bool>("started"), Some(true));
+
+        // Corrupt the stored params: the null payload then asks the executor
+        // to deserialize them, and the failure is reported as input.
+        let store = engine.runtime().store();
+        let mut event = store.events().find("evt-probe:event1").await.unwrap();
+        event.params = "not json".to_string();
+        store.events().update(&event).await.unwrap();
+
+        let err = executor
+            .evt()
+            .start("evt-probe:event1", &JsonValue::Null)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("failed to deserialize params"),
+            "got: {err}"
+        );
+    }
+}

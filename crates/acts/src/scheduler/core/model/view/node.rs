@@ -159,3 +159,107 @@ impl From<&str> for NodeKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workflow() -> Workflow {
+        let mut workflow = Workflow::new();
+        workflow.id = "wf".into();
+        workflow.name = "Wf".into();
+        workflow
+    }
+
+    fn contents() -> Vec<NodeContent> {
+        vec![
+            NodeContent::Workflow(Arc::new(workflow())),
+            NodeContent::Branch(Branch::new().with_id("br").with_name("Br")),
+            NodeContent::Step(Step::new().with_id("st").with_name("St")),
+            NodeContent::Act(Act::new().with_id("ac").with_name("Ac")),
+        ]
+    }
+
+    /// Every content variant answers the same question from its own fields;
+    /// the branch/step/act arms are exercised so a variant cannot inherit the
+    /// wrong id/kind by accident.
+    #[test]
+    fn content_accessors_read_the_declaring_node() {
+        let contents = contents();
+        assert_eq!(contents[0].id(), "wf");
+        assert_eq!(contents[1].id(), "br");
+        assert_eq!(contents[2].id(), "st");
+        assert_eq!(contents[3].id(), "ac");
+        assert_eq!(contents[0].name(), "Wf");
+        assert_eq!(contents[1].name(), "Br");
+        assert_eq!(contents[2].name(), "St");
+        assert_eq!(contents[3].name(), "Ac");
+        assert_eq!(contents[0].kind(), NodeKind::Workflow);
+        assert_eq!(contents[1].kind(), NodeKind::Branch);
+        assert_eq!(contents[2].kind(), NodeKind::Step);
+        assert_eq!(contents[3].kind(), NodeKind::Act);
+
+        for content in &contents {
+            assert!(content.vars().is_empty());
+            assert!(content.options().is_empty());
+            assert!(content.exposes().is_empty());
+        }
+        // Only a step and an act declare params; a container has none.
+        assert_eq!(contents[0].params(), serde_json::Value::Null);
+        assert_eq!(contents[1].params(), serde_json::Value::Null);
+        assert_eq!(contents[2].params(), serde_json::Value::Null);
+        assert_eq!(contents[3].params(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_step_params_are_exposed_verbatim() {
+        let step = Step::new()
+            .with_id("st")
+            .with_uses("pack", Vars::new().with("a", 1));
+        let content = NodeContent::Step(step);
+        assert!(content.params().is_object());
+        assert_eq!(content.params()["a"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn node_data_renders_its_persisted_json() {
+        let data = NodeData {
+            id: "st".into(),
+            content: NodeContent::Step(Step::new().with_id("st").with_name("St")),
+            level: 2,
+            parent_id: Some("parent".into()),
+            prev_id: None,
+            next_id: Some("next".into()),
+        };
+        assert_eq!(data.id(), "st");
+        assert_eq!(data.kind(), NodeKind::Step);
+        let json = data.to_string().unwrap();
+        assert!(json.contains("\"id\":\"st\""));
+        assert!(json.contains("\"level\":2"));
+        assert!(json.contains("\"parent_id\":\"parent\""));
+        assert!(json.contains("\"next_id\":\"next\""));
+        assert!(!json.contains("prev_id"), "an absent link is not written");
+    }
+
+    #[test]
+    fn node_kind_converts_both_ways() {
+        for (kind, name) in [
+            (NodeKind::Workflow, "workflow"),
+            (NodeKind::Branch, "branch"),
+            (NodeKind::Step, "step"),
+            (NodeKind::Act, "act"),
+        ] {
+            assert_eq!(kind.to_string(), name);
+            assert_eq!(String::from(kind.clone()), name);
+            assert_eq!(NodeKind::from(name.to_string()), kind);
+            assert_eq!(NodeKind::from(name), kind);
+        }
+        assert_eq!(NodeKind::default(), NodeKind::Workflow);
+    }
+
+    #[test]
+    #[should_panic(expected = "not found NodeKind: bogus")]
+    fn an_unknown_node_kind_panics() {
+        let _ = NodeKind::from("bogus");
+    }
+}

@@ -173,6 +173,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml",
  "url",
 ]
 
@@ -226,10 +227,12 @@ version = "0.25.0"
 dependencies = [
  "acts",
  "async-trait",
+ "parking_lot 0.12.5",
  "redis",
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -247,6 +250,7 @@ dependencies = [
  "toml",
  "tonic",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -287,8 +291,10 @@ name = "acts-proto"
 version = "0.25.0"
 dependencies = [
  "nanoid",
+ "parking_lot 0.12.5",
  "prost",
  "protoc-bin-vendored",
+ "tokio",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -4612,6 +4618,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2",
  "http",
  "http-body",

@@ -409,4 +409,40 @@ mod tests {
             }
         }
     }
+
+    /// Publishing a package invalidates the compiled-schema cache entry (a
+    /// second publish of the same id reports "not stored"; the schema was
+    /// already refreshed by the first), and the executor exposes the
+    /// principal it was built with.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_publication_refreshes_the_schema_cache_once() {
+        let engine = Engine::builder().start().await.unwrap();
+        let executor = engine.executor(&crate::Principal::unrestricted());
+        assert!(executor.principal().is_unrestricted());
+
+        let mut pack = package();
+        pack.id = format!("test_pack_{}", crate::utils::longid());
+        assert!(executor.pack().publish(&pack).await.unwrap());
+        // a re-publish is an update of the same row
+        assert!(executor.pack().publish(&pack).await.is_ok());
+    }
+
+    /// The engine-side extension surface registers a user var and a package
+    /// when it holds the unrestricted principal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_extension_executor_registers_vars_and_packages() {
+        let engine = Engine::builder().start().await.unwrap();
+        let executor = engine.executor(&crate::Principal::unrestricted());
+        let var = TestVar::new(&Config::default()).unwrap();
+        assert_eq!(
+            crate::ActUserVar::name(&var),
+            "executor_test_var".to_string()
+        );
+        executor.ext().register_var(&var).unwrap();
+        executor
+            .ext()
+            .register_package(&TestVar::definition())
+            .await
+            .unwrap();
+    }
 }

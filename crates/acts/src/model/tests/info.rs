@@ -325,3 +325,115 @@ fn model_info_model_arr_to_value() {
     );
     assert_eq!(v.get("data").unwrap().as_str().unwrap(), model.data);
 }
+
+#[test]
+fn model_info_workflow_parses_and_overrides_ver() {
+    let info = ModelInfo {
+        id: "m1".to_string(),
+        name: "model".to_string(),
+        desc: String::new(),
+        ver: "2.0.0".to_string(),
+        size: 0,
+        create_time: 0,
+        update_time: 0,
+        data: "id: m1\nver: 0.1.0\nsteps:\n  - id: s1\n    uses: acts.core.irq\n".to_string(),
+        view: None,
+    };
+    let workflow = info.workflow().unwrap();
+    assert_eq!(workflow.id, "m1");
+    assert_eq!(workflow.ver, "2.0.0");
+}
+
+#[test]
+fn model_info_workflow_invalid_data_is_a_convert_error() {
+    let info = ModelInfo {
+        id: "m1".to_string(),
+        name: "model".to_string(),
+        desc: String::new(),
+        ver: "1.0.0".to_string(),
+        size: 0,
+        create_time: 0,
+        update_time: 0,
+        data: "steps: not-a-list".to_string(),
+        view: None,
+    };
+    let err = info.workflow().unwrap_err();
+    assert!(matches!(err, crate::ActError::Convert(_)), "{err}");
+}
+
+#[test]
+fn model_info_message_from_delivery() {
+    let delivery = data::Delivery {
+        id: "d1".to_string(),
+        msg_id: "m1".to_string(),
+        pid: "p1".to_string(),
+        tid: "t1".to_string(),
+        chan_id: "chan".to_string(),
+        chan_pattern: "*".to_string(),
+        retry_times: 2,
+        create_time: 10,
+        update_time: 20,
+        ..Default::default()
+    };
+    let message = data::Message {
+        id: "m1".to_string(),
+        tid: "t1".to_string(),
+        name: "msg".to_string(),
+        r#type: "act".to_string(),
+        pid: "p1".to_string(),
+        nid: "n1".to_string(),
+        uses: Some("acts.core.msg".to_string()),
+        inputs: "{}".to_string(),
+        outputs: "{}".to_string(),
+        timestamp: 30,
+        ..Default::default()
+    };
+    let info = crate::MessageInfo::from_delivery(&delivery, &message);
+    assert_eq!(info.id, "d1");
+    assert_eq!(info.msg_id, "m1");
+    assert_eq!(info.chan_id, "chan");
+    assert_eq!(info.tid, "t1");
+    assert_eq!(info.name, "msg");
+    assert_eq!(info.r#type, "act");
+    assert_eq!(info.pid, "p1");
+    assert_eq!(info.nid, "n1");
+    assert_eq!(info.uses.as_deref(), Some("acts.core.msg"));
+    assert_eq!(info.create_time, 10);
+    assert_eq!(info.update_time, 20);
+    assert_eq!(info.retry_times, 2);
+    assert_eq!(info.timestamp, 30);
+
+    let value: Value = info.into();
+    assert_eq!(value["id"], "d1");
+    assert_eq!(value["retry_times"], 2);
+}
+
+#[test]
+fn model_info_event_to_value() {
+    let event = data::Event {
+        id: "e1".to_string(),
+        name: "event".to_string(),
+        mid: "m1".to_string(),
+        ver: "0.1.0".to_string(),
+        kind: "schedule".to_string(),
+        params: "{}".to_string(),
+        schedule: Some("* * * * * *".to_string()),
+        last_run: 1,
+        next_run: 2,
+        create_time: 3,
+        timestamp: 4,
+        ..Default::default()
+    };
+    let info: crate::EventInfo = (&event).into();
+    assert_eq!(info.id, "e1");
+    assert_eq!(info.mid, "m1");
+    assert_eq!(info.kind, "schedule");
+    assert_eq!(info.schedule.as_deref(), Some("* * * * * *"));
+    assert_eq!(info.last_run, 1);
+    assert_eq!(info.next_run, 2);
+
+    let value: Value = info.into();
+    assert_eq!(value["id"], "e1");
+    assert_eq!(value["kind"], "schedule");
+    assert_eq!(value["next_run"], 2);
+}

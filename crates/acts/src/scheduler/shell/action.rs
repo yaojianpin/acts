@@ -102,3 +102,70 @@ pub(super) fn decode_action_fact(
         .unwrap_or_default();
     Ok((action, inputs))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::commit::command::ActionKind;
+
+    /// The durable fact is the action's own spelling: every kind and every
+    /// input pair survives the JSON round trip the operation replays.
+    #[test]
+    fn a_fact_round_trips_every_action_and_its_inputs() {
+        let inputs = vec![
+            ("k".to_string(), "\"v\"".to_string()),
+            ("n".to_string(), "1".to_string()),
+        ];
+        for action in [
+            ActionKind::Complete,
+            ActionKind::Submit,
+            ActionKind::Skip,
+            ActionKind::Cancel,
+            ActionKind::Abort,
+            ActionKind::Back,
+            ActionKind::Fail {
+                code: "E1".into(),
+                message: "boom".into(),
+            },
+        ] {
+            let text = action_fact(&action, &inputs);
+            let (decoded, decoded_inputs) = decode_action_fact(&text).unwrap();
+            assert_eq!(decoded, action);
+            assert_eq!(decoded_inputs, inputs);
+        }
+        assert_eq!(action_fact_var(7), "__action@7");
+    }
+
+    /// A fact the engine cannot read back is an engine error naming the
+    /// corruption, never a silent default decision.
+    #[test]
+    fn a_corrupt_fact_is_an_engine_error() {
+        let error = decode_action_fact("not json").unwrap_err();
+        assert!(format!("{error}").contains("corrupt action fact"));
+        let error = decode_action_fact(r#"{"kind":{"action":"explode"}}"#).unwrap_err();
+        assert!(format!("{error}").contains("action 'explode'"), "{error}");
+        // A missing action is spelled empty and still refused.
+        let error = decode_action_fact("{}").unwrap_err();
+        assert!(format!("{error}").contains("action ''"), "{error}");
+    }
+
+    /// Non-array inputs and malformed pairs are skipped: a fact written by an
+    /// older kernel still decodes its action, and a pair that cannot name both
+    /// sides carries no input.
+    #[test]
+    fn malformed_input_pairs_are_skipped() {
+        let text = r#"{"kind":{"action":"fail","code":"E"},"inputs":["x",["only-name"],[1,2],["ok","1"]]}"#;
+        let (action, inputs) = decode_action_fact(text).unwrap();
+        assert_eq!(
+            action,
+            ActionKind::Fail {
+                code: "E".into(),
+                message: "".into(),
+            }
+        );
+        assert_eq!(inputs, vec![("ok".to_string(), "1".to_string())]);
+
+        let (_, inputs) = decode_action_fact(r#"{"kind":{"action":"skip"},"inputs":7}"#).unwrap();
+        assert!(inputs.is_empty());
+    }
+}

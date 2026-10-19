@@ -77,4 +77,10 @@ mod tests {
         let meta = super::MsgPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
+
+    #[test]
+    fn pack_msg_new() {
+        let _package = super::MsgPackage::new(&crate::Config::default()).unwrap();
+        assert_eq!(super::MsgPackage::definition().run_as, crate::ActRunAs::Msg);
+    }
 }

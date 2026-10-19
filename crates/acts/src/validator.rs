@@ -370,4 +370,65 @@ mod tests {
         compile(&cache, "b");
         assert_eq!(cache.len(), 1);
     }
+
+    #[test]
+    fn reinserting_a_key_replaces_the_validator() {
+        let cache = ValidatorCache::with_limits(4, DEFAULT_TTL);
+        compile(&cache, "a");
+        let key = schema("a").to_string();
+        let replacement = Arc::new(Validator::new(&json!({ "type": "string" })).unwrap());
+        cache.insert(&key, replacement.clone());
+
+        assert_eq!(cache.len(), 1);
+        let got = cache.get(&key).unwrap();
+        assert!(Arc::ptr_eq(&got, &replacement));
+    }
+
+    #[test]
+    fn debug_reports_limits_and_len() {
+        let cache = ValidatorCache::with_limits(3, Duration::from_secs(5));
+        compile(&cache, "a");
+        let text = format!("{cache:?}");
+        assert!(text.contains("ValidatorCache"), "{text}");
+        assert!(text.contains("cap: 3"), "{text}");
+        assert!(text.contains("len: 1"), "{text}");
+    }
+
+    #[test]
+    fn defensive_cache_branches_do_not_corrupt_state() {
+        let now = Instant::now();
+        let validator = Arc::new(Validator::new(&json!({ "type": "string" })).unwrap());
+
+        // entries present but the LRU order empty: eviction has nothing to
+        // drop, and the fresh entry is still inserted
+        let mut cache = Cache::default();
+        cache.entries.insert(
+            Arc::from("stale"),
+            Entry {
+                validator: validator.clone(),
+                used: 1,
+                at: now,
+            },
+        );
+        cache.insert("fresh", validator.clone(), 1, DEFAULT_TTL, now);
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.order.len(), 1);
+
+        // remove an entry whose order position is already gone
+        cache.remove("stale");
+        assert!(!cache.entries.contains_key("stale"));
+        // removing a key that is not cached at all is a no-op
+        cache.remove("never-inserted");
+
+        // touching a key with no order position is a no-op
+        cache.touch("ghost", 999, now);
+        assert!(!cache.entries.contains_key("ghost"));
+
+        // touching an order position whose entry vanished re-inserts the
+        // position without updating an entry
+        cache.order.insert(1_000, Arc::from("vanished"));
+        cache.touch("vanished", 1_000, now);
+        assert!(!cache.entries.contains_key("vanished"));
+        assert!(cache.order.values().any(|key| key.as_ref() == "vanished"));
+    }
 }

@@ -757,4 +757,97 @@ dir = "other"
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn create_rejects_a_wrongly_typed_field() {
+        let dir = scratch("wrong-type");
+        let path = write(&dir, "bad-field.toml", "cache_cap = \"not a number\"\n");
+        let err = Config::create(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse the config file"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn overlay_file_reports_unreadable_and_invalid_files() {
+        let dir = scratch("overlay-bad");
+        let base = write(&dir, "base.toml", "cache_cap = 1024\n");
+        let mut config = Config::create(&base).unwrap();
+
+        // an existing path that is not a readable file
+        let err = config.overlay_file(&dir).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to load config file"),
+            "{err}"
+        );
+
+        // a parseable file carrying an invalid field type
+        let bad = write(&dir, "bad-field.toml", "cache_cap = \"bad\"\n");
+        let err = config.overlay_file(&bad).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to parse the merged config"),
+            "{err}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_accepts_defaults_and_refuses_disabled_bounds() {
+        assert!(Config::default().validate().is_ok());
+
+        let mut config = Config::default();
+        config.data.max_message_retry_times = Some(0);
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.data.max_node_run_times = Some(-1);
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.data.workdir = Some("   ".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("workdir cannot be empty"), "{err}");
+
+        let mut config = Config::default();
+        config.data.workdir = Some("data/work".to_string());
+        config.data.max_message_retry_times = Some(1);
+        config.data.max_node_run_times = Some(1);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn cleanup_and_scheduler_limits_clamp() {
+        let defaults = Config::default();
+        assert_eq!(
+            defaults.cleanup_interval_secs(),
+            defaults.tick_interval_secs()
+        );
+        assert_eq!(defaults.scheduler_queue_cap(), 4096);
+
+        let dir = scratch("cleanup-limits");
+        let path = write(
+            &dir,
+            "limits.toml",
+            "tick_interval_secs = 9\ncleanup_interval_secs = 0\nscheduler_queue_cap = 0\ncleanup_batch = 0\n",
+        );
+        let config = Config::create(&path).unwrap();
+        assert_eq!(config.cleanup_interval_secs(), 1);
+        assert_eq!(config.scheduler_queue_cap(), 1);
+        assert_eq!(config.cleanup_batch(), 1);
+
+        let path = write(
+            &dir,
+            "limits2.toml",
+            "cleanup_interval_secs = 30\nscheduler_queue_cap = 64\ncleanup_batch = 512\n",
+        );
+        let config = Config::create(&path).unwrap();
+        assert_eq!(config.cleanup_interval_secs(), 30);
+        assert_eq!(config.scheduler_queue_cap(), 64);
+        assert_eq!(config.cleanup_batch(), 512);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

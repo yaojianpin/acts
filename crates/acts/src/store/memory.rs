@@ -176,6 +176,95 @@ mod tests {
         assert_eq!(keys, ["tasks-pid-a-1", "tasks-pid-a-2", "tasks-pid-a-3"]);
     }
 
+    #[test]
+    fn key_matches_covers_every_operation_and_bound() {
+        // Prefix mismatch is rejected before the operation is examined.
+        assert!(!key_matches(
+            "other-1",
+            "tasks-",
+            "tasks-",
+            &ScanOperation::Eq
+        ));
+
+        assert!(key_matches(
+            "tasks-a-1",
+            "tasks-a-",
+            "tasks-",
+            &ScanOperation::Eq
+        ));
+        assert!(key_matches(
+            "tasks-b-1",
+            "tasks-a-",
+            "tasks-",
+            &ScanOperation::Ne
+        ));
+        assert!(key_matches(
+            "tasks-b-1",
+            "",
+            "tasks-",
+            &ScanOperation::In {
+                values: vec!["tasks-a-".to_string(), "tasks-b-".to_string()]
+            }
+        ));
+
+        let op = ScanOperation::Range {
+            lower: Some("tasks-n-5".to_string()),
+            upper: Some("tasks-n-9".to_string()),
+        };
+        assert!(!key_matches("tasks-n-4", "", "tasks-n-", &op));
+        assert!(key_matches("tasks-n-5", "", "tasks-n-", &op));
+        // The upper bound is exclusive; a key at it is filtered even if the
+        // caller's scan loop let it through.
+        assert!(!key_matches("tasks-n-9", "", "tasks-n-", &op));
+        assert!(!key_matches("tasks-n-10", "", "tasks-n-", &op));
+    }
+
+    #[tokio::test]
+    async fn default_store_is_empty_and_batches_apply_atomically() {
+        use crate::store::StoreGuard;
+
+        let store = MemoryStore::default();
+        assert!(store.one("missing").await.unwrap().is_none());
+
+        // An empty batch is a no-op success.
+        assert!(store.batch(&[], &[]).await.unwrap());
+
+        // A failed guard applies nothing.
+        store.put("k", b"old".to_vec()).await.unwrap();
+        let applied = store
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "k".to_string(),
+                    value: b"new".to_vec(),
+                }],
+                &[StoreGuard::holds("k", b"other".to_vec())],
+            )
+            .await
+            .unwrap();
+        assert!(!applied);
+        assert_eq!(store.one("k").await.unwrap(), Some(b"old".to_vec()));
+
+        // A matching guard applies the put and the delete together.
+        let applied = store
+            .batch(
+                &[
+                    StoreBatchOp::Put {
+                        key: "k2".to_string(),
+                        value: b"v".to_vec(),
+                    },
+                    StoreBatchOp::Delete {
+                        key: "k".to_string(),
+                    },
+                ],
+                &[StoreGuard::holds("k", b"old".to_vec())],
+            )
+            .await
+            .unwrap();
+        assert!(applied);
+        assert!(store.one("k").await.unwrap().is_none());
+        assert_eq!(store.one("k2").await.unwrap(), Some(b"v".to_vec()));
+    }
+
     #[tokio::test]
     async fn range_starts_at_lower_and_stops_at_upper() {
         let store = MemoryStore::new();

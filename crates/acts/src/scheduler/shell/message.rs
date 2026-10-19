@@ -409,4 +409,155 @@ mod tests {
         assert!(seen[1].end_time >= seen[1].start_time);
         assert_eq!(seen[1].cost(), seen[1].end_time - seen[1].start_time);
     }
+
+    /// An error record may carry only one of the two failure facts; each one
+    /// lands in both the inputs and the outputs on its own.
+    #[test]
+    fn an_error_record_may_carry_only_one_failure_fact() {
+        let only_code = message_from_record(&record(
+            "task.failed",
+            &serde_json::json!({
+                "nid": "s1",
+                "name": "s1",
+                "uses": "test.fail",
+                "inputs": {"params": {}},
+                "mid": "wf1",
+                "error": {"code": "EPACKAGE"},
+            })
+            .to_string(),
+        ))
+        .unwrap();
+        assert_eq!(
+            only_code
+                .inputs
+                .get::<String>(consts::ACT_ERR_CODE)
+                .as_deref(),
+            Some("EPACKAGE")
+        );
+        assert_eq!(
+            only_code
+                .outputs
+                .get::<String>(consts::ACT_ERR_CODE)
+                .as_deref(),
+            Some("EPACKAGE")
+        );
+        assert!(
+            only_code
+                .outputs
+                .get::<String>(consts::ACT_ERR_MESSAGE)
+                .is_none()
+        );
+
+        let only_message = message_from_record(&record(
+            "task.failed",
+            &serde_json::json!({
+                "nid": "s1",
+                "name": "s1",
+                "uses": "test.fail",
+                "inputs": {"params": {}},
+                "mid": "wf1",
+                "error": {"message": "boom"},
+            })
+            .to_string(),
+        ))
+        .unwrap();
+        assert_eq!(
+            only_message
+                .outputs
+                .get::<String>(consts::ACT_ERR_MESSAGE)
+                .as_deref(),
+            Some("boom")
+        );
+        assert!(
+            only_message
+                .outputs
+                .get::<String>(consts::ACT_ERR_CODE)
+                .is_none()
+        );
+    }
+
+    /// A payload whose `inputs` is not an object is still a message: the
+    /// payload shape is only the payload, never the topic's identity.
+    #[test]
+    fn a_payload_without_an_inputs_bag_still_maps() {
+        let message = message_from_record(&record(
+            "message.created",
+            &serde_json::json!({
+                "nid": "s1",
+                "name": "s1",
+                "kind": "step",
+                "inputs": "not-a-bag",
+                "mid": "wf1",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+        assert!(message.inputs.is_empty());
+    }
+
+    /// A terminal record the forwarder never saw `created` for closes a
+    /// zero-length window at the delivery instant instead of leaving the
+    /// message with no end (a restarted forwarder, or a skip before any
+    /// announcement).
+    #[test]
+    fn an_unannounced_terminal_message_closes_at_the_delivery_instant() {
+        let payload = serde_json::json!({
+            "nid": "s1",
+            "tid": "t1",
+            "name": "s1",
+            "kind": "step",
+            "inputs": {},
+            "mid": "wf1",
+        })
+        .to_string();
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        {
+            let sink = seen.clone();
+            let mut forwarder =
+                MessageForwarder::new(move |message: &Message| sink.lock().push(message.clone()));
+            forwarder.deliver(&record("task.skipped", &payload));
+        }
+        let seen = seen.lock();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].start_time > 0);
+        assert_eq!(seen[0].end_time, seen[0].start_time);
+        assert_eq!(seen[0].cost(), 0);
+    }
+
+    /// A record with no payload maps onto no message but still confirms the
+    /// delivery: the lifecycle note is a success, not an error.
+    #[test]
+    fn a_lifecycle_note_confirms_delivery_without_a_message() {
+        use crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome;
+        let mut forwarder = MessageForwarder::new(|_: &Message| {
+            panic!("a lifecycle note must not reach the engine channel")
+        });
+        let outcome = forwarder.deliver(&record("task.started", ""));
+        match outcome {
+            DeliveryOutcome::Delivered { receipt } => assert_eq!(receipt, "lifecycle"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    /// A record with a payload is delivered as a message, not as a lifecycle
+    /// note: the receipt names the other outcome.
+    #[test]
+    fn a_payload_record_confirms_delivery_as_a_message() {
+        use crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome;
+        let payload = serde_json::json!({ "nid": "s1" }).to_string();
+        let mut forwarder = MessageForwarder::new(|_: &Message| {});
+        let outcome = forwarder.deliver(&record("message.created", &payload));
+        match outcome {
+            DeliveryOutcome::Delivered { receipt } => assert_eq!(receipt, "message"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    /// A payload without `nid` is not a task/act message (it names no model
+    /// node); it maps onto `None` rather than a message keyed by nothing.
+    #[test]
+    fn a_payload_without_a_node_id_is_not_a_message() {
+        assert!(message_from_record(&record("message.created", r#"{"name":"x"}"#)).is_none());
+        assert!(message_from_record(&record("message.created", "not json")).is_none());
+    }
 }

@@ -60,3 +60,38 @@ impl<'a> Id<'a> {
         self.tid
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_new_and_accessors() {
+        let id = Id::new("pid", "tid");
+        assert_eq!(id.pid(), "pid");
+        assert_eq!(id.tid(), "tid");
+        assert_eq!(id.id(), "pidtid");
+    }
+
+    #[test]
+    fn id_from_splits_the_key_separator() {
+        let raw = format!("pid{}tid", KEY_SEP);
+        let id = Id::from(&raw);
+        assert_eq!(id.pid(), "pid");
+        assert_eq!(id.tid(), "tid");
+        assert_eq!(id.id(), "pidtid");
+
+        // no separator: the whole value is the process id and tid is empty
+        let id = Id::from("onlypid");
+        assert_eq!(id.pid(), "onlypid");
+        assert_eq!(id.tid(), "");
+        assert_eq!(id.id(), "onlypid");
+    }
+
+    #[test]
+    fn generated_ids_have_the_expected_length() {
+        assert_eq!(shortid().len(), 8);
+        assert_eq!(longid().len(), 21);
+        assert_ne!(shortid(), shortid());
+    }
+}

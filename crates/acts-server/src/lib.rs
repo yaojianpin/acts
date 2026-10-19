@@ -853,6 +853,10 @@ mod tests {
     use super::*;
     use acts::MemoryStore;
 
+    /// `ACTS_DATABASE_URL` is process-global: the tests that set or read it
+    /// must not interleave.
+    static DATABASE_URL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn write_config(body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let thread = std::thread::current()
             .name()
@@ -1137,6 +1141,9 @@ ttl = "5m"
 
     #[test]
     fn database_url_prefers_config_then_sled_default() {
+        let _guard = DATABASE_URL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config_dir = Path::new("/tmp/acts");
         let sled = DbConfig::default();
         let pg = DbConfig {
@@ -1331,5 +1338,279 @@ ttl = "5m"
         drop(appender);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The shipped plugin set, the backend names in diagnostics, and the
+    /// config parser's acceptance of a non-default backend.
+    #[test]
+    fn server_plugins_db_type_names_and_config_dir() {
+        let full = ServerPlugins::full();
+        assert!(full.grpc, "the binary registers grpc");
+        assert!(full.web, "the binary registers web");
+        assert!(full.nats, "the binary registers nats");
+        let none = ServerPlugins::default();
+        assert!(!none.grpc && !none.web && !none.nats);
+
+        for (kind, name) in [
+            (DbType::Sled, "sled"),
+            (DbType::Sqlite, "sqlite"),
+            (DbType::Postgres, "postgres"),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(kind.to_string(), name);
+        }
+
+        let (dir, path) = write_config("[db]\ntype = \"sqlite\"\ndatabase_url = \"a.db\"\n");
+        assert_eq!(
+            Config::create(&path)
+                .unwrap()
+                .get::<DbConfig>("db")
+                .unwrap()
+                .kind,
+            DbType::Sqlite
+        );
+        assert_eq!(config_path(&dir), dir.join(CONFIG_FILE_NAME));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    /// `ACTS_CONFIG_DIR` wins; otherwise `$HOME/.acts`, then
+    /// `$USERPROFILE/.acts`, and only with neither does it fall back to a
+    /// relative `.acts` directory.
+    ///
+    /// The environment is process-global, so the values are restored before
+    /// the test returns.
+    #[test]
+    fn config_dir_env_then_home_then_fallback() {
+        let old = [
+            (ACTS_CONFIG_DIR_ENV, std::env::var_os(ACTS_CONFIG_DIR_ENV)),
+            ("HOME", std::env::var_os("HOME")),
+            ("USERPROFILE", std::env::var_os("USERPROFILE")),
+        ];
+        let temp = std::env::temp_dir();
+        let configured = temp.join("acts-configured-dir");
+        let home = temp.join("acts-home");
+        let profile = temp.join("acts-profile");
+
+        unsafe { std::env::set_var(ACTS_CONFIG_DIR_ENV, &configured) };
+        assert_eq!(config_dir(), configured);
+
+        unsafe {
+            std::env::remove_var(ACTS_CONFIG_DIR_ENV);
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &profile);
+        }
+        assert_eq!(config_dir(), home.join(DEFAULT_CONFIG_DIR_NAME));
+
+        unsafe { std::env::remove_var("HOME") };
+        assert_eq!(config_dir(), profile.join(DEFAULT_CONFIG_DIR_NAME));
+
+        unsafe { std::env::remove_var("USERPROFILE") };
+        assert_eq!(config_dir(), PathBuf::from(DEFAULT_CONFIG_DIR_NAME));
+
+        for (key, value) in old {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// A directory that cannot be created is reported, not panicked on.
+    #[test]
+    fn ensure_default_config_reports_an_unusable_directory() {
+        let base = std::env::temp_dir().join(format!("acts-cfg-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+
+        let err = ensure_default_config(&blocker).unwrap_err();
+        assert!(
+            err.to_string().contains("blocker") || err.kind() == std::io::ErrorKind::AlreadyExists,
+            "unexpected error: {err}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The operator-facing text of a lease that blocked startup: a missing row
+    /// and an unreadable row are both still reasons not to start.
+    #[tokio::test]
+    async fn lease_holder_text_reports_missing_and_unreadable_rows() {
+        let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+        assert_eq!(
+            lease_holder_text(&store).await,
+            "the database lease row is held"
+        );
+
+        store
+            .put(acts::LEASE_KEY, b"not a lease record".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            lease_holder_text(&store).await,
+            "the database lease row is unreadable"
+        );
+
+        let record = acts::LeaseRecord {
+            owner: "acts-7".to_string(),
+            fence: 4,
+            expires_at: i64::MAX,
+        };
+        store
+            .put(acts::LEASE_KEY, serde_json::to_vec(&record).unwrap())
+            .await
+            .unwrap();
+        let text = lease_holder_text(&store).await;
+        assert!(text.contains("owner=acts-7"), "got: {text}");
+        assert!(text.contains("fence=4"), "got: {text}");
+    }
+
+    /// `ACTS_DATABASE_URL` overrides `[db].database_url`, even for a backend
+    /// that would otherwise have to error for a missing url.
+    #[test]
+    fn database_url_env_overrides_config() {
+        let _guard = DATABASE_URL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pg_no_url = DbConfig {
+            kind: DbType::Postgres,
+            database_url: None,
+            ..DbConfig::default()
+        };
+        let old = std::env::var_os(ACTS_DATABASE_URL_ENV);
+        unsafe { std::env::set_var(ACTS_DATABASE_URL_ENV, "postgres://env/db") };
+        assert_eq!(
+            database_url(Path::new("/tmp/acts"), &DbConfig::default()).unwrap(),
+            "postgres://env/db"
+        );
+        assert_eq!(
+            database_url(Path::new("/tmp/acts"), &pg_no_url).unwrap(),
+            "postgres://env/db"
+        );
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var(ACTS_DATABASE_URL_ENV, value),
+                None => std::env::remove_var(ACTS_DATABASE_URL_ENV),
+            }
+        }
+    }
+
+    /// Connection URLs and `:memory:` are left alone; a file path gets its
+    /// parent created, and an impossible parent is a store error.
+    #[test]
+    fn ensure_store_dir_handles_urls_memory_and_bad_parents() {
+        ensure_store_dir("postgres://127.0.0.1:5432/acts").unwrap();
+        ensure_store_dir("sqlite://memory").unwrap();
+        ensure_store_dir(":memory:").unwrap();
+
+        let base = std::env::temp_dir().join(format!("acts-store-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let file_store = base.join("made").join("acts.db");
+        ensure_store_dir(&file_store.to_string_lossy()).unwrap();
+        assert!(base.join("made").is_dir());
+
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let nested = blocker.join("nested").join("acts.db");
+        let err = ensure_store_dir(&nested.to_string_lossy()).unwrap_err();
+        assert!(matches!(err, acts::ActError::Store(_)), "got: {err}");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The TTL deserializer accepts unsigned integers, rejects negative ones
+    /// and explains itself on a value of the wrong type.
+    #[test]
+    fn ttl_deserializer_covers_integer_and_type_errors() {
+        let positive: Option<u64> = de_ttl_secs(serde_json::Value::from(42u64)).unwrap();
+        assert_eq!(positive, Some(42));
+
+        let negative: Result<Option<u64>, serde_json::Error> =
+            de_ttl_secs(serde_json::Value::from(-1i64));
+        assert!(
+            negative.unwrap_err().to_string().contains("non-negative"),
+            "a negative ttl must be refused"
+        );
+
+        let bad_type: Result<Option<u64>, serde_json::Error> =
+            de_ttl_secs(serde_json::Value::from(true));
+        let message = bad_type.unwrap_err().to_string();
+        assert!(
+            message.contains("suffixed duration"),
+            "the error explains the accepted forms: {message}"
+        );
+    }
+
+    /// A database whose lease is turned off opens without taking it, and the
+    /// returned handle has no lease to keep.
+    #[tokio::test]
+    async fn open_store_honors_lease_disabled() {
+        let (dir, _) = write_config("");
+        let db = DbConfig {
+            lease: false,
+            ..DbConfig::default()
+        };
+        let opened = open_store(&dir, &db).await.unwrap();
+        assert!(opened.lease().is_none());
+        opened.store.put("k", b"v".to_vec()).await.unwrap();
+        assert_eq!(opened.store.one("k").await.unwrap(), Some(b"v".to_vec()));
+        drop(opened);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A postgres url that cannot be parsed is reported through the normal
+    /// error path (the backend selection still runs) without waiting on a
+    /// network timeout.
+    #[tokio::test]
+    async fn open_store_reports_an_unreachable_postgres() {
+        let dir = std::env::temp_dir().join(format!("acts-pg-{}", std::process::id()));
+        let db = DbConfig {
+            kind: DbType::Postgres,
+            database_url: Some("not-a-postgres-url".to_string()),
+            ..DbConfig::default()
+        };
+        let err = match open_store(&dir, &db).await {
+            Ok(_) => panic!("an unreachable postgres must fail startup"),
+            Err(err) => err,
+        };
+        assert!(!matches!(err, acts::ActError::LeaseHeld(_)), "got: {err}");
+    }
+
+    /// Selecting every plugin is accepted by the builder; a config without the
+    /// optional sections leaves the section-gated plugins out.
+    #[test]
+    fn engine_builder_registers_selected_plugins() {
+        let (dir, path) = write_config(
+            "[grpc]\nhost = \"127.0.0.1\"\nport = 0\n\
+             [web]\nhost = \"127.0.0.1\"\nport = 0\n\
+             [nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts\"\n",
+        );
+        let config = Config::create(&path).unwrap();
+        engine_builder(
+            &config,
+            Arc::new(MemoryStore::new()),
+            &ServerPlugins::full(),
+        )
+        .unwrap();
+
+        let (dir2, path2) = write_config("");
+        let config2 = Config::create(&path2).unwrap();
+        engine_builder(
+            &config2,
+            Arc::new(MemoryStore::new()),
+            &ServerPlugins::full(),
+        )
+        .unwrap();
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&path2).ok();
+        std::fs::remove_dir(&dir).ok();
+        std::fs::remove_dir(&dir2).ok();
     }
 }

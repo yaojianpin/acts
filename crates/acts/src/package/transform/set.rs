@@ -76,4 +76,27 @@ mod tests {
         let meta = super::SetPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
+
+    /// Params that are not a key/value object are the package's input error;
+    /// a map is returned as the next inputs.
+    #[tokio::test]
+    async fn pack_set_execute_rejects_a_non_object() {
+        let ctx = crate::package::tests::completed_context().await;
+        let err = super::SetPackage
+            .execute(&ctx, &serde_json::json!(5))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid ActPackage(acts.transform.set)"),
+            "got: {err}"
+        );
+
+        let outputs = super::SetPackage
+            .execute(&ctx, &serde_json::json!({"a": 1}))
+            .await
+            .unwrap()
+            .expect("a set act exposes its params");
+        assert_eq!(outputs.get::<i32>("a"), Some(1));
+    }
 }

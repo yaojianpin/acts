@@ -21,6 +21,14 @@ tonic = { features = ["transport"], workspace = true }
 # longer carries since 0.14.
 tonic-prost = { workspace = true }
 
+[dev-dependencies]
+# the binding tests drive the generated client/server futures on a runtime.
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+# `gzip` gives the compression-builder tests a concrete encoding to enable; the
+# production dependency graph of this crate keeps it off.
+tonic = { workspace = true, features = ["gzip"] }
+
 [build-dependencies]
 # `transport` is what generates the `connect`/`Channel` halves of the bindings.
 # `cleanup-markdown` (a default in 0.14) is off: it only reformats generated doc

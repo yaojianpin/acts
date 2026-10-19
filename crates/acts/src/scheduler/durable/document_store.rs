@@ -1262,22 +1262,719 @@ mod tests {
         assert_eq!(process_key("é").unwrap(), "kernel/aggregates/c3a9");
     }
 
+    use crate::scheduler::core::commit::aggregate::TaskSnapshot;
+    use crate::scheduler::core::model::model_graph::NodeId;
+    use crate::scheduler::core::model::operation::{
+        ClaimToken, OperationId, OperationKind, OperationRecord, OperationState,
+    };
+    use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
+    use crate::scheduler::core::outbox::records::{OutboxId, OutboxRecord};
+    use crate::scheduler::durable::snapshot_codec::SnapshotCodecV3;
+    use std::collections::HashMap;
+
+    fn source_snapshot() -> ProcessSnapshot {
+        let task = TaskId::new("step", 0).unwrap();
+        let operation_id = OperationId {
+            process_id: "process".into(),
+            task: task.clone(),
+            sequence: 0,
+        };
+        let pending_id = OperationId {
+            process_id: "process".into(),
+            task: task.clone(),
+            sequence: 1,
+        };
+        let outbox_id = OutboxId {
+            process_id: "process".into(),
+            key: "out".into(),
+        };
+        ProcessSnapshot {
+            process_id: "process".into(),
+            version: ProcessVersion {
+                graph: 1,
+                process: 1,
+                operations: 1,
+            },
+            tasks: HashMap::from([(
+                task,
+                TaskSnapshot {
+                    model_node: NodeId::parse("model-step").unwrap(),
+                    parent: None,
+                    predecessors: vec![],
+                    state: TaskState::Ready,
+                    revision: 0,
+                },
+            )]),
+            variables: BTreeMap::new(),
+            operations: HashMap::from([
+                (
+                    operation_id.clone(),
+                    OperationRecord {
+                        id: operation_id,
+                        kind: OperationKind::ExecuteTask,
+                        state: OperationState::Claimed(ClaimToken {
+                            owner: "owner".into(),
+                            fence: 1,
+                            lease_until_ms: 9_000,
+                            heartbeat_revision: 0,
+                        }),
+                        revision: 1,
+                    },
+                ),
+                (
+                    pending_id.clone(),
+                    OperationRecord::pending(pending_id, OperationKind::PropagateTask),
+                ),
+            ]),
+            outbox: HashMap::from([(
+                outbox_id.clone(),
+                OutboxRecord::pending(outbox_id, "topic".into(), "{}".into(), 0).unwrap(),
+            )]),
+        }
+    }
+
+    fn loaded_aggregate(source: &ProcessSnapshot) -> LoadedProcess {
+        let InstallWrite { write, .. } = build_create_transaction(source, 0, 800).unwrap();
+        loaded_after_write(source, write)
+    }
+
+    fn head_document(
+        source: &ProcessSnapshot,
+        epoch: u64,
+        base_seq: u64,
+        next_seq: u64,
+    ) -> Vec<u8> {
+        ProcessLogCodec::encode_head(&HeadPayload {
+            process_id: source.process_id.clone(),
+            version: source.version.clone(),
+            epoch,
+            base_seq,
+            next_seq,
+        })
+        .unwrap()
+    }
+
+    fn all_changes(source: &ProcessSnapshot) -> LogChanges {
+        LogChanges {
+            tasks: source.tasks.keys().cloned().collect(),
+            variables: source.variables.keys().cloned().collect(),
+            operations: source.operations.keys().cloned().collect(),
+            outbox: source.outbox.keys().cloned().collect(),
+        }
+    }
+
+    /// A transaction must carry at least one mutation, and no key may be empty
+    /// or repeated, regardless of whether it is a guard or a mutation.
+    #[test]
+    fn transaction_validation_rejects_empty_batches_and_keys() {
+        assert_eq!(
+            DocumentTransaction::new().validate(),
+            Err(DocumentStoreError(
+                "document transaction has no mutations".into()
+            ))
+        );
+        assert_eq!(
+            DocumentTransaction::new().require_absent(""),
+            Err(DocumentStoreError("empty document guard key".into()))
+        );
+        assert_eq!(
+            DocumentTransaction::new().put("", b"value".to_vec()),
+            Err(DocumentStoreError("empty document mutation key".into()))
+        );
+        assert_eq!(
+            DocumentTransaction::new().delete(""),
+            Err(DocumentStoreError("empty document mutation key".into()))
+        );
+    }
+
+    /// Encoded keys refuse blank process ids, and decoding refuses foreign,
+    /// odd-length, non-hex, uppercase-hex and non-UTF-8 keys.
+    #[test]
+    fn process_keys_are_validated_in_both_directions() {
+        assert_eq!(
+            process_key("   ").unwrap_err(),
+            DocumentRepositoryError::EmptyProcessId
+        );
+        assert_eq!(
+            outbox_index_key("").unwrap_err(),
+            DocumentRepositoryError::EmptyProcessId
+        );
+
+        let foreign = decode_process_key("other/key").unwrap_err().to_string();
+        assert!(foreign.contains("foreign key"));
+        let odd = decode_process_key("kernel/aggregates/abc")
+            .unwrap_err()
+            .to_string();
+        assert!(odd.contains("odd-length"));
+        let non_hex = decode_process_key("kernel/aggregates/zz")
+            .unwrap_err()
+            .to_string();
+        assert!(non_hex.contains("non-hex"));
+        let uppercase = decode_process_key("kernel/aggregates/FF")
+            .unwrap_err()
+            .to_string();
+        assert!(uppercase.contains("non-hex"));
+        let non_utf8 = decode_process_key("kernel/aggregates/ff")
+            .unwrap_err()
+            .to_string();
+        assert!(non_utf8.contains("non-utf8"));
+
+        assert_eq!(decode_process_key(&process_key("é").unwrap()).unwrap(), "é");
+        assert!(is_process_head_key(&process_key("p").unwrap()));
+        assert!(!is_process_head_key(&process_base_key("p").unwrap()));
+        assert!(!is_process_head_key(PROCESS_KEY_PREFIX));
+    }
+
+    /// A log key names its sequence only in canonical zero-padded form, and
+    /// only under its own process's prefix.
+    #[test]
+    fn log_sequence_parsing_is_canonical() {
+        let key = process_log_key("p", 5).unwrap();
+        assert_eq!(process_log_sequence("p", &key), Some(5));
+        assert_eq!(process_log_sequence("q", &key), None);
+        let prefix = process_log_prefix("p").unwrap();
+        assert_eq!(process_log_sequence("p", &format!("{prefix}abc")), None);
+        assert_eq!(process_log_sequence("p", &format!("{prefix}5")), None);
+    }
+
+    #[test]
+    fn replace_and_confirm_transactions_reject_a_foreign_snapshot() {
+        let source = source_snapshot();
+        let loaded = loaded_aggregate(&source);
+        let mut foreign = source.clone();
+        foreign.process_id = "foreign".into();
+
+        let error = build_replace_transaction(
+            &loaded,
+            &foreign,
+            &BTreeMap::new(),
+            None,
+            &LogChanges::default(),
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DocumentRepositoryError::ProcessIdentityMismatch {
+                requested: "process".into(),
+                stored: "foreign".into(),
+            }
+        );
+
+        let error =
+            build_outbox_confirm_transaction(&loaded, &foreign, std::iter::empty::<OutboxId>())
+                .map(|_| ())
+                .unwrap_err();
+        assert_eq!(
+            error,
+            DocumentRepositoryError::ProcessIdentityMismatch {
+                requested: "process".into(),
+                stored: "foreign".into(),
+            }
+        );
+    }
+
+    /// A legacy or partially written aggregate is rebased: a missing base is
+    /// guarded absent, an existing stale base is guarded exactly.
+    #[test]
+    fn replace_transaction_rebases_an_aggregate_without_a_base() {
+        let source = source_snapshot();
+        let base_key = process_base_key(&source.process_id).unwrap();
+        let mut legacy = loaded_aggregate(&source);
+        legacy.legacy = true;
+        legacy.original_base = None;
+        legacy.original_log.clear();
+
+        let InstallWrite {
+            transaction, write, ..
+        } = build_replace_transaction(
+            &legacy,
+            &source,
+            &BTreeMap::new(),
+            None,
+            &LogChanges::default(),
+        )
+        .unwrap();
+        assert_eq!(write.base_seq, 0);
+        assert_eq!(write.next_seq, 0);
+        assert!(write.base.is_some());
+        assert!(write.log_entry.is_none());
+        assert!(
+            transaction
+                .guards()
+                .iter()
+                .any(|guard| { guard.key == base_key && guard.expected.is_none() })
+        );
+
+        let mut stale_base = legacy.clone();
+        stale_base.original_base = Some(b"stale base".to_vec());
+        let InstallWrite { transaction, .. } = build_replace_transaction(
+            &stale_base,
+            &source,
+            &BTreeMap::new(),
+            None,
+            &LogChanges::default(),
+        )
+        .unwrap();
+        assert!(transaction.guards().iter().any(|guard| {
+            guard.key == base_key && guard.expected.as_deref() == Some(b"stale base".as_slice())
+        }));
+    }
+
+    /// An L8 aggregate whose base document is missing but whose head says it
+    /// is not legacy is the same rebase: the head is kept, a fresh base is
+    /// guarded absent. This is the non-legacy half of the rebase decision.
+    #[test]
+    fn replace_transaction_rebases_a_partial_l8_aggregate() {
+        let source = source_snapshot();
+        let base_key = process_base_key(&source.process_id).unwrap();
+        let mut partial = loaded_aggregate(&source);
+        partial.legacy = false;
+        partial.original_base = None;
+        partial.original_log.clear();
+        assert!(!partial.is_legacy());
+        assert!(partial.original_base().is_none());
+
+        let InstallWrite { transaction, write } = build_replace_transaction(
+            &partial,
+            &source,
+            &BTreeMap::new(),
+            None,
+            &LogChanges::default(),
+        )
+        .unwrap();
+        assert!(write.base.is_some());
+        assert_eq!(write.base_seq, 0);
+        assert_eq!(write.next_seq, 0);
+        let guard = transaction
+            .guards()
+            .iter()
+            .find(|guard| guard.key == base_key)
+            .expect("the rebase must guard the base key");
+        assert!(guard.expected.is_none());
+    }
+
+    /// The repair batch guards every observed document and rewrites only the
+    /// indexes whose bytes differ; a consistent aggregate produces no batch.
+    #[test]
+    fn repair_transaction_rewrites_only_changed_indexes() {
+        let source = source_snapshot();
+        let loaded = loaded_aggregate(&source);
+        let recovery_key = recovery_index_key("process").unwrap();
+        let ready_key = ready_index_key("process").unwrap();
+        let outbox_key = outbox_index_key("process").unwrap();
+
+        let transaction = build_repair_transaction(&loaded, None, None)
+            .unwrap()
+            .expect("dropping both indexes is a change");
+        assert!(
+            transaction
+                .guards()
+                .iter()
+                .any(|guard| { guard.key == outbox_key && guard.expected.is_some() })
+        );
+        assert!(transaction.mutations().contains(&DocumentMutation::Delete {
+            key: recovery_key.clone()
+        }));
+        assert!(transaction.mutations().contains(&DocumentMutation::Delete {
+            key: ready_key.clone()
+        }));
+
+        assert!(
+            build_repair_transaction(
+                &loaded,
+                loaded.original_recovery_index(),
+                loaded.original_ready_index(),
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        // Nothing observed means the guards are absent and the writes install
+        // fresh documents.
+        let empty = ProcessSnapshot::empty("empty").unwrap();
+        let empty = loaded_aggregate(&empty);
+        let transaction = build_repair_transaction(
+            &empty,
+            Some(b"recovery".as_slice()),
+            Some(b"ready".as_slice()),
+        )
+        .unwrap()
+        .expect("installing both indexes is a change");
+        assert!(transaction.guards().iter().any(|guard| {
+            guard.key == recovery_index_key("empty").unwrap() && guard.expected.is_none()
+        }));
+        assert!(transaction.mutations().contains(&DocumentMutation::Put {
+            key: ready_index_key("empty").unwrap(),
+            value: b"ready".to_vec(),
+        }));
+    }
+
+    #[test]
+    fn reclaim_transactions_delete_observed_entries_and_logs() {
+        let source = ProcessSnapshot::empty("gone").unwrap();
+        let loaded = loaded_aggregate(&source);
+        let entry_key = format!("{}entry", recovery_entry_process_prefix("gone").unwrap());
+        let transaction =
+            build_reclaim_transaction(&loaded, &[(entry_key.clone(), b"entry".to_vec())]).unwrap();
+        assert!(transaction.guards().iter().any(|guard| {
+            guard.key == entry_key && guard.expected.as_deref() == Some(b"entry".as_slice())
+        }));
+        assert!(
+            transaction
+                .mutations()
+                .contains(&DocumentMutation::Delete { key: entry_key })
+        );
+
+        let base_key = process_base_key("gone").unwrap();
+        let log_key = process_log_key("gone", 3).unwrap();
+        let orphan = build_orphan_reclaim_transaction(
+            "gone",
+            Some(b"base".to_vec()),
+            &[(log_key.clone(), b"log".to_vec())],
+            Some(b"recovery".to_vec()),
+            None,
+            Some(b"ready".to_vec()),
+            &[(String::from("entry"), b"value".to_vec())],
+        )
+        .unwrap();
+        for key in [
+            process_key("gone").unwrap(),
+            base_key.clone(),
+            log_key.clone(),
+            recovery_index_key("gone").unwrap(),
+            outbox_index_key("gone").unwrap(),
+            ready_index_key("gone").unwrap(),
+            "entry".into(),
+        ] {
+            assert!(
+                orphan
+                    .mutations()
+                    .contains(&DocumentMutation::Delete { key: key.clone() }),
+                "{key:?} must be deleted"
+            );
+        }
+        assert!(orphan.guards().iter().any(|guard| {
+            guard.key == base_key && guard.expected.as_deref() == Some(b"base".as_slice())
+        }));
+        assert!(orphan.guards().iter().any(|guard| {
+            guard.key == log_key && guard.expected.as_deref() == Some(b"log".as_slice())
+        }));
+        let head_guard = orphan
+            .guards()
+            .iter()
+            .find(|guard| guard.key == process_key("gone").unwrap())
+            .expect("the orphan head must be guarded absent");
+        assert!(head_guard.expected.is_none());
+    }
+
+    /// Migration is only meaningful for a legacy aggregate, and it replaces a
+    /// stale base and deletes stale log entries the legacy head cannot name.
+    #[test]
+    fn migration_transaction_replaces_stale_family_documents() {
+        let error = build_migration_transaction(&loaded_aggregate(&source_snapshot()))
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already in the L8 format"));
+
+        let source = source_snapshot();
+        let log_key = process_log_key("process", 0).unwrap();
+        let legacy = LoadedProcess {
+            snapshot: source.clone(),
+            original_document: ProcessDocumentCodec::encode(&source).unwrap(),
+            original_base: Some(b"stale base".to_vec()),
+            original_log: BTreeMap::from([(0, b"stale log".to_vec())]),
+            epoch: 0,
+            base_seq: 0,
+            next_seq: 0,
+            legacy: true,
+            original_recovery_index: None,
+            original_outbox_index: None,
+            original_ready_index: None,
+        };
+        let (transaction, head, base) = build_migration_transaction(&legacy).unwrap();
+        assert!(transaction.guards().iter().any(|guard| {
+            guard.key == log_key && guard.expected.as_deref() == Some(b"stale log".as_slice())
+        }));
+        assert!(
+            transaction
+                .mutations()
+                .contains(&DocumentMutation::Delete { key: log_key })
+        );
+        assert!(transaction.mutations().contains(&DocumentMutation::Put {
+            key: process_key("process").unwrap(),
+            value: head,
+        }));
+        assert!(transaction.mutations().contains(&DocumentMutation::Put {
+            key: process_base_key("process").unwrap(),
+            value: base,
+        }));
+    }
+
+    /// Every inconsistency the loader can detect is classified, and a valid
+    /// family loads.
+    #[test]
+    fn decode_loaded_process_classifies_each_inconsistency() {
+        let source = source_snapshot();
+        let log_key = process_log_key("process", 0).unwrap();
+        let base = ProcessLogCodec::encode_base(&source, 0).unwrap();
+        let log = ProcessLogCodec::encode_log(&source, 0, &all_changes(&source)).unwrap();
+        let recovery = recovery_index_document(&source).unwrap();
+        let outbox = outbox_index_document(&source).unwrap();
+        let head = head_document(&source, 1, 0, 1);
+
+        let loaded = decode_loaded_process(
+            "process",
+            head.clone(),
+            Some(base.clone()),
+            &[(log_key.clone(), log.clone())],
+            recovery.clone(),
+            outbox.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(loaded.snapshot, source);
+        assert!(!loaded.is_legacy());
+        assert_eq!(loaded.original_log().len(), 1);
+
+        // The head must name the process it is filed under.
+        let error = decode_loaded_process(
+            "other",
+            head.clone(),
+            Some(base.clone()),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("head names"));
+
+        // An L8 head without a base is damage.
+        let error = decode_loaded_process("process", head.clone(), None, &[], None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no base snapshot"));
+
+        // A legacy-schema base is not this family.
+        let legacy_base = ProcessEnvelope::seal(SnapshotCodecV3::encode(&source).unwrap()).unwrap();
+        let error = decode_loaded_process(
+            "process",
+            head.clone(),
+            Some(legacy_base),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("base uses schema"));
+
+        // The base must cover the sequence the head claims.
+        let moved_base = ProcessLogCodec::encode_base(&source, 7).unwrap();
+        let error = decode_loaded_process(
+            "process",
+            head.clone(),
+            Some(moved_base),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("base covers sequence 7"));
+
+        // A log entry filed under the wrong key, or from another schema, is
+        // refused.
+        let wrong_key = process_log_key("process", 1).unwrap();
+        let error = decode_loaded_process(
+            "process",
+            head.clone(),
+            Some(base.clone()),
+            &[(wrong_key, log.clone())],
+            recovery.clone(),
+            outbox.clone(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("does not name sequence"));
+        let legacy_log = ProcessEnvelope::seal(SnapshotCodecV3::encode(&source).unwrap()).unwrap();
+        let error = decode_loaded_process(
+            "process",
+            head.clone(),
+            Some(base.clone()),
+            &[(log_key.clone(), legacy_log)],
+            recovery.clone(),
+            outbox.clone(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("foreign schema"));
+
+        // An in-window sequence with no entry is damage; an out-of-window
+        // entry is a newer commit and is simply not folded in.
+        let error = decode_loaded_process(
+            "process",
+            head.clone(),
+            Some(base.clone()),
+            &[],
+            recovery.clone(),
+            outbox.clone(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("log sequence 0 is missing"));
+        let outside_key = process_log_key("process", 5).unwrap();
+        let outside = ProcessLogCodec::encode_log(&source, 5, &all_changes(&source)).unwrap();
+        let loaded = decode_loaded_process(
+            "process",
+            head.clone(),
+            Some(base.clone()),
+            &[(log_key.clone(), log.clone()), (outside_key, outside)],
+            recovery.clone(),
+            outbox.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(loaded.original_log().len(), 1);
+
+        // An entry from below the window (a base already covers it) is stale
+        // too: only in-window sequences survive the fold.
+        let stale_key = process_log_key("process", 0).unwrap();
+        let stale_log = ProcessLogCodec::encode_log(&source, 0, &all_changes(&source)).unwrap();
+        let rebased = ProcessLogCodec::encode_base(&source, 2).unwrap();
+        let in_window = ProcessLogCodec::encode_log(&source, 2, &all_changes(&source)).unwrap();
+        let head_at_two = head_document(&source, 1, 2, 3);
+        let loaded = decode_loaded_process(
+            "process",
+            head_at_two,
+            Some(rebased),
+            &[
+                (stale_key, stale_log),
+                (process_log_key("process", 2).unwrap(), in_window),
+            ],
+            recovery.clone(),
+            outbox.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(loaded.original_log().len(), 1);
+        assert_eq!(loaded.base_seq(), 2);
+
+        // The decoded snapshot must be the requested process.
+        let legacy = ProcessDocumentCodec::encode(&source).unwrap();
+        let error = decode_loaded_process("other", legacy.clone(), None, &[], None, None, None)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            DocumentRepositoryError::ProcessIdentityMismatch {
+                requested: "other".into(),
+                stored: "process".into(),
+            }
+        );
+
+        // A legacy head keeps stale log documents so migration/reclaim can
+        // delete them, and the derived indexes must match the rebuilt snapshot.
+        let legacy_loaded = decode_loaded_process(
+            "process",
+            legacy.clone(),
+            Some(b"stale base".to_vec()),
+            &[(log_key.clone(), log.clone())],
+            recovery.clone(),
+            outbox.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(legacy_loaded.is_legacy());
+        assert_eq!(legacy_loaded.original_log().len(), 1);
+        assert_eq!(
+            legacy_loaded.original_base(),
+            Some(b"stale base".as_slice())
+        );
+
+        assert!(matches!(
+            decode_loaded_process(
+                "process",
+                legacy.clone(),
+                None,
+                &[],
+                Some(b"wrong recovery".to_vec()),
+                outbox.clone(),
+                None
+            ),
+            Err(DocumentRepositoryError::RecoveryIndexMismatch { .. })
+        ));
+
+        // A pre-A2 recovery projection (every non-terminal operation) still
+        // loads: it differs from the current projection but matches the legacy
+        // one, so the second half of the mismatch detection is what saves it.
+        let legacy_recovery = legacy_recovery_index_document(&source).unwrap();
+        assert_ne!(legacy_recovery, recovery);
+        let accepted = decode_loaded_process(
+            "process",
+            legacy.clone(),
+            None,
+            &[],
+            legacy_recovery,
+            outbox.clone(),
+            None,
+        )
+        .unwrap();
+        assert!(accepted.is_legacy());
+
+        assert!(matches!(
+            decode_loaded_process(
+                "process",
+                legacy,
+                None,
+                &[],
+                recovery,
+                Some(b"wrong outbox".to_vec()),
+                None
+            ),
+            Err(DocumentRepositoryError::OutboxIndexMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn repository_and_store_errors_are_converted_and_displayed() {
+        let codec: DocumentRepositoryError =
+            ProcessDocumentError::Snapshot(SnapshotCodecError::InvalidMagic).into();
+        assert!(matches!(&codec, DocumentRepositoryError::Codec(_)));
+        assert!(codec.to_string().contains("document repository error"));
+
+        let store: DocumentRepositoryError = DocumentStoreError("boom".into()).into();
+        assert_eq!(
+            store,
+            DocumentRepositoryError::Store(DocumentStoreError("boom".into()))
+        );
+        assert_eq!(DocumentStoreError("boom".into()).to_string(), "boom");
+    }
+
     #[test]
     fn document_transaction_rejects_ambiguity_during_construction() {
         let duplicate_guard = DocumentTransaction::new()
             .require_absent("aggregate")
             .unwrap()
-            .require_exact("aggregate", b"old".to_vec());
-        assert!(
-            matches!(duplicate_guard, Err(DocumentStoreError(message)) if message.contains("duplicate document guard"))
-        );
+            .require_exact("aggregate", b"old".to_vec())
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate_guard.contains("duplicate document guard"));
 
         let duplicate_mutation = DocumentTransaction::new()
             .put("index", b"value".to_vec())
             .unwrap()
-            .delete("index");
-        assert!(
-            matches!(duplicate_mutation, Err(DocumentStoreError(message)) if message.contains("duplicate document mutation"))
-        );
+            .delete("index")
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate_mutation.contains("duplicate document mutation"));
     }
 }

@@ -275,3 +275,108 @@ fn cost_in(cost: i64, min: &str, max: Option<&str>) -> bool {
     }
     ret
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(name: &str, args: &[Value]) -> std::result::Result<Value, ExprError> {
+        match builtin(name).expect("the built-in exists") {
+            Value::Function(function) => function(args),
+            _ => panic!("{name} is not a function"),
+        }
+    }
+
+    fn error(name: &str, args: &[Value]) -> String {
+        call(name, args).unwrap_err().to_string()
+    }
+
+    /// `arity` names the accepted count for a fixed and for a ranged built-in,
+    /// from both the too-few and the too-many side.
+    #[test]
+    fn builtin_arity_names_the_expected_bounds() {
+        let message = error("$step_inputs", &[]);
+        assert!(message.contains("takes 1 argument(s), got 0"), "{message}");
+        let message = error("$step_inputs", &[Value::from("a"), Value::from("b")]);
+        assert!(message.contains("takes 1 argument(s), got 2"), "{message}");
+
+        let message = error("$cost_in", &[]);
+        assert!(
+            message.contains("takes 1 to 2 argument(s), got 0"),
+            "{message}"
+        );
+        let message = error(
+            "$cost_in",
+            &[Value::from("1s"), Value::from("2s"), Value::from("3s")],
+        );
+        assert!(
+            message.contains("takes 1 to 2 argument(s), got 3"),
+            "{message}"
+        );
+
+        // The accepted counts run: a headless step id has no data, and there
+        // is no step list.
+        assert_eq!(
+            call("$step_inputs", &[Value::from("s1")]).unwrap(),
+            Value::Null
+        );
+        match call("$steps", &[]).unwrap() {
+            Value::List(items) => assert!(items.is_empty()),
+            _ => panic!("$steps is a list"),
+        }
+    }
+
+    /// A non-string argument and a missing one each report their position.
+    #[test]
+    fn string_arguments_are_checked() {
+        let message = error("$step_inputs", &[Value::Int(1)]);
+        assert!(
+            message.contains("argument 1 must be a string, got int"),
+            "{message}"
+        );
+        let message = error("$cost_in", &[Value::from("1s"), Value::Int(2)]);
+        assert!(
+            message.contains("argument 2 must be a string, got int"),
+            "{message}"
+        );
+
+        let message = str_arg("$x", &[], 0).unwrap_err().to_string();
+        assert!(message.contains("argument 1 is missing"), "{message}");
+        let message = str_arg("$x", &[], 1).unwrap_err().to_string();
+        assert!(message.contains("argument 2 is missing"), "{message}");
+    }
+
+    /// The minimum alone, and the half-open maximum (`cost < max`) on top.
+    #[test]
+    fn cost_in_tests_the_minimum_and_the_optional_maximum() {
+        assert!(!cost_in(0, "1s", None));
+        assert!(cost_in(2_000, "1s", None));
+        assert!(cost_in(2_000, "1s", Some("10s")));
+        assert!(!cost_in(10_000, "1s", Some("10s")));
+    }
+
+    /// Without a scheduler context there is no process scope to read: `$env`
+    /// still answers the process environment and never an engine-private key.
+    #[test]
+    fn env_map_reads_the_process_without_a_scheduler_context() {
+        std::thread::spawn(|| {
+            assert!(
+                Context::try_with_current(|_| ()).is_err(),
+                "a fresh thread has no context"
+            );
+
+            let map = env_map();
+            let (key, value) = std::env::vars()
+                .find(|(name, _)| !consts::is_private_key(name))
+                .expect("the process has a non-private variable");
+            assert_eq!(map.get::<String>(&key).as_deref(), Some(value.as_str()));
+
+            match builtin("$env").expect("$env exists") {
+                Value::Map(map) => assert!(!map.keys().any(|name| consts::is_private_key(name))),
+                _ => panic!("$env is a map"),
+            }
+        })
+        .join()
+        .expect("the environment thread finishes");
+    }
+}

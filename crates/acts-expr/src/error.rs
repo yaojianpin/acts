@@ -86,3 +86,123 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn position_is_only_present_for_parse_errors() {
+        let parse = Error::parse("expected a value", 7);
+        assert_eq!(parse.position(), Some(7));
+        assert_eq!(
+            parse,
+            Error::Parse {
+                message: "expected a value".to_string(),
+                pos: 7
+            }
+        );
+
+        for error in [
+            Error::Unknown {
+                name: "x".to_string(),
+            },
+            Error::Missing {
+                name: "x".to_string(),
+            },
+            Error::OutOfRange { index: 1, len: 0 },
+            Error::Type {
+                operation: "+",
+                got: "int",
+            },
+            Error::Overflow { operation: "+" },
+            Error::DivideByZero { operation: "/" },
+            Error::Function {
+                name: "f".to_string(),
+                message: "failed".to_string(),
+            },
+            Error::UnknownMethod {
+                name: "m".to_string(),
+            },
+            Error::Convert {
+                message: "bad".to_string(),
+            },
+        ] {
+            assert_eq!(error.position(), None);
+        }
+    }
+
+    #[test]
+    fn display_names_the_problem() {
+        assert_eq!(
+            Error::parse("expected a value", 4).to_string(),
+            "parse error at byte 4: expected a value"
+        );
+        assert_eq!(
+            Error::Unknown {
+                name: "count".to_string()
+            }
+            .to_string(),
+            "unknown variable 'count'"
+        );
+        assert_eq!(
+            Error::Missing {
+                name: "retries".to_string()
+            }
+            .to_string(),
+            "no such member 'retries'"
+        );
+        assert_eq!(
+            Error::OutOfRange { index: 3, len: 2 }.to_string(),
+            "index 3 is out of range for a list of 2"
+        );
+        assert_eq!(
+            Error::Type {
+                operation: "+",
+                got: "string"
+            }
+            .to_string(),
+            "no + for a string value"
+        );
+        assert_eq!(
+            Error::Overflow { operation: "*" }.to_string(),
+            "'*' overflowed an int"
+        );
+        assert_eq!(
+            Error::DivideByZero { operation: "%" }.to_string(),
+            "'%' by zero"
+        );
+        assert_eq!(
+            Error::Function {
+                name: "upper".to_string(),
+                message: "takes 1 argument(s), got 0".to_string()
+            }
+            .to_string(),
+            "'upper' failed: takes 1 argument(s), got 0"
+        );
+        assert_eq!(
+            Error::UnknownMethod {
+                name: "upper".to_string()
+            }
+            .to_string(),
+            "no such method 'upper'"
+        );
+        assert_eq!(
+            Error::Convert {
+                message: "not json".to_string()
+            }
+            .to_string(),
+            "not json"
+        );
+    }
+
+    #[test]
+    fn it_is_a_std_error_with_no_source() {
+        let error = Error::Unknown {
+            name: "x".to_string(),
+        };
+        let std_error: &dyn std::error::Error = &error;
+        assert!(std_error.source().is_none());
+        assert_eq!(format!("{std_error}"), "unknown variable 'x'");
+    }
+}

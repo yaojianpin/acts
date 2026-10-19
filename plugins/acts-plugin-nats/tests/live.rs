@@ -451,3 +451,287 @@ async fn actions_beyond_the_in_flight_bound_are_refused() {
     engine.close().await;
     std::fs::remove_file(&path).ok();
 }
+
+/// One raw (non-JSON) publish to the actions subject with a reply inbox: the
+/// plugin must answer it with an error envelope instead of dropping the
+/// request — and must not treat the unparsable message as a run.
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_payload_is_answered() {
+    let Some(client) = connect_or_skip().await else {
+        return;
+    };
+
+    let subject = "acts-invalid-test.cmd".to_string();
+    let (path, config) =
+        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-invalid-test\"\n");
+    let engine = engine_with_nats_unrestricted(&config).await;
+
+    // warm up: the subscription is live once a well-formed request answers
+    let reply = request_action(
+        &client,
+        subject.clone(),
+        json!({"name": "model:ls", "seq": "warmup"}),
+    )
+    .await;
+    assert!(reply["err"].is_null(), "{reply}");
+
+    let inbox = client.new_inbox();
+    let mut replies = client.subscribe(inbox.clone()).await.unwrap();
+    client
+        .publish_with_reply(subject, inbox, "not json".as_bytes().to_vec().into())
+        .await
+        .unwrap();
+    client.flush().await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(5), replies.next())
+        .await
+        .expect("a malformed payload must be answered")
+        .expect("the reply subscription is live");
+    let reply: JsonValue = serde_json::from_slice(&msg.payload).unwrap();
+    assert!(
+        reply["err"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid payload"),
+        "a malformed payload must be refused: {reply}"
+    );
+
+    // and the same message without a reply inbox is simply dropped
+    client
+        .publish(
+            "acts-invalid-test.cmd",
+            "still not json".as_bytes().to_vec().into(),
+        )
+        .await
+        .unwrap();
+    client.flush().await.unwrap();
+    // a following well-formed request is answered only after the malformed
+    // one (no reply inbox) was consumed
+    let reply = request_action(
+        &client,
+        "acts-invalid-test.cmd".to_string(),
+        json!({"name": "model:ls", "seq": "after-malformed"}),
+    )
+    .await;
+    assert!(reply["err"].is_null(), "{reply}");
+
+    engine.close().await;
+    std::fs::remove_file(&path).ok();
+}
+
+/// Each channel's subject and id are optional: the subject defaults to
+/// `<config.subject>.evt.<id>`, and the id to the subject. Both defaulted
+/// shapes register a live channel.
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_subject_and_id_defaults() {
+    let Some(client) = connect_or_skip().await else {
+        return;
+    };
+
+    let (path, config) = temp_config(
+        "[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-defaults-test\"\n\n\
+         [[nats.channels]]\n\
+         id = \"by-id\"\n\
+         type = \"*\"\n\
+         state = \"*\"\n\
+         uses = \"*\"\n\
+         [nats.channels.options]\n\
+         pid = \"*\"\n\n\
+         [[nats.channels]]\n\
+         subject = \"acts-defaults-test.evt.explicit\"\n",
+    );
+    let engine = engine_with_nats_unrestricted(&config).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut by_id = client
+        .subscribe("acts-defaults-test.evt.by-id")
+        .await
+        .unwrap();
+    let mut explicit = client
+        .subscribe("acts-defaults-test.evt.explicit")
+        .await
+        .unwrap();
+
+    let executor = engine.executor(&acts::Principal::unrestricted());
+    let workflow = Workflow::new()
+        .with_id("nats_defaults_demo")
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses_code("acts.app.javascript", r#"return { output: "done" };"#)
+        });
+    executor.model().deploy(&workflow, None).await.unwrap();
+    executor
+        .proc()
+        .start(&workflow.id, Vars::new().with("pid", "natdefaults"))
+        .await
+        .unwrap();
+
+    for (label, sub) in [
+        ("defaulted subject", &mut by_id),
+        ("defaulted id", &mut explicit),
+    ] {
+        let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
+            .await
+            .unwrap_or_else(|_| panic!("no event on the {label} channel"))
+            .expect("the subscription ended");
+        let envelope: JsonValue = serde_json::from_slice(&msg.payload).unwrap();
+        assert!(
+            envelope["ack"].as_str().unwrap_or_default() != "",
+            "the {label} channel carries the message id: {envelope}"
+        );
+    }
+
+    engine.close().await;
+    std::fs::remove_file(&path).ok();
+}
+
+/// A broker that cannot be reached disables the plugin instead of failing the
+/// engine: the transport is optional, and its connect errors are logged. Both
+/// credential shapes (token, user/password) take the same path.
+#[tokio::test(flavor = "multi_thread")]
+async fn unreachable_broker_leaves_the_engine_running() {
+    for credentials in [
+        "token = \"secret\"\n",
+        "username = \"u\"\npassword = \"p\"\n",
+    ] {
+        let (path, config) = temp_config(&format!(
+            "[nats]\nurl = \"nats://127.0.0.1:1\"\n{credentials}"
+        ));
+        let engine = engine_with_nats_unrestricted(&config).await;
+        // the connect attempt fails in the plugin's background task
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        let models = engine
+            .executor(&acts::Principal::unrestricted())
+            .model()
+            .list(&acts::query::Query::new().limit(1))
+            .await
+            .expect("the engine serves local calls while NATS is unreachable");
+        assert_eq!(models.count, 0);
+        engine.close().await;
+        std::fs::remove_file(&path).ok();
+    }
+}
+
+/// An access control whose `authenticate` always refuses: the shipped
+/// registries answer a tokenless request with the anonymous principal, so a
+/// caller the broker cannot authenticate has no other way to be refused.
+#[derive(Debug)]
+struct RefusingAcl;
+
+impl RefusingAcl {
+    fn failure() -> acts::AclError {
+        acts::AclError::Unauthenticated("no such session".to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl acts::AccessControl for RefusingAcl {
+    async fn load(&self, _store: std::sync::Arc<acts::Store>) -> acts::Result<()> {
+        Ok(())
+    }
+
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    fn authenticate(
+        &self,
+        _token: Option<&str>,
+    ) -> std::result::Result<acts::Principal, acts::AclError> {
+        Err(Self::failure())
+    }
+
+    async fn login(
+        &self,
+        _user: &str,
+        _password: &str,
+    ) -> std::result::Result<acts::LoginTokens, acts::AclError> {
+        Err(Self::failure())
+    }
+
+    async fn refresh(
+        &self,
+        _refresh_token: &str,
+    ) -> std::result::Result<acts::LoginTokens, acts::AclError> {
+        Err(Self::failure())
+    }
+
+    async fn logout(&self, _token: &str) -> acts::Result<bool> {
+        Err(acts::ActError::Unauthenticated("no session".to_string()))
+    }
+
+    async fn set_user(&self, _spec: &acts::UserSpec) -> acts::Result<()> {
+        Err(acts::ActError::Denied("not allowed".to_string()))
+    }
+
+    async fn del_user(&self, _name: &str) -> acts::Result<()> {
+        Err(acts::ActError::Denied("not allowed".to_string()))
+    }
+
+    async fn user_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn get_user(&self, _name: &str) -> Option<JsonValue> {
+        None
+    }
+}
+
+/// A credential the ACL cannot resolve is refused to its caller as an error
+/// envelope, whether or not the request named a reply inbox — and a message
+/// without a reply is dropped after the refusal instead of wedging the loop.
+#[tokio::test(flavor = "multi_thread")]
+async fn unauthenticated_action_is_refused() {
+    let Some(client) = connect_or_skip().await else {
+        return;
+    };
+
+    let subject = "acts-refuse-test.cmd".to_string();
+    let (path, config) =
+        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-refuse-test\"\n");
+    let engine = Engine::builder()
+        .set_config(&config)
+        .set_acl(std::sync::Arc::new(RefusingAcl))
+        .add_plugin(&NatsPlugin::new())
+        .start()
+        .await
+        .unwrap();
+
+    // with a reply inbox: the refusal is answered
+    let reply = request_action(
+        &client,
+        subject.clone(),
+        json!({"name": "model:ls", "seq": "req-anon"}),
+    )
+    .await;
+    assert!(
+        reply["err"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unauthenticated"),
+        "an unauthenticated action must be refused: {reply}"
+    );
+    assert_eq!(reply["ack"], "req-anon");
+
+    // without one: the message is still consumed (a following request gets
+    // its own answer), so it cannot wedge the actions subscription
+    client
+        .publish(
+            subject.clone(),
+            serde_json::to_vec(&json!({"name": "model:ls"}))
+                .unwrap()
+                .into(),
+        )
+        .await
+        .unwrap();
+    client.flush().await.unwrap();
+    let reply = request_action(
+        &client,
+        subject,
+        json!({"name": "model:ls", "seq": "req-after"}),
+    )
+    .await;
+    assert_eq!(reply["ack"], "req-after");
+
+    engine.close().await;
+    std::fs::remove_file(&path).ok();
+}

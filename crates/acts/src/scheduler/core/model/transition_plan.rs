@@ -403,4 +403,164 @@ mod tests {
         assert_eq!(ProcessVersion::decode("1.2.3.4"), None);
         assert_eq!(ProcessVersion::decode("1.x.3"), None);
     }
+
+    fn create(task: &str, generation: u64, state: TaskState) -> TaskCreate {
+        TaskCreate {
+            task: TaskId::new(task, generation).unwrap(),
+            model_node: crate::scheduler::core::model::model_graph::NodeId::parse(task).unwrap(),
+            parent: None,
+            predecessors: vec![],
+            initial_state: state,
+        }
+    }
+
+    #[test]
+    fn an_empty_process_id_is_refused() {
+        let mut p = plan();
+        p.process_id = " ".into();
+        assert_eq!(p.validate(), Err(PlanError::EmptyProcessId));
+    }
+
+    #[test]
+    fn task_creates_are_unique_and_sane() {
+        let mut p = plan();
+        p.state_changes.clear();
+        p.task_creates = vec![
+            create("a", 0, TaskState::Ready),
+            create("a", 0, TaskState::Created),
+        ];
+        assert_eq!(
+            p.validate(),
+            Err(PlanError::DuplicateTaskCreate(TaskId::new("a", 0).unwrap()))
+        );
+
+        let mut p = plan();
+        p.state_changes.clear();
+        p.task_creates = vec![create("a", 0, TaskState::Running)];
+        assert_eq!(
+            p.validate(),
+            Err(PlanError::InvalidInitialState(
+                TaskId::new("a", 0).unwrap(),
+                TaskState::Running
+            ))
+        );
+
+        // A cascade may fold its decision into the create.
+        for state in [TaskState::Skipped, TaskState::Aborted] {
+            let mut p = plan();
+            p.state_changes.clear();
+            p.task_creates = vec![create("a", 0, state)];
+            assert_eq!(p.validate(), Ok(()), "{state:?} is a legal birth state");
+        }
+    }
+
+    #[test]
+    fn predecessors_must_be_other_tasks_and_unique() {
+        for predecessors in [
+            vec![TaskId::new("a", 0).unwrap()],
+            vec![TaskId::new("b", 0).unwrap(), TaskId::new("b", 0).unwrap()],
+        ] {
+            let mut p = plan();
+            p.state_changes.clear();
+            let mut created = create("a", 0, TaskState::Created);
+            created.predecessors = predecessors;
+            p.task_creates = vec![created];
+            assert!(matches!(
+                p.validate(),
+                Err(PlanError::InvalidPredecessor(_, _))
+            ));
+        }
+    }
+
+    #[test]
+    fn variable_writes_are_named_and_unique() {
+        let mut p = plan();
+        p.state_changes.clear();
+        p.variable_writes = vec![VariableWrite {
+            scope: TaskId::new("t1", 0).unwrap(),
+            name: "  ".into(),
+            value: "v".into(),
+        }];
+        assert_eq!(p.validate(), Err(PlanError::EmptyVariableName(task())));
+
+        let mut p = plan();
+        p.state_changes.clear();
+        p.variable_writes = vec![
+            VariableWrite {
+                scope: task(),
+                name: "auto".into(),
+                value: "1".into(),
+            },
+            VariableWrite {
+                scope: task(),
+                name: "auto".into(),
+                value: "0".into(),
+            },
+        ];
+        assert_eq!(
+            p.validate(),
+            Err(PlanError::DuplicateVariableWrite(task(), "auto".into()))
+        );
+    }
+
+    #[test]
+    fn the_source_operation_must_belong_to_the_plan_process() {
+        let mut p = plan();
+        p.source_operation = Some(
+            crate::scheduler::core::model::transition_plan::OperationCommit {
+                id: OperationId {
+                    process_id: "other".into(),
+                    task: task(),
+                    sequence: 3,
+                },
+                claim: crate::scheduler::core::model::operation::ClaimToken {
+                    owner: "r".into(),
+                    fence: 1,
+                    lease_until_ms: 10,
+                    heartbeat_revision: 0,
+                },
+            },
+        );
+        assert!(matches!(p.validate(), Err(PlanError::ForeignOperation(_))));
+    }
+
+    #[test]
+    fn operations_are_unique() {
+        let mut p = plan();
+        let intent = OperationIntent {
+            id: OperationId {
+                process_id: "p1".into(),
+                task: task(),
+                sequence: 1,
+            },
+            kind: OperationKind::PropagateTask,
+            ready_at_ms: None,
+        };
+        p.operations = vec![intent.clone(), intent.clone()];
+        assert_eq!(
+            p.validate(),
+            Err(PlanError::DuplicateOperation(intent.id.clone()))
+        );
+    }
+
+    #[test]
+    fn outbox_keys_are_unique() {
+        let mut p = plan();
+        let item = OutboxIntent {
+            key: "k".into(),
+            topic: "topic".into(),
+            payload: "{}".into(),
+        };
+        p.outbox = vec![item.clone(), item];
+        assert_eq!(p.validate(), Err(PlanError::DuplicateOutboxKey("k".into())));
+    }
+
+    #[test]
+    fn plan_errors_render() {
+        assert!(
+            PlanError::EmptyProcessId
+                .to_string()
+                .starts_with("transition plan error:")
+        );
+    }
 }

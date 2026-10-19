@@ -324,6 +324,7 @@ pub(super) const BRANCH_ERROR_VAR: &str = "__branch_error";
 
 /// One decided execution failure: the error variables a failure operation commits,
 /// plus the legacy task-data name a catch predicate reads.
+#[derive(Debug)]
 pub(super) struct Failure {
     /// The kernel's error code (`error.code`).
     pub(super) code: String,
@@ -699,5 +700,178 @@ mod tests {
             facts("missing"),
             (NodeKind::Step, NodeKind::Step, String::new())
         );
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::scheduler::core::commit::aggregate::ProcessSnapshot;
+    use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
+    use crate::utils::consts;
+    use crate::{MessageState, Vars, model::Workflow};
+
+    fn seeded(workflow: &Workflow) -> ProcessSnapshot {
+        ProcessSpec::from_workflow("p-facts", workflow, &|_| None)
+            .unwrap()
+            .seed_snapshot()
+            .unwrap()
+    }
+
+    fn root() -> TaskId {
+        TaskId::new(consts::TASK_ROOT_TID, 0).unwrap()
+    }
+
+    #[test]
+    fn an_aggregate_without_the_auto_map_or_a_decision_is_an_error() {
+        let workflow = Workflow::new().with_step(|step| step.with_id("s1"));
+        let mut snapshot = seeded(&workflow);
+        snapshot.variables.retain(|(scope, name), _| {
+            !(scope == &root() && name == crate::scheduler::shell::model::AUTO_MAP_VAR)
+        });
+        let error = auto_decision(&snapshot, "s1").unwrap_err();
+        assert!(format!("{error}").contains("no auto map"), "{error}");
+
+        let snapshot = seeded(&workflow);
+        let error = auto_decision(&snapshot, "ghost").unwrap_err();
+        assert!(
+            format!("{error}").contains("no decision for node 'ghost'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_ownerless_aggregate_denies_everything() {
+        let workflow = Workflow::new().with_step(|step| step.with_id("s1"));
+        let mut snapshot = seeded(&workflow);
+        snapshot
+            .variables
+            .retain(|(scope, name), _| !(scope == &root() && name == consts::PROC_OWNER));
+        assert_eq!(owner_of(&snapshot).unwrap(), crate::ScopePolicy::default());
+    }
+
+    #[test]
+    fn exposes_answer_templates_literals_and_names() {
+        let workflow = Workflow::new()
+            .with_var("v", 7)
+            .with_var("named", "from-scope")
+            .with_step(|step| step.with_id("s1"));
+        let snapshot = seeded(&workflow);
+        let variant = |name: &str, value: serde_json::Value| crate::Variant {
+            name: name.to_string(),
+            value,
+            ..crate::Variant::default()
+        };
+        let exposes = vec![
+            variant("templated", serde_json::json!("${{ v }}")),
+            variant("literal", serde_json::json!("plain text")),
+            variant("named", serde_json::Value::Null),
+            variant("missing", serde_json::Value::Null),
+            variant("given", serde_json::json!({"a": 1})),
+        ];
+        let outputs = exposed_variables(&snapshot, &root(), &exposes);
+        assert_eq!(outputs.get::<i32>("templated"), Some(7));
+        assert_eq!(
+            outputs.get::<String>("literal").as_deref(),
+            Some("plain text")
+        );
+        assert_eq!(
+            outputs.get::<String>("named").as_deref(),
+            Some("from-scope")
+        );
+        assert_eq!(
+            outputs.get::<serde_json::Value>("missing"),
+            Some(serde_json::Value::Null)
+        );
+        assert_eq!(
+            outputs.get::<serde_json::Value>("given").unwrap()["a"],
+            serde_json::json!(1)
+        );
+    }
+
+    /// Every execution state has a message state: the terminal seven map onto
+    /// their legacy names, the live four onto `None`.
+    #[test]
+    fn every_execution_state_maps_onto_a_message_state() {
+        for (state, expected) in [
+            (TaskState::Completed, MessageState::Completed),
+            (TaskState::Submitted, MessageState::Submitted),
+            (TaskState::Backed, MessageState::Backed),
+            (TaskState::Cancelled, MessageState::Cancelled),
+            (TaskState::Aborted, MessageState::Aborted),
+            (TaskState::Skipped, MessageState::Skipped),
+            (TaskState::Failed, MessageState::Error),
+            (TaskState::Removed, MessageState::Removed),
+            (TaskState::Created, MessageState::None),
+            (TaskState::Ready, MessageState::None),
+            (TaskState::Running, MessageState::None),
+            (TaskState::Waiting, MessageState::None),
+        ] {
+            assert_eq!(lifecycle_state(state), expected, "{state:?}");
+        }
+    }
+
+    /// A task absent from the aggregate still contributes its own (empty)
+    /// scope; a missing execution is not a panic.
+    #[test]
+    fn input_vars_of_a_missing_execution_are_empty() {
+        let workflow = Workflow::new().with_step(|step| step.with_id("s1"));
+        let snapshot = seeded(&workflow);
+        let ghost = TaskId::new("ghost", 0).unwrap();
+        assert!(input_vars(&snapshot, &ghost).is_empty());
+    }
+
+    #[test]
+    fn an_invalid_predicate_names_the_compile_failure() {
+        let workflow = Workflow::new()
+            .with_var("v", 1)
+            .with_step(|step| step.with_id("s1"));
+        let snapshot = seeded(&workflow);
+        match evaluate_predicate(&snapshot, &root(), "v >", &[]) {
+            crate::scheduler::core::plan::branch::PredicateValue::Invalid { message } => {
+                assert!(!message.is_empty())
+            }
+            other => panic!("expected an invalid predicate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_boolean_predicate_is_invalid() {
+        let workflow = Workflow::new()
+            .with_var("v", 1)
+            .with_step(|step| step.with_id("s1"));
+        let snapshot = seeded(&workflow);
+        match evaluate_predicate(&snapshot, &root(), "v + 1", &[]) {
+            crate::scheduler::core::plan::branch::PredicateValue::Invalid { message } => {
+                assert!(message.contains("must evaluate to a boolean"), "{message}")
+            }
+            other => panic!("expected an invalid predicate: {other:?}"),
+        }
+    }
+
+    /// A timeout handler is a branch node like a `branches` entry: its name is
+    /// resolved through `node_facts`.
+    #[test]
+    fn a_timeout_handler_resolves_as_a_branch_node() {
+        let workflow = Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.transform.set", Vars::new())
+                .with_timeout(|timeout| {
+                    timeout.with_id("t1").with_branch(|branch| {
+                        branch
+                            .with_id("tb")
+                            .with_name("Timeout branch")
+                            .with_if("$cost() >= 1000")
+                    })
+                })
+        });
+        // The handler step itself is a step; its branch is the branch node.
+        assert_eq!(
+            node_facts(&workflow, "t1").declared_kind,
+            crate::NodeKind::Step
+        );
+        let facts = node_facts(&workflow, "tb");
+        assert_eq!(facts.declared_kind, crate::NodeKind::Branch);
+        assert_eq!(facts.name, "Timeout branch");
     }
 }

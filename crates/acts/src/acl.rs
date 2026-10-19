@@ -1090,4 +1090,94 @@ mod tests {
         assert!(principal.is_unrestricted());
         principal.check("model:rm").unwrap();
     }
+
+    #[test]
+    fn acl_error_display_and_act_error_conversions() {
+        let unauth = AclError::Unauthenticated("no token".to_string());
+        assert_eq!(unauth.to_string(), "unauthenticated: no token");
+        let denied = AclError::Denied("nope".to_string());
+        assert_eq!(denied.to_string(), "denied: nope");
+
+        let err: ActError = AclError::Unauthenticated("u".to_string()).into();
+        assert!(matches!(err, ActError::Unauthenticated(_)));
+        let err: ActError = AclError::Denied("d".to_string()).into();
+        assert!(matches!(err, ActError::Denied(_)));
+
+        let err: AclError = ActError::Unauthenticated("u".to_string()).into();
+        assert!(matches!(err, AclError::Unauthenticated(_)));
+        let err: AclError = ActError::Denied("d".to_string()).into();
+        assert!(matches!(err, AclError::Denied(_)));
+        let err: AclError = ActError::Config("bad".to_string()).into();
+        assert!(matches!(err, AclError::Denied(_)));
+        assert!(err.to_string().contains("bad"));
+    }
+
+    #[test]
+    fn an_empty_catalog_token_is_refused() {
+        let err = Principal::from_policy(&UserPolicy {
+            allow: vec!["@".to_string()],
+            ..policy("x")
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("empty allow catalog token"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_snapshot_pattern_is_refused() {
+        let err = Principal::from_policy(&UserPolicy {
+            snapshot: HashMap::from([("secrets".to_string(), vec!["[invalid".to_string()])]),
+            ..policy("x")
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid snapshot pattern"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unauthenticated_scope_and_rn_check_asks_for_login() {
+        let principal = Principal::anonymous();
+        assert!(matches!(
+            principal.check_scope("secrets", "anonymous"),
+            Err(AclError::Unauthenticated(_))
+        ));
+        assert!(matches!(
+            principal.check_rn("orders:eu"),
+            Err(AclError::Unauthenticated(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn anonymous_acl_async_methods_refuse_everything() {
+        let acl = AnonymousAcl;
+        assert!(matches!(
+            acl.login("u", "p").await,
+            Err(AclError::Denied(_))
+        ));
+        assert!(matches!(acl.refresh("r").await, Err(AclError::Denied(_))));
+        assert!(!acl.logout("t").await.unwrap());
+        assert!(acl.set_user(&UserSpec::default()).await.is_err());
+        assert!(acl.del_user("u").await.is_err());
+        assert!(acl.user_names().await.is_empty());
+        assert!(acl.get_user("u").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_acl_async_methods_refuse_registry_work() {
+        let acl = DisabledAcl;
+        assert!(matches!(
+            acl.login("u", "p").await,
+            Err(AclError::Denied(_))
+        ));
+        assert!(matches!(acl.refresh("r").await, Err(AclError::Denied(_))));
+        assert!(!acl.logout("t").await.unwrap());
+        assert!(acl.set_user(&UserSpec::default()).await.is_err());
+        assert!(acl.del_user("u").await.is_err());
+        assert!(acl.user_names().await.is_empty());
+        assert!(acl.get_user("u").await.is_none());
+    }
 }

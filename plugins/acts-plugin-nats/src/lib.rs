@@ -447,6 +447,11 @@ mod tests {
     }
 
     #[test]
+    fn plugin_constructors() {
+        let _ = NatsPlugin::new();
+    }
+
+    #[test]
     fn wire_reply_serde() {
         let reply = WireReply {
             name: "proc:start".to_string(),

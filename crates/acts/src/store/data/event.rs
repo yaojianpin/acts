@@ -180,4 +180,56 @@ mod tests {
         let doc = json!({ "id": "m:e1", "v": 9 });
         assert!(Event::upcast(doc).is_err());
     }
+
+    #[test]
+    fn event_metadata_and_version_defaults() {
+        assert_eq!(Event::iden(), "events");
+        assert_eq!(Event::ordered_index_fields(), &["next_run"]);
+        assert_eq!(Event::version(), 1);
+
+        // A v0 row without a `uses` key (or a non-object v0 body) migrates
+        // without inventing a kind.
+        let doc = json!({
+            "id": "m:e2",
+            "name": "",
+            "mid": "m",
+            "ver": "0.1.0",
+            "kind": "",
+            "params": "{}",
+            "create_time": 0,
+            "timestamp": 0,
+        });
+        let evt = Event::upcast(doc).unwrap();
+        assert_eq!(evt.kind, "");
+        assert_eq!(evt.v, 1);
+    }
+
+    #[test]
+    fn event_default_params_and_from_trigger() {
+        let evt = Event {
+            params: "{\"a\":1}".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(evt.default_params(), json!({"a": 1}));
+
+        let evt = Event {
+            params: "not-json".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(evt.default_params(), JsonValue::Null);
+
+        let trigger = Trigger {
+            name: "t1".to_string(),
+            kind: "manual".to_string(),
+            params: json!({"x": 2}),
+            schedule: Some("* * * * * *".to_string()),
+            ..Default::default()
+        };
+        let evt = Event::from_trigger(&trigger, "m1", "0.1.0", "e1").unwrap();
+        assert_eq!(evt.id, "e1");
+        assert_eq!(evt.kind, "manual");
+        assert_eq!(evt.schedule.as_deref(), Some("* * * * * *"));
+        assert_eq!(evt.default_params(), json!({"x": 2}));
+        assert_eq!(evt.v, Event::version());
+    }
 }

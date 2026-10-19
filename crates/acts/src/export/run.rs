@@ -116,3 +116,27 @@ impl serde::Serialize for RunHandle {
         serializer.serialize_str(&self.pid)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Engine;
+
+    /// The handle is its pid: the accessor, `Display`, `Debug` and the wire
+    /// serialization all answer the same identity.
+    #[tokio::test]
+    async fn a_handle_answers_its_pid() {
+        let engine = Engine::builder().start().await.unwrap();
+        let handle = engine
+            .executor(&crate::Principal::unrestricted())
+            .proc()
+            .handle("run-1")
+            .unwrap();
+        assert_eq!(handle.pid(), "run-1");
+        assert_eq!(handle.to_string(), "run-1");
+        assert_eq!(format!("{handle:?}"), "RunHandle { pid: \"run-1\" }");
+        assert_eq!(
+            serde_json::to_value(&handle).unwrap(),
+            serde_json::json!("run-1")
+        );
+    }
+}

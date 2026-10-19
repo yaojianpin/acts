@@ -456,4 +456,127 @@ mod tests {
             Err(ReadyIndexError::DuplicateOperation(_))
         ));
     }
+
+    #[test]
+    fn decoder_rejects_bad_magic_and_schema() {
+        let bytes =
+            ReadyIndexCodec::encode(&ReadyIndex::project(&snapshot(), 100, 10).unwrap()).unwrap();
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            ReadyIndexCodec::decode(&bad_magic),
+            Err(ReadyIndexError::InvalidMagic)
+        );
+        let mut bad_schema = bytes;
+        bad_schema[8..10].copy_from_slice(&2u16.to_be_bytes());
+        assert_eq!(
+            ReadyIndexCodec::decode(&bad_schema),
+            Err(ReadyIndexError::UnsupportedSchema(2))
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_an_impossible_count_before_allocating() {
+        let index = ReadyIndex::project(&snapshot(), 100, 10).unwrap();
+        let mut bytes = ReadyIndexCodec::encode(&index).unwrap();
+        // MAGIC(8) + schema(2) + process len(4) + process bytes, then count.
+        let process_len = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;
+        let count_at = 14 + process_len;
+        bytes[count_at..count_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            ReadyIndexCodec::decode(&bytes),
+            Err(ReadyIndexError::Truncated)
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_duplicate_entries_and_trailing_bytes() {
+        let index = ReadyIndex::project(&snapshot(), 100, 10).unwrap();
+        let encoded = ReadyIndexCodec::encode(&index).unwrap();
+        // Duplicate the single entry bytes: a second identical entry decodes
+        // as a duplicate identity.
+        let process_len = u32::from_be_bytes(encoded[10..14].try_into().unwrap()) as usize;
+        let count_at = 14 + process_len;
+        let entry_at = count_at + 4;
+        let entry = encoded[entry_at..].to_vec();
+        let mut duplicated = encoded[..count_at].to_vec();
+        duplicated.extend_from_slice(&2u32.to_be_bytes());
+        duplicated.extend_from_slice(&entry);
+        duplicated.extend_from_slice(&entry);
+        assert!(matches!(
+            ReadyIndexCodec::decode(&duplicated),
+            Err(ReadyIndexError::DuplicateOperation(_))
+        ));
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            ReadyIndexCodec::decode(&trailing),
+            Err(ReadyIndexError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn validation_names_each_structural_mistake() {
+        let entry = ReadyEntry {
+            operation_id: OperationId {
+                process_id: "process".into(),
+                task: TaskId::new("step", 0).unwrap(),
+                sequence: 0,
+            },
+            ready_at_ms: 1,
+            source_aggregate_revision: 1,
+        };
+
+        let empty_process = ReadyIndex {
+            process_id: " ".into(),
+            entries: vec![entry.clone()],
+        };
+        assert_eq!(
+            ReadyIndexCodec::encode(&empty_process),
+            Err(ReadyIndexError::EmptyProcessId)
+        );
+
+        let empty = ReadyIndex {
+            process_id: "process".into(),
+            entries: vec![],
+        };
+        assert_eq!(
+            ReadyIndexCodec::encode(&empty),
+            Err(ReadyIndexError::EmptyIndex)
+        );
+
+        let mut foreign = entry.clone();
+        foreign.operation_id.process_id = "other".into();
+        let foreign = ReadyIndex {
+            process_id: "process".into(),
+            entries: vec![foreign],
+        };
+        assert!(matches!(
+            ReadyIndexCodec::encode(&foreign),
+            Err(ReadyIndexError::ForeignOperation(_))
+        ));
+
+        let later = ReadyEntry {
+            ready_at_ms: 2,
+            ..entry.clone()
+        };
+        let unordered = ReadyIndex {
+            process_id: "process".into(),
+            entries: vec![later, entry],
+        };
+        assert_eq!(
+            ReadyIndexCodec::encode(&unordered),
+            Err(ReadyIndexError::NonCanonicalOrder)
+        );
+    }
+
+    #[test]
+    fn ready_index_errors_render() {
+        assert!(
+            ReadyIndexError::EmptyIndex
+                .to_string()
+                .starts_with("ready index error:")
+        );
+    }
 }

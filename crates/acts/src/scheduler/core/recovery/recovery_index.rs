@@ -357,4 +357,75 @@ mod tests {
             Err(RecoveryIndexError::Truncated)
         );
     }
+
+    #[test]
+    fn decoder_rejects_bad_magic_and_schema() {
+        let index = RecoveryIndex {
+            process_id: "p".into(),
+            entries: vec![entry("a", 1)],
+        };
+        let bytes = RecoveryIndexCodec::encode(&index).unwrap();
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            RecoveryIndexCodec::decode(&bad_magic),
+            Err(RecoveryIndexError::InvalidMagic)
+        );
+        let mut bad_schema = bytes;
+        bad_schema[8..10].copy_from_slice(&7u16.to_be_bytes());
+        assert_eq!(
+            RecoveryIndexCodec::decode(&bad_schema),
+            Err(RecoveryIndexError::UnsupportedSchema(7))
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_a_duplicated_entry() {
+        let index = RecoveryIndex {
+            process_id: "p".into(),
+            entries: vec![entry("a", 1)],
+        };
+        let encoded = RecoveryIndexCodec::encode(&index).unwrap();
+        let process_length = usize::try_from(encoded_u32(&encoded, 10)).unwrap();
+        let count_offset = 14 + process_length;
+        let entry_at = count_offset + 4;
+        let entry_bytes = encoded[entry_at..].to_vec();
+        let mut duplicated = encoded[..count_offset].to_vec();
+        duplicated.extend_from_slice(&2u32.to_be_bytes());
+        duplicated.extend_from_slice(&entry_bytes);
+        duplicated.extend_from_slice(&entry_bytes);
+        assert!(matches!(
+            RecoveryIndexCodec::decode(&duplicated),
+            Err(RecoveryIndexError::DuplicateOperation(_))
+        ));
+    }
+
+    #[test]
+    fn validation_names_empty_process_and_index() {
+        let empty_process = RecoveryIndex {
+            process_id: " ".into(),
+            entries: vec![entry("a", 0)],
+        };
+        assert_eq!(
+            RecoveryIndexCodec::encode(&empty_process),
+            Err(RecoveryIndexError::EmptyProcessId)
+        );
+        let empty = RecoveryIndex {
+            process_id: "p".into(),
+            entries: vec![],
+        };
+        assert_eq!(
+            RecoveryIndexCodec::encode(&empty),
+            Err(RecoveryIndexError::EmptyIndex)
+        );
+    }
+
+    #[test]
+    fn recovery_index_errors_render() {
+        assert!(
+            RecoveryIndexError::EmptyIndex
+                .to_string()
+                .starts_with("recovery index error:")
+        );
+    }
 }

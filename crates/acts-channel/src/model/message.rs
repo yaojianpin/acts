@@ -196,3 +196,163 @@ fn str_to_message_state(s: &str) -> MessageState {
         _ => MessageState::None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Message, MessageState};
+    use crate::Vars;
+    use serde_json::json;
+
+    fn message() -> Message {
+        Message {
+            id: "m1".to_string(),
+            tid: "t1".to_string(),
+            nid: "n1".to_string(),
+            mid: "mid1".to_string(),
+            name: "act1".to_string(),
+            state: "completed".to_string(),
+            r#type: "req".to_string(),
+            pid: "p1".to_string(),
+            inputs: Vars::new().with("params", Vars::new().with("key", "k1")),
+            outputs: Vars::new(),
+            tag: "g1".to_string(),
+            start_time: 10,
+            end_time: 35,
+            retry_times: 2,
+        }
+    }
+
+    #[test]
+    fn every_state_maps_to_and_from_its_wire_text() {
+        assert_eq!(MessageState::default(), MessageState::None);
+        let states = [
+            (MessageState::None, "none"),
+            (MessageState::Created, "created"),
+            (MessageState::Completed, "completed"),
+            (MessageState::Submitted, "submitted"),
+            (MessageState::Backed, "backed"),
+            (MessageState::Cancelled, "cancelled"),
+            (MessageState::Aborted, "aborted"),
+            (MessageState::Skipped, "skipped"),
+            (MessageState::Error, "error"),
+            (MessageState::Removed, "removed"),
+        ];
+        for (state, text) in states {
+            assert_eq!(state.to_string(), text);
+            assert_eq!(String::from(&state), text);
+            assert_eq!(MessageState::from(text), state);
+            assert_eq!(MessageState::from(text.to_string()), state);
+        }
+
+        // an unknown wire text falls back to the neutral state
+        assert_eq!(MessageState::from("unknown"), MessageState::None);
+        assert_eq!(
+            MessageState::from(String::from("unknown")),
+            MessageState::None
+        );
+    }
+
+    #[test]
+    fn terminal_states_are_completed() {
+        for state in [
+            MessageState::Completed,
+            MessageState::Cancelled,
+            MessageState::Submitted,
+            MessageState::Backed,
+            MessageState::Error,
+            MessageState::Skipped,
+            MessageState::Aborted,
+            MessageState::Removed,
+        ] {
+            assert!(state.is_completed(), "{state:?} must be terminal");
+        }
+        assert!(!MessageState::None.is_completed());
+        assert!(!MessageState::Created.is_completed());
+    }
+
+    #[test]
+    fn accessors_read_the_wire_fields() {
+        let message = message();
+        assert_eq!(message.state(), MessageState::Completed);
+        assert!(message.is_state("completed"));
+        assert!(!message.is_state("created"));
+        assert!(message.is_tag("g1"));
+        assert!(!message.is_tag("other"));
+        assert_eq!(message.type_of("req").map(|m| m.id.as_str()), Some("m1"));
+        assert!(message.type_of("msg").is_none());
+        assert_eq!(message.tag_of("g1").map(|m| m.id.as_str()), Some("m1"));
+        assert!(message.tag_of("other").is_none());
+        assert_eq!(message.cost(), 25);
+        assert!(message.is_params_key("k1"));
+        assert!(!message.is_params_key("other"));
+    }
+
+    #[test]
+    fn cost_is_only_measured_for_a_completed_message() {
+        let created = Message {
+            state: "created".to_string(),
+            start_time: 1,
+            end_time: 100,
+            ..Default::default()
+        };
+        assert_eq!(created.cost(), 0);
+        // the default state text is empty, which maps to `None`
+        assert_eq!(Message::default().cost(), 0);
+    }
+
+    #[test]
+    fn is_params_key_needs_a_params_map_with_a_key() {
+        assert!(!Message::default().is_params_key("k"));
+
+        let not_a_map = Message {
+            inputs: Vars::new().with("params", "text"),
+            ..Default::default()
+        };
+        assert!(!not_a_map.is_params_key("k"));
+
+        let no_key = Message {
+            inputs: Vars::new().with("params", Vars::new()),
+            ..Default::default()
+        };
+        assert!(!no_key.is_params_key("k"));
+
+        let other_key = Message {
+            inputs: Vars::new().with("params", Vars::new().with("key", "other")),
+            ..Default::default()
+        };
+        assert!(!other_key.is_params_key("k"));
+    }
+
+    #[test]
+    fn serde_roundtrip_defaults_the_tag() {
+        let message = message();
+        let text = serde_json::to_string(&message).unwrap();
+        let back: Message = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.id, "m1");
+        assert_eq!(back.tag, "g1");
+        assert_eq!(back.retry_times, 2);
+        assert_eq!(
+            back.inputs
+                .get::<Vars>("params")
+                .unwrap()
+                .get::<String>("key")
+                .as_deref(),
+            Some("k1")
+        );
+
+        // `tag` is defaulted so payloads written before it existed still decode
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        value.as_object_mut().unwrap().remove("tag");
+        let back: Message = serde_json::from_value(value).unwrap();
+        assert_eq!(back.tag, "");
+
+        assert_eq!(
+            serde_json::to_value(MessageState::Completed).unwrap(),
+            json!("Completed")
+        );
+        assert_eq!(
+            serde_json::from_value::<MessageState>(json!("Error")).unwrap(),
+            MessageState::Error
+        );
+    }
+}

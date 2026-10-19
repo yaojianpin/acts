@@ -152,3 +152,16 @@ fn model_branch_with_expose() {
     let b = Branch::new().with_expose(Variant::create("v1", 0));
     assert!(b.exposes().contains_key("v1"));
 }
+
+#[test]
+fn model_branch_model_base_id() {
+    use crate::ModelBase;
+    let b = Branch::new().with_id("branch-id");
+    assert_eq!(b.id(), "branch-id");
+}
+
+#[test]
+fn model_branch_if() {
+    let b = Branch::new().with_if("${{ a > 1 }}");
+    assert_eq!(b.r#if.as_deref(), Some("${{ a > 1 }}"));
+}

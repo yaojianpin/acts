@@ -124,3 +124,86 @@ impl DbCollectionIden for TaskVars {
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task() -> Task {
+        Task {
+            id: "p1-t1".into(),
+            pid: "p1".into(),
+            tid: "t1".into(),
+            node_data: "{}".into(),
+            kind: "step".into(),
+            prev: None,
+            next: Vec::new(),
+            parent: None,
+            name: "test".into(),
+            state: "running".into(),
+            err: None,
+            start_time: 0,
+            end_time: 0,
+            timestamp: 1000,
+            source_revision: "g.p.0".into(),
+            v: Task::version(),
+        }
+    }
+
+    #[test]
+    fn task_metadata_and_state_setters() {
+        assert_eq!(Task::iden(), "tasks");
+        assert_eq!(
+            Task::ordered_index_fields(),
+            &["timestamp", "start_time", "end_time"]
+        );
+        assert_eq!(Task::version(), 0);
+
+        let mut row = task();
+        row.set_state(LegacyTaskState::Completed);
+        assert_eq!(row.state, "completed");
+        row.set_start_time(10);
+        row.set_end_time(20);
+        assert_eq!((row.start_time, row.end_time), (10, 20));
+    }
+
+    #[test]
+    fn task_upcast_current_and_missing_version() {
+        let json = serde_json::to_value(task()).unwrap();
+        assert_eq!(Task::upcast(json).unwrap().id, "p1-t1");
+
+        let mut json = serde_json::to_value(task()).unwrap();
+        json.as_object_mut().unwrap().remove("v");
+        let restored = Task::upcast(json).unwrap();
+        assert_eq!(restored.v, 0, "missing v decodes as the oldest version");
+    }
+
+    #[test]
+    fn task_upcast_rejects_unknown_version() {
+        let mut json = serde_json::to_value(task()).unwrap();
+        json["v"] = serde_json::json!(42);
+        let err = Task::upcast(json).unwrap_err();
+        assert!(err.to_string().contains("unsupported task version: 42"));
+    }
+
+    #[test]
+    fn task_vars_upcast_current_and_rejects_unknown_version() {
+        assert_eq!(TaskVars::iden(), "vars");
+        assert_eq!(TaskVars::version(), 0);
+
+        let vars = TaskVars {
+            id: "p1-t1".into(),
+            pid: "p1".into(),
+            tid: "t1".into(),
+            data: "{}".into(),
+            sealed: String::new(),
+            source_revision: String::new(),
+            v: TaskVars::version(),
+        };
+        let json = serde_json::to_value(&vars).unwrap();
+        assert_eq!(TaskVars::upcast(json).unwrap().id, "p1-t1");
+
+        let err = TaskVars::upcast(serde_json::json!({"id": "x", "v": 9})).unwrap_err();
+        assert!(err.to_string().contains("unsupported task vars version: 9"));
+    }
+}

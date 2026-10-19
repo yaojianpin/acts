@@ -467,4 +467,58 @@ mod tests {
         assert_eq!(expr.op, ExprOp::In);
         assert_eq!(expr.value(), &json!(["only"]));
     }
+
+    #[test]
+    fn filter_push_and_or_build_nested_trees() {
+        use super::{Filter, FilterExpr, FilterType};
+
+        let nested = Filter::or().expr(Expr::eq("a", 1));
+        let outer = Filter::and().expr(Expr::eq("b", 2)).push(nested);
+        assert_eq!(outer.r#type, FilterType::And);
+        assert_eq!(outer.exprs.len(), 2);
+        match &outer.exprs[1] {
+            FilterExpr::Filter(inner) => {
+                assert_eq!(inner.r#type, FilterType::Or);
+                assert_eq!(inner.exprs.len(), 1);
+            }
+            FilterExpr::Expr(_) => panic!("push must nest a filter"),
+        }
+
+        let empty = Filter::or();
+        assert_eq!(empty.r#type, FilterType::Or);
+        assert!(empty.exprs.is_empty());
+    }
+
+    #[test]
+    fn query_default_matches_new() {
+        use super::Query;
+
+        let default = Query::default();
+        let new = Query::new();
+        assert_eq!(default.offset, new.offset);
+        assert_eq!(default.limit, new.limit);
+        assert!(default.filter.is_none());
+        assert!(default.order_by.is_empty());
+        assert_eq!(new.limit, 100000);
+    }
+
+    #[test]
+    fn query_json_conversions_round_trip_and_reject_bad_input() {
+        use super::{Query, Sort};
+
+        let query = Query::new().offset(5).limit(10).order("ts", Sort::Desc);
+        let value: serde_json::Value = query.try_into().unwrap();
+        assert_eq!(value["offset"], json!(5));
+        assert_eq!(value["limit"], json!(10));
+        assert_eq!(value["order_by"][0]["field"], json!("ts"));
+
+        let restored = Query::try_from(value).unwrap();
+        assert_eq!(restored.offset, 5);
+        assert_eq!(restored.limit, 10);
+        assert_eq!(restored.order_by.len(), 1);
+        assert_eq!(restored.order_by[0].order, Sort::Desc);
+
+        let err = Query::try_from(json!("nope")).unwrap_err();
+        assert!(matches!(err, crate::ActError::Convert(_)));
+    }
 }

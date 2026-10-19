@@ -334,6 +334,74 @@ mod tests {
         assert_eq!(assembled, source);
     }
 
+    /// Each reader only accepts its own schema; a document sealed for the
+    /// other family is an unsupported version, not a payload failure.
+    #[test]
+    fn readers_reject_the_other_schema_family() {
+        let l8 = ProcessEnvelope::seal_v2(b"anything".to_vec()).unwrap();
+        assert_eq!(
+            ProcessDocumentCodec::decode(&l8),
+            Err(ProcessDocumentError::Envelope(
+                EnvelopeError::UnsupportedSchema(
+                    crate::scheduler::durable::envelope::AGGREGATE_SCHEMA_VERSION
+                )
+            ))
+        );
+
+        let legacy = ProcessEnvelope::seal(b"anything".to_vec()).unwrap();
+        let expected = EnvelopeError::UnsupportedSchema(
+            crate::scheduler::durable::envelope::LEGACY_AGGREGATE_SCHEMA_VERSION,
+        );
+        assert_eq!(
+            ProcessLogCodec::decode_head(&legacy),
+            Err(ProcessDocumentError::Envelope(expected.clone()))
+        );
+        assert_eq!(
+            ProcessLogCodec::decode_log(&legacy),
+            Err(ProcessDocumentError::Envelope(expected))
+        );
+    }
+
+    /// Assembly refuses a base or a log entry from another aggregate instead
+    /// of mixing two processes into one snapshot.
+    #[test]
+    fn assembly_rejects_documents_from_another_process() {
+        let source = snapshot();
+        let head = HeadPayload {
+            process_id: source.process_id.clone(),
+            version: source.version.clone(),
+            epoch: 1,
+            base_seq: 0,
+            next_seq: 1,
+        };
+        let mut foreign = source.clone();
+        foreign.process_id = "foreign".into();
+        let error = ProcessLogCodec::assemble(foreign, &head, &[]).unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+
+        let entry = LogPayload {
+            process_id: "foreign".into(),
+            sequence: 0,
+            tasks: Vec::new(),
+            variables: Vec::new(),
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        };
+        let error = ProcessLogCodec::assemble(source.clone(), &head, &[entry]).unwrap_err();
+        assert!(error.to_string().contains("belongs to"));
+    }
+
+    #[test]
+    fn document_error_display_names_the_document() {
+        let error = ProcessDocumentError::Snapshot(SnapshotCodecError::InvalidMagic);
+        assert!(error.to_string().contains("aggregate document error"));
+        assert_eq!(error, SnapshotCodecError::InvalidMagic.into());
+        assert_eq!(
+            ProcessDocumentError::Envelope(EnvelopeError::TruncatedHeader),
+            EnvelopeError::TruncatedHeader.into()
+        );
+    }
+
     /// The L8 golden. The V3 *payload* golden above did not move: the base and
     /// every log record keep the V3 record layout. What L8 changed is the
     /// document family — a head payload, a base snapshot and a per-commit log

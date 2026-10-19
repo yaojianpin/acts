@@ -357,3 +357,102 @@ fn model_vars_value_validate_ok_untyped() {
         );
     }
 }
+
+#[test]
+fn model_schema_new_none_and_schema() {
+    let schema = ActSchema::new();
+    assert!(schema.is_empty());
+    assert_eq!(schema.schema(), json!({}));
+    assert!(schema.simple().is_none());
+    assert!(schema.multiple().is_none());
+}
+
+#[test]
+fn model_schema_wrong_variant_accessors_return_none() {
+    let simple = ActSchema::Simple(Variant::create("a", 1));
+    assert!(simple.multiple().is_none());
+
+    let multiple = ActSchema::Multiple(vec![Variant::create("a", 1)]);
+    assert!(multiple.simple().is_none());
+}
+
+#[test]
+fn model_vars_from_iter_and_collections() {
+    let vars: Vars = [("a".to_string(), json!(1)), ("b".to_string(), json!(2))]
+        .into_iter()
+        .collect();
+    assert_eq!(vars.len(), 2);
+    assert_eq!(vars.get::<i32>("b").unwrap(), 2);
+
+    let map = serde_json::Map::from_iter([("c".to_string(), json!(3))]);
+    let vars: Vars = map.into();
+    assert_eq!(vars.get::<i32>("c").unwrap(), 3);
+
+    let vars: Vars = vec![Variant::create("d", 4), Variant::create("e", 5)].into();
+    assert_eq!(vars.get::<i32>("d").unwrap(), 4);
+    assert_eq!(vars.get::<i32>("e").unwrap(), 5);
+}
+
+#[test]
+fn model_vars_from_non_object_value_is_empty() {
+    let vars: Vars = json!([1, 2, 3]).into();
+    assert!(vars.is_empty());
+
+    let value: serde_json::Value = vars.into();
+    assert_eq!(value, json!({}));
+}
+
+#[test]
+fn model_vars_extend_and_append() {
+    let base = Vars::new().with("a", 1).with("b", 2);
+    let merged = base.extend(Vars::new().with("b", 20).with("c", 3));
+    assert_eq!(merged.get::<i32>("a").unwrap(), 1);
+    assert_eq!(merged.get::<i32>("b").unwrap(), 20);
+    assert_eq!(merged.get::<i32>("c").unwrap(), 3);
+
+    let mut left = Vars::new().with("a", 1).with("shared", 1);
+    let mut right = Vars::new().with("b", 2).with("shared", 2);
+    left.append(&mut right);
+    assert_eq!(left.get::<i32>("a").unwrap(), 1);
+    assert_eq!(left.get::<i32>("b").unwrap(), 2);
+    assert_eq!(left.get::<i32>("shared").unwrap(), 2);
+    assert!(right.is_empty());
+}
+
+#[test]
+fn model_vars_get_and_pop_type_mismatch() {
+    let mut vars = Vars::new().with("a", "text");
+    assert!(vars.get::<i32>("a").is_none());
+    assert!(vars.get::<i32>("missing").is_none());
+    assert!(vars.pop::<i32>("missing").is_none());
+    // the value is removed even when it cannot be decoded as the asked type
+    assert!(vars.pop::<i32>("a").is_none());
+    assert!(vars.get_value("a").is_none());
+
+    let mut vars = Vars::new().with("a", 7);
+    assert_eq!(vars.pop::<i32>("a"), Some(7));
+}
+
+#[test]
+fn model_vars_debug_iterators_and_deref_mut() {
+    let mut vars = Vars::new().with("a", 1).with("b", 2);
+    assert_eq!(vars.to_string(), serde_json::to_string(&vars).unwrap());
+    assert!(format!("{vars:?}").contains("\"a\":1"));
+
+    let owned: Vec<(String, serde_json::Value)> = (&vars).into_iter().collect();
+    assert_eq!(owned.len(), 2);
+
+    let mut count = 0;
+    for (_k, v) in &mut vars {
+        if v.as_i64() == Some(1) {
+            *v = json!(10);
+        }
+        count += 1;
+    }
+    assert_eq!(count, 2);
+    assert_eq!(vars.get::<i32>("a").unwrap(), 10);
+
+    // DerefMut gives Map's own mutation api
+    vars.insert("c".to_string(), json!(3));
+    assert_eq!(vars.len(), 3);
+}

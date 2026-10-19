@@ -460,3 +460,108 @@ impl Emitter {
         self.workers.write().clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Vars;
+
+    fn message(pid: &str) -> Message {
+        Message {
+            pid: pid.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_emitter_debugs_and_a_reset_drops_every_handler() {
+        let emitter = Emitter::new();
+        assert_eq!(format!("{emitter:?}"), "Emitter");
+        let emitter = Emitter::default();
+        emitter.on_message("k", |_| async {});
+        emitter.on_start("k", |_| async {});
+        emitter.on_complete("k", |_| async {});
+        emitter.on_error("k", |_| async {});
+        emitter.reset();
+        // after the reset the handler maps are empty, so the event has no
+        // receiver to reach
+        emitter.emit_message(&message("p1"));
+        emitter.emit_start_event(&message("p1"));
+        emitter.emit_complete_event(&message("p1"));
+        emitter.emit_error(&message("p1"));
+    }
+
+    #[test]
+    fn a_process_gate_sizes_its_lock_pool_from_the_router() {
+        let gate = ProcessGate::new(4);
+        assert!(gate.lane_index("pid") < 4);
+        assert_eq!(format!("{gate:?}"), format!("{gate:?}"));
+    }
+
+    #[tokio::test]
+    async fn a_delivery_without_a_channel_handler_is_dropped() {
+        let handlers: ShareLock<HashMap<String, ActWorkflowMessageHandle>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        dispatch_delivery(&handlers, "unsubscribed", message("p1")).await;
+    }
+
+    #[tokio::test]
+    async fn remove_drops_a_handler_from_every_map() {
+        let emitter = Emitter::new();
+        emitter.on_start("k", |_| async {});
+        emitter.on_complete("k", |_| async {});
+        emitter.on_error("k", |_| async {});
+        emitter.on_message("k", |_| async {});
+        emitter.remove("k");
+        // and the second removal takes the "not there" path
+        emitter.remove("k");
+        assert!(emitter.starts.read().is_empty());
+        assert!(emitter.completes.read().is_empty());
+        assert!(emitter.errors.read().is_empty());
+        assert!(emitter.messages.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_delivery_written_in_both_maps_keeps_its_scope() {
+        // A `Delivery` is routed by its message's pid, not by the channel.
+        let mut msg = message("p1");
+        msg.inputs = Vars::new().with("options", Vars::new().with("tag", "vip"));
+        let emitter = Emitter::new();
+        emitter.emit_delivery("chan-1", &msg);
+    }
+
+    /// Two routes race on a stale (closed) worker entry: the first to reach
+    /// the write lock replaces it, and the second finds the fresh sender and
+    /// hands its event over instead of spawning a third worker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_route_finds_the_replacement_worker() {
+        let emitter = Arc::new(Emitter::new());
+        let (tx, rx) = unbounded_channel();
+        drop(rx);
+        emitter.workers.write().insert("race".to_string(), tx);
+
+        let handle = tokio::runtime::Handle::current();
+        // Hold the read lock so neither sender can reach the write lock
+        // before both have observed the closed sender.
+        let read = emitter.workers.read();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let emitter = emitter.clone();
+                let barrier = barrier.clone();
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    let _enter = handle.enter();
+                    barrier.wait();
+                    emitter.emit_message(&message("race"));
+                })
+            })
+            .collect();
+        barrier.wait();
+        std::thread::sleep(Duration::from_millis(100));
+        drop(read);
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+}

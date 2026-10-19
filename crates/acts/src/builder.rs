@@ -346,3 +346,78 @@ impl EngineBuilder {
         &mut self.config
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AnonymousAcl, MemoryStore};
+
+    #[test]
+    fn builder_default_is_new() {
+        let builder = EngineBuilder::default();
+        assert_eq!(builder.config().log().dir, "log");
+        assert!(builder.store.is_none());
+        assert!(builder.acl.is_none());
+    }
+
+    #[test]
+    fn builder_set_and_disable_acl() {
+        let builder = EngineBuilder::new().set_acl(Arc::new(AnonymousAcl));
+        assert!(builder.acl.is_some());
+        assert!(builder.acl.as_ref().unwrap().enabled());
+
+        let builder = EngineBuilder::new().disable_acl();
+        assert!(!builder.acl.as_ref().unwrap().enabled());
+    }
+
+    #[test]
+    fn builder_sets_workdir_and_worker_limits() {
+        let builder = EngineBuilder::new()
+            .workdir("/tmp/acts")
+            .max_message_retry_times(3)
+            .max_node_run_times(5)
+            .scheduler_workers(2)
+            .scheduler_queue_cap(16)
+            .store_writer_workers(3)
+            .store_writer_queue_cap(32)
+            .tick_interval_secs(7)
+            .cache_size(64)
+            .log("logs", "DEBUG");
+
+        let config = builder.config();
+        assert_eq!(
+            config.workdir().unwrap(),
+            std::path::PathBuf::from("/tmp/acts")
+        );
+        assert_eq!(config.data.scheduler_workers, Some(2));
+        assert_eq!(config.data.scheduler_queue_cap, Some(16));
+        assert_eq!(config.data.store_writer_workers, Some(3));
+        assert_eq!(config.data.store_writer_queue_cap, Some(32));
+        assert_eq!(config.data.tick_interval_secs, Some(7));
+        assert_eq!(config.data.cache_cap, Some(64));
+        assert_eq!(config.max_message_retry_times(), 3);
+        assert_eq!(config.max_node_run_times(), 5);
+        assert_eq!(config.log().dir, "logs");
+        assert_eq!(config.log().level, "DEBUG");
+    }
+
+    #[test]
+    #[should_panic(expected = "store already set")]
+    fn builder_refuses_a_second_store() {
+        let _ = EngineBuilder::new()
+            .set_store(Arc::new(MemoryStore::new()))
+            .set_store(Arc::new(MemoryStore::new()));
+    }
+
+    #[test]
+    fn builder_rejects_a_missing_config_source() {
+        let path = std::env::temp_dir().join("acts-builder-missing-config-file.toml");
+        let _ = std::fs::remove_file(&path);
+        assert!(EngineBuilder::new().set_config_source(&path).is_err());
+        assert!(
+            EngineBuilder::new()
+                .set_config_source(std::path::Path::new("."))
+                .is_err()
+        );
+    }
+}

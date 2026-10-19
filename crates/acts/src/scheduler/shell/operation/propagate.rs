@@ -381,3 +381,133 @@ impl ActOperation for PropagateTask {
         Ok(plan)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
+
+    fn host() -> std::sync::Arc<KernelHost> {
+        KernelHost::in_memory().0
+    }
+
+    fn id(node: &str) -> TaskId {
+        TaskId::new(node, 0).unwrap()
+    }
+
+    fn intent(sequence: u64) -> OperationIntent {
+        OperationIntent {
+            id: OperationId {
+                process_id: "p".into(),
+                task: id("s1"),
+                sequence,
+            },
+            kind: OperationKind::PropagateTask,
+            ready_at_ms: None,
+        }
+    }
+
+    /// A flow only exists when the aggregate carries a declaring model; an
+    /// aggregate seeded before the model fact has none.
+    #[tokio::test]
+    async fn no_model_means_no_declared_flow() {
+        let host = host();
+        let mut snapshot = ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap();
+        let root = id("root");
+        snapshot
+            .variables
+            .remove(&(root.clone(), super::super::model::MODEL_VAR.to_string()));
+        assert!(host.flow_of(&snapshot, &root).await.unwrap().is_none());
+    }
+
+    /// A `while` whose guard still holds after the iteration re-enters the
+    /// node instead of following its declared next.
+    #[tokio::test]
+    async fn a_holding_while_reopens_the_node() {
+        let host = host();
+        let workflow =
+            crate::model::Workflow::new().with_step(|step| step.with_id("s1").with_while("true"));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let mut snapshot = spec.seed_snapshot().unwrap();
+        let source = id("s1");
+        snapshot.tasks.get_mut(&source).unwrap().state = TaskState::Completed;
+        let target = host
+            .flow_of(&snapshot, &source)
+            .await
+            .unwrap()
+            .expect("a flow");
+        assert_eq!(target.node, "s1");
+        assert!(target.reopen, "a loop turn is a fresh generation");
+    }
+
+    /// A join for an execution the aggregate no longer holds says nothing.
+    #[tokio::test]
+    async fn a_join_message_for_a_missing_parent_is_ignored() {
+        let host = host();
+        let snapshot = ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap();
+        let mut plan = TransitionPlan {
+            process_id: "p".into(),
+            expected: snapshot.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        };
+        host.attach_join_message(&snapshot, &mut plan, &id("ghost"), &intent(3))
+            .unwrap();
+        assert!(plan.outbox.is_empty());
+    }
+
+    /// A package-less container speaks its own completion at the join.
+    #[tokio::test]
+    async fn a_package_less_parent_announces_its_join() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| step.with_id("a"));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        let mut plan = TransitionPlan {
+            process_id: "p".into(),
+            expected: snapshot.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        };
+        host.attach_join_message(&snapshot, &mut plan, &id("a"), &intent(4))
+            .unwrap();
+        assert_eq!(plan.outbox.len(), 1);
+        assert_eq!(plan.outbox[0].topic, "task.completed");
+    }
+
+    /// A `uses` container announced its act at the fan-out; the join adds
+    /// nothing for it.
+    #[tokio::test]
+    async fn a_package_parent_suppresses_the_join_message() {
+        let host = host();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_uses("pkg.test", crate::Vars::new()));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        let mut plan = TransitionPlan {
+            process_id: "p".into(),
+            expected: snapshot.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        };
+        host.attach_join_message(&snapshot, &mut plan, &id("s1"), &intent(5))
+            .unwrap();
+        assert!(plan.outbox.is_empty());
+    }
+}

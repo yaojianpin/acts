@@ -403,4 +403,173 @@ mod tests {
         assert_eq!(folded.state_changes[0].from, TaskState::Running);
         assert_eq!(folded.state_changes[0].to, TaskState::Failed);
     }
+
+    /// A plan with no pure-internal hand-off is returned untouched: the
+    /// scratch snapshot is never built.
+    #[tokio::test]
+    async fn a_plan_without_hand_offs_is_returned_as_is() {
+        let (host, _wake) = KernelHost::in_memory();
+        let snapshot =
+            crate::scheduler::core::commit::aggregate::ProcessSnapshot::empty("p").unwrap();
+        let plan = TransitionPlan {
+            process_id: "p".into(),
+            expected: snapshot.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: vec![OperationIntent {
+                id: crate::scheduler::core::model::operation::OperationId {
+                    process_id: "p".into(),
+                    task: task("a", 0),
+                    sequence: 0,
+                },
+                kind: OperationKind::ExecuteTask,
+                ready_at_ms: None,
+            }],
+            outbox: Vec::new(),
+        };
+        let folded = host
+            .fold_internal(&snapshot, plan.clone(), 0)
+            .await
+            .unwrap();
+        assert_eq!(folded, plan);
+    }
+
+    fn seeded() -> crate::scheduler::core::commit::aggregate::ProcessSnapshot {
+        let mut snapshot = crate::scheduler::shell::ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap();
+        snapshot.tasks.get_mut(&task("root", 0)).unwrap().state = TaskState::Completed;
+        snapshot
+    }
+
+    fn propagate(sequence: u64) -> OperationIntent {
+        OperationIntent {
+            id: crate::scheduler::core::model::operation::OperationId {
+                process_id: "p".into(),
+                task: task("root", 0),
+                sequence,
+            },
+            kind: OperationKind::PropagateTask,
+            ready_at_ms: None,
+        }
+    }
+
+    fn handoff_plan(operations: Vec<OperationIntent>) -> TransitionPlan {
+        TransitionPlan {
+            process_id: "p".into(),
+            expected: crate::scheduler::core::model::transition_plan::ProcessVersion {
+                graph: 1,
+                process: 0,
+                operations: 1,
+            },
+            task_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations,
+            outbox: Vec::new(),
+        }
+    }
+
+    /// A cascade that re-derives the same hand-off twice (two settled
+    /// predecessors) folds it once.
+    #[tokio::test]
+    async fn the_same_hand_off_twice_is_planned_once() {
+        let (host, _wake) = KernelHost::in_memory();
+        let snapshot = seeded();
+        let intent = propagate(1);
+        let once = host
+            .fold_internal(&snapshot, handoff_plan(vec![intent.clone()]), 0)
+            .await
+            .unwrap();
+        let twice = host
+            .fold_internal(&snapshot, handoff_plan(vec![intent.clone(), intent]), 0)
+            .await
+            .unwrap();
+        assert_eq!(twice, once, "the duplicate hand-off folded twice");
+    }
+
+    /// The same operation identity re-created as a different kind is a
+    /// planning inconsistency, not a merge.
+    #[tokio::test]
+    async fn one_operation_planned_as_two_kinds_is_an_error() {
+        let (host, _wake) = KernelHost::in_memory();
+        let snapshot = seeded();
+        let intent = propagate(1);
+        let mut other = intent.clone();
+        other.kind = OperationKind::SkipTask;
+        let error = host
+            .fold_internal(&snapshot, handoff_plan(vec![intent, other]), 0)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error}").contains("re-creates operation"),
+            "{error}"
+        );
+    }
+
+    /// A pending change for a task the scratch snapshot does not hold is
+    /// ignored (the plan it came from was formed defensively).
+    #[test]
+    fn applying_a_change_for_a_missing_task_is_a_no_op() {
+        let mut snapshot =
+            crate::scheduler::core::commit::aggregate::ProcessSnapshot::empty("p").unwrap();
+        let id = crate::scheduler::core::model::operation::OperationId {
+            process_id: "p".into(),
+            task: task("a", 0),
+            sequence: 0,
+        };
+        let plan = TransitionPlan {
+            process_id: "p".into(),
+            expected: snapshot.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: vec![StateChange {
+                task: task("ghost", 0),
+                expected_revision: 0,
+                from: TaskState::Ready,
+                to: TaskState::Running,
+            }],
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: vec![OperationIntent {
+                id: id.clone(),
+                kind: OperationKind::PropagateTask,
+                ready_at_ms: None,
+            }],
+            outbox: Vec::new(),
+        };
+        apply_pending(&mut snapshot, &plan);
+        assert!(snapshot.tasks.is_empty());
+        assert_eq!(snapshot.operations[&id].kind, OperationKind::PropagateTask);
+    }
+
+    /// A batch that creates an execution may only settle it terminally.
+    #[test]
+    fn settling_a_created_execution_non_terminally_is_an_error() {
+        let mut folded = TransitionPlan {
+            process_id: "p".into(),
+            expected: version(),
+            task_creates: vec![create("b2")],
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        };
+        let created = HashMap::from([(task("b2", 0), 0)]);
+        let error = merge_change(
+            &mut folded,
+            &created,
+            StateChange {
+                task: task("b2", 0),
+                expected_revision: 0,
+                from: TaskState::Ready,
+                to: TaskState::Running,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error}").contains("non-terminal"), "{error}");
+    }
 }

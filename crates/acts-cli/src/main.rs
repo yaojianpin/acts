@@ -86,3 +86,13 @@ fn show_help_tip() {
     let text = "tap 'help' to list available subcommands and some concept guides";
     println!("{text}");
 }
+
+#[cfg(test)]
+mod tests {
+    /// The startup tip is part of the REPL's product, and printing it must not
+    /// panic when stdout is a captured pipe.
+    #[test]
+    fn the_help_tip_is_printed() {
+        super::show_help_tip();
+    }
+}

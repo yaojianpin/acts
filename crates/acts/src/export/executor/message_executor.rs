@@ -159,3 +159,129 @@ impl MessageExecutor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Engine, Principal,
+        data::{Delivery, DeliveryStatus, Message},
+    };
+
+    fn delivery(id: &str, msg_id: &str, status: DeliveryStatus) -> Delivery {
+        Delivery {
+            id: id.to_string(),
+            msg_id: msg_id.to_string(),
+            chan_id: "chan".to_string(),
+            status,
+            ..Default::default()
+        }
+    }
+
+    fn message(id: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            r#type: "act".to_string(),
+            ..Default::default()
+        }
+    }
+
+    async fn executor(engine: &Engine) -> MessageExecutor {
+        MessageExecutor::new(&engine.runtime(), &Arc::new(Principal::unrestricted()))
+    }
+
+    /// A delivery whose canonical message row is gone is dropped from the
+    /// list (its metadata still counts it) and reported as an error by `get`.
+    #[tokio::test]
+    async fn an_orphan_delivery_is_dropped_from_the_list() {
+        let engine = Engine::builder().start().await.unwrap();
+        let store = engine.runtime().store();
+        store
+            .deliveries()
+            .create(&delivery("d1", "missing", DeliveryStatus::Created))
+            .await
+            .unwrap();
+
+        let executor = executor(&engine).await;
+        let page = executor.list(&Query::new()).await.unwrap();
+        assert!(page.rows.is_empty());
+        assert_eq!(page.count, 1);
+
+        let err = executor.get("d1").await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot find message for delivery 'd1'"),
+            "got: {err}"
+        );
+    }
+
+    /// A joined delivery answers the message it carries.
+    #[tokio::test]
+    async fn a_delivery_joins_its_message() {
+        let engine = Engine::builder().start().await.unwrap();
+        let store = engine.runtime().store();
+        store.messages().create(&message("m1")).await.unwrap();
+        store
+            .deliveries()
+            .create(&delivery("d1", "m1", DeliveryStatus::Delivered))
+            .await
+            .unwrap();
+
+        let executor = executor(&engine).await;
+        let info = executor.get("d1").await.unwrap();
+        assert_eq!(info.id, "d1");
+        assert_eq!(executor.list(&Query::new()).await.unwrap().rows.len(), 1);
+    }
+
+    /// `redeliver` re-sends an error delivery, and silently does nothing when
+    /// the canonical message is gone (the row is still reset for a later
+    /// retry).
+    #[tokio::test]
+    async fn redeliver_resets_and_re_sends_an_error_delivery() {
+        let engine = Engine::builder().start().await.unwrap();
+        let store = engine.runtime().store();
+        store.messages().create(&message("m1")).await.unwrap();
+        store
+            .deliveries()
+            .create(&delivery("d1", "m1", DeliveryStatus::Error))
+            .await
+            .unwrap();
+        // a second row whose message is missing exercises the drop path
+        store
+            .deliveries()
+            .create(&delivery("d2", "gone", DeliveryStatus::Error))
+            .await
+            .unwrap();
+
+        let executor = executor(&engine).await;
+        executor.redeliver("d1").await.unwrap();
+        executor.redeliver("d2").await.unwrap();
+        // neither row exists at all: nothing to reset, nothing to send
+        executor.redeliver("absent").await.unwrap();
+
+        for id in ["d1", "d2"] {
+            assert_eq!(
+                store.deliveries().find(id).await.unwrap().status,
+                DeliveryStatus::Created
+            );
+        }
+    }
+
+    /// Clearing one error delivery deletes exactly that row.
+    #[tokio::test]
+    async fn clearing_one_error_delivery_deletes_it() {
+        let engine = Engine::builder().start().await.unwrap();
+        let store = engine.runtime().store();
+        store
+            .deliveries()
+            .create(&delivery("d1", "m1", DeliveryStatus::Error))
+            .await
+            .unwrap();
+
+        let executor = executor(&engine).await;
+        executor.clear_delivery("d1").await.unwrap();
+        assert!(store.deliveries().find_opt("d1").await.unwrap().is_none());
+        // an absent row is a no-op
+        executor.clear_delivery("d1").await.unwrap();
+    }
+}

@@ -88,3 +88,38 @@ impl std::fmt::Display for EventAction {
         f.write_str(self.as_ref())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_accepts_a_wire_name_and_reports_an_unknown_one() {
+        assert_eq!(EventAction::parse("next").unwrap(), EventAction::Next);
+        assert_eq!(
+            EventAction::parse("set_process_vars").unwrap(),
+            EventAction::SetProcessVars
+        );
+        let err = EventAction::parse("no_such_action").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot find the action define 'no_such_action'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn display_matches_the_wire_name() {
+        assert_eq!(EventAction::Next.to_string(), "next");
+        assert_eq!(EventAction::Submit.to_string(), "submit");
+        assert_eq!(EventAction::SetProcessVars.to_string(), "set_process_vars");
+    }
+
+    #[test]
+    fn an_event_wraps_its_inner_value() {
+        let event = Event::from_inner(7u8);
+        assert_eq!(*event, 7);
+        assert_eq!(event.inner(), &7);
+        assert_eq!(format!("{event:?}"), "7");
+    }
+}

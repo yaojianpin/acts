@@ -141,3 +141,46 @@ fn reserved_error_fields_are_rejected_for_every_action() {
         );
     }
 }
+
+#[test]
+fn an_empty_input_name_is_rejected_before_commit() {
+    let mut command = command(ActionKind::Complete);
+    command.inputs = vec![("  ".into(), "v".into())];
+    assert_eq!(
+        ActionPlanner::validate_command(&command),
+        Err(CommandError::EmptyInputName)
+    );
+}
+
+#[test]
+fn the_command_envelope_must_match_the_snapshot() {
+    let mut wrong_process = command(ActionKind::Complete);
+    wrong_process.process_id = "other".into();
+    assert!(matches!(
+        ActionPlanner::plan(&snapshot(TaskState::Waiting), &wrong_process),
+        Err(CommandError::WrongProcess { .. })
+    ));
+
+    let mut foreign_source = command(ActionKind::Complete);
+    foreign_source.source_operation.id.process_id = "other".into();
+    assert!(matches!(
+        ActionPlanner::plan(&snapshot(TaskState::Waiting), &foreign_source),
+        Err(CommandError::ForeignSourceOperation(_))
+    ));
+
+    let mut wrong_target = command(ActionKind::Complete);
+    wrong_target.source_operation.id.task = TaskId::new("elsewhere", 0).unwrap();
+    assert_eq!(
+        ActionPlanner::plan(&snapshot(TaskState::Waiting), &wrong_target),
+        Err(CommandError::SourceOperationTargetsDifferentTask)
+    );
+}
+
+#[test]
+fn command_errors_render() {
+    assert!(
+        CommandError::EmptyInputName
+            .to_string()
+            .starts_with("command error:")
+    );
+}

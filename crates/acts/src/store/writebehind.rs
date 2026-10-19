@@ -525,6 +525,8 @@ mod tests {
         fail_put: AtomicBool,
         gate: AtomicBool,
         in_gate: AtomicBool,
+        /// Number of `put`s that have parked on the gate (never reset).
+        entered: AtomicUsize,
         /// When set, only the `put`s whose key carries this substring (a pid)
         /// park on the gate: holds one shard's write in flight while every
         /// other shard keeps applying.
@@ -554,6 +556,7 @@ mod tests {
                 fail_put: AtomicBool::new(false),
                 gate: AtomicBool::new(false),
                 in_gate: AtomicBool::new(false),
+                entered: AtomicUsize::new(0),
                 gate_key: Mutex::new(None),
                 join: AtomicUsize::new(0),
                 in_flight: AtomicUsize::new(0),
@@ -643,6 +646,7 @@ mod tests {
         async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
             let _gate = self.join_gate().await;
             if self.gate.load(Ordering::SeqCst) || self.key_gated(key) {
+                self.entered.fetch_add(1, Ordering::SeqCst);
                 self.in_gate.store(true, Ordering::SeqCst);
                 while self.gate.load(Ordering::SeqCst) || self.key_gated(key) {
                     tokio::time::sleep(Duration::from_millis(1)).await;
@@ -754,6 +758,69 @@ mod tests {
     async fn flush_is_clean_without_failures() {
         let (_, _, writer) = test_writer();
         writer.flush().await.unwrap();
+    }
+
+    /// Two failing writes on one shard: the shard keeps the first failure
+    /// (the second does not replace it) and the flush still reports it.
+    #[tokio::test]
+    async fn flush_keeps_the_first_of_several_shard_failures() {
+        let (_, kv, writer) = test_writer();
+        kv.set_fail(true);
+        // The same pid maps to the same shard, so both writes are handled by
+        // one writer task and its `failed` slot is already taken by the second.
+        enqueue(&writer, "same").await;
+        enqueue(&writer, "same").await;
+        let err = writer.flush().await.unwrap_err();
+        assert!(err.to_string().contains("injected"), "{err}");
+    }
+
+    /// Two shards whose consumers are aborted after their barriers were
+    /// queued: the flush sees two dropped acks and keeps the first one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flush_keeps_the_first_of_two_dropped_barrier_acks() {
+        let kv = Arc::new(TestKv::new());
+        let store = Arc::new(Store::new(kv.clone()));
+        let writer = StoreWriter::spawn(store, 2, 8, shared(2));
+
+        // Park both shard writers inside a write, so both barriers queue
+        // behind them instead of being acked.
+        kv.arm_gate();
+        let (a, b) = pids_on_distinct_shards(2);
+        enqueue(&writer, &a).await;
+        enqueue(&writer, &b).await;
+        // Both shard writers must be parked, so neither can consume a
+        // barrier before the abort.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while kv.entered.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both shard writers must park");
+        let queued = writer.depth();
+
+        let flushing = {
+            let writer = writer.clone();
+            tokio::spawn(async move { writer.flush().await })
+        };
+        // Both barriers are queued before the consumers are aborted, so both
+        // acks are dropped.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while writer.depth() < queued + 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both barriers must be queued");
+        for task in writer.tasks.lock().iter() {
+            task.abort();
+        }
+
+        let err = flushing.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("store writer task dropped"),
+            "{err}"
+        );
     }
 
     /// `flush_pid` barriers the pid's own shard only: it acks while another
@@ -979,5 +1046,185 @@ mod tests {
             .unwrap();
         writer.flush().await.unwrap();
         assert!(!durable(&store, &a).await, "one pid's ops must stay FIFO");
+    }
+
+    // ========== backlog accounting, closed writers and workdir removal ==========
+
+    #[test]
+    fn write_op_pid_and_barrier_have_no_process() {
+        let (tx, _rx) = oneshot::channel();
+        assert_eq!(WriteOp::Barrier(tx).pid(), None);
+        assert_eq!(
+            WriteOp::RemoveProc {
+                pid: "p1".to_string()
+            }
+            .pid(),
+            Some("p1")
+        );
+        assert_eq!(delivery("p1", "m1").pid(), Some("p1"));
+    }
+
+    /// The high-water log also fires above the first threshold: for every
+    /// power of two past 1024, and not for the depths in between.
+    #[test]
+    fn backlog_logs_powers_of_two_above_the_first_threshold() {
+        let backlog = Backlog::new(4);
+        for _ in 0..2048 {
+            backlog.record_accepted();
+        }
+        assert_eq!(backlog.depth.load(Ordering::Acquire), 2048);
+        assert_eq!(backlog.high_watermark.load(Ordering::Acquire), 2048);
+    }
+
+    #[test]
+    fn backlog_accounting_logs_the_watermark_and_unlatches_when_drained() {
+        let backlog = Backlog::new(4);
+        // The high-watermark log fires at depth 1024.
+        for _ in 0..1024 {
+            backlog.record_accepted();
+        }
+        assert_eq!(backlog.depth.load(Ordering::Acquire), 1024);
+        assert_eq!(backlog.high_watermark.load(Ordering::Acquire), 1024);
+        assert!(!backlog.is_saturated());
+        backlog.latch();
+        assert!(backlog.is_saturated());
+        // Latching twice must not log twice.
+        backlog.latch();
+
+        for _ in 0..1024 {
+            backlog.record_released();
+        }
+        assert_eq!(backlog.depth.load(Ordering::Acquire), 0);
+        assert!(
+            !backlog.is_saturated(),
+            "the latch must release once the backlog drained"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_fails_when_the_consumer_is_gone() {
+        let kv = Arc::new(TestKv::new());
+        let store = Arc::new(Store::new(kv));
+        let writer = StoreWriter::spawn(store, 1, 4, shared(1));
+        for task in writer.tasks.lock().iter() {
+            task.abort();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let err = writer.send(delivery("p1", "m1")).await.unwrap_err();
+        assert!(matches!(err, ActError::Shutdown), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn flush_reports_a_barrier_whose_consumer_was_aborted() {
+        let kv = Arc::new(TestKv::new());
+        let store = Arc::new(Store::new(kv.clone()));
+        let writer = StoreWriter::spawn(store, 1, 4, shared(1));
+
+        // Park the consumer inside a write so the barrier stays queued.
+        kv.arm_gate();
+        enqueue(&writer, "p1").await;
+        kv.wait_entered().await;
+
+        let flushing = {
+            let writer = writer.clone();
+            tokio::spawn(async move { writer.flush().await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        for task in writer.tasks.lock().iter() {
+            task.abort();
+        }
+
+        let err = flushing.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("store writer task dropped"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_pid_reports_a_barrier_whose_consumer_was_aborted() {
+        let kv = Arc::new(TestKv::new());
+        let store = Arc::new(Store::new(kv.clone()));
+        let writer = StoreWriter::spawn(store, 1, 4, shared(1));
+
+        kv.arm_gate();
+        enqueue(&writer, "p1").await;
+        kv.wait_entered().await;
+
+        let flushing = {
+            let writer = writer.clone();
+            tokio::spawn(async move { writer.flush_pid("p1").await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        for task in writer.tasks.lock().iter() {
+            task.abort();
+        }
+
+        let err = flushing.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("store writer task dropped"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_delivery_reports_a_closed_writer() {
+        let (_, _, writer) = test_writer();
+        writer.close().await;
+
+        let message = crate::store::data::Message {
+            id: "m1".to_string(),
+            pid: "p1".to_string(),
+            ..Default::default()
+        };
+        let delivery = crate::store::data::Delivery {
+            id: "d1".to_string(),
+            msg_id: "m1".to_string(),
+            pid: "p1".to_string(),
+            ..Default::default()
+        };
+        let err = store_delivery(&writer, &message, &delivery)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActError::Shutdown), "got: {err}");
+    }
+
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("acts-wb-{tag}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn remove_workdir_only_removes_a_directory_named_after_the_process() {
+        let base = unique_dir("base");
+        let pid = format!("pid-{}", std::process::id());
+        let dir = base.join(&pid);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The expected shape is removed.
+        remove_workdir(&pid, Some(dir.clone()));
+        assert!(!dir.exists());
+
+        // A directory whose name is not the pid is left alone.
+        let wrong = base.join("someone-else");
+        std::fs::create_dir_all(&wrong).unwrap();
+        remove_workdir(&pid, Some(wrong.clone()));
+        assert!(wrong.exists(), "a foreign directory must not be removed");
+
+        // No workdir is a no-op; an already-gone directory is fine.
+        remove_workdir(&pid, None);
+        remove_workdir(&pid, Some(dir.clone()));
+
+        // A filesystem error is reported but not fatal.
+        let file = base.join(&pid);
+        std::fs::write(&file, b"not a dir").unwrap();
+        remove_workdir(&pid, Some(file.clone()));
+        assert!(file.exists(), "a failed removal leaves the path alone");
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

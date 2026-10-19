@@ -372,3 +372,222 @@ fn node_content_in_step(step: &crate::model::Step, target: &str) -> Option<NodeC
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::task_graph::TaskId;
+    use crate::store::MemoryStore;
+    use crate::{Config, NodeKind, Vars, model::Workflow};
+
+    fn runtime() -> Arc<Runtime> {
+        Runtime::new(&Config::default(), Some(Arc::new(MemoryStore::new()))).unwrap()
+    }
+
+    fn model() -> Workflow {
+        Workflow::new()
+            .with_id("wf-scope")
+            .with_name("scope model")
+            .with_var("v", 1)
+            .with_step(|step| {
+                step.with_id("s1")
+                    .with_uses("test.irq", Vars::new())
+                    .with_var("own", 2)
+                    .with_expose(crate::Variant {
+                        name: "exposed".into(),
+                        value: serde_json::json!("${{ v }}"),
+                        ..crate::Variant::default()
+                    })
+                    .with_branch(|branch| {
+                        branch
+                            .with_id("b1")
+                            .with_if("true")
+                            .with_step(|inner| inner.with_id("inner"))
+                    })
+                    .with_catch(|catch| catch.with_id("c1"))
+                    .with_timeout(|timeout| timeout.with_id("t1"))
+            })
+            .with_step(|step| step.with_id("plain"))
+            .with_step(|step| {
+                step.with_id("opt").with_option(
+                    "exposes",
+                    vec![crate::Variant {
+                        name: "from_options".into(),
+                        value: serde_json::json!(5),
+                        ..crate::Variant::default()
+                    }],
+                )
+            })
+            .with_step(|step| {
+                step.with_id("params").with_uses(
+                    "test.irq",
+                    Vars::new().with("p", "${{ v }}").with("plain", "text"),
+                )
+            })
+    }
+
+    fn spec(node: &str) -> ScopeSpec {
+        ScopeSpec {
+            process_id: "p-scope".into(),
+            node: node.into(),
+            task_id: TaskId::new(node, 0).unwrap(),
+            model: model(),
+            vars: vec![
+                ("v".into(), "1".into()),
+                ("__private".into(), "2".into()),
+                ("broken".into(), "{not json".into()),
+            ],
+            env: vec![("declared".into(), serde_json::json!("from-env"))],
+            owner: crate::ScopePolicy::deny_all(),
+        }
+    }
+
+    /// The lightweight process view answers its surface without a tree.
+    #[test]
+    fn a_headless_process_reads_its_id_env_owner_and_workdir() {
+        let scope = Scope::headless(
+            "p",
+            Vars::new().with("k", "v").with(
+                crate::utils::consts::PROC_OWNER,
+                crate::ScopePolicy::deny_all(),
+            ),
+        );
+        assert_eq!(scope.id(), "p");
+        assert_eq!(scope.env().get::<String>("k").as_deref(), Some("v"));
+        assert_eq!(scope.with_env(|env| env.get::<String>("k")).unwrap(), "v");
+        assert_eq!(scope.owner_scope(), crate::ScopePolicy::deny_all());
+        assert!(scope.workdir().is_none());
+        scope.with_env_mut(|env| env.set("added", true));
+        assert_eq!(scope.with_env(|env| env.get::<bool>("added")), Some(true));
+    }
+
+    /// Every node shape resolves to its own kind and id.
+    #[test]
+    fn node_content_resolves_every_shape() {
+        assert_eq!(
+            node_content(&model(), "wf-scope").unwrap().kind(),
+            NodeKind::Workflow
+        );
+        assert_eq!(node_content(&model(), "s1").unwrap().kind(), NodeKind::Step);
+        assert_eq!(
+            node_content(&model(), "b1").unwrap().kind(),
+            NodeKind::Branch
+        );
+        assert_eq!(
+            node_content(&model(), "inner").unwrap().kind(),
+            NodeKind::Step
+        );
+        assert_eq!(node_content(&model(), "c1").unwrap().kind(), NodeKind::Step);
+        assert_eq!(node_content(&model(), "t1").unwrap().kind(), NodeKind::Step);
+        assert!(node_content(&model(), "missing").is_none());
+
+        let node = ScopeNode::new("a", NodeContent::Act(crate::Act::default()));
+        assert_eq!(node.id(), "a");
+        assert_eq!(node.kind(), NodeKind::Act);
+    }
+
+    /// The headless task answers inputs, outputs, params, data, sealed data
+    /// and its engine handles exactly like the tree task did.
+    #[tokio::test]
+    async fn a_headless_task_answers_the_task_surface() {
+        let runtime = runtime();
+        let (scope, task, ctx) = headless_scope(&runtime, &spec("s1")).unwrap();
+        assert_eq!(task.pid, "p-scope");
+        assert_eq!(task.node().id(), "s1");
+        // Seeded vars: valid JSON only, and the fan-out private names stay out
+        // of the public scope.
+        assert_eq!(task.data().get::<i32>("v"), Some(1));
+        // Private engine names are seeded like any other variable (the scope
+        // chain carries them); the output surface is what filters them.
+        assert_eq!(task.data().get::<i32>("__private"), Some(2));
+        assert!(task.data().get::<serde_json::Value>("broken").is_none());
+        assert_eq!(
+            scope.env().get::<String>("declared").as_deref(),
+            Some("from-env")
+        );
+
+        task.set_data_with(|data| data.set("other", 3));
+        task.update_data(&Vars::new().with("v", 9));
+        assert_eq!(task.find::<i32>(&scope, "other"), Some(3));
+        assert_eq!(task.data().get::<i32>("v"), Some(9));
+        assert!(task.parent(&scope).is_none());
+
+        let inputs = task.inputs(&ctx);
+        assert_eq!(inputs.get::<i32>("own"), Some(2));
+        // Exposes are the output surface: the expression resolves over the
+        // task's data.
+        let outputs = task.outputs(&ctx);
+        assert_eq!(outputs.get::<i32>("exposed"), Some(9));
+        assert_eq!(task.options().get::<i32>("missing"), None);
+        assert_eq!(task.state(), crate::scheduler::LegacyTaskState::None);
+        assert!(task.cost() >= 0);
+        assert!(task.is_kind(NodeKind::Step));
+        assert!(!task.is_kind(NodeKind::Act));
+        assert!(!task.cancellation_token().is_cancelled());
+    }
+
+    /// A step's params resolve through the same expression path, against the
+    /// acting execution's data.
+    #[tokio::test]
+    async fn params_resolve_against_the_headless_scope() {
+        let runtime = runtime();
+        let (_scope, task, ctx) = headless_scope(&runtime, &spec("params")).unwrap();
+        let params = task.params(&ctx);
+        assert_eq!(params["p"].as_i64(), Some(1));
+        assert_eq!(params["plain"].as_str(), Some("text"));
+    }
+
+    /// Without declarations the task exports its own non-private data, and an
+    /// `exposes` option is the runtime push fallback.
+    #[tokio::test]
+    async fn outputs_fall_back_to_data_and_options() {
+        let runtime = runtime();
+        let (_scope, task, ctx) = headless_scope(&runtime, &spec("plain")).unwrap();
+        task.set_data_with(|data| {
+            data.set("v", 4);
+            data.set("__private", 5);
+        });
+        let outputs = task.outputs(&ctx);
+        assert_eq!(outputs.get::<i32>("v"), Some(4));
+        assert!(outputs.get_value("__private").is_none());
+
+        let (_scope, task, ctx) = headless_scope(&runtime, &spec("opt")).unwrap();
+        let outputs = task.outputs(&ctx);
+        assert_eq!(outputs.get::<i32>("from_options"), Some(5));
+    }
+
+    /// A sealed value is local to the headless task: it is readable and never
+    /// leaks through `find`.
+    #[tokio::test]
+    async fn sealed_data_is_local_to_the_evaluation() {
+        let runtime = runtime();
+        let (scope, task, _ctx) = headless_scope(&runtime, &spec("s1")).unwrap();
+        assert!(!task.has_sealed_local("profile"));
+        task.set_sealed("profile", Vars::new().with("uid", "u1"));
+        assert!(task.has_sealed_local("profile"));
+        assert_eq!(
+            task.sealed(&scope, "profile")
+                .unwrap()
+                .get::<String>("uid")
+                .as_deref(),
+            Some("u1")
+        );
+        assert!(task.find::<Vars>(&scope, "profile").is_none());
+    }
+
+    /// An aggregate model without the acting node is an engine error naming
+    /// the node, not an empty scope.
+    #[tokio::test]
+    async fn an_unknown_node_is_refused() {
+        let runtime = runtime();
+        match headless_scope(&runtime, &spec("ghost")) {
+            Ok(_) => panic!("an unknown node must not produce a scope"),
+            Err(error) => {
+                assert!(
+                    format!("{error}").contains("model has no node 'ghost'"),
+                    "{error}"
+                )
+            }
+        }
+    }
+}

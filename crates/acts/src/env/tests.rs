@@ -246,6 +246,20 @@ async fn env_task_get_var_not_exists() {
     });
 }
 
+/// A run with no timeout carries no `__cost` datum, so `$cost_in` reads the
+/// acting task's elapsed cost instead of a frozen timeout marker.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_cost_without_a_timeout_reads_the_elapsed_cost() {
+    let env = Environment::new();
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let (_engine, context) = start_completed(&workflow, Vars::new()).await;
+    Context::scope(&context, || {
+        assert!(env.eval::<bool>("$cost_in('0s')").unwrap());
+        assert!(!env.eval::<bool>("$cost_in('100000d')").unwrap());
+    });
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_fn_not_exists() {

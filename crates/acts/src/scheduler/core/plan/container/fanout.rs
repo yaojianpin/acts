@@ -416,3 +416,83 @@ fn fanout_outbox(command: &ContainerFanoutCommand, outcome: &str) -> OutboxInten
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::commit::aggregate::TaskSnapshot;
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
+    use std::collections::{BTreeMap, HashMap};
+
+    fn snapshot(tasks: Vec<(TaskId, TaskSnapshot)>) -> ProcessSnapshot {
+        ProcessSnapshot {
+            process_id: "p1".into(),
+            version: ProcessVersion {
+                graph: 1,
+                process: 0,
+                operations: 0,
+            },
+            tasks: HashMap::from_iter(tasks),
+            variables: BTreeMap::new(),
+            operations: HashMap::new(),
+            outbox: HashMap::new(),
+        }
+    }
+
+    fn task(state: TaskState) -> (TaskId, TaskSnapshot) {
+        (
+            TaskId::new("b1", 0).unwrap(),
+            TaskSnapshot {
+                model_node: NodeId::parse("b1").unwrap(),
+                parent: None,
+                predecessors: vec![],
+                state,
+                revision: 3,
+            },
+        )
+    }
+
+    /// `readmit_change` is only reached for an `Unstarted` (Created) child, so
+    /// the refusal is a defensive invariant: a non-Created execution must be
+    /// named, never forced Ready.
+    #[test]
+    fn a_non_created_execution_cannot_be_readmitted() {
+        let snapshot = snapshot(vec![task(TaskState::Running)]);
+        assert_eq!(
+            readmit_change(&snapshot, &TaskId::new("b1", 0).unwrap()),
+            Err(ContainerError::ReadmitNotCreated {
+                task: TaskId::new("b1", 0).unwrap(),
+                state: TaskState::Running,
+            })
+        );
+    }
+
+    #[test]
+    fn readmitting_a_missing_execution_is_refused() {
+        let snapshot = snapshot(vec![]);
+        assert_eq!(
+            readmit_change(&snapshot, &TaskId::new("b1", 0).unwrap()),
+            Err(ContainerError::TaskNotFound(TaskId::new("b1", 0).unwrap()))
+        );
+    }
+
+    #[test]
+    fn a_sibling_index_past_the_resolved_prefix_is_a_forward_reference() {
+        let source = TaskId::new("step1", 0).unwrap();
+        assert_eq!(
+            resolve_predecessors(&[ContainerPredecessor::Sibling(4)], &source, &[], 0),
+            Err(ContainerError::ForwardSibling(4))
+        );
+        // An index inside the command that was not resolved (a gap) is also a
+        // forward reference.
+        assert_eq!(
+            resolve_predecessors(
+                &[ContainerPredecessor::Sibling(1)],
+                &source,
+                &[TaskId::new("a", 0).unwrap()],
+                2
+            ),
+            Err(ContainerError::ForwardSibling(1))
+        );
+    }
+}

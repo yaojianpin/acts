@@ -215,9 +215,41 @@ mod tests {
     }
 
     #[test]
+    fn variant_plain_string_value_is_typed() {
+        let var: Variant = serde_yaml::from_str("name: s\nvalue: hello\n").unwrap();
+        assert_eq!(var.r#type, VariantTypes::String);
+        assert!(var.typed);
+
+        let var = Variant::new().value("text");
+        assert_eq!(var.r#type, VariantTypes::String);
+        assert!(var.typed);
+    }
+
+    #[test]
     fn variant_expression_value_stays_untyped() {
         let var: Variant = serde_yaml::from_str("name: result\nvalue: '${{ v }}'\n").unwrap();
         assert_eq!(var.r#type, VariantTypes::String);
         assert!(!var.typed);
+    }
+
+    #[test]
+    fn variant_value_keeps_an_explicit_type() {
+        // An already typed variant keeps its declared type: `value` only
+        // infers when no type was declared.
+        let var = Variant::new()
+            .r#type(VariantTypes::Number)
+            .value("not a number");
+        assert_eq!(var.r#type, VariantTypes::Number);
+        assert!(var.typed);
+        assert_eq!(var.value, json!("not a number"));
+    }
+
+    #[test]
+    fn variant_value_without_a_static_type_stays_untyped() {
+        // null has no static type, so the variant stays untyped.
+        let var = Variant::new().value(JsonValue::Null);
+        assert_eq!(var.r#type, VariantTypes::String);
+        assert!(!var.typed);
+        assert_eq!(var.value, JsonValue::Null);
     }
 }

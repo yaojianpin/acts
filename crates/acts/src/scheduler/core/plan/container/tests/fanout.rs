@@ -297,3 +297,166 @@ fn a_failure_fanout_keeps_the_step_running() {
         "a running source has no state change to park it"
     );
 }
+
+#[test]
+fn fanout_refuses_bad_envelopes_and_children() {
+    let (snapshot, mut command) = fanout_command(
+        "step1",
+        TaskState::Running,
+        vec![child(
+            "b1",
+            ContainerChildPlan::Entry,
+            vec![ContainerPredecessor::Source],
+        )],
+    );
+    command.process_id = "other".into();
+    assert_eq!(
+        Fanout::plan(&snapshot, &command),
+        Err(ContainerError::WrongProcess)
+    );
+
+    let mut command = command.clone();
+    command.process_id = "p1".into();
+    command.source_park = TaskState::Completed;
+    assert_eq!(
+        Fanout::plan(&snapshot, &command),
+        Err(ContainerError::InvalidSourcePark(TaskState::Completed))
+    );
+
+    let mut command = command.clone();
+    command.source_park = TaskState::Running;
+    command.source_operation.id.task = id("elsewhere", 0);
+    assert_eq!(
+        Fanout::plan(&snapshot, &command),
+        Err(ContainerError::SourceOperationTargetsDifferentTask)
+    );
+
+    let mut command = command.clone();
+    command.source_operation = commit("step1", 4);
+    command.children = vec![ContainerChild {
+        node: "  ".into(),
+        model_node: node("b1"),
+        plan: ContainerChildPlan::Entry,
+        predecessors: vec![],
+        vars: vec![],
+        auto: true,
+    }];
+    assert_eq!(
+        Fanout::plan(&snapshot, &command),
+        Err(ContainerError::EmptyChildTaskId)
+    );
+}
+
+#[test]
+fn a_sibling_reference_may_not_point_forward() {
+    let (snapshot, mut command) = fanout_command(
+        "step1",
+        TaskState::Running,
+        vec![child(
+            "b1",
+            ContainerChildPlan::Entry,
+            vec![ContainerPredecessor::Sibling(2)],
+        )],
+    );
+    command.source_park = TaskState::Running;
+    assert_eq!(
+        Fanout::plan(&snapshot, &command),
+        Err(ContainerError::ForwardSibling(2))
+    );
+}
+
+#[test]
+fn an_empty_container_does_not_replan_an_existing_propagation() {
+    let (mut snapshot, command) = fanout_command("step1", TaskState::Running, vec![]);
+    // The propagation of the empty container is already durable.
+    snapshot.operations.insert(
+        OperationId {
+            process_id: "p1".into(),
+            task: id("step1", 0),
+            sequence: 5,
+        },
+        crate::scheduler::core::model::operation::OperationRecord::pending(
+            OperationId {
+                process_id: "p1".into(),
+                task: id("step1", 0),
+                sequence: 5,
+            },
+            OperationKind::PropagateTask,
+        ),
+    );
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
+    assert!(plan.operations.is_empty(), "the retry is idempotent");
+    assert_eq!(plan.state_changes[0].to, TaskState::Completed);
+}
+
+#[test]
+fn any_terminal_child_reruns_as_a_fresh_generation() {
+    for state in [
+        TaskState::Cancelled,
+        TaskState::Failed,
+        TaskState::Aborted,
+        TaskState::Skipped,
+        TaskState::Removed,
+    ] {
+        let snapshot = snapshot(vec![
+            task("step1", 0, TaskState::Running),
+            (
+                id("b1", 0),
+                TaskSnapshot {
+                    model_node: node("b1"),
+                    parent: Some(id("step1", 0)),
+                    predecessors: vec![id("step1", 0)],
+                    state,
+                    revision: 1,
+                },
+            ),
+        ]);
+        let command = ContainerFanoutCommand {
+            process_id: "p1".into(),
+            source: id("step1", 0),
+            source_operation: commit("step1", 4),
+            children: vec![child(
+                "b1",
+                ContainerChildPlan::Entry,
+                vec![ContainerPredecessor::Source],
+            )],
+            inputs: Vec::new(),
+            source_park: TaskState::Running,
+        };
+        let plan = Fanout::plan(&snapshot, &command).unwrap();
+        assert_eq!(
+            plan.task_creates[0].task,
+            id("b1", 1),
+            "{state:?} is terminal, so the fan-out allocates the next generation"
+        );
+    }
+}
+
+#[test]
+fn container_errors_render() {
+    for error in [
+        ContainerError::WrongProcess,
+        ContainerError::TaskNotFound(id("a", 0)),
+        ContainerError::SourceNotContainer {
+            source: id("a", 0),
+            state: TaskState::Completed,
+        },
+        ContainerError::SourceOperationTargetsDifferentTask,
+        ContainerError::InvalidSourcePark(TaskState::Completed),
+        ContainerError::EmptyChildTaskId,
+        ContainerError::ForwardSibling(1),
+        ContainerError::ReadmitNotCreated {
+            task: id("a", 0),
+            state: TaskState::Running,
+        },
+        ContainerError::GraphVersionConflict {
+            graph: 1,
+            snapshot: 2,
+        },
+        ContainerError::GenerationOverflow,
+        ContainerError::SequenceOverflow,
+        ContainerError::InvalidPlan("bad".into()),
+    ] {
+        assert!(error.to_string().starts_with("container error:"));
+    }
+}

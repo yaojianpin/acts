@@ -61,3 +61,112 @@ fn canonical_process_and_commit_digest_match_golden_fingerprint() {
     assert_eq!(sha256_hex(&bytes), GOLDEN_DIGEST);
     assert_eq!(deterministic_digest(&snapshot).unwrap(), GOLDEN_DIGEST);
 }
+
+#[test]
+fn the_canonical_bytes_distinguish_every_state_and_kind_tag() {
+    let tasks = [
+        TaskState::Created,
+        TaskState::Ready,
+        TaskState::Running,
+        TaskState::Waiting,
+        TaskState::Completed,
+        TaskState::Submitted,
+        TaskState::Backed,
+        TaskState::Cancelled,
+        TaskState::Failed,
+        TaskState::Aborted,
+        TaskState::Skipped,
+        TaskState::Removed,
+    ];
+    let kinds = [
+        OperationKind::ExecuteTask,
+        OperationKind::PropagateTask,
+        OperationKind::ApplyAction,
+        OperationKind::SkipTask,
+        OperationKind::AbortTask,
+        OperationKind::DispatchTimeout,
+        OperationKind::ReenterTask,
+        OperationKind::DeliverMessage,
+        OperationKind::FireTrigger,
+        OperationKind::RunPostCommit,
+    ];
+    let claim = crate::scheduler::core::model::operation::ClaimToken {
+        owner: "w".into(),
+        fence: 1,
+        lease_until_ms: 2,
+        heartbeat_revision: 0,
+    };
+    let commit = crate::scheduler::core::model::operation::CommitToken {
+        process_version: 3,
+        digest: "d".into(),
+    };
+    let states = [
+        OperationState::Pending,
+        OperationState::Claimed(claim.clone()),
+        OperationState::CommitPrepared(claim.clone()),
+        OperationState::Committed(commit.clone()),
+        OperationState::RetryScheduled { attempt: 1 },
+        OperationState::EffectUnknown { attempt: 1 },
+        OperationState::Quarantined {
+            reason: "hold".into(),
+        },
+        OperationState::Superseded { by_generation: 1 },
+        OperationState::Completed(commit),
+    ];
+    let mut snapshot = ProcessSnapshot::empty("p").unwrap();
+    for (index, state) in tasks.iter().copied().enumerate() {
+        snapshot.tasks.insert(
+            TaskId::new(format!("task{index}"), 0).unwrap(),
+            TaskSnapshot {
+                model_node: NodeId::parse(format!("model{index}")).unwrap(),
+                parent: None,
+                predecessors: vec![],
+                state,
+                revision: index as u64,
+            },
+        );
+    }
+    for (index, kind) in kinds.iter().copied().enumerate() {
+        for (slot, state) in states.iter().enumerate() {
+            let id = OperationId {
+                process_id: "p".into(),
+                task: TaskId::new("task0", 0).unwrap(),
+                sequence: (index * states.len() + slot) as u64,
+            };
+            snapshot.operations.insert(
+                id.clone(),
+                crate::scheduler::core::model::operation::OperationRecord {
+                    id,
+                    kind,
+                    state: state.clone(),
+                    revision: 0,
+                },
+            );
+        }
+    }
+    let bytes = canonical_process_bytes(&snapshot).unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(text.contains("Cancelled"));
+    assert!(text.contains("Removed"));
+    assert!(text.contains("RunPostCommit"));
+    assert!(text.contains("CommitPrepared("));
+    assert!(text.contains("Committed("));
+    assert!(text.contains("RetryScheduled {"));
+    assert!(text.contains("Quarantined {"));
+    assert!(text.contains("Superseded {"));
+    // Every distinct state/kind changes the digest of an otherwise identical
+    // aggregate.
+    let mut other = snapshot.clone();
+    let id = OperationId {
+        process_id: "p".into(),
+        task: TaskId::new("task0", 0).unwrap(),
+        sequence: 0,
+    };
+    other.operations.get_mut(&id).unwrap().kind = OperationKind::ApplyAction;
+    other.operations.get_mut(&id).unwrap().state = OperationState::Pending;
+    assert_ne!(
+        canonical_process_bytes(&snapshot).unwrap(),
+        canonical_process_bytes(&other).unwrap()
+    );
+    assert_eq!(sha256_hex(&bytes).len(), 64);
+}

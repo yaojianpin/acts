@@ -106,4 +106,20 @@ mod tests {
         serde_json::from_value::<super::SequencePackageParams>(value.clone()).unwrap();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
+
+    /// An act the sequence params cannot deserialize is the package's input
+    /// error, reported with its package id.
+    #[tokio::test]
+    async fn pack_sequence_execute_rejects_malformed_acts() {
+        let ctx = crate::package::tests::completed_context().await;
+        let err = super::SequencePackage
+            .execute(&ctx, &serde_json::json!({"in": [], "acts": [{"id": 1}]}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid ActPackage(acts.core.sequence)"),
+            "got: {err}"
+        );
+    }
 }

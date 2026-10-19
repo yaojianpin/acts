@@ -117,3 +117,104 @@ pub(super) fn repository_error(
         _ => runtime(error),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::commit::aggregate::CommitError;
+    use crate::scheduler::core::model::task_graph::TaskId;
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
+    use crate::scheduler::durable::async_document_store::AsyncRepositoryError;
+
+    #[test]
+    fn panic_payloads_read_as_text() {
+        assert_eq!(panic_message(&"static"), "static");
+        assert_eq!(panic_message(&String::from("owned")), "owned");
+        assert_eq!(panic_message(&42u32), "unknown panic payload");
+    }
+
+    /// The wrapper turns a panicking poll into an `Err` and leaves the slot
+    /// empty, and a normal future continues to its value.
+    #[tokio::test]
+    async fn a_panicking_future_is_contained() {
+        let payload = CatchPanic::new(async { panic!("contained") })
+            .await
+            .unwrap_err();
+        assert_eq!(panic_message(&*payload), "contained");
+        let value = CatchPanic::new(async { 7 }).await.unwrap();
+        assert_eq!(value, 7);
+    }
+
+    /// A future that is pending first and ready later is polled again: the
+    /// wrapper only clears its slot on a ready poll.
+    #[tokio::test]
+    async fn a_pending_future_is_polled_to_completion() {
+        let value = CatchPanic::new(async {
+            tokio::task::yield_now().await;
+            9
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, 9);
+    }
+
+    #[test]
+    #[should_panic(expected = "CatchPanic was polled after completion")]
+    fn polling_after_completion_panics() {
+        use std::task::{Context as TaskCtx, Poll, Waker};
+
+        let mut wrapper = std::pin::pin!(CatchPanic::new(std::future::ready(1)));
+        let waker = Waker::noop();
+        let mut cx = TaskCtx::from_waker(waker);
+        assert!(matches!(wrapper.as_mut().poll(&mut cx), Poll::Ready(Ok(1))));
+        let _ = wrapper.as_mut().poll(&mut cx);
+    }
+
+    #[test]
+    fn conflicts_are_retryable_exceptions() {
+        let error = conflict("lost");
+        assert!(is_conflict(&error));
+        assert!(!is_conflict(&ActError::Runtime("plain".into())));
+        assert!(!is_conflict(&ActError::Exception {
+            ecode: "EOTHER".into(),
+            message: "other".into(),
+        }));
+    }
+
+    #[test]
+    fn repository_failures_keep_their_class() {
+        let store = ActError::Store("down".into());
+        let mapped = repository_error(AsyncRepositoryError::Store(store));
+        match mapped {
+            ActError::Store(message) => assert_eq!(message, "down"),
+            other => panic!("unexpected error class: {other:?}"),
+        }
+
+        let version = ProcessVersion {
+            graph: 1,
+            process: 1,
+            operations: 1,
+        };
+        let mapped = repository_error(AsyncRepositoryError::Domain(CommitError::VersionConflict {
+            expected: version.clone(),
+            actual: version,
+        }));
+        assert!(is_conflict(&mapped), "{mapped:?}");
+        assert!(format!("{mapped}").contains("stale plan"));
+
+        let operation = crate::scheduler::core::model::operation::OperationId {
+            process_id: "p".into(),
+            task: TaskId::new("a", 0).unwrap(),
+            sequence: 0,
+        };
+        let mapped = repository_error(AsyncRepositoryError::Domain(
+            CommitError::OperationAlreadyExists(operation),
+        ));
+        assert!(is_conflict(&mapped));
+
+        let mapped = repository_error(AsyncRepositoryError::Domain(CommitError::ProcessNotFound(
+            "p".into(),
+        )));
+        assert!(matches!(mapped, ActError::Runtime(_)), "{mapped:?}");
+    }
+}

@@ -432,3 +432,17 @@ fn model_step_yml_timeout() {
     let timeout = step.timeouts.get(1).unwrap();
     assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('3m')");
 }
+
+#[test]
+fn model_step_model_base_id() {
+    use crate::ModelBase;
+    let step = Step::new().with_id("step-id");
+    assert_eq!(step.id(), "step-id");
+}
+
+#[test]
+fn model_step_uses_code() {
+    let step = Step::new().with_uses_code("acts.app.javascript", "print('x')");
+    assert_eq!(step.uses.as_deref(), Some("acts.app.javascript"));
+    assert_eq!(step.params, json!("print('x')"));
+}

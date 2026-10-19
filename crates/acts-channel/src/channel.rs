@@ -707,3 +707,116 @@ fn decode_payload<T: DeserializeOwned>(action: &str, data: &[u8]) -> Result<T, S
     serde_json::from_slice(data)
         .map_err(|err| Status::internal(format!("{action}: invalid response payload: {err}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Auth, SessionTokens, Subscription, SubscriptionError, decode_payload};
+    use crate::model;
+    use tonic::{Code, Request, Status};
+
+    #[test]
+    fn auth_presents_and_clears_the_bearer_token() {
+        let mut auth = Auth::new(Some("tok".to_string()));
+        assert_eq!(auth.token().as_deref(), Some("tok"));
+
+        let request =
+            <Auth as tonic::service::Interceptor>::call(&mut auth, Request::new(())).unwrap();
+        assert_eq!(
+            request.metadata().get("authorization").unwrap(),
+            "Bearer tok"
+        );
+
+        auth.set_token(None);
+        assert!(auth.token().is_none());
+        let request =
+            <Auth as tonic::service::Interceptor>::call(&mut auth, Request::new(())).unwrap();
+        assert!(request.metadata().get("authorization").is_none());
+
+        auth.set_token(Some("next".to_string()));
+        assert_eq!(auth.token().as_deref(), Some("next"));
+        // the default interceptor is anonymous
+        assert!(Auth::default().token().is_none());
+    }
+
+    #[test]
+    fn auth_refuses_a_token_that_is_not_header_metadata() {
+        let mut auth = Auth::new(Some("bad token\nvalue".to_string()));
+        let err =
+            <Auth as tonic::service::Interceptor>::call(&mut auth, Request::new(())).unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(err.message(), "invalid acl token");
+    }
+
+    #[test]
+    fn decode_payload_maps_malformed_bodies_to_internal() {
+        let err = decode_payload::<model::Message>("on_message", b"{ not json").unwrap_err();
+        assert_eq!(err.code(), Code::Internal);
+        assert!(
+            err.message().contains("on_message")
+                && err.message().contains("invalid response payload"),
+            "got: {}",
+            err.message()
+        );
+
+        let body = serde_json::to_vec(&model::Message {
+            id: "m1".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        let message = decode_payload::<model::Message>("on_message", &body).unwrap();
+        assert_eq!(message.id, "m1");
+    }
+
+    #[tokio::test]
+    async fn a_subscription_whose_task_vanished_is_cancelled() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), Status>>();
+        drop(tx);
+        let err = Subscription { closed: rx }.wait().await.unwrap_err();
+        assert_eq!(err.code(), Code::Cancelled);
+        assert_eq!(err.message(), "subscription task ended without a status");
+    }
+
+    #[test]
+    fn subscription_faults_display_their_sequence_and_source() {
+        let decode = SubscriptionError::Decode {
+            seq: "m1".to_string(),
+            source: "bad json".to_string(),
+        };
+        assert_eq!(
+            decode.to_string(),
+            "message 'm1' skipped: invalid payload: bad json"
+        );
+        let ack = SubscriptionError::Ack {
+            seq: "m2".to_string(),
+            source: Status::unavailable("no ack"),
+        };
+        let text = ack.to_string();
+        assert!(
+            text.starts_with("message 'm2' dropped: ack failed: ") && text.contains("no ack"),
+            "got: {text}"
+        );
+        // both are ordinary errors to a `Box<dyn Error>` caller
+        let _: &dyn std::error::Error = &decode;
+        let _: &dyn std::error::Error = &ack;
+    }
+
+    #[test]
+    fn session_tokens_serde_and_clock() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let session = SessionTokens {
+            token: "at".to_string(),
+            refresh_token: "rt".to_string(),
+            expires_at: now + 10_000,
+            refresh_expires_at: now + 20_000,
+        };
+        let text = serde_json::to_string(&session).unwrap();
+        let back: SessionTokens = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.token, "at");
+        assert_eq!(back.refresh_token, "rt");
+        assert!(!back.is_expired() && !back.is_refresh_expired());
+
+        // the default session is already spent
+        let default = SessionTokens::default();
+        assert!(default.is_expired() && default.is_refresh_expired());
+    }
+}

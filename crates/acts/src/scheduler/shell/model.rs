@@ -739,6 +739,36 @@ mod tests {
         ProcessSpec::from_workflow("p1", workflow, &|_| None)
     }
 
+    /// A workflow with no steps seeds only the root and has no first-child
+    /// edge to add.
+    #[test]
+    fn a_workflow_without_steps_seeds_only_the_root() {
+        let empty = spec(&crate::model::Workflow::new()).unwrap();
+        let root = node_id(crate::utils::consts::TASK_ROOT_TID).unwrap();
+        let graph = empty.model_graph().unwrap();
+        assert!(graph.successor(&root).is_none());
+
+        let snapshot = empty.seed_snapshot().unwrap();
+        assert_eq!(snapshot.tasks.len(), 1);
+    }
+
+    /// An explicit edge out of the root wins over the implicit first-child
+    /// edge.
+    #[test]
+    fn an_explicit_root_edge_wins_over_the_first_child_edge() {
+        let mut wired =
+            spec(&crate::model::Workflow::new().with_step(|step| step.with_id("s1"))).unwrap();
+        wired.explicit_next.push((
+            crate::utils::consts::TASK_ROOT_TID.to_string(),
+            "s1".to_string(),
+        ));
+
+        let root = node_id(crate::utils::consts::TASK_ROOT_TID).unwrap();
+        let s1 = node_id("s1").unwrap();
+        let graph = wired.model_graph().unwrap();
+        assert_eq!(graph.successor(&root), Some(&s1));
+    }
+
     /// The `examples/catches/model.yml` shape: an unnamed catch handler with
     /// unnamed branches and unnamed inner steps. The tree build and the import
     /// share one id pass (`view::assign_ids`); the import runs it on a copy, so
@@ -1319,6 +1349,96 @@ steps:
         assert!(
             foreign.branches.is_empty(),
             "a package the import does not know keeps its declaration"
+        );
+    }
+
+    /// A node id that cannot address a graph node is an engine error, and an
+    /// explicit declaration edge is honored at import time.
+    #[test]
+    fn node_ids_and_explicit_edges_are_checked_at_import() {
+        let spec = ProcessSpec::linear("p1", "root", &[""]);
+        let error = spec.model_graph().unwrap_err();
+        assert!(matches!(error, ActError::Runtime(_)), "{error:?}");
+
+        let mut spec = ProcessSpec::linear("p1", "root", &["a", "b"]);
+        spec.explicit_next.push(("a".into(), "b".into()));
+        let graph = spec.model_graph().unwrap();
+        assert_eq!(
+            graph
+                .successor(&crate::scheduler::core::model::model_graph::NodeId::parse("a").unwrap())
+                .map(|node| node.as_str().to_string()),
+            Some("b".to_string())
+        );
+    }
+
+    /// A container package's acts that the model cannot read are left exactly
+    /// as declared: a non-array `acts`, and an element that is not an act.
+    #[test]
+    fn unreadable_container_acts_are_left_alone() {
+        let mut workflow = crate::model::Workflow::new().with_step(|step| {
+            let mut step = step
+                .with_id("s1")
+                .with_uses(BLOCK_PACKAGE, crate::Vars::new());
+            step.params = serde_json::json!({ "acts": "not-an-array" });
+            step
+        });
+        materialize_container_acts(&mut workflow);
+        assert!(workflow.steps[0].branches.is_empty());
+
+        let mut workflow = crate::model::Workflow::new().with_step(|step| {
+            let mut step = step
+                .with_id("s1")
+                .with_uses(BLOCK_PACKAGE, crate::Vars::new());
+            step.params = serde_json::json!({ "acts": ["not-an-act"] });
+            step
+        });
+        materialize_container_acts(&mut workflow);
+        assert!(
+            workflow.steps[0].branches.is_empty(),
+            "an act without a package is not silently dropped"
+        );
+
+        // No `acts` at all, and a non-container package: both stay untouched.
+        let mut workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("plain"))
+            .with_step(|step| {
+                step.with_id("foreign")
+                    .with_uses("my.package", crate::Vars::new())
+            });
+        materialize_container_acts(&mut workflow);
+        assert!(workflow.steps.iter().all(|step| step.branches.is_empty()));
+    }
+
+    /// Whitespace ids are not assigned a meaning by the shared id pass: a
+    /// nested step and a branch that carry one are refused by the import.
+    #[test]
+    fn blank_nested_step_and_branch_ids_are_refused() {
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("step1").with_branch(|branch| {
+                branch
+                    .with_id("b1")
+                    .with_if("true")
+                    .with_step(|inner| inner.with_id(" "))
+            })
+        });
+        let error = spec(&workflow).unwrap_err();
+        assert!(
+            format!("{error}").contains("nested step has a blank id"),
+            "{error}"
+        );
+
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("step1").with_branch(|branch| {
+                branch
+                    .with_id(" ")
+                    .with_if("true")
+                    .with_step(|inner| inner.with_id("s11"))
+            })
+        });
+        let error = spec(&workflow).unwrap_err();
+        assert!(
+            format!("{error}").contains("branch of step 'step1' has a blank id"),
+            "{error}"
         );
     }
 }

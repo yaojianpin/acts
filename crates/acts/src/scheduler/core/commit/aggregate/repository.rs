@@ -288,3 +288,62 @@ impl ProcessRepository for MemoryProcessRepository {
         Ok(receipt)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The in-memory repository only ever stores validated snapshots through
+    /// `insert`; `load` still revalidates so a corrupt document surfaces here
+    /// instead of at the first mutation. This fixture injects one directly.
+    #[test]
+    fn load_revalidates_the_stored_document() {
+        let mut snapshot = ProcessSnapshot::empty("p").unwrap();
+        snapshot.process_id = " ".into();
+        let mut repo = MemoryProcessRepository::default();
+        repo.processes.insert("p".into(), snapshot);
+        assert_eq!(repo.load("p"), Err(CommitError::EmptyProcessId));
+        assert_eq!(repo.load("absent"), Ok(None));
+    }
+
+    #[test]
+    fn a_missing_process_is_named_for_both_paths() {
+        let mut repo = MemoryProcessRepository::default();
+        let plan = TransitionPlan {
+            process_id: "p".into(),
+            expected: ProcessVersion {
+                graph: 0,
+                process: 0,
+                operations: 0,
+            },
+            task_creates: vec![],
+            state_changes: vec![],
+            variable_writes: vec![],
+            source_operation: None,
+            operations: vec![],
+            outbox: vec![],
+        };
+        assert_eq!(
+            repo.compare_and_commit(&plan),
+            Err(CommitError::ProcessNotFound("p".into()))
+        );
+        let id = crate::scheduler::core::model::operation::OperationId {
+            process_id: "p".into(),
+            task: TaskId::new("t", 0).unwrap(),
+            sequence: 0,
+        };
+        assert_eq!(
+            repo.claim_operation(
+                &id,
+                0,
+                crate::scheduler::core::model::operation::ClaimToken {
+                    owner: "w".into(),
+                    fence: 1,
+                    lease_until_ms: 1,
+                    heartbeat_revision: 0,
+                }
+            ),
+            Err(CommitError::ProcessNotFound("p".into()))
+        );
+    }
+}

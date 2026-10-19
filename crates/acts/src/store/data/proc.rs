@@ -68,6 +68,11 @@ mod tests {
     #[test]
     fn proc_version_returns_current() {
         assert_eq!(Proc::version(), 0);
+        assert_eq!(Proc::iden(), "procs");
+        assert_eq!(
+            Proc::ordered_index_fields(),
+            &["timestamp", "start_time", "end_time"]
+        );
     }
 
     #[test]

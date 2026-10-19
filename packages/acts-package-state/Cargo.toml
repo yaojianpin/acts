@@ -17,3 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+parking_lot = { workspace = true }
+toml = { workspace = true }

@@ -350,11 +350,11 @@ mod tests {
         successor.lease_until_ms = 200;
         let taken = held
             .evolve(OutboxEvent::Claim {
-                claim: successor,
+                claim: successor.clone(),
                 now_ms: 100,
             })
             .unwrap();
-        assert!(matches!(&taken.state, OutboxState::Claimed(current) if current.owner == "b"));
+        assert_eq!(taken.state, OutboxState::Claimed(successor));
         assert_eq!(taken.attempt, 2);
         assert_eq!(taken.last_fence, 2);
     }
@@ -881,9 +881,6 @@ mod tests {
                 }
             }
             frontier = next;
-            if frontier.is_empty() {
-                break;
-            }
         }
         assert!(
             reached
@@ -945,6 +942,316 @@ mod tests {
         ];
         for event in outcomes {
             assert_eq!(claimed.evolve(event), Err(OutboxError::InvalidTransition));
+        }
+    }
+
+    #[test]
+    fn a_quarantine_needs_a_real_diagnostic() {
+        let mut invalid = record();
+        invalid.state = OutboxState::Quarantined { reason: " ".into() };
+        assert_eq!(invalid.validate(), Err(OutboxError::InvalidPersistedState));
+        let mut invalid = record();
+        invalid.state = OutboxState::Quarantined {
+            reason: "x".repeat(MAX_OUTBOX_DIAGNOSTIC_BYTES + 1),
+        };
+        assert_eq!(invalid.validate(), Err(OutboxError::InvalidPersistedState));
+    }
+
+    #[test]
+    fn outbox_errors_render() {
+        for error in [
+            OutboxError::InvalidProcessId,
+            OutboxError::InvalidKey,
+            OutboxError::InvalidTopic,
+            OutboxError::PayloadTooLarge,
+            OutboxError::InvalidTransition,
+            OutboxError::InvalidPersistedState,
+            OutboxError::CounterInvariant,
+            OutboxError::AttemptOverflow,
+            OutboxError::RevisionOverflow,
+        ] {
+            assert!(error.to_string().starts_with("outbox error:"));
+        }
+    }
+
+    #[test]
+    fn an_exhausted_audit_frontier_ends_the_walk() {
+        // A delivered record accepts none of the audit events, so its frontier
+        // is empty after one round: the bounded walk must stop then.
+        let claim = claim("worker", 1);
+        let delivered = record()
+            .evolve(OutboxEvent::Claim {
+                claim: claim.clone(),
+                now_ms: 0,
+            })
+            .unwrap()
+            .evolve(OutboxEvent::ConfirmDelivered {
+                claim,
+                receipt: "ok".into(),
+                now_ms: 0,
+            })
+            .unwrap();
+        let successors: Vec<_> = audit_events(&delivered)
+            .into_iter()
+            .filter_map(|event| delivered.evolve(event).ok())
+            .collect();
+        assert!(successors.is_empty(), "a terminal record has no successors");
+    }
+
+    fn persisted(state: OutboxState, attempt: u32, last_fence: u64) -> OutboxRecord {
+        OutboxRecord {
+            id: OutboxId {
+                process_id: "p".into(),
+                key: "event:1".into(),
+            },
+            topic: "task.completed".into(),
+            payload: "{}".into(),
+            state,
+            attempt,
+            last_fence,
+            revision: u64::from(attempt),
+        }
+    }
+
+    #[test]
+    fn persisted_claims_must_name_an_owner_and_a_matching_positive_fence() {
+        for (state, why) in [
+            (
+                OutboxState::Claimed(DeliveryClaim {
+                    owner: " ".into(),
+                    ..claim("worker", 1)
+                }),
+                "an empty owner",
+            ),
+            (
+                OutboxState::Claimed(DeliveryClaim {
+                    owner: "x".repeat(MAX_OUTBOX_OWNER_BYTES + 1),
+                    ..claim("worker", 1)
+                }),
+                "an oversized owner",
+            ),
+            (
+                OutboxState::Claimed(DeliveryClaim {
+                    fence: 0,
+                    ..claim("worker", 1)
+                }),
+                "a zero fence",
+            ),
+            (
+                OutboxState::Claimed(DeliveryClaim {
+                    lease_until_ms: i64::MIN,
+                    ..claim("worker", 1)
+                }),
+                "an unstorable lease",
+            ),
+            (
+                OutboxState::Claimed(claim("worker", 2)),
+                "a fence the counters do not name",
+            ),
+        ] {
+            assert_eq!(
+                persisted(state, 1, 1).validate(),
+                Err(OutboxError::InvalidPersistedState),
+                "{why} must not persist"
+            );
+        }
+        assert_eq!(
+            persisted(OutboxState::Claimed(claim("worker", 1)), 1, 1).validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn persisted_delivery_outcomes_need_a_real_diagnostic_and_attempt() {
+        for state in [
+            OutboxState::DeliveryUnknown { reason: " ".into() },
+            OutboxState::Delivered {
+                receipt: String::new(),
+            },
+            OutboxState::Delivered {
+                receipt: "x".repeat(MAX_OUTBOX_DIAGNOSTIC_BYTES + 1),
+            },
+        ] {
+            assert_eq!(
+                persisted(state, 1, 1).validate(),
+                Err(OutboxError::InvalidPersistedState)
+            );
+        }
+        assert_eq!(
+            persisted(
+                OutboxState::Delivered {
+                    receipt: "ok".into()
+                },
+                0,
+                0
+            )
+            .validate(),
+            Err(OutboxError::InvalidPersistedState),
+            "a delivery without an attempt is impossible"
+        );
+        assert_eq!(
+            persisted(
+                OutboxState::DeliveryUnknown {
+                    reason: "lost".into()
+                },
+                1,
+                1
+            )
+            .validate(),
+            Ok(())
+        );
+    }
+
+    fn held() -> OutboxRecord {
+        record()
+            .evolve(OutboxEvent::Claim {
+                claim: claim("a", 1),
+                now_ms: 0,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_takeover_needs_an_expired_lease_a_fresh_lease_and_the_next_fence() {
+        let held = held();
+        let mut unexpired_successor = claim("b", 2);
+        unexpired_successor.lease_until_ms = 100;
+        assert_eq!(
+            held.evolve(OutboxEvent::Claim {
+                claim: unexpired_successor,
+                now_ms: 100,
+            }),
+            Err(OutboxError::InvalidTransition),
+            "the successor's own lease must outlive the claim instant"
+        );
+        for (candidate, why) in [
+            (
+                DeliveryClaim {
+                    heartbeat_revision: 1,
+                    ..claim("b", 2)
+                },
+                "a claim that is not fresh",
+            ),
+            (claim("b", 3), "a skipped fence"),
+            (claim(" ", 2), "an empty owner"),
+        ] {
+            let mut candidate = candidate;
+            candidate.lease_until_ms = 200;
+            assert_eq!(
+                held.clone().evolve(OutboxEvent::Claim {
+                    claim: candidate,
+                    now_ms: 100,
+                }),
+                Err(OutboxError::InvalidTransition),
+                "{why} must not take the record over"
+            );
+        }
+        let mut successor = claim("b", 2);
+        successor.lease_until_ms = 200;
+        let taken = held
+            .evolve(OutboxEvent::Claim {
+                claim: successor.clone(),
+                now_ms: 100,
+            })
+            .unwrap();
+        assert_eq!(taken.state, OutboxState::Claimed(successor));
+        assert_eq!(taken.attempt, 2);
+        assert_eq!(taken.last_fence, 2);
+    }
+
+    #[test]
+    fn claimed_outcomes_require_the_current_claim_a_live_lease_and_a_diagnostic() {
+        let held = held();
+        let current = claim("a", 1);
+        let stranger = claim("b", 1);
+        let confirm = |claim: DeliveryClaim, receipt: &str, now_ms: i64| {
+            held.clone().evolve(OutboxEvent::ConfirmDelivered {
+                claim,
+                receipt: receipt.into(),
+                now_ms,
+            })
+        };
+        assert_eq!(
+            confirm(stranger.clone(), "ok", 0),
+            Err(OutboxError::InvalidTransition)
+        );
+        assert_eq!(
+            confirm(current.clone(), " ", 0),
+            Err(OutboxError::InvalidTransition)
+        );
+        assert_eq!(
+            confirm(current.clone(), "ok", 99).unwrap().state,
+            OutboxState::Delivered {
+                receipt: "ok".into()
+            }
+        );
+
+        let reschedule = |claim: DeliveryClaim, error: &str| {
+            held.clone().evolve(OutboxEvent::Reschedule {
+                claim,
+                available_at_ms: 200,
+                error: error.into(),
+                now_ms: 0,
+            })
+        };
+        assert_eq!(
+            reschedule(stranger.clone(), "retry"),
+            Err(OutboxError::InvalidTransition)
+        );
+        assert_eq!(
+            reschedule(current.clone(), ""),
+            Err(OutboxError::InvalidTransition)
+        );
+        assert_eq!(
+            reschedule(current.clone(), "retry").unwrap().state,
+            OutboxState::Pending {
+                available_at_ms: 200
+            }
+        );
+
+        let unknown = |claim: DeliveryClaim, reason: &str| {
+            held.clone().evolve(OutboxEvent::MarkDeliveryUnknown {
+                claim,
+                reason: reason.into(),
+                now_ms: 0,
+            })
+        };
+        assert_eq!(
+            unknown(stranger, "lost"),
+            Err(OutboxError::InvalidTransition)
+        );
+        assert_eq!(
+            unknown(current.clone(), " "),
+            Err(OutboxError::InvalidTransition)
+        );
+        assert_eq!(
+            unknown(current, "lost").unwrap().state,
+            OutboxState::DeliveryUnknown {
+                reason: "lost".into()
+            }
+        );
+    }
+
+    #[test]
+    fn initial_claims_must_be_fresh_and_fenced_to_the_next_value() {
+        for (candidate, why) in [
+            (
+                DeliveryClaim {
+                    heartbeat_revision: 1,
+                    ..claim("a", 1)
+                },
+                "a resumed heartbeat",
+            ),
+            (claim("a", 2), "a fence beyond the next one"),
+        ] {
+            assert_eq!(
+                record().evolve(OutboxEvent::Claim {
+                    claim: candidate,
+                    now_ms: 0,
+                }),
+                Err(OutboxError::InvalidTransition),
+                "{why} must not claim a pending record"
+            );
         }
     }
 }

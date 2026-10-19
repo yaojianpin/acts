@@ -272,4 +272,98 @@ mod tests {
             ))
         ));
     }
+
+    #[test]
+    fn decoder_rejects_bad_magic_schema_and_state_tags() {
+        let valid = OutboxCodec::encode(&pending()).unwrap();
+        let mut bad_magic = valid.clone();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            OutboxCodec::decode(&bad_magic),
+            Err(OutboxCodecError::InvalidMagic)
+        );
+        let mut bad_schema = valid.clone();
+        bad_schema[8..10].copy_from_slice(&9u16.to_be_bytes());
+        assert_eq!(
+            OutboxCodec::decode(&bad_schema),
+            Err(OutboxCodecError::UnsupportedSchema(9))
+        );
+        let mut unknown = valid;
+        let state_at = unknown.len() - 9;
+        unknown[state_at] = 42;
+        assert_eq!(
+            OutboxCodec::decode(&unknown),
+            Err(OutboxCodecError::UnknownState(42))
+        );
+    }
+
+    #[test]
+    fn every_state_tag_round_trips() {
+        let base = pending();
+        let claimed = base
+            .clone()
+            .evolve(
+                crate::scheduler::core::outbox::records::OutboxEvent::Claim {
+                    claim: DeliveryClaim {
+                        owner: "w".into(),
+                        fence: 1,
+                        lease_until_ms: 100,
+                        heartbeat_revision: 0,
+                    },
+                    now_ms: 0,
+                },
+            )
+            .unwrap();
+        let unknown = claimed
+            .clone()
+            .evolve(
+                crate::scheduler::core::outbox::records::OutboxEvent::MarkDeliveryUnknown {
+                    claim: DeliveryClaim {
+                        owner: "w".into(),
+                        fence: 1,
+                        lease_until_ms: 100,
+                        heartbeat_revision: 0,
+                    },
+                    reason: "lost".into(),
+                    now_ms: 0,
+                },
+            )
+            .unwrap();
+        let delivered = claimed
+            .clone()
+            .evolve(
+                crate::scheduler::core::outbox::records::OutboxEvent::ConfirmDelivered {
+                    claim: DeliveryClaim {
+                        owner: "w".into(),
+                        fence: 1,
+                        lease_until_ms: 100,
+                        heartbeat_revision: 0,
+                    },
+                    receipt: "ok".into(),
+                    now_ms: 0,
+                },
+            )
+            .unwrap();
+        let quarantined = base
+            .clone()
+            .evolve(
+                crate::scheduler::core::outbox::records::OutboxEvent::Quarantine {
+                    reason: "stop".into(),
+                },
+            )
+            .unwrap();
+        for record in [base, claimed, unknown, delivered, quarantined] {
+            let bytes = OutboxCodec::encode(&record).unwrap();
+            assert_eq!(OutboxCodec::decode(&bytes).unwrap(), record);
+        }
+    }
+
+    #[test]
+    fn codec_errors_render() {
+        assert!(
+            OutboxCodecError::Truncated
+                .to_string()
+                .starts_with("outbox codec error:")
+        );
+    }
 }

@@ -307,3 +307,61 @@ fn the_declared_tiers_agree() {
         "SHELL_MODULES and the shell entries of RUNTIME_ROOT disagree"
     );
 }
+
+#[test]
+fn dependency_names_recognize_both_import_forms() {
+    // The plain form.
+    assert!(names("use crate::store::KvStore;", "crate::store"));
+    // The grouped form: the `crate::` prefix sits on the group.
+    assert!(names(
+        "use crate::{model::Step, store::KvStore};",
+        "crate::store"
+    ));
+    // A bare segment name matches only on a segment boundary.
+    assert!(names("use store::KvStore;", "store"));
+    assert!(!names("use document_store::KvStore;", "crate::store"));
+    // A segment at the start of the source has an empty prefix.
+    assert!(names_segment("store::KvStore", "store"));
+    assert!(!names_segment("document_store::KvStore", "store"));
+    // An identifier character (alphanumeric or `_`) before the segment means
+    // it is part of a longer name, not this segment.
+    assert!(!names_segment("xstore::KvStore", "store"));
+    assert!(!names_segment("_store::KvStore", "store"));
+    // Any other character before it is a boundary.
+    assert!(names_segment(" store::KvStore", "store"));
+}
+
+/// The walker reads nested `.rs` files and ignores everything else; a file
+/// outside the base falls back to its full path as the reported name.
+#[test]
+fn the_source_walker_skips_non_rust_entries_and_nests() {
+    let root = std::env::temp_dir().join(format!("acts-arch-{}", std::process::id()));
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(root.join("a.rs"), "fn a() {}").unwrap();
+    std::fs::write(root.join("notes.txt"), "ignored").unwrap();
+    std::fs::write(nested.join("b.rs"), "fn b() {}").unwrap();
+
+    let mut files = Vec::new();
+    collect(&root, &root, &mut files);
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, vec!["a.rs", "nested/b.rs"]);
+
+    // A directory item outside the base falls back to its full path; the
+    // nested entry is still relative to the base.
+    let mut outside = Vec::new();
+    collect(&root, &nested, &mut outside);
+    assert!(
+        outside
+            .iter()
+            .any(|(name, _)| name.ends_with("a.rs") && name.contains("acts-arch-")),
+        "a path outside the base has no relative name: {outside:?}"
+    );
+    assert!(
+        outside.iter().any(|(name, _)| name == "b.rs"),
+        "a path inside the base is reported relative to it: {outside:?}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

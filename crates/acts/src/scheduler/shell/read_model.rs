@@ -221,3 +221,88 @@ fn parse_vars(raw: &str) -> Result<Vars> {
     }
     serde_json::from_str(raw).map_err(|err| ActError::Store(err.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Workflow;
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
+    use crate::store::MemoryStore;
+
+    fn proc_row(model: &str, env: &str) -> data::Proc {
+        data::Proc {
+            id: "p-read".into(),
+            state: "running".into(),
+            mid: String::new(),
+            name: String::new(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: 0,
+            model: model.into(),
+            env: env.into(),
+            err: None,
+            removable: false,
+            source_revision: ProcessVersion {
+                graph: 1,
+                process: 1,
+                operations: 1,
+            }
+            .encode(),
+            v: 1,
+        }
+    }
+
+    /// An empty `vars.data` is the empty variable map; malformed JSON is a
+    /// store error, never a panic.
+    #[test]
+    fn vars_text_is_parsed_strictly_but_empty_is_empty() {
+        assert!(parse_vars("").unwrap().is_empty());
+        assert_eq!(parse_vars(r#"{"a":1}"#).unwrap().get::<i32>("a"), Some(1));
+        let error = parse_vars("[not json").unwrap_err();
+        assert!(matches!(error, ActError::Store(_)), "{error:?}");
+    }
+
+    /// A proc row whose env cannot decode is a store error, not a run with no
+    /// env.
+    #[tokio::test]
+    async fn an_unreadable_env_row_is_a_store_error() {
+        let store = Store::new(std::sync::Arc::new(MemoryStore::new()));
+        let model = serde_json::to_string(
+            &Workflow::new()
+                .with_id("wf-read")
+                .with_step(|step| step.with_id("s1")),
+        )
+        .unwrap();
+        assert!(
+            store
+                .procs()
+                .create(&proc_row(&model, "not-json"))
+                .await
+                .unwrap()
+        );
+        let error = load(&store, "p-read").await.unwrap_err();
+        assert!(matches!(error, ActError::Store(_)), "{error:?}");
+    }
+
+    /// A model row that cannot decode is a store error as well.
+    #[tokio::test]
+    async fn an_unreadable_model_row_is_a_store_error() {
+        let store = Store::new(std::sync::Arc::new(MemoryStore::new()));
+        assert!(
+            store
+                .procs()
+                .create(&proc_row("not-json", "{}"))
+                .await
+                .unwrap()
+        );
+        let error = load(&store, "p-read").await.unwrap_err();
+        assert!(matches!(error, ActError::Store(_)), "{error:?}");
+    }
+
+    /// A missing proc row is `None`: a reclaimed run has no reading.
+    #[tokio::test]
+    async fn a_reclaimed_run_reads_as_absent() {
+        let store = Store::new(std::sync::Arc::new(MemoryStore::new()));
+        assert!(load(&store, "p-missing").await.unwrap().is_none());
+    }
+}

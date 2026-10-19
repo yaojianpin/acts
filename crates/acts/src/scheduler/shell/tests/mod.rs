@@ -8796,3 +8796,1739 @@ async fn a_proc_read_reprojects_a_lagging_row() {
     assert_eq!(runtime.projection_metrics().lag, 0);
     engine.close().await;
 }
+
+// ---------------------------------------------------------------------------
+// Admission bookkeeping and the no-projector fallbacks. These are the shell's
+// own state machines, driven directly: the run-level tests above exercise
+// them through whole runs, and these pin the branch edges of the pure parts.
+// ---------------------------------------------------------------------------
+
+fn admission_snapshot(pid: &str) -> crate::scheduler::core::commit::aggregate::ProcessSnapshot {
+    ProcessSpec::linear(pid, crate::utils::consts::TASK_ROOT_TID, &["only"])
+        .seed_snapshot()
+        .unwrap()
+}
+
+fn operation_id(pid: &str, node: &str, sequence: u64) -> OperationId {
+    OperationId {
+        process_id: pid.into(),
+        task: crate::scheduler::core::model::task_graph::TaskId::new(node, 0).unwrap(),
+        sequence,
+    }
+}
+
+/// A saturated auxiliary gate parks its next entrant until a permit is
+/// returned; the released permit is what wakes it, and the counters follow.
+#[tokio::test]
+async fn an_auxiliary_gate_waits_while_saturated() {
+    let gate = AdmissionGate::new(1);
+    let held = gate.enter().await;
+    assert_eq!(
+        gate.metrics(),
+        QuotaMetrics {
+            cap: 1,
+            active: 1,
+            admitted: 1,
+        }
+    );
+
+    let waiting = gate.clone();
+    let waiter = tokio::spawn(async move {
+        let _lease = waiting.enter().await;
+        waiting.metrics().active
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!waiter.is_finished(), "the gate is at its cap");
+
+    drop(held);
+    let active = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("the released permit wakes the waiter")
+        .unwrap();
+    assert_eq!(active, 1);
+    assert_eq!(gate.metrics().active, 0);
+    assert_eq!(gate.metrics().admitted, 2);
+}
+
+/// A zero cap means "no bound": the gate admits every entrant immediately.
+#[tokio::test]
+async fn an_unbounded_gate_never_waits() {
+    let gate = AdmissionGate::new(0);
+    let first = gate.enter().await;
+    let second = gate.enter().await;
+    assert_eq!(gate.metrics().active, 2);
+    drop((first, second));
+    assert_eq!(gate.metrics().active, 0);
+}
+
+/// Execution has no auxiliary gate; every other category has its own.
+#[test]
+fn every_auxiliary_category_has_its_own_gate() {
+    let admissions = Admissions::new(AdmissionCaps::new(3));
+    assert!(admissions.gate(AdmissionCategory::Execution).is_none());
+    for category in [
+        AdmissionCategory::Effect,
+        AdmissionCategory::Recovery,
+        AdmissionCategory::Reconciliation,
+        AdmissionCategory::Projection,
+    ] {
+        let gate = admissions.gate(category).expect("an auxiliary gate");
+        assert_eq!(gate.metrics().cap, admissions.cap(category));
+    }
+    let metrics = admissions.metrics();
+    assert_eq!(metrics.execution.cap, 3);
+    assert_eq!(metrics.parked, 0);
+    assert_eq!(metrics.quarantined_runs, 0);
+}
+
+impl Admissions {
+    fn cap(&self, category: AdmissionCategory) -> usize {
+        self.gate(category).unwrap().metrics().cap
+    }
+}
+
+/// The execution slot set: reservation, parking, the free-slot race a start
+/// resolves, release, and abandonment of a run that never became durable.
+#[test]
+fn the_execution_slot_set_parks_admits_and_releases() {
+    let mut admissions = Admissions::new(AdmissionCaps::new(1));
+    let other = admission_snapshot("p-other");
+
+    assert_eq!(admissions.reserve("p-parked"), Admission::Admit);
+    assert!(admissions.holds("p-parked"));
+    assert_eq!(admissions.metrics().execution.admitted, 1);
+    assert_eq!(admissions.reserve("p-other"), Admission::Park);
+    assert!(admissions.holds("p-parked"), "the parked run takes nothing");
+
+    // A second activation is not a second admission.
+    admissions.activate("p-parked");
+    assert_eq!(admissions.metrics().execution.admitted, 1);
+
+    let created = created_stamp(&other);
+    admissions.park(created, "p-other", &operation_id("p-other", "root", 0));
+    assert!(admissions.is_parked("p-other"));
+    assert!(
+        !admissions.take_free_slot(created, "p-other"),
+        "the cap is still full"
+    );
+    assert!(
+        !admissions.take_free_slot(created, "p-unknown"),
+        "an unqueued run takes nothing"
+    );
+
+    let admitted = admissions
+        .release("p-parked")
+        .expect("the oldest parked run is admitted by the release");
+    assert_eq!(admitted.process_id, "p-other");
+    assert!(!admissions.is_parked("p-other"));
+    assert!(admissions.holds("p-other"));
+    assert_eq!(admissions.release("p-unknown"), None);
+
+    // A release that leaves the set at the cap hands out nothing.
+    let mut full = Admissions::new(AdmissionCaps::new(1));
+    full.activate("a");
+    full.activate("b");
+    assert_eq!(full.release("a"), None);
+
+    // Abandoning forgets every trace of a run that never became durable.
+    let mut abandoned = Admissions::new(AdmissionCaps::new(1));
+    abandoned.reserve("gone");
+    abandoned.park(0, "gone", &operation_id("gone", "root", 0));
+    abandoned.note_quarantined("gone", true);
+    assert_eq!(abandoned.metrics().quarantined_runs, 1);
+    abandoned.abandon("gone");
+    assert!(!abandoned.holds("gone"));
+    assert!(!abandoned.is_parked("gone"));
+    assert_eq!(abandoned.metrics().quarantined_runs, 0);
+    abandoned.note_quarantined("gone", false);
+    assert_eq!(abandoned.metrics().quarantined_runs, 0);
+}
+
+/// The admission directive reads the set's standing: parked, holding (with
+/// and without live work) and unplaced.
+#[test]
+fn admission_standings_map_onto_directives() {
+    use crate::scheduler::core::decision::{AdmissionDirective, SlotDirective};
+    // Parked whatever the facts.
+    let parked = admission_snapshot("p-standing-parked");
+    let mut admissions = Admissions::new(AdmissionCaps::new(1));
+    admissions.park(
+        0,
+        "p-standing-parked",
+        &operation_id("p-standing-parked", "root", 0),
+    );
+    assert!(matches!(
+        admissions.directive(&parked),
+        AdmissionDirective::Park
+    ));
+    assert!(
+        admissions
+            .apply(&parked, AdmissionDirective::Park)
+            .is_none()
+    );
+
+    // Holding a slot keeps it while work is live; the direct `apply` arms for
+    // every other directive are no-ops on the set.
+    let holding = admission_snapshot("p-standing-holding");
+    admissions.activate("p-standing-holding");
+    assert!(matches!(
+        admissions.directive(&holding),
+        AdmissionDirective::Drive(SlotDirective::Keep)
+            | AdmissionDirective::Drive(SlotDirective::Release)
+    ));
+    assert!(
+        admissions
+            .apply(&holding, AdmissionDirective::Drive(SlotDirective::Keep))
+            .is_none()
+    );
+    assert!(
+        admissions
+            .apply(&holding, AdmissionDirective::Drive(SlotDirective::NoSlot))
+            .is_none()
+    );
+
+    // Unplaced with a free slot takes one.
+    let unplaced = admission_snapshot("p-standing-new");
+    let mut free = Admissions::new(AdmissionCaps::new(1));
+    assert!(matches!(
+        free.directive(&unplaced),
+        AdmissionDirective::Drive(SlotDirective::Take) | AdmissionDirective::Park
+    ));
+    assert!(
+        free.apply(&unplaced, AdmissionDirective::Drive(SlotDirective::Take))
+            .is_none()
+    );
+    assert!(free.holds("p-standing-new"));
+    // Releasing a run that holds nothing is a no-op.
+    let stranger = admission_snapshot("p-standing-stranger");
+    assert!(
+        free.apply(&stranger, AdmissionDirective::Drive(SlotDirective::Release))
+            .is_none()
+    );
+}
+
+/// A spec whose seed cannot be built must not keep its reserved slot.
+#[tokio::test]
+async fn a_start_with_an_unbuildable_seed_abandons_its_slot() {
+    let (host, _wake) = KernelHost::in_memory();
+    let spec = ProcessSpec::linear("p-bad-seed", "", &[]);
+    let error = host.start_process(&spec).await.unwrap_err();
+    assert!(matches!(error, ActError::Runtime(_)), "{error:?}");
+    assert!(!host.admissions.lock().holds("p-bad-seed"));
+}
+
+/// Without a read model, every projection seam is a no-op success.
+#[tokio::test]
+async fn a_host_without_a_projector_reports_no_projection_work() {
+    let (host, _wake) = KernelHost::in_memory();
+    assert_eq!(host.repair_projections_batch(8).await, (0, 0));
+    assert!(host.catch_up_projections().await);
+    assert!(host.lock_projection("p-none").await.is_none());
+    assert!(host.refresh_projection("p-none").await);
+    assert!(host.projection_metrics().lag == 0);
+}
+
+/// An absent aggregate has no unknown effects and no process completion.
+#[tokio::test]
+async fn an_absent_run_reads_as_empty() {
+    let (host, _wake) = KernelHost::in_memory();
+    assert!(host.effect_unknowns("p-absent").await.unwrap().is_empty());
+    assert!(!host.process_completed("p-absent").await.unwrap());
+    assert!(!host.exists("p-absent").await.unwrap());
+}
+
+/// Only an `ApplyAction` in `EffectUnknown` is observed; every other
+/// observation is answered without IO, and an unknown effect of an absent run
+/// has no proof to offer.
+#[tokio::test]
+async fn effect_observation_is_bounded_to_unknown_apply_actions() {
+    use crate::scheduler::core::model::operation::{
+        OperationKind, OperationRecord, OperationState,
+    };
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
+
+    let (host, _wake) = KernelHost::in_memory();
+    let version = ProcessVersion {
+        graph: 0,
+        process: 0,
+        operations: 0,
+    };
+
+    // Wrong kind, even in `EffectUnknown`: not the executor's business.
+    let id = operation_id("p-observe", "s1", 0);
+    let mut record = OperationRecord::pending(id.clone(), OperationKind::ExecuteTask);
+    record.state = OperationState::EffectUnknown { attempt: 1 };
+    let observed = crate::scheduler::core::recovery::planner::Observed::from_record(
+        &record,
+        version.clone(),
+        0,
+    );
+    assert!(host.observe_effect(&observed).await.unwrap().is_none());
+
+    // The right kind but a live phase: no proof asked.
+    let record = OperationRecord::pending(id.clone(), OperationKind::ApplyAction);
+    let observed = crate::scheduler::core::recovery::planner::Observed::from_record(
+        &record,
+        version.clone(),
+        0,
+    );
+    assert!(host.observe_effect(&observed).await.unwrap().is_none());
+
+    // Unknown, but the run is gone: nothing to observe.
+    let mut record = OperationRecord::pending(id, OperationKind::ApplyAction);
+    record.state = OperationState::EffectUnknown { attempt: 1 };
+    let observed =
+        crate::scheduler::core::recovery::planner::Observed::from_record(&record, version, 0);
+    assert!(host.observe_effect(&observed).await.unwrap().is_none());
+}
+
+/// A settle waiter is woken by the notification and a reclaimed pid's waiter
+/// does not stay registered.
+#[tokio::test]
+async fn a_settle_waiter_is_notified_and_taken() {
+    let (host, _wake) = KernelHost::in_memory();
+    let waiter = host.run_waiter("p-wait");
+    let woken = waiter.clone();
+    let task = tokio::spawn(async move { woken.notified().await });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    host.notify_settled("p-wait");
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("the settle notification wakes the waiter")
+        .unwrap();
+    // A second notification for an unregistered pid is a no-op.
+    host.notify_settled("p-wait");
+}
+
+/// The operation-event outcome keeps the committed records and maps a lost
+/// guard onto the retryable conflict.
+#[tokio::test]
+async fn operation_event_outcomes_keep_committed_records_and_classify_conflicts() {
+    use crate::scheduler::core::model::operation::{OperationKind, OperationRecord};
+    use crate::scheduler::durable::async_document_store::OperationCommitOutcome;
+
+    let (host, _wake) = KernelHost::in_memory();
+    let spec = ProcessSpec::linear("p-outcome", crate::utils::consts::TASK_ROOT_TID, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    let loaded = host.load("p-outcome").await.unwrap().unwrap();
+    let id = operation_id("p-outcome", crate::utils::consts::TASK_ROOT_TID, 0);
+    let record = OperationRecord::pending(id.clone(), OperationKind::ExecuteTask);
+
+    for outcome in [
+        OperationCommitOutcome::Committed {
+            operation: record.clone(),
+            loaded: loaded.clone(),
+        },
+        OperationCommitOutcome::AlreadyCommitted {
+            operation: record.clone(),
+            loaded: loaded.clone(),
+        },
+    ] {
+        let (returned, returned_loaded) =
+            KernelHost::operation_event_outcome(&id, outcome).unwrap();
+        assert_eq!(returned.id, id);
+        assert_eq!(returned_loaded.snapshot.process_id, "p-outcome");
+    }
+
+    let error =
+        KernelHost::operation_event_outcome(&id, OperationCommitOutcome::Conflict {}).unwrap_err();
+    assert!(is_conflict(&error), "{error:?}");
+}
+
+/// The effect-key lookups answer absent runs and non-unknown operations with
+/// explicit engine errors instead of panicking.
+#[tokio::test]
+async fn effect_resolution_names_missing_runs_and_operations() {
+    let (host, _wake) = KernelHost::in_memory();
+    let missing = host
+        .resolve_effect_by_key("p-missing", "key", crate::EffectResolution::NotApplied)
+        .await
+        .unwrap_err();
+    assert!(format!("{missing}").contains("p-missing"), "{missing}");
+
+    let missing = host
+        .resolve_effect(
+            &operation_id("p-missing", "root", 0),
+            crate::EffectResolution::NotApplied,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{missing}").contains("not found"), "{missing}");
+
+    let spec = ProcessSpec::linear(
+        "p-effect-lookup",
+        crate::utils::consts::TASK_ROOT_TID,
+        &["only"],
+    );
+    host.start_process(&spec).await.unwrap();
+
+    let not_unknown = host
+        .resolve_effect(
+            &operation_id("p-effect-lookup", crate::utils::consts::TASK_ROOT_TID, 0),
+            crate::EffectResolution::NotApplied,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{not_unknown}").contains("not an unknown effect"),
+        "{not_unknown}"
+    );
+
+    let missing = host
+        .resolve_effect_by_key(
+            "p-effect-lookup",
+            "no-such-key",
+            crate::EffectResolution::NotApplied,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{missing}").contains("no operation with effect key"),
+        "{missing}"
+    );
+}
+
+/// Delivering committed records skips ids the aggregate no longer holds and
+/// records another pass already settled; neither is an error.
+#[tokio::test]
+async fn committed_outbox_delivery_skips_missing_and_settled_records() {
+    use crate::scheduler::core::outbox::records::OutboxId;
+
+    let (host, mut wake_rx) = KernelHost::in_memory();
+    let counter = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(CountingTransport {
+        delivered: counter.clone(),
+    }));
+    let spec = ProcessSpec::linear("p-outbox-skip", crate::utils::consts::TASK_ROOT_TID, &["a"]);
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+    let mut loaded = host.load("p-outbox-skip").await.unwrap().unwrap();
+    let delivered = loaded
+        .snapshot
+        .outbox
+        .keys()
+        .next()
+        .cloned()
+        .expect("the run wrote records");
+    // The record is already Delivered: the pass must not redeliver it.
+    host.deliver_committed_outbox(&mut loaded, std::slice::from_ref(&delivered))
+        .await;
+    // An id the aggregate never carried is skipped as well, leaving nothing to
+    // confirm.
+    let ghost = OutboxId {
+        process_id: "p-outbox-skip".into(),
+        key: "ghost".into(),
+    };
+    host.deliver_committed_outbox(&mut loaded, &[ghost]).await;
+    // No records at all is the common no-op.
+    host.deliver_committed_outbox(&mut loaded, &[]).await;
+}
+
+// ---------------------------------------------------------------------------
+// Direct branch edges of the shell's host code: slot bookkeeping, projection
+// repair, action identity/resume, recovery directives and the outbox pass.
+// These drive the private seams with a store that fails or releases a slot at
+// the exact point the branch needs.
+// ---------------------------------------------------------------------------
+
+/// A parked run takes a slot that freed while its aggregate was being written;
+/// a key that is not parked (or a full cap) takes nothing.
+#[test]
+fn a_parked_run_takes_a_free_slot_when_the_cap_allows() {
+    let mut admissions = Admissions::new(AdmissionCaps::new(2));
+    admissions.activate("p-slot-holder");
+    let parked = admission_snapshot("p-slot-taker");
+    let created = created_stamp(&parked);
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    admissions.park(
+        created,
+        "p-slot-taker",
+        &operation_id("p-slot-taker", root, 0),
+    );
+
+    assert!(admissions.take_free_slot(created, "p-slot-taker"));
+    assert!(admissions.holds("p-slot-taker"));
+    assert!(!admissions.is_parked("p-slot-taker"));
+    assert_eq!(admissions.metrics().execution.admitted, 2);
+    // The entry was consumed: a second take has nothing to remove.
+    assert!(!admissions.take_free_slot(created, "p-slot-taker"));
+    // An unknown key at a free cap removes nothing either.
+    assert!(!admissions.take_free_slot(created, "p-not-parked"));
+}
+
+/// A failed repair counts as a failure in the batch report; once the store
+/// answers the same queued run repairs cleanly. `refresh_proc_row` follows the
+/// same queue/clear rule, and an absent run's row refresh is a no-op success.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_repair_is_counted_and_queued_until_the_rows_write() {
+    const PID: &str = "p-repair-count";
+    let stored = FailingRowsKv::new();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let store = Arc::new(crate::store::Store::new(kv.clone()));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
+    // Take the boot pass while the rows do not exist yet, so the later repair
+    // goes through the queue.
+    host.recover(SystemClock.now_ms()).await.unwrap();
+
+    stored.arm();
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-repair-count")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    let (attempted, failures) = host.repair_projections_batch(8).await;
+    assert!(attempted >= 1, "the failed run is queued: {attempted}");
+    assert_eq!(failures, attempted, "every repair failed");
+
+    // A proc-row refresh that fails queues the run for repair.
+    let before = host.projection_metrics().failed;
+    host.refresh_proc_row(PID).await;
+    assert!(
+        host.projection_metrics().failed > before,
+        "the failed row refresh must be counted"
+    );
+
+    stored.disarm();
+    let (attempted, failures) = host.repair_projections_batch(8).await;
+    assert!(attempted >= 1, "the queue still holds the run");
+    assert_eq!(failures, 0, "the repaired run reports no failure");
+
+    // An absent run's row refresh clears its (unnamed) claim without error.
+    host.refresh_proc_row("p-no-such-run").await;
+}
+
+/// The lifecycle program has three early exits that must not build a message:
+/// no sink, no root execution, and nothing for Core to report.
+#[test]
+fn a_lifecycle_decision_without_sink_root_or_directive_is_ignored() {
+    use crate::scheduler::core::decision::LifecycleDirective;
+
+    let (host, _wake) = KernelHost::in_memory();
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let snapshot = ProcessSpec::linear("p-lifecycle-early", root, &["only"])
+        .seed_snapshot()
+        .unwrap();
+    // No sink: even a directive reports nothing.
+    host.report_lifecycle_decision(&snapshot, Some(&LifecycleDirective::Started), None);
+
+    let reported = Arc::new(AtomicUsize::new(0));
+    let seen = reported.clone();
+    host.attach_lifecycle_sink(Box::new(move |_, _| {
+        seen.fetch_add(1, Ordering::SeqCst);
+    }));
+    // Nothing to report.
+    host.report_lifecycle_decision(&snapshot, None, None);
+    // No root execution to shape the message from.
+    let mut rootless = snapshot.clone();
+    rootless.tasks.clear();
+    host.report_lifecycle_decision(&rootless, Some(&LifecycleDirective::Started), None);
+    assert_eq!(reported.load(Ordering::SeqCst), 0);
+
+    // The same decision with a root reports once.
+    host.report_lifecycle_decision(&snapshot, Some(&LifecycleDirective::Started), Some((1, 2)));
+    assert_eq!(reported.load(Ordering::SeqCst), 1);
+}
+
+/// Action identity: a fresh pin mints `max(sequence) + 1`, a pin that is still
+/// ours is reused, a foreign pin is replaced, and an occupied sequence is
+/// skipped.
+#[test]
+fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
+    use crate::scheduler::core::model::operation::{OperationKind, OperationRecord};
+    use crate::scheduler::core::model::task_graph::TaskId;
+
+    let pid = "p-action-identity";
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let mut snapshot = ProcessSpec::linear(pid, root, &["only"])
+        .seed_snapshot()
+        .unwrap();
+    let task = TaskId::new(root, 0).unwrap();
+    let node = task.wire(pid);
+    let action = ActionKind::Skip;
+    let inputs = vec![("note".to_string(), "x".to_string())];
+
+    // No operations: the sequence default (0) is used.
+    let mut pinned = None;
+    let first =
+        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, &mut pinned).unwrap();
+    assert_eq!(first.operation.sequence, 1);
+    assert!(pinned.is_some());
+
+    // The same pin, now carried by the aggregate's own fact, is still ours.
+    snapshot.operations.insert(
+        first.operation.clone(),
+        OperationRecord::pending(first.operation.clone(), OperationKind::SkipTask),
+    );
+    snapshot.variables.insert(
+        (
+            first.task.clone(),
+            action_fact_var(first.operation.sequence),
+        ),
+        action_fact(&action, &inputs),
+    );
+    pinned = Some(ActionIntent {
+        task: first.task.clone(),
+        operation: first.operation.clone(),
+    });
+    let resumed =
+        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, &mut pinned).unwrap();
+    assert_eq!(resumed.operation, first.operation);
+
+    // A pin whose fact is not this decision is replaced by a fresh identity.
+    let mut foreign = Some(ActionIntent {
+        task: task.clone(),
+        operation: operation_id(pid, root, 99),
+    });
+    let minted =
+        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, &mut foreign).unwrap();
+    assert_eq!(minted.operation.sequence, 2);
+
+    // An operation already standing at the minted sequence is skipped.
+    snapshot.operations.insert(
+        minted.operation.clone(),
+        OperationRecord::pending(minted.operation.clone(), OperationKind::SkipTask),
+    );
+    let mut fresh = None;
+    let next =
+        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, &mut fresh).unwrap();
+    assert_eq!(next.operation.sequence, 3);
+}
+
+/// An intent is ours only when its operation exists *and* carries this exact
+/// decision's fact (same action, same inputs).
+#[test]
+fn an_action_intent_is_ours_only_with_its_own_fact() {
+    use crate::scheduler::core::model::operation::{OperationKind, OperationRecord};
+    use crate::scheduler::core::model::task_graph::TaskId;
+
+    let pid = "p-intent-mine";
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let mut snapshot = ProcessSpec::linear(pid, root, &["only"])
+        .seed_snapshot()
+        .unwrap();
+    let task = TaskId::new(root, 0).unwrap();
+    let operation = operation_id(pid, root, 1);
+    let intent = ActionIntent {
+        task: task.clone(),
+        operation: operation.clone(),
+    };
+    let action = ActionKind::Skip;
+    let inputs: Vec<(String, String)> = Vec::new();
+
+    assert!(!KernelHost::action_intent_is_mine(
+        &snapshot, &intent, &action, &inputs
+    ));
+    snapshot.operations.insert(
+        operation.clone(),
+        OperationRecord::pending(operation.clone(), OperationKind::SkipTask),
+    );
+    assert!(
+        !KernelHost::action_intent_is_mine(&snapshot, &intent, &action, &inputs),
+        "an operation without the fact is not ours"
+    );
+    snapshot.variables.insert(
+        (task.clone(), action_fact_var(1)),
+        action_fact(&ActionKind::Complete, &inputs),
+    );
+    assert!(
+        !KernelHost::action_intent_is_mine(&snapshot, &intent, &action, &inputs),
+        "another decision's fact is not ours"
+    );
+    snapshot.variables.insert(
+        (task.clone(), action_fact_var(1)),
+        action_fact(&action, &inputs),
+    );
+    assert!(KernelHost::action_intent_is_mine(
+        &snapshot, &intent, &action, &inputs
+    ));
+    assert!(
+        !KernelHost::action_intent_is_mine(
+            &snapshot,
+            &intent,
+            &action,
+            &[("other".to_string(), "value".to_string())]
+        ),
+        "different inputs are a different decision"
+    );
+}
+
+/// A resume check for an absent run or a foreign pin sends the caller back to
+/// a fresh attempt instead of reporting an outcome.
+#[tokio::test]
+async fn resume_action_intent_retries_absent_runs_and_foreign_pins() {
+    use crate::scheduler::core::model::task_graph::TaskId;
+
+    let (host, _wake) = KernelHost::in_memory();
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let task = TaskId::new(root, 0).unwrap();
+    let action = ActionKind::Skip;
+    let inputs: Vec<(String, String)> = Vec::new();
+
+    let absent = ActionIntent {
+        task: task.clone(),
+        operation: operation_id("p-resume-absent", root, 0),
+    };
+    assert!(matches!(
+        host.resume_action_intent(&absent, &action, &inputs)
+            .await
+            .unwrap(),
+        ActionResume::Retry
+    ));
+
+    let pid = "p-resume-foreign";
+    let spec = ProcessSpec::linear(pid, root, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    let foreign = ActionIntent {
+        task,
+        operation: operation_id(pid, root, 7),
+    };
+    assert!(matches!(
+        host.resume_action_intent(&foreign, &action, &inputs)
+            .await
+            .unwrap(),
+        ActionResume::Retry
+    ));
+}
+
+/// Effect observation answers `None` for a record naming a task the aggregate
+/// does not have and for a step without an effect runner.
+#[tokio::test]
+async fn effect_observation_skips_missing_tasks_and_effectless_steps() {
+    use crate::scheduler::core::model::operation::{
+        OperationKind, OperationRecord, OperationState,
+    };
+    use crate::scheduler::core::model::transition_plan::ProcessVersion;
+    use crate::scheduler::core::recovery::planner::Observed;
+
+    let (host, _wake) = KernelHost::in_memory();
+    let pid = "p-observe-task";
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let spec = ProcessSpec::linear(pid, root, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    let version = ProcessVersion {
+        graph: 1,
+        process: 0,
+        operations: 0,
+    };
+
+    let mut record = OperationRecord::pending(
+        operation_id(pid, "ghost-task", 0),
+        OperationKind::ApplyAction,
+    );
+    record.state = OperationState::EffectUnknown { attempt: 1 };
+    let observed = Observed::from_record(&record, version.clone(), 0);
+    assert!(host.observe_effect(&observed).await.unwrap().is_none());
+
+    let mut record =
+        OperationRecord::pending(operation_id(pid, root, 0), OperationKind::ApplyAction);
+    record.state = OperationState::EffectUnknown { attempt: 1 };
+    let observed = Observed::from_record(&record, version, 0);
+    assert!(
+        host.observe_effect(&observed).await.unwrap().is_none(),
+        "no effect runner means no proof to ask for"
+    );
+}
+
+/// A missing ready index is rebuilt by the boot pass and counted; the boot
+/// flag makes the pass one-time.
+#[tokio::test]
+async fn ready_boot_repairs_a_missing_index_once() {
+    let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let (host, _wake) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let spec = ProcessSpec::linear("p-ready-boot", root, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    let key = crate::scheduler::durable::document_store::ready_index_key("p-ready-boot").unwrap();
+    kv.delete(&key).await.unwrap();
+
+    let (restarted, _wake) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    restarted
+        .ensure_ready_boot(SystemClock.now_ms())
+        .await
+        .unwrap();
+    assert!(
+        restarted.ready_metrics().repaired >= 1,
+        "the boot pass rebuilds the missing record: {:?}",
+        restarted.ready_metrics()
+    );
+    let repaired = restarted.ready_metrics().repaired;
+    restarted
+        .ensure_ready_boot(SystemClock.now_ms())
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.ready_metrics().repaired,
+        repaired,
+        "the boot pass runs once"
+    );
+}
+
+/// The projection boot catch-up is also one-time: a second call short-circuits
+/// on the flag.
+#[tokio::test]
+async fn projection_boot_is_a_one_time_pass() {
+    let (host, _wake) = KernelHost::in_memory();
+    host.ensure_projection_boot().await;
+    assert!(host.projection_booted.load(Ordering::SeqCst));
+    host.ensure_projection_boot().await;
+    assert!(host.projection_booted.load(Ordering::SeqCst));
+}
+
+/// Reclaiming a projected run forgets its row claims; an absent run is also
+/// forgotten without error.
+#[tokio::test(flavor = "multi_thread")]
+async fn reclaiming_a_projected_run_forgets_its_projection_claims() {
+    const PID: &str = "p-reclaim-projected";
+    let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let store = Arc::new(crate::store::Store::new(kv.clone()));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
+    let spec = ProcessSpec::linear(PID, crate::utils::consts::TASK_ROOT_TID, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    let outcome = host.reclaim_process(PID).await.unwrap();
+    assert!(
+        !matches!(
+            outcome,
+            crate::scheduler::durable::async_document_store::ReclaimOutcome::Retained
+        ),
+        "a finished run is reclaimed or already absent: {outcome:?}"
+    );
+    // The pid is a new identity: a second reclaim finds it absent and forgets
+    // the (already forgotten) in-process state again.
+    let _ = host.reclaim_process(PID).await.unwrap();
+}
+
+/// A store that releases a competing slot when the start's create batch
+/// lands: the slot frees between the reserve (which decided to park) and the
+/// post-create free-slot check.
+struct SlotReleasingKv {
+    inner: MemoryStore,
+    armed: AtomicBool,
+    released: tokio::sync::Notify,
+    done: tokio::sync::Notify,
+}
+
+impl SlotReleasingKv {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryStore::new(),
+            armed: AtomicBool::new(true),
+            released: tokio::sync::Notify::new(),
+            done: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStore for SlotReleasingKv {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::StoreBatchOp],
+        guards: &[crate::StoreGuard],
+    ) -> Result<bool> {
+        if self.armed.swap(false, Ordering::SeqCst) && !ops.is_empty() {
+            self.released.notify_one();
+            self.done.notified().await;
+        }
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::store::ScanOptions,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// A start that decided to park takes the slot a concurrent release freed
+/// before its aggregate was written, and wakes its root.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_that_parked_takes_a_slot_freed_while_it_was_written() {
+    const PID: &str = "p-start-race";
+    let stored = SlotReleasingKv::new();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    // A phantom holder owns the only slot, so the start decides to park.
+    host.admissions.lock().activate("p-phantom-holder");
+
+    let waiter = host.clone();
+    let signal = stored.clone();
+    tokio::spawn(async move {
+        signal.released.notified().await;
+        waiter.admissions.lock().release("p-phantom-holder");
+        signal.done.notify_one();
+    });
+
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let spec = ProcessSpec::linear(PID, root, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    assert!(
+        host.admissions.lock().holds(PID),
+        "the run takes the freed slot"
+    );
+    assert!(!host.admissions.lock().is_parked(PID));
+    let woken = wake_rx.try_recv().expect("the admitted root is woken");
+    assert_eq!(woken.process_id, PID);
+}
+
+/// Seed one operation into a chosen durable state.
+async fn seed_operation_state(
+    host: &KernelHost,
+    id: &OperationId,
+    state: &str,
+    now: i64,
+) -> Result<()> {
+    use crate::scheduler::core::model::operation::{ClaimToken, CommitToken, OperationEvent};
+
+    let claim = ClaimToken {
+        owner: "recovery-test".into(),
+        fence: 1,
+        lease_until_ms: now + 60_000,
+        heartbeat_revision: 0,
+    };
+    let outcome = match state {
+        "claimed-expired" => {
+            let expired = ClaimToken {
+                lease_until_ms: now - 1_000,
+                ..claim.clone()
+            };
+            host.processes
+                .commit_operation_event(id, 0, OperationEvent::Claim(expired), now, 800)
+                .await
+        }
+        "prepared-expired" => {
+            let expired = ClaimToken {
+                lease_until_ms: now - 1_000,
+                ..claim.clone()
+            };
+            host.processes
+                .commit_operation_event(id, 0, OperationEvent::ClaimAndPrepare(expired), now, 800)
+                .await
+        }
+        "committed" => {
+            host.processes
+                .commit_operation_event(
+                    id,
+                    0,
+                    OperationEvent::ClaimAndPrepare(claim.clone()),
+                    now,
+                    800,
+                )
+                .await
+                .map_err(runtime)?;
+            host.processes
+                .commit_operation_event(
+                    id,
+                    1,
+                    OperationEvent::Commit {
+                        claim: claim.clone(),
+                        commit: CommitToken {
+                            process_version: 1,
+                            digest: "digest".into(),
+                        },
+                    },
+                    now,
+                    800,
+                )
+                .await
+        }
+        other => panic!("unknown seeded state {other}"),
+    };
+    outcome.expect("the seeded operation event commits");
+    Ok(())
+}
+
+/// Recovery's three lifecycle directives each drive their own command: an
+/// expired claim before the effect boundary is released, an expired prepared
+/// commit becomes `EffectUnknown`, and a lost completion is finalized through
+/// the normal post-commit program.
+#[tokio::test]
+async fn recovery_reclaims_observes_and_finalizes_by_directive() {
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let now = SystemClock.now_ms();
+
+    // ReclaimReady: an expired `Claimed` exists.
+    let (host, _wake) = KernelHost::in_memory();
+    host.start_process(&ProcessSpec::linear("p-rec-reclaim", root, &["only"]))
+        .await
+        .unwrap();
+    let id = operation_id("p-rec-reclaim", root, 0);
+    seed_operation_state(&host, &id, "claimed-expired", now)
+        .await
+        .unwrap();
+    let report = host.recover(now).await.unwrap();
+    assert_eq!(report.reclaimed, vec![id.clone()], "{report:?}");
+
+    // ReclaimUnknown: an expired `CommitPrepared` crosses the effect boundary,
+    // so it is observed and (an ExecuteTask) needs a human.
+    let (host, _wake) = KernelHost::in_memory();
+    host.start_process(&ProcessSpec::linear("p-rec-unknown", root, &["only"]))
+        .await
+        .unwrap();
+    let id = operation_id("p-rec-unknown", root, 0);
+    seed_operation_state(&host, &id, "prepared-expired", now)
+        .await
+        .unwrap();
+    let report = host.recover(now).await.unwrap();
+    assert!(report.reconciliation_required.contains(&id), "{report:?}");
+
+    // FinalizeCommit: the completion was lost; recovery closes it and runs the
+    // post-commit decision.
+    let (host, _wake) = KernelHost::in_memory();
+    host.start_process(&ProcessSpec::linear("p-rec-finalize", root, &["only"]))
+        .await
+        .unwrap();
+    let id = operation_id("p-rec-finalize", root, 0);
+    seed_operation_state(&host, &id, "committed", now)
+        .await
+        .unwrap();
+    let report = host.recover(now).await.unwrap();
+    assert_eq!(report.finalized, vec![id.clone()], "{report:?}");
+    let snapshot = host.snapshot("p-rec-finalize").await.unwrap().unwrap();
+    assert!(matches!(
+        snapshot.operations.get(&id).map(|record| &record.state),
+        Some(OperationState::Completed(_))
+    ));
+}
+
+/// A bounded recovery scan resumes from its cursor across passes: a budget of
+/// one leaves the rest pending and the next pass continues instead of
+/// restarting.
+#[tokio::test]
+async fn a_bounded_recovery_scan_resumes_from_its_cursor() {
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let now = SystemClock.now_ms();
+    let (host, _wake) = KernelHost::in_memory();
+    let pids = ["p-budget-a", "p-budget-b", "p-budget-c"];
+    for pid in pids {
+        host.start_process(&ProcessSpec::linear(pid, root, &["only"]))
+            .await
+            .unwrap();
+        let id = operation_id(pid, root, 0);
+        seed_operation_state(&host, &id, "claimed-expired", now)
+            .await
+            .unwrap();
+    }
+
+    let mut scanned = 0;
+    for _ in 0..pids.len() {
+        let report = host.recover_with_budget(now, 1).await.unwrap();
+        assert!(report.scanned <= 1, "{report:?}");
+        scanned += report.scanned;
+        if !host.recovery_metrics().more_pending {
+            break;
+        }
+    }
+    assert!(scanned >= 1, "the scan made bounded progress");
+    assert!(
+        !host.recovery_metrics().more_pending,
+        "the last pass drained the index"
+    );
+}
+
+/// A transport that reschedules a record for the current instant: the
+/// confirmation must wake the retry pass immediately rather than wait for the
+/// tick.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_rescheduled_for_now_wakes_the_retry_pass() {
+    struct DueNowTransport {
+        delivered: Arc<parking_lot::Mutex<usize>>,
+    }
+    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for DueNowTransport {
+        fn deliver(&mut self, _record: &OutboxRecord) -> DeliveryOutcome {
+            *self.delivered.lock() += 1;
+            DeliveryOutcome::RetryAt {
+                available_at_ms: 0,
+                error: "try again now".into(),
+            }
+        }
+    }
+
+    let (host, mut wake_rx) = KernelHost::in_memory();
+    let delivered = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(DueNowTransport {
+        delivered: delivered.clone(),
+    }));
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let spec = ProcessSpec::linear("p-due-now", root, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    assert!(
+        *delivered.lock() > 0,
+        "the normal path delivered the record"
+    );
+}
+
+/// The outbox pass: a failed projection defers every record of the run, the
+/// budget stops mid-page, a cursor past the end wraps once, and a later pass
+/// delivers.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_outbox_pass_defers_wraps_and_delivers_after_repair() {
+    const PID: &str = "p-outbox-pass";
+    let stored = FailingRowsKv::new();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let store = Arc::new(crate::store::Store::new(kv.clone()));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
+    let delivered = Arc::new(parking_lot::Mutex::new(0));
+    host.attach_outbox_transport(Box::new(CountingTransport {
+        delivered: delivered.clone(),
+    }));
+    // Boot before the rows exist so the failures below go through the queue.
+    host.recover(SystemClock.now_ms()).await.unwrap();
+
+    stored.arm();
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-outbox-pass")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    let pending = host
+        .snapshot(PID)
+        .await
+        .unwrap()
+        .unwrap()
+        .outbox
+        .values()
+        .filter(|record| matches!(record.state, OutboxState::Pending { .. }))
+        .count();
+    assert!(pending >= 2, "the failed projection withholds records");
+
+    // One page: the run is deferred, and its following records ride the same
+    // deferral rather than re-projecting.
+    assert_eq!(host.dispatch_outbox_batch(8).await.unwrap(), 0);
+    assert!(
+        host.outbox_metrics().deferred >= 2,
+        "{:?}",
+        host.outbox_metrics()
+    );
+
+    // A one-record budget stops after the page.
+    assert_eq!(host.dispatch_outbox_batch(1).await.unwrap(), 0);
+
+    // A cursor past the last due record wraps to the beginning once.
+    let ghost = crate::scheduler::core::outbox::records::OutboxId {
+        process_id: PID.into(),
+        key: "zzz-past-the-end".into(),
+    };
+    *host.outbox_cursor.lock() = Some(OutboxCursor(ghost));
+    assert_eq!(host.dispatch_outbox_batch(8).await.unwrap(), 0);
+
+    // Once the rows write, the pass delivers the deferred records.
+    stored.disarm();
+    let before = *delivered.lock();
+    let sent = host.dispatch_outbox_batch(8).await.unwrap();
+    assert!(sent >= 1, "the repaired run's records are delivered");
+    assert!(*delivered.lock() > before);
+}
+
+/// Stale recovery-index entries (a pid whose aggregate is gone) are filtered
+/// out of a page, so a later page can still be larger than the remaining
+/// budget: the scan must stop mid-page instead of overrunning its budget.
+#[tokio::test]
+async fn a_recovery_scan_with_stale_index_entries_respects_its_budget() {
+    let root = crate::utils::consts::TASK_ROOT_TID;
+    let now = SystemClock.now_ms();
+    let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let (host, _wake) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let pids = ["p-page-a", "p-page-b", "p-page-c", "p-page-d"];
+    for pid in pids {
+        host.start_process(&ProcessSpec::linear(pid, root, &["only"]))
+            .await
+            .unwrap();
+        let id = operation_id(pid, root, 0);
+        seed_operation_state(&host, &id, "claimed-expired", now)
+            .await
+            .unwrap();
+    }
+
+    // Leave only the recovery index of the first pid: its aggregate is gone,
+    // so the page filters it out while the cursor still moves past it.
+    use crate::scheduler::durable::document_store::{
+        outbox_index_key, process_key, ready_index_key, recovery_index_key,
+    };
+    for pid in ["p-page-a"] {
+        for key in [
+            process_key(pid).unwrap(),
+            ready_index_key(pid).unwrap(),
+            outbox_index_key(pid).unwrap(),
+        ] {
+            kv.delete(&key).await.unwrap();
+        }
+        assert!(recovery_index_key(pid).is_ok());
+    }
+
+    let report = host.recover_with_budget(now, 2).await.unwrap();
+    assert!(
+        report.scanned <= 2,
+        "the budget bounds the page: {report:?}"
+    );
+    assert!(report.scanned >= 1);
+}
+
+/// A store that loses exactly one guarded batch with `false` — the conflict a
+/// second writer causes. Used to force the client-action retry loop without a
+/// real concurrent writer.
+struct ConflictOnceKv {
+    inner: MemoryStore,
+    armed: AtomicBool,
+}
+
+impl ConflictOnceKv {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryStore::new(),
+            armed: AtomicBool::new(false),
+        })
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStore for ConflictOnceKv {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::StoreBatchOp],
+        guards: &[crate::StoreGuard],
+    ) -> Result<bool> {
+        if !ops.is_empty() && self.armed.swap(false, Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::store::ScanOptions,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// A lost intent compare-and-swap is retried: the pinned intent is not ours
+/// (it never landed), the action re-mints the same identity, and the second
+/// attempt applies.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_action_intent_cas_is_retried_and_applies() {
+    const PID: &str = "p-action-retry";
+    let stored = ConflictOnceKv::new();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let mut spec = ProcessSpec::linear(PID, "root", &["wait", "after"]);
+    spec.auto.remove("wait");
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+
+    let replans = host.action_replans();
+    stored.arm();
+    host.apply_action(
+        PID,
+        &tid_of(PID, "wait", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        host.action_replans() > replans,
+        "the lost compare-and-swap forced a re-plan"
+    );
+    host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+    assert!(host.process_completed(PID).await.unwrap());
+}
+
+/// The serve loop's control-plane branches: a parked run and a held
+/// reconciliation permit are reported in the admission gauge, a failed
+/// projection keeps lag/backlog gauges non-zero and eventually degrades the
+/// projection loop, and the recovery scan reports what it examined.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_serve_loop_reports_admission_lag_and_degrades_the_projection_loop() {
+    const PID: &str = "p-serve-parked";
+    let stored = FailingRowsKv::new();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let store = Arc::new(crate::store::Store::new(kv.clone()));
+    let writer = crate::store::writebehind::StoreWriter::spawn(
+        store.clone(),
+        1,
+        64,
+        crate::utils::shared(1),
+    );
+    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
+    host.attach_outbox_transport(Box::new(CountingTransport {
+        delivered: Arc::new(parking_lot::Mutex::new(0)),
+    }));
+    // A run whose projection failed keeps its outbox records due and
+    // undelivered, so the retry pass has a backlog to report.
+    stored.arm();
+    let delivered_workflow = crate::model::Workflow::new()
+        .with_id("wf-serve-undelivered")
+        .with_step(|step| step.with_id("s1"));
+    let delivered_run =
+        ProcessSpec::from_workflow("p-serve-undelivered", &delivered_workflow, &|_| None).unwrap();
+    host.start_process(&delivered_run).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+    // The only execution slot is taken by a phantom: the next start parks.
+    host.admissions.lock().activate("p-phantom-holder");
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-serve-parked")
+        .with_step(|step| step.with_id("s1"));
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    assert_eq!(host.admission_metrics().parked, 1);
+    // Give the recovery scan one exceptional operation to examine.
+    let parked_root = operation_id(PID, crate::utils::consts::TASK_ROOT_TID, 0);
+    seed_operation_state(&host, &parked_root, "claimed-expired", SystemClock.now_ms())
+        .await
+        .unwrap();
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let serving = tokio::spawn({
+        let host = host.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            host.serve(
+                wake_rx,
+                shutdown,
+                KernelSchedule::uniform(Duration::from_millis(20)),
+            )
+            .await
+        }
+    });
+    // A held reconciliation permit makes the admission gauge report the
+    // category as active while the ready loop ticks.
+    let permit = host
+        .enter_admission(AdmissionCategory::Reconciliation)
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(permit);
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("the serve loop observes its shutdown")
+        .unwrap();
+
+    let projection = host.projection_metrics();
+    assert!(
+        projection.lag > 0,
+        "the failed rows stay queued: {projection:?}"
+    );
+    assert!(projection.failed > 0, "{projection:?}");
+    assert!(
+        host.outbox_metrics().backlog > 0,
+        "{:?}",
+        host.outbox_metrics()
+    );
+    assert!(
+        host.recovery_metrics().reclaimed >= 1,
+        "the recovery scan reclaimed the expired claim: {:?}",
+        host.recovery_metrics()
+    );
+    assert_eq!(
+        host.projection_health().state,
+        crate::scheduler::shell::health::HealthState::Degraded,
+        "a persistently failing projection loop degrades"
+    );
+}
+
+/// The auxiliary gate's compare-and-swap loop: many entrants at once all read
+/// the same counter, so the losers of the exchange re-check instead of
+/// waiting. Every entrant is admitted exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_gate_entrants_retry_a_lost_compare_and_swap() {
+    let gate = AdmissionGate::new(64);
+    let mut tasks = Vec::new();
+    for _ in 0..64 {
+        let gate = gate.clone();
+        tasks.push(tokio::spawn(async move {
+            let _lease = gate.enter().await;
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let metrics = gate.metrics();
+    assert_eq!(metrics.admitted, 64, "{metrics:?}");
+    assert_eq!(metrics.active, 0, "{metrics:?}");
+}
+
+/// A store whose index scans fail while armed: the boot repair fails, and the
+/// notification-driven ready and outbox passes surface their errors instead of
+/// taking the driver down.
+struct FailingScanKv {
+    inner: MemoryStore,
+    armed: AtomicBool,
+}
+
+impl FailingScanKv {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryStore::new(),
+            armed: AtomicBool::new(false),
+        })
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStore for FailingScanKv {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::StoreBatchOp],
+        guards: &[crate::StoreGuard],
+    ) -> Result<bool> {
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::store::ScanOptions,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        if self.armed.load(Ordering::SeqCst) {
+            return Err(crate::ActError::Store("injected scan outage".into()));
+        }
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// A failing index scan makes the pre-loop boot repair fail, and the
+/// notification-driven ready/outbox passes report their own failures.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_scan_is_survived_by_the_serve_loop() {
+    let stored = FailingScanKv::new();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    stored.arm();
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let serving = tokio::spawn({
+        let host = host.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            host.serve(
+                wake_rx,
+                shutdown,
+                KernelSchedule::uniform(Duration::from_millis(20)),
+            )
+            .await
+        }
+    });
+    // Both notifications drive their pass into the scan error.
+    host.ready.notify_one();
+    host.deliver.notify_one();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("the serve loop observes its shutdown")
+        .unwrap();
+}
+
+/// The serve loop reports a recovery pass that applied an observed effect.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn the_serve_loop_reports_an_observed_effect_application() {
+    const PID: &str = "p-serve-effect";
+    let stored = ConflictKv::new(PID);
+    let observation = Arc::new(parking_lot::Mutex::new(
+        effects::EffectObservation::Applied(effects::EffectOutcome::from_outputs(
+            crate::Vars::new().with("observed", "once"),
+        )),
+    ));
+    let runner = Arc::new(ObservedRunner {
+        calls: Arc::new(AtomicUsize::new(0)),
+        keys: Arc::new(parking_lot::Mutex::new(Vec::new())),
+        observation,
+        record: true,
+        idempotent: false,
+    });
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx, engine) = effect_host(kv, PID, runner).await;
+    let apply = drive_to_step_effect(&host, &mut wake_rx, PID).await;
+    lose_the_effect_commit(&host, &stored, &apply, PID).await;
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let serving = tokio::spawn({
+        let host = host.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            host.serve(
+                wake_rx,
+                shutdown,
+                KernelSchedule::uniform(Duration::from_millis(20)),
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("the serve loop observes its shutdown")
+        .unwrap();
+    assert!(
+        host.recovery_metrics().effect_applied >= 1,
+        "the observed effect was applied by recovery: {:?}",
+        host.recovery_metrics()
+    );
+    engine.close().await;
+}
+
+/// An action whose pinned intent names an operation that is no longer
+/// claimable is refused with a retryable conflict, never re-planned into a
+/// second intent.
+#[tokio::test]
+async fn an_action_intent_that_is_already_closed_is_not_claimable() {
+    use crate::scheduler::core::model::operation::{ClaimToken, CommitToken, OperationEvent};
+    use crate::scheduler::core::model::task_graph::TaskId;
+
+    const PID: &str = "p-action-closed";
+    let (host, mut wake_rx) = KernelHost::in_memory();
+    let mut spec = ProcessSpec::linear(PID, "root", &["wait", "after"]);
+    spec.auto.remove("wait");
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+
+    let task = TaskId::new("wait", 0).unwrap();
+    let operation = operation_id(PID, "wait", 1);
+    let action = ActionKind::Complete;
+    let inputs: Vec<(String, String)> = Vec::new();
+    let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+    let plan = KernelHost::action_intent(
+        PID,
+        &task,
+        &operation,
+        &action,
+        &inputs,
+        snapshot.version.clone(),
+    );
+    host.processes
+        .commit_transition(&plan, SystemClock.now_ms(), host.timer_poll_ms())
+        .await
+        .unwrap();
+
+    // Drive the intent operation to `Completed` so nothing can claim it.
+    let claim = ClaimToken {
+        owner: "closed-intent".into(),
+        fence: 1,
+        lease_until_ms: SystemClock.now_ms() + 60_000,
+        heartbeat_revision: 0,
+    };
+    let commit = CommitToken {
+        process_version: 1,
+        digest: "closed".into(),
+    };
+    let now = SystemClock.now_ms();
+    host.processes
+        .commit_operation_event(
+            &operation,
+            0,
+            OperationEvent::ClaimAndPrepare(claim.clone()),
+            now,
+            800,
+        )
+        .await
+        .unwrap();
+    host.processes
+        .commit_operation_event(
+            &operation,
+            1,
+            OperationEvent::Commit {
+                claim: claim.clone(),
+                commit: commit.clone(),
+            },
+            now,
+            800,
+        )
+        .await
+        .unwrap();
+    host.processes
+        .commit_operation_event(&operation, 2, OperationEvent::Complete { commit }, now, 800)
+        .await
+        .unwrap();
+
+    let mut pinned = Some(ActionIntent {
+        task: task.clone(),
+        operation: operation.clone(),
+    });
+    let error = host
+        .apply_action_once(PID, &tid_of(PID, "wait", 0), action, inputs, &mut pinned)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error}").contains("not claimable"),
+        "the closed intent is a retryable conflict: {error}"
+    );
+}
+
+/// The cancel guard's forward walk follows predecessor edges: it visits a
+/// successor reached from two parents once, skips a successor that is a
+/// container child, and only collects steps that own a package act.
+#[tokio::test]
+async fn the_cancel_guard_walks_a_shared_successor_once_and_skips_child_work() {
+    use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
+
+    const PID: &str = "p-cancel-forward";
+    let (host, _wake) = KernelHost::in_memory();
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-cancel-forward")
+        .with_step(|step| step.with_id("a"))
+        .with_step(|step| step.with_id("b"))
+        .with_step(|step| {
+            step.with_id("j")
+                .with_uses(crate::utils::test::USES_SET, crate::Vars::new())
+        });
+    let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+    let mut snapshot = spec.seed_snapshot().unwrap();
+    let a = TaskId::new("a", 0).unwrap();
+    let b = TaskId::new("b", 0).unwrap();
+    let j = TaskId::new("j", 0).unwrap();
+    // a -> b and a -> j, b -> j: the walk reaches `j` twice, and `b` owns no
+    // package act.
+    snapshot.tasks.get_mut(&b).unwrap().predecessors = vec![a.clone()];
+    snapshot.tasks.get_mut(&j).unwrap().predecessors = vec![a.clone(), b.clone()];
+    snapshot.tasks.get_mut(&j).unwrap().state = TaskState::Running;
+
+    // `j` is live forward work, so the guard passes.
+    assert!(host.validate_cancel_forward_work(&snapshot, &a).is_ok());
+}
+
+/// A delivery claim that loses its guarded write is skipped (not a pass
+/// failure), leaving the record for a later pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_outbox_claim_skips_the_record_without_failing_the_pass() {
+    struct RescheduleNow {
+        delivered: Arc<parking_lot::Mutex<usize>>,
+    }
+    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for RescheduleNow {
+        fn deliver(&mut self, _record: &OutboxRecord) -> DeliveryOutcome {
+            *self.delivered.lock() += 1;
+            DeliveryOutcome::RetryAt {
+                available_at_ms: 0,
+                error: "busy now".into(),
+            }
+        }
+    }
+
+    const PID: &str = "p-outbox-lost-claim";
+    let stored = ConflictOnceKv::new();
+    let kv: Arc<dyn KvStore> = stored.clone();
+    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_outbox_transport(Box::new(RescheduleNow {
+        delivered: Arc::new(parking_lot::Mutex::new(0)),
+    }));
+    let spec = ProcessSpec::linear(PID, crate::utils::consts::TASK_ROOT_TID, &["only"]);
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+
+    let due = host
+        .snapshot(PID)
+        .await
+        .unwrap()
+        .unwrap()
+        .outbox
+        .values()
+        .filter(|record| matches!(record.state, OutboxState::Pending { .. }))
+        .count();
+    assert!(due >= 1, "the rescheduled record stays pending and due");
+
+    // The next guarded write (the delivery claim) loses its guard.
+    stored.arm();
+    assert_eq!(
+        host.dispatch_outbox_batch(8).await.unwrap(),
+        0,
+        "a lost claim delivers nothing and does not fail the pass"
+    );
+    assert!(
+        host.snapshot(PID)
+            .await
+            .unwrap()
+            .unwrap()
+            .outbox
+            .values()
+            .any(|record| matches!(record.state, OutboxState::Pending { .. })),
+        "the record stays pending for a later pass"
+    );
+}

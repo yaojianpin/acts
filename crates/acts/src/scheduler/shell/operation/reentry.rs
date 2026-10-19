@@ -58,3 +58,61 @@ impl ActOperation for ReenterTask {
         Ok(plan)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::{operation::ClaimToken, task_graph::TaskState};
+
+    /// Without the durable target the rewind re-enters the source node itself:
+    /// a `Cancel` closes the execution and names it as the target.
+    #[tokio::test]
+    async fn the_source_node_is_the_default_reenter_target() {
+        let (host, _wake) = KernelHost::in_memory();
+        let mut snapshot = ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap();
+        let task_id = crate::scheduler::core::model::task_graph::TaskId::new("a", 0).unwrap();
+        snapshot.tasks.get_mut(&task_id).unwrap().state = TaskState::Cancelled;
+        let id = OperationId {
+            process_id: "p".into(),
+            task: task_id.clone(),
+            sequence: 1,
+        };
+        let claim = OperationCommit {
+            id: id.clone(),
+            claim: ClaimToken {
+                owner: "test".into(),
+                fence: 1,
+                lease_until_ms: i64::MAX,
+                heartbeat_revision: 0,
+            },
+        };
+        let mut lane = CommandLane::detached(&host);
+        let operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: task_id.clone(),
+            task: snapshot.tasks.get(&task_id),
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let plan = ReenterTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap();
+        assert!(
+            plan.task_creates
+                .iter()
+                .any(|create| create.task.node.as_str() == "a" && create.task.generation == 1),
+            "the rewind creates the next generation: {plan:?}"
+        );
+        assert!(
+            plan.operations
+                .iter()
+                .any(|intent| intent.kind == OperationKind::ExecuteTask),
+            "the re-entered root is admitted: {plan:?}"
+        );
+    }
+}

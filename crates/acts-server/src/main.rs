@@ -1,5 +1,9 @@
-use acts_server::Config;
-use std::{path::Path, sync::Arc};
+use acts_server::{Config, ServerPlugins};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tracing::{error, info};
 
 #[tokio::main]
@@ -18,6 +22,22 @@ async fn main() -> Result<(), anyhow::Error> {
     init_log(&config)?;
     println!("config file: {}", config_file.display());
 
+    serve(config_dir, config, ServerPlugins::full(), shutdown_signal()).await
+}
+
+/// Open the store, start the engine, and run until `shutdown` resolves — the
+/// body of [`main`] after the config is loaded. Extracted so the startup and
+/// shutdown path can be exercised without spawning the binary for a full
+/// process lifetime.
+async fn serve<F>(
+    config_dir: PathBuf,
+    config: Config,
+    plugins: ServerPlugins,
+    shutdown: F,
+) -> Result<(), anyhow::Error>
+where
+    F: Future<Output = ()>,
+{
     let db = if config.has("db") {
         config.get::<acts_server::DbConfig>("db")?
     } else {
@@ -27,11 +47,7 @@ async fn main() -> Result<(), anyhow::Error> {
     // server on the same database is refused here, before an engine exists to
     // duplicate recovery and scheduling.
     let opened = acts_server::open_store(&config_dir, &db).await?;
-    let started = match acts_server::engine_builder(
-        &config,
-        opened.store.clone(),
-        &acts_server::ServerPlugins::full(),
-    ) {
+    let started = match acts_server::engine_builder(&config, opened.store.clone(), &plugins) {
         Ok(builder) => builder.start().await,
         Err(err) => Err(err),
     };
@@ -54,7 +70,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     print_logo();
 
-    shutdown_signal().await;
+    shutdown.await;
     info!("shutdown signal received, closing the engine");
     engine.close().await;
     if let Some(keeper) = keeper {
@@ -150,4 +166,134 @@ fn print_logo() {
     "#
     );
     println!("{banner}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acts_server::DbType;
+
+    /// Scratch config dir for one case, wiped so it starts empty.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("acts-main-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn load(dir: &Path, body: &str) -> Config {
+        let path = dir.join(acts_server::CONFIG_FILE_NAME);
+        std::fs::write(&path, body).unwrap();
+        Config::create(&path).unwrap()
+    }
+
+    fn sqlite_db(dir: &Path) -> (acts_server::DbConfig, String) {
+        let url = dir.join("acts.db").to_string_lossy().into_owned();
+        (
+            acts_server::DbConfig {
+                kind: DbType::Sqlite,
+                database_url: Some(url.clone()),
+                lease_owner: Some("main-test".to_string()),
+                ..acts_server::DbConfig::default()
+            },
+            url,
+        )
+    }
+
+    /// With no `[db]` section the server runs on the default sled database
+    /// under the config dir, takes the lease, and hands it back on shutdown.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_defaults_to_sled_and_shuts_down() {
+        let dir = scratch("default");
+        let config = load(&dir, "");
+
+        serve(dir.clone(), config, ServerPlugins::default(), async {})
+            .await
+            .unwrap();
+        assert!(dir.join("data").is_dir(), "the sled data dir exists");
+
+        // sled may hold its file lock briefly after the store is dropped, so
+        // the lease release itself is asserted on the sqlite case below.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A configured database is used, the engine starts, and a graceful
+    /// shutdown closes it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_uses_the_configured_database() {
+        let dir = scratch("configured");
+        let (db, url) = sqlite_db(&dir);
+        let config = load(
+            &dir,
+            &format!("[db]\ntype = \"sqlite\"\ndatabase_url = '{url}'\n"),
+        );
+
+        serve(dir.clone(), config, ServerPlugins::default(), async {})
+            .await
+            .unwrap();
+        assert!(Path::new(&url).exists(), "the sqlite file exists");
+
+        let reopened = acts_server::open_store(&dir, &db).await.unwrap();
+        assert_eq!(reopened.lease().unwrap().fence(), 2);
+        reopened.lease().unwrap().release().await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A startup that fails after taking the lease hands it back, so fixing
+    /// the config and restarting does not wait out the TTL.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_releases_the_lease_when_the_engine_fails() {
+        let dir = scratch("engine-fail");
+        let (db, url) = sqlite_db(&dir);
+        // `snapshot` is a scalar where the server expects an array of tables:
+        // engine construction fails with a config error.
+        let config = load(
+            &dir,
+            &format!("snapshot = \"bad\"\n[db]\ntype = \"sqlite\"\ndatabase_url = '{url}'\n"),
+        );
+
+        let err = serve(dir.clone(), config, ServerPlugins::default(), async {})
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("snapshot"), "got: {err}");
+
+        let reopened = acts_server::open_store(&dir, &db).await.unwrap();
+        assert_eq!(
+            reopened.lease().unwrap().fence(),
+            2,
+            "the failed startup released the lease"
+        );
+        reopened.lease().unwrap().release().await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `lease = false` starts without a keeper, so shutdown has nothing to
+    /// stop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_without_the_lease_shuts_down() {
+        let dir = scratch("no-lease");
+        let (_db, url) = sqlite_db(&dir);
+        let config = load(
+            &dir,
+            &format!("[db]\ntype = \"sqlite\"\ndatabase_url = '{url}'\nlease = false\n"),
+        );
+
+        serve(dir.clone(), config, ServerPlugins::default(), async {})
+            .await
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shutdown future waits for a signal instead of resolving on its own;
+    /// the task is aborted once the handlers are installed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_signal_waits() {
+        let handle = tokio::spawn(shutdown_signal());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!handle.is_finished(), "shutdown must wait for a signal");
+        handle.abort();
+    }
 }

@@ -154,3 +154,156 @@ pub fn get_exprs(text: &str) -> Vec<(core::ops::Range<usize>, String, String)> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Engine, Workflow};
+    use serde_json::json;
+
+    /// Run a trivial workflow and hand back the finished root context. The
+    /// workflow vars are the task data expressions resolve against.
+    async fn completed_context() -> crate::Context {
+        let engine = Engine::builder().start().await.unwrap();
+        let sig = engine.signal(());
+        let done = sig.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+        let workflow = Workflow::new()
+            .with_id("convert-model")
+            .with_var("a", 5)
+            .with_var("arr", json!([1, 2]))
+            .with_var("obj", json!({ "k": 1 }))
+            .with_step(|step| {
+                step.with_id("s1")
+                    .with_uses(crate::utils::test::USES_SET, Vars::new())
+            });
+        let pid = engine
+            .runtime()
+            .start(&workflow, Vars::new())
+            .await
+            .unwrap();
+        sig.recv().await;
+
+        let runtime = engine.runtime();
+        let read = runtime.read_proc(&pid).await.unwrap().unwrap();
+        crate::scheduler::read_context(&runtime, &read).unwrap()
+    }
+
+    #[test]
+    fn get_expr_and_exprs() {
+        assert_eq!(get_expr("${{  a + 1  }}").as_deref(), Some("a + 1"));
+        assert!(get_expr("${{ a }} trailing").is_none());
+        assert!(get_expr("plain").is_none());
+
+        let exprs = get_exprs("a${{ 1 }}\nb${{ 2 }}");
+        assert_eq!(exprs.len(), 2);
+        assert_eq!(exprs[0].1, "${{ 1 }}");
+        assert_eq!(exprs[0].2, " 1 ");
+        assert_eq!(exprs[0].0, 1..9);
+        assert_eq!(exprs[1].2, " 2 ");
+
+        assert!(get_exprs("no expression").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fill_params_evaluates_and_passes_through_values() {
+        let ctx = completed_context().await;
+
+        // a single expression returns the typed json value itself
+        assert_eq!(fill_params(&json!("${{ a }}"), &ctx), json!(5));
+        assert_eq!(fill_params(&json!("${{ a > 1 }}"), &ctx), json!(true));
+
+        // an embedded expression is substituted as text
+        assert_eq!(
+            fill_params(&json!("value=${{ a }}"), &ctx),
+            json!("value=5")
+        );
+        assert_eq!(
+            fill_params(&json!("ok=${{ a > 1 }}"), &ctx),
+            json!("ok=true")
+        );
+        assert_eq!(
+            fill_params(&json!("s=${{ 'text' }}"), &ctx),
+            json!("s=text")
+        );
+        // non-scalar results are stringified through their json text
+        assert_eq!(
+            fill_params(&json!("arr=${{ arr }}"), &ctx),
+            json!("arr=[1,2]")
+        );
+        assert_eq!(
+            fill_params(&json!("obj=${{ obj }}"), &ctx),
+            json!("obj={\"k\":1}")
+        );
+
+        // several expressions are each substituted
+        assert_eq!(
+            fill_params(&json!("${{ a }}\n${{ a > 1 }}"), &ctx),
+            json!("5\ntrue")
+        );
+
+        // an evaluation error substitutes null instead of failing
+        assert_eq!(fill_params(&json!("x=${{ 1 + }}"), &ctx), json!("x=null"));
+
+        // no expression: the value is returned untouched
+        assert_eq!(fill_params(&json!("plain"), &ctx), json!("plain"));
+
+        // arrays and objects are filled recursively, scalars cloned
+        let params = json!({
+            "a": "${{ a }}",
+            "list": ["${{ a }}", 2, true, null],
+            "nested": { "b": "${{ a > 1 }}" },
+        });
+        assert_eq!(
+            fill_params(&params, &ctx),
+            json!({
+                "a": 5,
+                "list": [5, 2, true, null],
+                "nested": { "b": true },
+            })
+        );
+        assert_eq!(fill_params(&json!(3), &ctx), json!(3));
+        assert_eq!(fill_params(&json!(null), &ctx), json!(null));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fill_inputs_evaluates_expressions_and_nested_objects() {
+        let ctx = completed_context().await;
+        let inputs = Vars::new()
+            .with("expr", "${{ a + 1 }}")
+            .with("bad", "${{ 1 + }}")
+            .with("plain", "text")
+            .with("nested", json!({ "k": "${{ a }}", "v": 2 }))
+            .with("num", 3);
+
+        let out = fill_inputs(&inputs, &ctx);
+        assert_eq!(out.get::<i32>("expr").unwrap(), 6);
+        assert_eq!(out.get_value("bad").unwrap(), &json!(null));
+        assert_eq!(out.get::<String>("plain").unwrap(), "text");
+        assert_eq!(out.get_value("nested").unwrap(), &json!({ "k": 5, "v": 2 }));
+        assert_eq!(out.get::<i32>("num").unwrap(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fill_outputs_evaluates_and_falls_back_to_task_data() {
+        let ctx = completed_context().await;
+        ctx.task().set_data_with(|data| data.set("only_in_task", 7));
+
+        let outputs = Vars::new()
+            .with("expr", "${{ a + 2 }}")
+            .with("bad", "${{ 1 + }}")
+            .with("only_in_task", json!(null))
+            .with("missing", json!(null))
+            .with("value", 9);
+
+        let out = fill_outputs(&outputs, &ctx);
+        assert_eq!(out.get::<i32>("expr").unwrap(), 7);
+        assert_eq!(out.get_value("bad").unwrap(), &json!(null));
+        assert_eq!(out.get::<i32>("only_in_task").unwrap(), 7);
+        assert_eq!(out.get_value("missing").unwrap(), &json!(null));
+        assert_eq!(out.get::<i32>("value").unwrap(), 9);
+    }
+}

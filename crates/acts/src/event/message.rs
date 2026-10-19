@@ -294,3 +294,121 @@ impl From<&MessageState> for String {
         state.as_ref().to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message() -> Message {
+        Message {
+            nid: "step1".to_string(),
+            uses: Some("acts.core.msg".to_string()),
+            r#type: "act".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn node_and_use_predicates_read_the_message() {
+        let msg = message();
+        assert!(msg.is_nid("step1"));
+        assert!(!msg.is_nid("step2"));
+        assert!(msg.is_uses("acts.core.msg"));
+        assert!(!msg.is_uses("acts.core.irq"));
+        assert!(msg.is_msg());
+        assert!(!msg.is_irq());
+
+        let mut irq = message();
+        irq.uses = Some("acts.core.irq".to_string());
+        assert!(irq.is_irq());
+        assert!(!irq.is_msg());
+
+        // `is_uses`/`is_irq` require the act message type.
+        let mut typed = message();
+        typed.r#type = "step".to_string();
+        assert!(!typed.is_uses("acts.core.msg"));
+        assert!(!typed.is_msg());
+    }
+
+    #[test]
+    fn a_tag_is_read_from_the_message_options() {
+        let mut msg = message();
+        assert!(!msg.is_tag("vip"), "no options means no tag");
+        msg.inputs = Vars::new().with("options", Vars::new());
+        assert!(!msg.is_tag("vip"), "options without a tag match nothing");
+        msg.inputs = Vars::new().with("options", Vars::new().with("tag", "vip"));
+        assert!(msg.is_tag("vip"));
+        assert!(!msg.is_tag("other"));
+    }
+
+    #[test]
+    fn every_legacy_state_maps_onto_a_message_state() {
+        for (legacy, expected) in [
+            (LegacyTaskState::None, MessageState::None),
+            (LegacyTaskState::Ready, MessageState::Created),
+            (LegacyTaskState::Pending, MessageState::Created),
+            (LegacyTaskState::Running, MessageState::Created),
+            (LegacyTaskState::Interrupt, MessageState::Created),
+            (LegacyTaskState::Completed, MessageState::Completed),
+            (LegacyTaskState::Submitted, MessageState::Submitted),
+            (LegacyTaskState::Backed, MessageState::Backed),
+            (LegacyTaskState::Cancelled, MessageState::Cancelled),
+            (LegacyTaskState::Error, MessageState::Error),
+            (LegacyTaskState::Aborted, MessageState::Aborted),
+            (LegacyTaskState::Skipped, MessageState::Skipped),
+            (LegacyTaskState::Removed, MessageState::Removed),
+        ] {
+            assert_eq!(MessageState::from(legacy), expected);
+        }
+    }
+
+    #[test]
+    fn state_strings_round_trip_through_the_wire_vocabulary() {
+        for state in [
+            MessageState::None,
+            MessageState::Created,
+            MessageState::Completed,
+            MessageState::Submitted,
+            MessageState::Backed,
+            MessageState::Cancelled,
+            MessageState::Aborted,
+            MessageState::Skipped,
+            MessageState::Error,
+            MessageState::Removed,
+        ] {
+            let text: String = state.into();
+            assert_eq!(MessageState::from(text.clone()), state);
+            assert_eq!(text, state.to_string());
+        }
+
+        // an unknown name falls back to the default state
+        assert_eq!(
+            MessageState::from("no_such_state".to_string()),
+            MessageState::None
+        );
+    }
+
+    #[test]
+    fn a_stored_message_rebuilds_without_a_delivery_id() {
+        let stored = data::Message {
+            id: "m1".to_string(),
+            tid: "t1".to_string(),
+            name: "n".to_string(),
+            state: MessageState::Completed,
+            r#type: "act".to_string(),
+            pid: "p1".to_string(),
+            nid: "n1".to_string(),
+            mid: "mid".to_string(),
+            uses: Some("acts.core.msg".to_string()),
+            inputs: r#"{"a":1}"#.to_string(),
+            outputs: "not json".to_string(),
+            ..Default::default()
+        };
+        let msg = Message::from(stored);
+        assert_eq!(msg.id, "m1");
+        assert_eq!(msg.delivery_id, None);
+        assert_eq!(msg.inputs.get::<i32>("a"), Some(1));
+        // an unreadable stored payload degrades to empty rather than failing
+        assert!(msg.outputs.is_empty());
+    }
+}

@@ -188,3 +188,75 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     );
     assert!(Join::plan((&graph, &waiting), &command).unwrap().is_none());
 }
+
+#[test]
+fn join_refuses_a_foreign_process_or_stale_graph() {
+    let command = ContainerJoinCommand {
+        process_id: "other".into(),
+        parent: id("step1", 0),
+    };
+    let graph = {
+        let mut b =
+            crate::scheduler::core::model::task_graph::TaskGraphBuilder::new("p1", 1).unwrap();
+        b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+            id: id("step1", 0),
+            model_node: node("step1"),
+            state: TaskState::Created,
+            revision: 0,
+        })
+        .unwrap();
+        b.set_root(id("step1", 0)).unwrap();
+        b.build().unwrap()
+    };
+    let snapshot = snapshot(vec![task("step1", 0, TaskState::Running)]);
+    assert_eq!(
+        Join::plan((&graph, &snapshot), &command),
+        Err(ContainerError::WrongProcess)
+    );
+
+    let mut stale = snapshot.clone();
+    stale.version.graph = 9;
+    assert_eq!(
+        Join::plan(
+            (&graph, &stale,),
+            &ContainerJoinCommand {
+                process_id: "p1".into(),
+                parent: id("step1", 0),
+            },
+        ),
+        Err(ContainerError::GraphVersionConflict {
+            graph: 1,
+            snapshot: 9
+        })
+    );
+}
+
+#[test]
+fn a_container_without_children_never_joins() {
+    let graph = {
+        let mut b =
+            crate::scheduler::core::model::task_graph::TaskGraphBuilder::new("p1", 1).unwrap();
+        b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+            id: id("step1", 0),
+            model_node: node("step1"),
+            state: TaskState::Created,
+            revision: 0,
+        })
+        .unwrap();
+        b.set_root(id("step1", 0)).unwrap();
+        b.build().unwrap()
+    };
+    let mut snapshot = snapshot(vec![task("step1", 0, TaskState::Running)]);
+    mark_parked(&mut snapshot, "step1");
+    assert!(
+        Join::plan(
+            (&graph, &snapshot),
+            &ContainerJoinCommand {
+                process_id: "p1".into(),
+                parent: id("step1", 0),
+            }
+        )
+        .unwrap()
+        .is_none()
+    );
+}

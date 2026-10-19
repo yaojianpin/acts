@@ -78,3 +78,55 @@ fn guard_degrades_widens_to_a_cap_and_recovers() {
         "a recovered loop attempts every tick again"
     );
 }
+
+/// The state spellings are part of the log contract; both arms are read.
+#[test]
+fn health_state_names_are_stable() {
+    assert_eq!(HealthState::Healthy.as_str(), "healthy");
+    assert_eq!(HealthState::Degraded.as_str(), "degraded");
+}
+
+/// A clean tick below the threshold only clears a streak: it is a debug
+/// event, not the recovery of a degraded loop, and the loop attempts again
+/// immediately either way.
+#[test]
+fn a_short_streak_recovers_quietly() {
+    let guard = LoopGuard::new("test-short");
+    let err = ActError::Store("flaky".to_string());
+    assert!(guard.attempt());
+    guard.failed(&err);
+    assert_eq!(guard.snapshot().consecutive_failures, 1);
+    assert!(guard.attempt(), "below the threshold nothing is skipped");
+    guard.recovered();
+    assert_eq!(
+        guard.snapshot(),
+        crate::scheduler::shell::health::LoopHealth {
+            state: HealthState::Healthy,
+            consecutive_failures: 0,
+            backoff_ticks: 0,
+        }
+    );
+
+    // A clean tick with no failure at all is a no-op.
+    guard.recovered();
+    assert_eq!(guard.snapshot().consecutive_failures, 0);
+}
+
+/// A failure inside an unchanged backoff window does not re-log, and the
+/// window still caps: repeated failures at the cap keep the same skip count.
+#[test]
+fn a_repeated_failure_inside_the_cap_does_not_widen_the_window() {
+    let guard = LoopGuard::new("test-cap");
+    let err = ActError::Store("down".to_string());
+    for _ in 0..64 {
+        guard.failed(&err);
+    }
+    let capped = guard.snapshot();
+    assert_eq!(capped.state, HealthState::Degraded);
+    assert_eq!(capped.backoff_ticks, MAX_BACKOFF_TICKS);
+    // Every one of the capped ticks is skipped, then the loop attempts again.
+    for _ in 0..MAX_BACKOFF_TICKS {
+        assert!(!guard.attempt());
+    }
+    assert!(guard.attempt());
+}

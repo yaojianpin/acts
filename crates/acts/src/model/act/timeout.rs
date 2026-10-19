@@ -144,3 +144,59 @@ impl Timeout {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_builder() {
+        let timeout = Timeout::new()
+            .with_on("5s")
+            .with_step(|step| step.with_id("s1"));
+        assert_eq!(timeout.on, "5s");
+        assert_eq!(timeout.steps.len(), 1);
+        assert_eq!(timeout.steps[0].id, "s1");
+    }
+
+    #[test]
+    fn timeout_limit_parse_and_display_all_units() {
+        use std::str::FromStr;
+
+        for (text, value, unit, secs) in [
+            ("5s", 5, TimeoutUnit::Second, 5),
+            ("2m", 2, TimeoutUnit::Minute, 120),
+            ("3h", 3, TimeoutUnit::Hour, 10800),
+            ("1d", 1, TimeoutUnit::Day, 86400),
+        ] {
+            let limit = TimeoutLimit::from_str(text).unwrap();
+            assert_eq!(limit.value, value, "{text}");
+            assert_eq!(limit.unit, unit, "{text}");
+            assert_eq!(limit.as_secs(), secs, "{text}");
+            assert_eq!(limit.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn timeout_limit_parse_errors() {
+        // no unit suffix
+        let err = TimeoutLimit::parse("5").unwrap_err();
+        assert!(err.to_string().contains("timeout parse error"), "{err}");
+
+        // a numeric value that does not parse
+        let err = TimeoutLimit::parse("xs").unwrap_err();
+        assert!(err.to_string().contains("timeout parse error"), "{err}");
+    }
+
+    #[test]
+    fn timeout_limit_serde_roundtrip_and_errors() {
+        let limit = TimeoutLimit::parse("2h").unwrap();
+        let text = serde_json::to_string(&limit).unwrap();
+        assert_eq!(text, "\"2h\"");
+        let back: TimeoutLimit = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, limit);
+
+        let err = serde_json::from_str::<TimeoutLimit>("\"bad\"").unwrap_err();
+        assert!(err.to_string().contains("timeout parse error"), "{err}");
+    }
+}

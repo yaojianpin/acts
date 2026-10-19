@@ -2,10 +2,36 @@ use super::CommandRunner as Command;
 use crate::{client, util};
 use acts_channel::{
     Vars,
-    model::{EventInfo, Expr, OrderBy, PageData},
+    model::{Expr, OrderBy, PageData},
 };
 use clap::{Args, Subcommand};
 use comfy_table::Table;
+
+/// One trigger row as the server answers it. The model crate's `EventInfo`
+/// still describes the retired `uses` shape; the wire now carries a string
+/// `ver` and the typed trigger fields, so the CLI reads the row it is sent.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct EventInfo {
+    pub id: String,
+    pub name: String,
+    pub mid: String,
+    pub ver: String,
+
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub params: String,
+    #[serde(default)]
+    pub schedule: Option<String>,
+    #[serde(default)]
+    pub last_run: i64,
+    #[serde(default)]
+    pub next_run: i64,
+
+    pub create_time: i64,
+    #[serde(default)]
+    pub timestamp: i64,
+}
 
 #[derive(Debug, Args)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -111,14 +137,14 @@ pub async fn ls(
 
     let data = client::payload("evt:ls", resp.data.as_ref())?;
     let mut table = Table::new();
-    table.set_header(vec!["id", "name", "mid", "ver", "uses", "create time"]);
+    table.set_header(vec!["id", "name", "mid", "ver", "kind", "create time"]);
     for p in &data.rows {
         table.add_row(vec![
             p.id.to_string(),
             p.name.to_string(),
             p.mid.to_string(),
             p.ver.to_string(),
-            p.uses.to_string(),
+            p.kind.to_string(),
             util::local_time(p.create_time),
         ]);
     }

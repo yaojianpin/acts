@@ -18,6 +18,25 @@ mod config;
 type MessageStream =
     std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Message, Status>> + Send>>;
 
+/// The start-time failure of registering the pre-bound listener with the
+/// runtime. Built through a named function so the deployment fault it reports
+/// (a listener tokio refuses) has one description whether it is raised by the
+/// plugin or asserted by a test.
+fn register_listener_error(addr: std::net::SocketAddr, err: std::io::Error) -> acts::ActError {
+    acts::ActError::Config(format!(
+        "failed to register the gRPC listener on {addr}: {err}"
+    ))
+}
+
+/// The start-time failure of putting the bound listener in non-blocking mode.
+/// Named for the same reason as [`register_listener_error`]: the fault is
+/// asserted directly, not only through a bind that happens to fail this way.
+fn configure_listener_error(addr: std::net::SocketAddr, err: std::io::Error) -> acts::ActError {
+    acts::ActError::Config(format!(
+        "failed to configure the gRPC listener on {addr}: {err}"
+    ))
+}
+
 /// Map an action-dispatch failure onto its gRPC status, so the unary and the
 /// subscription paths answer a refusal the same way.
 fn action_status(err: acts::actions::Error) -> Status {
@@ -334,16 +353,11 @@ impl ActPlugin for GrpcPlugin {
         let listener = std::net::TcpListener::bind(addr).map_err(|e| {
             acts::ActError::Config(format!("failed to bind gRPC server on {addr}: {e}"))
         })?;
-        listener.set_nonblocking(true).map_err(|e| {
-            acts::ActError::Config(format!(
-                "failed to configure the gRPC listener on {addr}: {e}"
-            ))
-        })?;
-        let listener = tokio::net::TcpListener::from_std(listener).map_err(|e| {
-            acts::ActError::Config(format!(
-                "failed to register the gRPC listener on {addr}: {e}"
-            ))
-        })?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| configure_listener_error(addr, e))?;
+        let listener = tokio::net::TcpListener::from_std(listener)
+            .map_err(|e| register_listener_error(addr, e))?;
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
         tokio::spawn(async move {

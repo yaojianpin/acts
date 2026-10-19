@@ -141,4 +141,49 @@ mod tests {
         let cfg: NatsConfig = serde_json::from_value(json!({"max_in_flight": usize::MAX})).unwrap();
         assert_eq!(cfg.max_in_flight(), MAX_IN_FLIGHT);
     }
+
+    /// A channel's filters default to `*` and its subject/id stay optional: a
+    /// channel entry names only what it wants to override.
+    #[test]
+    fn channel_filters_default_to_star() {
+        let channel: NatsChannelConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(channel.r#type, "*");
+        assert_eq!(channel.state, "*");
+        assert_eq!(channel.uses, "*");
+        assert_eq!(channel.subject, None);
+        assert_eq!(channel.id, None);
+        assert!(channel.options.is_empty());
+    }
+
+    /// Broker credentials, url and subject are read from the section; a
+    /// channel's options are the engine channel's key filters.
+    #[test]
+    fn credentials_and_channels_deserialize() {
+        let cfg: NatsConfig = serde_json::from_value(json!({
+            "url": "nats://broker:4222",
+            "token": "secret",
+            "username": "u",
+            "password": "p",
+            "subject": "prefix",
+            "channels": [
+                {"subject": "prefix.evt.a", "id": "a", "options": {"pid": "*"}},
+                {},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(cfg.url, "nats://broker:4222");
+        assert_eq!(cfg.token.as_deref(), Some("secret"));
+        assert_eq!(cfg.username.as_deref(), Some("u"));
+        assert_eq!(cfg.password.as_deref(), Some("p"));
+        assert_eq!(cfg.subject, "prefix");
+        assert_eq!(cfg.channels.len(), 2);
+        assert_eq!(cfg.channels[0].subject.as_deref(), Some("prefix.evt.a"));
+        assert_eq!(cfg.channels[0].id.as_deref(), Some("a"));
+        assert_eq!(
+            cfg.channels[0].options.get("pid").map(String::as_str),
+            Some("*")
+        );
+        assert_eq!(cfg.channels[1].subject, None);
+        assert_eq!(cfg.channels[1].id, None);
+    }
 }

@@ -575,3 +575,48 @@ fn write_tree_output(
         write_tree_output(model, next, next_is_last, &path, visited, output);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Act;
+
+    #[test]
+    fn children_of_act_node_is_empty() {
+        let position = Position {
+            content: NodeContent::Act(Act::new()),
+            level: 0,
+            parent_id: None,
+            prev_id: None,
+            next_id: None,
+        };
+        assert_eq!(
+            children_of(&position),
+            [Vec::<String>::new(), Vec::new(), Vec::new()]
+        );
+    }
+
+    #[test]
+    fn write_tree_output_returns_for_unknown_and_visited_ids() {
+        let model = Workflow::new().with_id("m1");
+        let mut output = String::new();
+        let mut visited = HashSet::new();
+        let mut parent = HashMap::new();
+
+        write_tree_output(&model, "missing", true, &parent, &mut visited, &mut output);
+        assert!(output.is_empty());
+
+        let mut path = HashMap::new();
+        path.insert(0usize, false);
+        write_tree_output(&model, "m1", true, &path, &mut visited, &mut output);
+        assert!(output.contains("id:m1"), "{output}");
+        let first_len = output.len();
+        write_tree_output(&model, "m1", true, &parent, &mut visited, &mut output);
+        assert_eq!(
+            output.len(),
+            first_len,
+            "a visited node is not written twice"
+        );
+        parent.clear();
+    }
+}

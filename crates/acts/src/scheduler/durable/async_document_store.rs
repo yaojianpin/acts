@@ -1628,10 +1628,15 @@ mod tests {
         let loaded = loaded_after_write(&snapshot, write);
         let transaction = build_reclaim_transaction(&loaded, &[]).unwrap();
         let aggregate_key = process_key("guard").unwrap();
-        assert!(transaction.guards().iter().any(|guard| {
-            guard.key == aggregate_key
-                && guard.expected.as_deref() == Some(loaded.original_document())
-        }));
+        let aggregate_guard = transaction
+            .guards()
+            .iter()
+            .find(|guard| guard.key == aggregate_key)
+            .expect("the aggregate must be guarded");
+        assert_eq!(
+            aggregate_guard.expected.as_deref(),
+            Some(loaded.original_document())
+        );
         let base_key = process_base_key("guard").unwrap();
         assert!(
             transaction.guards().iter().any(|guard| {
@@ -1699,10 +1704,11 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(matches!(
-            repository.reclaim("reclaim").await.unwrap(),
-            ReclaimOutcome::Reclaimed { document_bytes, .. } if document_bytes > 0
-        ));
+        let outcome = repository.reclaim("reclaim").await.unwrap();
+        let debug = format!("{outcome:?}");
+        assert!(debug.starts_with("Reclaimed"));
+        assert!(debug.contains("document_bytes: "));
+        assert!(!debug.contains("document_bytes: 0"), "{debug}");
         for key in [
             process_key("reclaim").unwrap(),
             process_base_key("reclaim").unwrap(),
@@ -1883,13 +1889,12 @@ mod tests {
             guards: &[DocumentGuard],
             mutations: &[DocumentMutation],
         ) -> Result<bool, ActError> {
-            let deletes_aggregate = mutations.iter().any(|mutation| {
-                matches!(
-                    mutation,
-                    DocumentMutation::Delete { key } if key.starts_with(PROCESS_KEY_PREFIX)
-                )
+            let deletes_aggregate = mutations.iter().any(|mutation| match mutation {
+                DocumentMutation::Delete { key } => key.starts_with(PROCESS_KEY_PREFIX),
+                DocumentMutation::Put { .. } => false,
             });
-            if deletes_aggregate && !self.raced.swap(true, Ordering::SeqCst) {
+            let raced = self.raced.swap(true, Ordering::SeqCst);
+            if deletes_aggregate & !raced {
                 // The commit the reclamation read did not see: it installs a
                 // newer, non-reclaimable aggregate version.
                 self.inner
@@ -2092,9 +2097,16 @@ mod tests {
             )
             .await
             .unwrap();
-        let OperationCommitOutcome::Committed { operation, .. } = outcome else {
-            panic!("the finalize must commit, not lose a compare-and-swap: {outcome:?}");
-        };
+        assert!(
+            format!("{outcome:?}").starts_with("Committed"),
+            "the finalize must commit, not lose a compare-and-swap: {outcome:?}"
+        );
+        let loaded = repository
+            .load("process")
+            .await
+            .unwrap()
+            .expect("the aggregate exists");
+        let operation = loaded.snapshot.operations.get(&operation_id).unwrap();
         assert_eq!(operation.state, OperationState::Completed(commit));
     }
 
@@ -2224,6 +2236,25 @@ mod tests {
                 .operations,
             vec![id]
         );
+    }
+
+    /// The boot repair pass counts only the aggregates it actually rewrote:
+    /// a consistent one is visited and left alone.
+    #[tokio::test]
+    async fn repair_all_ready_counts_only_rewritten_aggregates() {
+        let (first, _) = ready_snapshot("repair-a");
+        let (second, _) = ready_snapshot("repair-b");
+        let (repository, store) = repository_with_store();
+        repository.create(&first, 0, 800).await.unwrap();
+        repository.create(&second, 0, 800).await.unwrap();
+
+        assert_eq!(repository.repair_all_ready(0, 800).await.unwrap(), 0);
+        store
+            .delete(&ready_index_key("repair-a").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(repository.repair_all_ready(0, 800).await.unwrap(), 1);
+        assert_eq!(repository.repair_all_ready(0, 800).await.unwrap(), 0);
     }
 
     /// A missing ready document is rebuilt from the authoritative aggregate;
@@ -2575,7 +2606,7 @@ mod tests {
         let log_prefix = process_log_prefix(process_id).unwrap();
         let mut log_bytes = 0u64;
 
-        for _ in 0..MAX_LOG_ENTRIES {
+        for step in 0..MAX_LOG_ENTRIES {
             let mut replacement = loaded.snapshot.clone();
             replacement.version.process += 1;
             let task = replacement.tasks.keys().next().unwrap().clone();
@@ -2583,18 +2614,30 @@ mod tests {
             let mut changes = LogChanges::default();
             changes.tasks.insert(task);
             let entries = recovery_entries(&loaded.snapshot);
-            let ReplaceOutcome::Committed(write) = repository
+            let outcome = repository
                 .replace(&loaded, &replacement, &entries, None, &changes)
                 .await
+                .unwrap();
+            assert!(
+                format!("{outcome:?}").starts_with("Committed"),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                kv.one(&base_key).await.unwrap().unwrap(),
+                base_before,
+                "no ordinary commit rewrites the base"
+            );
+            loaded = repository
+                .load(process_id)
+                .await
                 .unwrap()
-            else {
-                panic!("an uncontended commit must install");
-            };
-            let (_, entry) = write
-                .log_entry
-                .as_ref()
+                .expect("aggregate");
+            let (_, entry) = loaded
+                .original_log()
+                .iter()
+                .next_back()
                 .expect("an ordinary commit appends a log entry");
-            assert!(write.base.is_none(), "no ordinary commit rewrites the base");
+            assert_eq!(loaded.original_log().len() as u64, step + 1);
             assert!(
                 (entry.len() as u64) * 4 < base_before.len() as u64,
                 "one commit's log entry ({} B) must not approach the {}-task base ({} B)",
@@ -2603,7 +2646,6 @@ mod tests {
                 base_before.len()
             );
             log_bytes += entry.len() as u64;
-            loaded.install_replace_documents(write);
         }
         let logged = kv
             .scan_prefix(
@@ -2633,16 +2675,24 @@ mod tests {
         let mut changes = LogChanges::default();
         changes.tasks.insert(task);
         let entries = recovery_entries(&loaded.snapshot);
-        let ReplaceOutcome::Committed(write) = repository
+        let outcome = repository
             .replace(&loaded, &replacement, &entries, None, &changes)
             .await
+            .unwrap();
+        assert!(
+            format!("{outcome:?}").starts_with("Committed"),
+            "{outcome:?}"
+        );
+        let compacted = repository
+            .load(process_id)
+            .await
             .unwrap()
-        else {
-            panic!("the compacting commit must install");
-        };
-        assert!(write.base.is_some(), "the full window folds into a base");
-        assert!(write.log_entry.is_none());
-        assert_eq!(write.base_seq, write.next_seq);
+            .expect("aggregate");
+        assert!(
+            compacted.original_log().is_empty(),
+            "the full window folds into a base"
+        );
+        assert_eq!(compacted.base_seq(), compacted.next_seq());
         assert!(
             kv.scan_prefix(
                 &log_prefix,
@@ -2657,6 +2707,1211 @@ mod tests {
             .is_empty()
         );
         assert_ne!(kv.one(&base_key).await.unwrap().unwrap(), base_before);
+    }
+
+    /// Serves hand-crafted scan results for one prefix while every read and
+    /// write (and every other prefix) goes to the real store.
+    struct StaleScanStore {
+        inner: Arc<KvDocumentStore>,
+        prefix: String,
+        entries: Vec<(String, Vec<u8>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncDocumentStore for StaleScanStore {
+        async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+            self.inner.read_many(keys).await
+        }
+        async fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            if prefix == self.prefix {
+                return Ok(self.entries.clone());
+            }
+            self.inner.scan_prefix(prefix).await
+        }
+        async fn scan_range(
+            &self,
+            prefix: &str,
+            lower: Option<&str>,
+            upper: Option<&str>,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            if prefix == self.prefix {
+                return Ok(self.entries.clone());
+            }
+            self.inner.scan_range(prefix, lower, upper).await
+        }
+        async fn atomic_batch(
+            &self,
+            guards: &[DocumentGuard],
+            mutations: &[DocumentMutation],
+        ) -> Result<bool, ActError> {
+            self.inner.atomic_batch(guards, mutations).await
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum BatchFault {
+        Lose,
+        LoseAfterApply,
+        Fail,
+    }
+
+    /// Injects one storage fault: a permanently lost guard, one lost guard
+    /// whose mutations still landed (a rival writer won), a failed batch, or a
+    /// failed read.
+    struct FaultyStore {
+        inner: Arc<KvDocumentStore>,
+        fault: BatchFault,
+        read_fails: bool,
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncDocumentStore for FaultyStore {
+        async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+            if self.read_fails {
+                return Err(ActError::Store("injected read failure".into()));
+            }
+            self.inner.read_many(keys).await
+        }
+        async fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            self.inner.scan_prefix(prefix).await
+        }
+        async fn scan_range(
+            &self,
+            prefix: &str,
+            lower: Option<&str>,
+            upper: Option<&str>,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            self.inner.scan_range(prefix, lower, upper).await
+        }
+        async fn atomic_batch(
+            &self,
+            guards: &[DocumentGuard],
+            mutations: &[DocumentMutation],
+        ) -> Result<bool, ActError> {
+            match self.fault {
+                BatchFault::Fail => Err(ActError::Store("injected batch failure".into())),
+                BatchFault::Lose => Ok(false),
+                BatchFault::LoseAfterApply => {
+                    if !self.fired.swap(true, Ordering::SeqCst) {
+                        self.inner.atomic_batch(&[], mutations).await?;
+                        Ok(false)
+                    } else {
+                        self.inner.atomic_batch(guards, mutations).await
+                    }
+                }
+            }
+        }
+    }
+
+    fn faulty_repository(
+        inner: Arc<KvDocumentStore>,
+        fault: BatchFault,
+        read_fails: bool,
+    ) -> AsyncProcessRepository {
+        AsyncProcessRepository::new(Arc::new(FaultyStore {
+            inner,
+            fault,
+            read_fails,
+            fired: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
+    #[tokio::test]
+    async fn create_reports_conflict_when_the_aggregate_already_exists() {
+        let (repository, _) = repository_with_store();
+        let (process, _) = ready_snapshot("process");
+        repository.create(&process, 0, 800).await.unwrap();
+        let error = repository.create(&process, 0, 800).await.unwrap_err();
+        assert!(error.to_string().contains(": process"));
+    }
+
+    #[tokio::test]
+    async fn repository_pages_reject_out_of_range_limits() {
+        let (repository, _) = repository_with_store();
+        let repository = Arc::new(repository);
+        let recovery = AsyncRecoveryRepository::new(repository.clone());
+        for limit in [0, MAX_RECOVERY_PAGE_SIZE + 1] {
+            assert!(matches!(
+                recovery.recoverable_page(None, limit).await,
+                Err(AsyncRepositoryError::Domain(CommitError::InvalidPageLimit))
+            ));
+            assert!(matches!(
+                repository.due_ready_page(None, 0, limit).await,
+                Err(AsyncRepositoryError::Domain(CommitError::InvalidPageLimit))
+            ));
+        }
+        assert_eq!(
+            repository
+                .dispatchable_outbox_page(0, None, 0)
+                .await
+                .unwrap_err(),
+            OutboxRepositoryError::InvalidPageLimit
+        );
+    }
+
+    /// A corrupt recovery index is damage; candidates whose aggregate or
+    /// operation moved on (or never existed) are stale and skipped.
+    #[tokio::test]
+    async fn recovery_page_skips_corrupt_and_stale_index_documents() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv.clone()));
+        let repository = AsyncProcessRepository::new(inner.clone());
+        let (process, operation) = ready_snapshot("process");
+        repository.create(&process, 0, 800).await.unwrap();
+
+        let corrupt = AsyncProcessRepository::new(Arc::new(StaleScanStore {
+            inner: inner.clone(),
+            prefix: RECOVERY_INDEX_KEY_PREFIX.into(),
+            entries: vec![(recovery_index_key("process").unwrap(), b"junk".to_vec())],
+        }));
+        let error = corrupt.load_recovery_page(None, 10).await.unwrap_err();
+        assert!(format!("{error}").contains("recovery index"));
+
+        let ghost = OperationId {
+            process_id: "ghost".into(),
+            task: TaskId::new("step", 0).unwrap(),
+            sequence: 0,
+        };
+        let unknown = OperationId {
+            process_id: "process".into(),
+            task: operation.task.clone(),
+            sequence: 9,
+        };
+        let ghost_index = RecoveryIndex {
+            process_id: "ghost".into(),
+            entries: vec![
+                crate::scheduler::core::recovery::recovery_index::RecoveryIndexEntry {
+                    operation_id: ghost,
+                    revision: 1,
+                },
+            ],
+        };
+        let stale_index = RecoveryIndex {
+            process_id: "process".into(),
+            entries: vec![
+                crate::scheduler::core::recovery::recovery_index::RecoveryIndexEntry {
+                    operation_id: operation,
+                    revision: 99,
+                },
+                crate::scheduler::core::recovery::recovery_index::RecoveryIndexEntry {
+                    operation_id: unknown,
+                    revision: 1,
+                },
+            ],
+        };
+        let stale = AsyncProcessRepository::new(Arc::new(StaleScanStore {
+            inner,
+            prefix: RECOVERY_INDEX_KEY_PREFIX.into(),
+            entries: vec![
+                (
+                    recovery_index_key("ghost").unwrap(),
+                    RecoveryIndexCodec::encode(&ghost_index).unwrap(),
+                ),
+                (
+                    recovery_index_key("process").unwrap(),
+                    RecoveryIndexCodec::encode(&stale_index).unwrap(),
+                ),
+            ],
+        }));
+        let page = stale.load_recovery_page(None, 10).await.unwrap();
+        assert!(page.operations.is_empty());
+        assert!(page.next.is_none());
+    }
+
+    /// The cursor may name only a document (no operation yet) and an entry
+    /// that sorts after the cursor's operation is still emitted; both are the
+    /// non-skip side of the positional filter. A retired operation whose
+    /// revision still matches is stale as well, not damage.
+    #[tokio::test]
+    async fn recovery_cursor_edges_skip_only_what_it_names() {
+        let (mut process, first) = ready_snapshot("cursor");
+        let task = first.task.clone();
+        let second = OperationId {
+            process_id: "cursor".into(),
+            task: task.clone(),
+            sequence: 1,
+        };
+        let claim = ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 1,
+            lease_until_ms: 9_000,
+            heartbeat_revision: 0,
+        };
+        for id in [&first, &second] {
+            process.operations.insert(
+                id.clone(),
+                OperationRecord::pending(id.clone(), OperationKind::ExecuteTask)
+                    .evolve(
+                        crate::scheduler::core::model::operation::OperationEvent::ClaimAndPrepare(
+                            claim.clone(),
+                        ),
+                    )
+                    .unwrap(),
+            );
+        }
+        process.version.operations = 2;
+        let (repository, _) = repository_with_store();
+        repository.create(&process, 0, 800).await.unwrap();
+
+        // No operation in the cursor: the document is scanned from its start.
+        let document_only = RecoveryCursor {
+            process_key: recovery_index_key("cursor").unwrap(),
+            operation: None,
+        };
+        let page = repository
+            .load_recovery_page(Some(&document_only), 10)
+            .await
+            .unwrap();
+        assert_eq!(page.operations.len(), 2);
+
+        // The entry after the cursor's operation is emitted (the `is_gt` arm
+        // the skip filter must not swallow).
+        let after_first = RecoveryCursor {
+            process_key: recovery_index_key("cursor").unwrap(),
+            operation: Some(first.clone()),
+        };
+        let page = repository
+            .load_recovery_page(Some(&after_first), 10)
+            .await
+            .unwrap();
+        assert_eq!(page.operations.len(), 1);
+        assert_eq!(page.operations[0].operation.id, second);
+
+        // Same revision, but the record retired after the index was scanned.
+        let (mut retired_process, retired) = ready_snapshot("retired");
+        retired_process.operations.insert(
+            retired.clone(),
+            OperationRecord {
+                id: retired.clone(),
+                kind: OperationKind::ExecuteTask,
+                state: OperationState::Superseded { by_generation: 1 },
+                revision: 0,
+            },
+        );
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv));
+        AsyncProcessRepository::new(inner.clone())
+            .create(&retired_process, 0, 800)
+            .await
+            .unwrap();
+        let index = RecoveryIndex {
+            process_id: "retired".into(),
+            entries: vec![
+                crate::scheduler::core::recovery::recovery_index::RecoveryIndexEntry {
+                    operation_id: retired,
+                    revision: 0,
+                },
+            ],
+        };
+        let scanned = AsyncProcessRepository::new(Arc::new(StaleScanStore {
+            inner,
+            prefix: RECOVERY_INDEX_KEY_PREFIX.into(),
+            entries: vec![(
+                recovery_index_key("retired").unwrap(),
+                RecoveryIndexCodec::encode(&index).unwrap(),
+            )],
+        }));
+        let page = scanned.load_recovery_page(None, 10).await.unwrap();
+        assert!(page.operations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn operation_commits_require_the_process_and_its_identity() {
+        let (repository, _) = repository_with_store();
+        let missing = OperationId {
+            process_id: "missing".into(),
+            task: TaskId::new("step", 0).unwrap(),
+            sequence: 0,
+        };
+        let error = repository
+            .commit_operation_event(
+                &missing,
+                0,
+                crate::scheduler::core::model::operation::OperationEvent::Complete {
+                    commit: crate::scheduler::core::model::operation::CommitToken {
+                        process_version: 1,
+                        digest: "d".into(),
+                    },
+                },
+                0,
+                800,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("missing"));
+
+        let (process, id) = ready_snapshot("process");
+        let loaded = repository.create(&process, 0, 800).await.unwrap();
+        let foreign = OperationId {
+            process_id: "foreign".into(),
+            ..id
+        };
+        let error = repository
+            .commit_operation_event_from(
+                loaded,
+                &foreign,
+                0,
+                crate::scheduler::core::model::operation::OperationEvent::Complete {
+                    commit: crate::scheduler::core::model::operation::CommitToken {
+                        process_version: 1,
+                        digest: "d".into(),
+                    },
+                },
+                0,
+                800,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("foreign"));
+    }
+
+    fn claim_event() -> crate::scheduler::core::model::operation::OperationEvent {
+        crate::scheduler::core::model::operation::OperationEvent::ClaimAndPrepare(ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 1,
+            lease_until_ms: 9_000,
+            heartbeat_revision: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn operation_event_reports_an_already_committed_or_conflicting_write() {
+        let (process, id) = ready_snapshot("process");
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv));
+        let creator = AsyncProcessRepository::new(inner.clone());
+        creator.create(&process, 0, 800).await.unwrap();
+
+        // The guard was lost but the same state landed: the operation is
+        // authoritative and the outcome is `AlreadyCommitted`.
+        let applied = faulty_repository(inner.clone(), BatchFault::LoseAfterApply, false);
+        let loaded = applied.load("process").await.unwrap().expect("aggregate");
+        let outcome = applied
+            .commit_operation_event_from(loaded, &id, 0, claim_event(), 0, 800)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            OperationCommitOutcome::AlreadyCommitted { .. }
+        ));
+
+        // A second, independent aggregate for the plain lost-guard case.
+        let (process, id) = ready_snapshot("process");
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv));
+        let creator = AsyncProcessRepository::new(inner.clone());
+        let loaded = creator.create(&process, 0, 800).await.unwrap();
+        let losing = faulty_repository(inner, BatchFault::Lose, false);
+        assert!(matches!(
+            losing
+                .commit_operation_event_from(loaded, &id, 0, claim_event(), 0, 800)
+                .await
+                .unwrap(),
+            OperationCommitOutcome::Conflict {}
+        ));
+    }
+
+    fn transition_plan(
+        process: &ProcessSnapshot,
+        task: TaskId,
+    ) -> crate::scheduler::core::model::transition_plan::TransitionPlan {
+        use crate::scheduler::core::model::transition_plan::{StateChange, TransitionPlan};
+        TransitionPlan {
+            process_id: process.process_id.clone(),
+            expected: process.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: vec![StateChange {
+                task,
+                expected_revision: 1,
+                from: TaskState::Ready,
+                to: TaskState::Running,
+            }],
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn transition_commit_reports_an_already_committed_or_conflicting_write() {
+        let source = snapshot(false);
+        let task = source.tasks.keys().next().unwrap().clone();
+        let plan = transition_plan(&source, task);
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv));
+        let creator = AsyncProcessRepository::new(inner.clone());
+        creator.create(&source, 0, 800).await.unwrap();
+
+        let applied = faulty_repository(inner.clone(), BatchFault::LoseAfterApply, false);
+        let outcome = applied.commit_transition(&plan, 0, 800).await.unwrap();
+        assert!(matches!(
+            outcome,
+            TransitionCommitOutcome::AlreadyCommitted { .. }
+        ));
+
+        // A fresh aggregate for the plain lost-guard case: the applied attempt
+        // above advanced the version this plan expects.
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv));
+        let creator = AsyncProcessRepository::new(inner.clone());
+        creator.create(&source, 0, 800).await.unwrap();
+        let losing = faulty_repository(inner, BatchFault::Lose, false);
+        assert!(matches!(
+            losing.commit_transition(&plan, 0, 800).await.unwrap(),
+            TransitionCommitOutcome::Conflict {}
+        ));
+    }
+
+    /// Two due operations with the same ready time page one at a time: the
+    /// cursor skips the entry it names and resumes after it.
+    #[tokio::test]
+    async fn ready_pages_resume_after_the_cursor() {
+        let (mut process, first) = ready_snapshot("process");
+        let task = first.task.clone();
+        let second = OperationId {
+            process_id: "process".into(),
+            task: task.clone(),
+            sequence: 1,
+        };
+        process.operations.insert(
+            second.clone(),
+            OperationRecord::pending(second.clone(), OperationKind::ExecuteTask),
+        );
+        process.version.operations = 2;
+        let (repository, _) = repository_with_store();
+        repository.create(&process, 0, 800).await.unwrap();
+
+        let page = repository.due_ready_page(None, 0, 1).await.unwrap();
+        assert_eq!(page.observed, 2);
+        assert_eq!(page.oldest_ready_at_ms, Some(0));
+        assert_eq!(page.operations, vec![first.clone()]);
+        let cursor = page.next.expect("a second due operation remains");
+
+        let page = repository
+            .due_ready_page(Some(&cursor), 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.operations, vec![second]);
+        assert!(page.next.is_none());
+    }
+
+    /// The ready cursor skips only entries at or before the cursor position:
+    /// an earlier ready time in the same document is skipped, a later one is
+    /// walked, and a different document after it is never compared with the
+    /// cursor at all.
+    #[tokio::test]
+    async fn ready_cursor_walks_earlier_and_later_entries() {
+        let (mut process, first) = ready_snapshot("cursor");
+        let task = first.task.clone();
+        let second = OperationId {
+            process_id: "cursor".into(),
+            task: task.clone(),
+            sequence: 1,
+        };
+        process.operations.insert(
+            second.clone(),
+            OperationRecord::pending(second.clone(), OperationKind::ExecuteTask),
+        );
+        process.version.operations = 2;
+        let (repository, _) = repository_with_store();
+        repository.create(&process, 0, 800).await.unwrap();
+        repository.set_ready_at(&second, 5).await.unwrap();
+
+        let (other, other_id) = ready_snapshot("zulu");
+        repository.create(&other, 0, 800).await.unwrap();
+
+        // An earlier ready time than the cursor is skipped; the other process
+        // document is scanned without consulting the cursor's position.
+        let cursor = ReadyCursor {
+            process_key: ready_index_key("cursor").unwrap(),
+            ready_at_ms: 2,
+            operation: second.clone(),
+        };
+        let page = repository
+            .due_ready_page(Some(&cursor), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(page.observed, 2, "only the later entries are walked");
+        assert_eq!(page.operations, vec![other_id]);
+
+        // The same position (equal ready time, equal operation) is skipped and
+        // a later ready time in the same document is not.
+        let equal = ReadyCursor {
+            process_key: ready_index_key("cursor").unwrap(),
+            ready_at_ms: 0,
+            operation: first,
+        };
+        let page = repository
+            .due_ready_page(Some(&equal), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(page.observed, 2);
+    }
+
+    #[tokio::test]
+    async fn set_ready_at_handles_missing_stale_and_repeated_edits() {
+        let (process, first) = ready_snapshot("process");
+        let task = first.task.clone();
+        let second = OperationId {
+            process_id: "process".into(),
+            task,
+            sequence: 1,
+        };
+        let mut process = process;
+        process.operations.insert(
+            second.clone(),
+            OperationRecord::pending(second.clone(), OperationKind::ExecuteTask),
+        );
+        process.version.operations = 2;
+        let (repository, store) = repository_with_store();
+        repository.create(&process, 0, 800).await.unwrap();
+
+        // A process with no ready document, and an operation absent from an
+        // existing one, are both no-ops.
+        assert!(
+            !repository
+                .set_ready_at(
+                    &OperationId {
+                        process_id: "absent".into(),
+                        task: first.task.clone(),
+                        sequence: 0,
+                    },
+                    10
+                )
+                .await
+                .unwrap()
+        );
+        let absent_entry = OperationId {
+            process_id: "process".into(),
+            task: first.task.clone(),
+            sequence: 9,
+        };
+        assert!(!repository.set_ready_at(&absent_entry, 10).await.unwrap());
+        assert!(!repository.set_ready_at(&first, 0).await.unwrap());
+        assert!(repository.set_ready_at(&second, 5).await.unwrap());
+
+        let corrupt_key = ready_index_key("corrupt").unwrap();
+        store.put(&corrupt_key, b"junk".to_vec()).await.unwrap();
+        let error = repository
+            .set_ready_at(
+                &OperationId {
+                    process_id: "corrupt".into(),
+                    task: first.task.clone(),
+                    sequence: 0,
+                },
+                5,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AsyncRepositoryError::Domain(_)));
+
+        let inner = Arc::new(KvDocumentStore::new(store.clone()));
+        let losing = faulty_repository(inner.clone(), BatchFault::Lose, false);
+        assert!(!losing.set_ready_at(&first, 77).await.unwrap());
+
+        let failing = faulty_repository(inner, BatchFault::Lose, true);
+        assert!(matches!(
+            failing.set_ready_at(&first, 77).await,
+            Err(AsyncRepositoryError::Store(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repair_ready_is_a_no_op_for_absent_or_unwritable_aggregates() {
+        let (repository, _) = repository_with_store();
+        assert!(!repository.repair_ready("absent", 0, 800).await.unwrap());
+
+        let (process, _) = ready_snapshot("process");
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv.clone()));
+        let creator = AsyncProcessRepository::new(inner.clone());
+        creator.create(&process, 0, 800).await.unwrap();
+        kv.delete(&ready_index_key("process").unwrap())
+            .await
+            .unwrap();
+        let losing = faulty_repository(inner, BatchFault::Lose, false);
+        assert!(!losing.repair_ready("process", 0, 800).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_ready_document_fails_the_commit_that_reads_it() {
+        let (process, id) = ready_snapshot("process");
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        repository.create(&process, 0, 800).await.unwrap();
+        kv.put(&ready_index_key("process").unwrap(), b"junk".to_vec())
+            .await
+            .unwrap();
+        let error = repository
+            .commit_operation_event(&id, 0, claim_event(), 0, 800)
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("ready index"));
+    }
+
+    fn outbox_snapshot() -> (ProcessSnapshot, OperationId) {
+        let mut process = ProcessSnapshot::empty("outbox").unwrap();
+        process.tasks.insert(
+            TaskId::new("step", 0).unwrap(),
+            TaskSnapshot {
+                model_node: NodeId::parse("model-step").unwrap(),
+                parent: None,
+                predecessors: vec![],
+                state: TaskState::Completed,
+                revision: 1,
+            },
+        );
+        let claim = crate::scheduler::core::outbox::records::DeliveryClaim {
+            owner: "owner".into(),
+            fence: 1,
+            lease_until_ms: 1_000,
+            heartbeat_revision: 0,
+        };
+        let make = |key: &str| crate::scheduler::core::outbox::records::OutboxId {
+            process_id: "outbox".into(),
+            key: key.into(),
+        };
+        let pending = crate::scheduler::core::outbox::records::OutboxRecord::pending(
+            make("a-pending"),
+            "topic".into(),
+            "{}".into(),
+            0,
+        )
+        .unwrap();
+        let claimed = crate::scheduler::core::outbox::records::OutboxRecord::pending(
+            make("b-claimed"),
+            "topic".into(),
+            "{}".into(),
+            0,
+        )
+        .unwrap()
+        .evolve(
+            crate::scheduler::core::outbox::records::OutboxEvent::Claim {
+                claim: claim.clone(),
+                now_ms: 0,
+            },
+        )
+        .unwrap();
+        let unknown = crate::scheduler::core::outbox::records::OutboxRecord::pending(
+            make("c-unknown"),
+            "topic".into(),
+            "{}".into(),
+            0,
+        )
+        .unwrap()
+        .evolve(
+            crate::scheduler::core::outbox::records::OutboxEvent::Claim {
+                claim: claim.clone(),
+                now_ms: 0,
+            },
+        )
+        .unwrap()
+        .evolve(
+            crate::scheduler::core::outbox::records::OutboxEvent::MarkDeliveryUnknown {
+                claim,
+                reason: "unknown".into(),
+                now_ms: 0,
+            },
+        )
+        .unwrap();
+        for record in [pending, claimed, unknown] {
+            process.outbox.insert(record.id.clone(), record);
+        }
+        let id = OperationId {
+            process_id: "outbox".into(),
+            task: TaskId::new("step", 0).unwrap(),
+            sequence: 0,
+        };
+        (process, id)
+    }
+
+    #[tokio::test]
+    async fn outbox_page_orders_due_states_and_resumes_at_its_cursor() {
+        let (process, _) = outbox_snapshot();
+        let (repository, store) = repository_with_store();
+        repository.create(&process, 0, 800).await.unwrap();
+
+        let page = repository
+            .dispatchable_outbox_page(0, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page.observed, 3);
+        assert_eq!(page.due, 1);
+        assert_eq!(page.records.len(), 1);
+
+        let page = repository
+            .dispatchable_outbox_page(2_000, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.due, 2);
+        assert_eq!(page.records.len(), 1);
+        let cursor = page.next.expect("a second due record remains");
+        let page = repository
+            .dispatchable_outbox_page(2_000, Some(&cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert!(page.records[0].id > cursor.0);
+
+        let corrupt_key = format!("{OUTBOX_INDEX_KEY_PREFIX}corrupt");
+        store.put(&corrupt_key, b"junk".to_vec()).await.unwrap();
+        let error = repository
+            .dispatchable_outbox_page(0, None, 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OutboxRepositoryError::CorruptData(_)));
+    }
+
+    /// A stale index entry (an aggregate that moved on after the scan) is
+    /// damage the page refuses rather than handing out an outdated record.
+    #[tokio::test]
+    async fn outbox_page_refuses_a_stale_index_entry() {
+        use crate::scheduler::core::outbox::outbox_index::{OutboxIndex, OutboxIndexState};
+
+        let (process, _) = outbox_snapshot();
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv));
+        let repository = AsyncProcessRepository::new(inner.clone());
+        repository.create(&process, 0, 800).await.unwrap();
+        let entry = crate::scheduler::core::outbox::outbox_index::OutboxIndexEntry {
+            id: crate::scheduler::core::outbox::records::OutboxId {
+                process_id: "outbox".into(),
+                key: "a-pending".into(),
+            },
+            revision: 99,
+            state: OutboxIndexState::Pending { available_at_ms: 0 },
+        };
+        let stale = OutboxIndex {
+            process_id: "outbox".into(),
+            entries: vec![entry],
+        };
+        let scanned = AsyncProcessRepository::new(Arc::new(StaleScanStore {
+            inner: inner.clone(),
+            prefix: OUTBOX_INDEX_KEY_PREFIX.into(),
+            entries: vec![(
+                outbox_index_key("outbox").unwrap(),
+                OutboxIndexCodec::encode(&stale).unwrap(),
+            )],
+        }));
+        let error = scanned
+            .dispatchable_outbox_page(0, None, 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OutboxRepositoryError::CorruptData(_)));
+
+        // The revision still matches, but the record's own state says it is
+        // not dispatchable right now (a live claim): also stale, not damage.
+        let claimed_id = crate::scheduler::core::outbox::records::OutboxId {
+            process_id: "outbox".into(),
+            key: "b-claimed".into(),
+        };
+        let claimed = process.outbox.get(&claimed_id).unwrap().clone();
+        let not_ready = OutboxIndex {
+            process_id: "outbox".into(),
+            entries: vec![
+                crate::scheduler::core::outbox::outbox_index::OutboxIndexEntry {
+                    id: claimed_id,
+                    revision: claimed.revision,
+                    state: OutboxIndexState::Pending { available_at_ms: 0 },
+                },
+            ],
+        };
+        let scanned = AsyncProcessRepository::new(Arc::new(StaleScanStore {
+            inner: inner.clone(),
+            prefix: OUTBOX_INDEX_KEY_PREFIX.into(),
+            entries: vec![(
+                outbox_index_key("outbox").unwrap(),
+                OutboxIndexCodec::encode(&not_ready).unwrap(),
+            )],
+        }));
+        let error = scanned
+            .dispatchable_outbox_page(0, None, 10)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("stale outbox index"));
+
+        // An index entry naming a record the aggregate does not have is the
+        // same kind of damage.
+        let missing = OutboxIndex {
+            process_id: "outbox".into(),
+            entries: vec![
+                crate::scheduler::core::outbox::outbox_index::OutboxIndexEntry {
+                    id: crate::scheduler::core::outbox::records::OutboxId {
+                        process_id: "outbox".into(),
+                        key: "z-missing".into(),
+                    },
+                    revision: 0,
+                    state: OutboxIndexState::Pending { available_at_ms: 0 },
+                },
+            ],
+        };
+        let scanned = AsyncProcessRepository::new(Arc::new(StaleScanStore {
+            inner,
+            prefix: OUTBOX_INDEX_KEY_PREFIX.into(),
+            entries: vec![(
+                outbox_index_key("outbox").unwrap(),
+                OutboxIndexCodec::encode(&missing).unwrap(),
+            )],
+        }));
+        let error = scanned
+            .dispatchable_outbox_page(0, None, 10)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("missing record"));
+    }
+
+    #[tokio::test]
+    async fn evolve_outbox_reports_revision_conflicts_and_store_failures() {
+        let (process, _) = outbox_snapshot();
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv));
+        let creator = AsyncProcessRepository::new(inner.clone());
+        creator.create(&process, 0, 800).await.unwrap();
+        let id = crate::scheduler::core::outbox::records::OutboxId {
+            process_id: "outbox".into(),
+            key: "a-pending".into(),
+        };
+        let claim = crate::scheduler::core::outbox::records::DeliveryClaim {
+            owner: "owner".into(),
+            fence: 1,
+            lease_until_ms: 1_000,
+            heartbeat_revision: 0,
+        };
+        let event =
+            crate::scheduler::core::outbox::records::OutboxEvent::Claim { claim, now_ms: 0 };
+        assert!(matches!(
+            creator.evolve_outbox(&id, 99, event.clone()).await,
+            Err(OutboxRepositoryError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            faulty_repository(inner.clone(), BatchFault::Lose, false)
+                .evolve_outbox(&id, 0, event.clone())
+                .await,
+            Err(OutboxRepositoryError::ConcurrentModification(_))
+        ));
+        assert!(matches!(
+            faulty_repository(inner, BatchFault::Fail, false)
+                .evolve_outbox(&id, 0, event)
+                .await,
+            Err(OutboxRepositoryError::Unavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn confirm_outbox_batch_skips_inapplicable_records_and_restores_on_failure() {
+        use crate::scheduler::core::outbox::outbox_repository::OutboxConfirmation;
+        use crate::scheduler::core::outbox::records::{DeliveryClaim, OutboxEvent, OutboxId};
+
+        async fn seeded() -> (
+            AsyncProcessRepository,
+            Arc<KvDocumentStore>,
+            LoadedProcess,
+            OutboxId,
+        ) {
+            let (process, _) = outbox_snapshot();
+            let kv = Arc::new(crate::store::MemoryStore::new());
+            let inner = Arc::new(KvDocumentStore::new(kv));
+            let creator = AsyncProcessRepository::new(inner.clone());
+            let loaded = creator.create(&process, 0, 800).await.unwrap();
+            let id = OutboxId {
+                process_id: "outbox".into(),
+                key: "a-pending".into(),
+            };
+            (creator, inner, loaded, id)
+        }
+
+        let claim = DeliveryClaim {
+            owner: "owner".into(),
+            fence: 1,
+            lease_until_ms: 1_000,
+            heartbeat_revision: 0,
+        };
+        let events = vec![
+            OutboxEvent::Claim {
+                claim: claim.clone(),
+                now_ms: 0,
+            },
+            OutboxEvent::ConfirmDelivered {
+                claim,
+                receipt: "ok".into(),
+                now_ms: 0,
+            },
+        ];
+
+        let (creator, inner, mut loaded, id) = seeded().await;
+        assert!(
+            creator
+                .confirm_outbox_batch(&mut loaded, &[])
+                .await
+                .unwrap()
+                .confirmed
+                .is_empty()
+        );
+        for confirmation in [
+            OutboxConfirmation {
+                id: OutboxId {
+                    process_id: "outbox".into(),
+                    key: "missing".into(),
+                },
+                expected_revision: 0,
+                events: vec![],
+            },
+            OutboxConfirmation {
+                id: id.clone(),
+                expected_revision: 99,
+                events: vec![],
+            },
+            OutboxConfirmation {
+                id: id.clone(),
+                expected_revision: 0,
+                events: vec![OutboxEvent::Quarantine {
+                    reason: "  ".into(),
+                }],
+            },
+        ] {
+            assert!(
+                creator
+                    .confirm_outbox_batch(&mut loaded, &[confirmation])
+                    .await
+                    .unwrap()
+                    .confirmed
+                    .is_empty()
+            );
+        }
+
+        // The ordinary path installs the written bytes.
+        let outcome = creator
+            .confirm_outbox_batch(
+                &mut loaded,
+                &[OutboxConfirmation {
+                    id: id.clone(),
+                    expected_revision: 0,
+                    events: events.clone(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.confirmed.len(), 1);
+        assert!(loaded.snapshot.outbox[&id].state.is_terminal());
+        let index_bytes = inner
+            .read_many(&[outbox_index_key("outbox").unwrap()])
+            .await
+            .unwrap()[0]
+            .clone()
+            .expect("the other records still project an index");
+        let index =
+            crate::scheduler::core::outbox::outbox_index::OutboxIndexCodec::decode(&index_bytes)
+                .unwrap();
+        assert!(index.entries.iter().all(|entry| entry.id != id));
+
+        // A store failure restores the caller's snapshot: the record is still
+        // pending and can be redelivered.
+        let (_, inner, mut failing_loaded, id) = seeded().await;
+        let failing = faulty_repository(inner, BatchFault::Fail, false);
+        assert!(matches!(
+            failing
+                .confirm_outbox_batch(
+                    &mut failing_loaded,
+                    &[OutboxConfirmation {
+                        id: id.clone(),
+                        expected_revision: 0,
+                        events: events.clone(),
+                    }]
+                )
+                .await,
+            Err(OutboxRepositoryError::Unavailable(_))
+        ));
+        assert_eq!(failing_loaded.snapshot.outbox.get(&id).unwrap().revision, 0);
+
+        // The guard is lost but the applied bytes are authoritative: the
+        // confirmation is adopted rather than replayed.
+        let (_, inner, _, id) = seeded().await;
+        let applied = faulty_repository(inner, BatchFault::LoseAfterApply, false);
+        let mut applied_loaded = applied.load("outbox").await.unwrap().expect("aggregate");
+        let outcome = applied
+            .confirm_outbox_batch(
+                &mut applied_loaded,
+                &[OutboxConfirmation {
+                    id,
+                    expected_revision: 0,
+                    events,
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.confirmed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reclaim_reports_store_failures_and_exhausted_conflicts() {
+        let process = reclaimable_snapshot("process");
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv.clone()));
+        let creator = AsyncProcessRepository::new(inner.clone());
+        creator.create(&process, 0, 800).await.unwrap();
+        assert!(matches!(
+            faulty_repository(inner.clone(), BatchFault::Fail, false)
+                .reclaim("process")
+                .await,
+            Err(AsyncRepositoryError::Store(_))
+        ));
+        let error = faulty_repository(inner.clone(), BatchFault::Lose, false)
+            .reclaim("process")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(": process"));
+
+        // The orphan path fails the same way, and a permanently lost guard
+        // exhausts its attempts too.
+        kv.put(&process_base_key("orphan").unwrap(), b"base".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            faulty_repository(inner.clone(), BatchFault::Fail, false)
+                .reclaim("orphan")
+                .await,
+            Err(AsyncRepositoryError::Store(_))
+        ));
+        let error = faulty_repository(inner, BatchFault::Lose, false)
+            .reclaim("orphan")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(": orphan"));
+    }
+
+    #[tokio::test]
+    async fn a_lost_migration_guard_for_every_attempt_is_a_conflict() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv.clone()));
+        let source = snapshot_for("legacy-conflict");
+        seed_legacy(&kv, &source, false).await;
+        let repository = faulty_repository(inner, BatchFault::Lose, false);
+        let error = repository.load("legacy-conflict").await.unwrap_err();
+        assert!(error.to_string().contains("legacy-conflict"));
+    }
+
+    /// A head that moved while its log was damaged is re-read; the retry stops
+    /// at the bounded attempt count and surfaces the damage.
+    struct MovedHeadStore {
+        head: Vec<u8>,
+        moved: Vec<u8>,
+        base: Vec<u8>,
+        log_key: String,
+        bad_log: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncDocumentStore for MovedHeadStore {
+        async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+            if keys.len() == 1 {
+                return Ok(vec![Some(self.moved.clone())]);
+            }
+            Ok(vec![
+                Some(self.head.clone()),
+                None,
+                None,
+                None,
+                Some(self.base.clone()),
+            ])
+        }
+        async fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            Ok(vec![(self.log_key.clone(), self.bad_log.clone())])
+        }
+        async fn scan_range(
+            &self,
+            _prefix: &str,
+            _lower: Option<&str>,
+            _upper: Option<&str>,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            Ok(Vec::new())
+        }
+        async fn atomic_batch(
+            &self,
+            _guards: &[DocumentGuard],
+            _mutations: &[DocumentMutation],
+        ) -> Result<bool, ActError> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn load_retries_a_damaged_log_while_the_head_moves() {
+        use crate::scheduler::durable::document::ProcessLogCodec;
+        use crate::scheduler::durable::snapshot_codec::HeadPayload;
+
+        let source = snapshot(false);
+        let head = ProcessLogCodec::encode_head(&HeadPayload {
+            process_id: source.process_id.clone(),
+            version: source.version.clone(),
+            epoch: 1,
+            base_seq: 0,
+            next_seq: 1,
+        })
+        .unwrap();
+        let moved = ProcessLogCodec::encode_head(&HeadPayload {
+            process_id: source.process_id.clone(),
+            version: source.version.clone(),
+            epoch: 2,
+            base_seq: 0,
+            next_seq: 0,
+        })
+        .unwrap();
+        let base = ProcessLogCodec::encode_base(&source, 0).unwrap();
+        let repository = AsyncProcessRepository::new(Arc::new(MovedHeadStore {
+            head,
+            moved,
+            base,
+            log_key: process_log_prefix("process").unwrap() + "00000000000000000000",
+            bad_log: b"not an envelope".to_vec(),
+        }));
+        let error = repository.load("process").await.unwrap_err();
+        assert!(matches!(error, AsyncRepositoryError::Integrity(_)));
+    }
+
+    #[tokio::test]
+    async fn async_error_display_names_the_failure_class() {
+        assert!(
+            AsyncRepositoryError::Conflict("p".into())
+                .to_string()
+                .contains("already exists or changed: p")
+        );
+    }
+
+    /// A legacy database may already carry an outbox index; seeding a fixture
+    /// with one exercises the same migration/load path.
+    #[tokio::test]
+    async fn legacy_documents_with_an_outbox_index_still_migrate() {
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        let pid = "legacy-outbox";
+        let mut source = snapshot(false);
+        source.process_id = pid.into();
+        let id = crate::scheduler::core::outbox::records::OutboxId {
+            process_id: pid.into(),
+            key: "k".into(),
+        };
+        source.outbox.insert(
+            id.clone(),
+            crate::scheduler::core::outbox::records::OutboxRecord::pending(
+                id,
+                "topic".into(),
+                "{}".into(),
+                0,
+            )
+            .unwrap(),
+        );
+        seed_legacy(&kv, &source, false).await;
+        assert!(
+            kv.one(&outbox_index_key(pid).unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let loaded = repository.load(pid).await.unwrap().expect("aggregate");
+        assert_eq!(loaded.snapshot, source);
+        assert!(!loaded.is_legacy());
     }
 
     /// A base document names the log sequence it covers. Pairing it with a head

@@ -1267,3 +1267,1165 @@ impl ActOperation for ApplyAction {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::{
+        commit::command::ActionKind,
+        model::{
+            operation::{ClaimToken, OperationRecord},
+            task_graph::{TaskId, TaskState},
+        },
+    };
+    use crate::scheduler::shell::effects::EffectOutcome;
+
+    fn host() -> std::sync::Arc<KernelHost> {
+        KernelHost::in_memory().0
+    }
+
+    fn task(node: &str) -> TaskId {
+        TaskId::new(node, 0).unwrap()
+    }
+
+    fn id(node: &str, sequence: u64) -> OperationId {
+        OperationId {
+            process_id: "p".into(),
+            task: task(node),
+            sequence,
+        }
+    }
+
+    fn commit(id: &OperationId) -> OperationCommit {
+        OperationCommit {
+            id: id.clone(),
+            claim: ClaimToken {
+                owner: "test".into(),
+                fence: 1,
+                lease_until_ms: i64::MAX,
+                heartbeat_revision: 0,
+            },
+        }
+    }
+
+    fn seeded() -> ProcessSnapshot {
+        ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap()
+    }
+
+    fn from_workflow(workflow: &crate::model::Workflow) -> ProcessSnapshot {
+        ProcessSpec::from_workflow("p", workflow, &|_| None)
+            .unwrap()
+            .seed_snapshot()
+            .unwrap()
+    }
+
+    fn empty_plan(snapshot: &ProcessSnapshot) -> TransitionPlan {
+        TransitionPlan {
+            process_id: snapshot.process_id.clone(),
+            expected: snapshot.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        }
+    }
+
+    fn snapstate(snapshot: &mut ProcessSnapshot, task: &TaskId, state: TaskState) {
+        snapshot.tasks.get_mut(task).unwrap().state = state;
+    }
+
+    /// A `Back` without its `to` input names no rewind target.
+    #[tokio::test]
+    async fn back_without_a_target_is_an_error() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = task("a");
+        let id = id("a", 0);
+        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let error = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                Some(ActionKind::Back),
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error}").contains("cannot find 'to' value"),
+            "{error}"
+        );
+    }
+
+    /// A rewind whose re-entry is already durable does not plan it again.
+    #[tokio::test]
+    async fn a_rewind_does_not_duplicate_its_reentry() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = task("a");
+        let id = id("a", 0);
+        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        let reenter = OperationId {
+            sequence: id.sequence + 2,
+            ..id.clone()
+        };
+        snapshot.operations.insert(
+            reenter.clone(),
+            OperationRecord::pending(reenter, OperationKind::ReenterTask),
+        );
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                Some(ActionKind::Back),
+                vec![(crate::utils::consts::ACT_TO.to_string(), "s1".into())],
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == REENTER_TARGET_VAR)
+        );
+        assert!(
+            plan.operations
+                .iter()
+                .all(|intent| intent.kind != OperationKind::ReenterTask)
+        );
+    }
+
+    /// A container completion dispatches its children instead of completing
+    /// the step (the client `Next` on a running step).
+    #[tokio::test]
+    async fn a_container_completion_fans_out() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_branch(|branch| branch.with_id("b1").with_if("true"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                Some(ActionKind::Complete),
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            plan.task_creates
+                .iter()
+                .any(|create| create.task.node.as_str() == "b1"),
+            "the selected branch is admitted: {plan:?}"
+        );
+    }
+
+    /// The auto completion of a container fans out the same way.
+    #[tokio::test]
+    async fn an_auto_container_completion_fans_out() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_branch(|branch| branch.with_id("b1").with_if("true"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                None,
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            plan.task_creates
+                .iter()
+                .any(|create| create.task.node.as_str() == "b1")
+        );
+    }
+
+    /// A `uses` container announces its own completion at the fan-out, and the
+    /// folded effect outcome rides the same plan.
+    #[tokio::test]
+    async fn a_package_container_folds_its_effect_and_message() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("pkg.test", crate::Vars::new())
+                .with_branch(|branch| branch.with_id("b1").with_if("true"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let outcome = EffectOutcome {
+            outputs: Some(crate::Vars::new().with("answer", 42)),
+        };
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                None,
+                Vec::new(),
+                Some(&outcome),
+            )
+            .await
+            .unwrap();
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.scope == task_id && write.name == "answer")
+        );
+        assert!(
+            plan.outbox
+                .iter()
+                .any(|record| record.topic == "task.completed")
+        );
+    }
+
+    /// A step waiting for a timeout branch parks instead of completing.
+    #[tokio::test]
+    async fn a_step_waiting_for_its_branches_parks() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_timeout(|timeout| timeout.with_id("t1"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let mut branch = snapshot.tasks[&task_id].clone();
+        branch.parent = Some(task_id.clone());
+        branch.model_node =
+            crate::scheduler::core::model::model_graph::NodeId::parse("t1").unwrap();
+        branch.state = TaskState::Running;
+        snapshot.tasks.insert(task("t1"), branch);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let outcome = EffectOutcome { outputs: None };
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                None,
+                Vec::new(),
+                Some(&outcome),
+            )
+            .await
+            .unwrap();
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == crate::scheduler::core::plan::container::FLOW_VAR)
+        );
+        assert!(plan.state_changes.is_empty(), "the execution keeps running");
+    }
+
+    /// A leaf's completion records the act's message and propagates.
+    #[tokio::test]
+    async fn a_leaf_completion_propagates() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                None,
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan.state_changes[0].to, TaskState::Completed);
+        assert_eq!(plan.outbox[0].topic, "task.completed");
+        assert_eq!(plan.operations[0].kind, OperationKind::PropagateTask);
+    }
+
+    /// A client `Fail` on a step without handlers takes the error walk.
+    #[tokio::test]
+    async fn a_client_failure_without_handlers_fails_the_step() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                Some(ActionKind::Fail {
+                    code: "E1".into(),
+                    message: "boom".into(),
+                }),
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan.state_changes[0].to, TaskState::Failed);
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == "error.code")
+        );
+    }
+
+    /// The park plan carries the client inputs, the resume and the act message.
+    #[tokio::test]
+    async fn the_park_plan_carries_inputs_and_resumes() {
+        let host = host();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_uses("pkg.test", crate::Vars::new()));
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .park_for_children_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                &[("answer".to_string(), "42".to_string())],
+            )
+            .unwrap();
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == "answer" && write.value == "42")
+        );
+        assert_eq!(plan.state_changes[0].from, TaskState::Waiting);
+        assert_eq!(plan.state_changes[0].to, TaskState::Running);
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == crate::scheduler::core::plan::container::FLOW_VAR)
+        );
+        assert!(!plan.outbox[0].payload.is_empty());
+    }
+
+    /// A failure on a step declaring `catches` dispatches its handlers and
+    /// keeps the step running; every guard verdict is pinned.
+    #[tokio::test]
+    async fn a_caught_failure_dispatches_every_handler() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_catch(|catch| catch.with_id("c_none"))
+                .with_catch(|catch| catch.with_id("c_true").with_if("true"))
+                .with_catch(|catch| catch.with_id("c_false").with_if("false"))
+                .with_catch(|catch| catch.with_id("c_null").with_if("null"))
+                .with_catch(|catch| catch.with_id("c_bad").with_if("1 + 1"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .failure_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                &Failure::new("E1", "boom"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan.task_creates.len(), 5);
+        assert!(
+            plan.task_creates
+                .iter()
+                .any(|create| create.task.node.as_str() == "c_false")
+        );
+        // The skipped handler is marked as a guard skip; the undecidable ones
+        // carry the pinned branch error.
+        assert!(plan.variable_writes.iter().any(|write| {
+            write.scope.node.as_str() == "c_false"
+                && write.name == crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR
+        }));
+        for branch in ["c_null", "c_bad"] {
+            assert!(
+                plan.variable_writes.iter().any(|write| {
+                    write.scope.node.as_str() == branch && write.name == BRANCH_ERROR_VAR
+                }),
+                "{branch} has a pinned failure"
+            );
+        }
+        assert!(
+            plan.outbox
+                .iter()
+                .any(|record| record.topic == "task.failed")
+        );
+    }
+
+    /// A step whose failure handlers are not applicable takes the failure
+    /// plan: terminal executions keep their state, live ones fail.
+    #[tokio::test]
+    async fn a_failure_on_a_terminal_step_is_a_bare_remainder() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Completed);
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .failure_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                &Failure::new("E1", "boom"),
+            )
+            .await
+            .unwrap();
+        assert!(plan.state_changes.is_empty());
+        assert!(plan.operations.is_empty());
+    }
+
+    /// A live execution fails with the error facts, the propagation hand-off
+    /// and the failure message; an already durable hand-off is not repeated.
+    #[tokio::test]
+    async fn a_live_failure_walks_the_error_up() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .failure_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                &Failure::new("E1", "boom"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan.state_changes[0].to, TaskState::Failed);
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == "error.message")
+        );
+        assert_eq!(plan.operations[0].kind, OperationKind::PropagateTask);
+        assert_eq!(plan.outbox[0].topic, "task.failed");
+
+        // The propagation is already durable: no second intent.
+        let propagate = OperationId {
+            sequence: id.sequence + 1,
+            ..id.clone()
+        };
+        snapshot.operations.insert(
+            propagate.clone(),
+            OperationRecord::pending(propagate, OperationKind::PropagateTask),
+        );
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .failure_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                &Failure::new("E1", "boom"),
+            )
+            .await
+            .unwrap();
+        assert!(plan.operations.is_empty());
+    }
+
+    /// A catch fan-out only exists for a live execution of a declaring node.
+    #[tokio::test]
+    async fn inapplicable_catch_fanouts_answer_none() {
+        let host = host();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_catch(|catch| catch.with_id("c1")));
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Completed);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let failure = Failure::new("E", "boom");
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        assert!(
+            host.catch_fanout(&snapshot, &claim, &task_id, snapshot_task, &failure, &[])
+                .await
+                .unwrap()
+                .is_none(),
+            "a settled execution has no handlers to dispatch"
+        );
+
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let mut without_model = snapshot.clone();
+        let root = without_model
+            .tasks
+            .iter()
+            .find(|(_, task)| task.parent.is_none())
+            .map(|(id, _)| id.clone())
+            .expect("the run has a root");
+        without_model
+            .variables
+            .remove(&(root, crate::scheduler::shell::model::MODEL_VAR.to_string()));
+        let snapshot_task = without_model.tasks.get(&task_id).unwrap();
+        assert!(
+            host.catch_fanout(
+                &without_model,
+                &claim,
+                &task_id,
+                snapshot_task,
+                &failure,
+                &[]
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+
+        // The model exists but does not declare this node.
+        let mut renamed = snapshot.clone();
+        renamed.tasks.get_mut(&task_id).unwrap().model_node =
+            crate::scheduler::core::model::model_graph::NodeId::parse("ghost").unwrap();
+        let snapshot_task = renamed.tasks.get(&task_id).unwrap();
+        assert!(
+            host.catch_fanout(&renamed, &claim, &task_id, snapshot_task, &failure, &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A step that already dispatches its handlers never dispatches them a
+    /// second time.
+    #[tokio::test]
+    async fn a_deciding_catch_step_answers_none() {
+        let host = host();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_catch(|catch| catch.with_id("c1")));
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        snapshot.variables.insert(
+            (
+                task_id.clone(),
+                crate::scheduler::core::plan::container::FLOW_VAR.to_string(),
+            ),
+            crate::scheduler::core::plan::container::FLOW_CATCHES.to_string(),
+        );
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        assert!(
+            host.catch_fanout(
+                &snapshot,
+                &claim,
+                &task_id,
+                snapshot_task,
+                &Failure::new("E", "boom"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    /// The message attachment answers the three "nothing to say" cases and
+    /// both record shapes.
+    #[tokio::test]
+    async fn an_operation_message_attaches_to_the_planned_record() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| step.with_id("a"));
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+
+        // No state change for the execution.
+        let mut plan = empty_plan(&snapshot);
+        host.attach_operation_message(&snapshot, &task_id, &mut plan)
+            .unwrap();
+        assert!(plan.outbox.is_empty());
+
+        // A change to a state that emits no message.
+        plan.state_changes.push(StateChange {
+            task: task_id.clone(),
+            expected_revision: 0,
+            from: TaskState::Running,
+            to: TaskState::Running,
+        });
+        host.attach_operation_message(&snapshot, &task_id, &mut plan)
+            .unwrap();
+        assert!(plan.outbox.is_empty());
+
+        // The planner's own record receives the payload.
+        plan.state_changes[0].to = TaskState::Completed;
+        plan.outbox.push(
+            crate::scheduler::core::model::transition_plan::OutboxIntent {
+                key: "message:p:a:0".into(),
+                topic: "task.completed".into(),
+                payload: String::new(),
+            },
+        );
+        host.attach_operation_message(&snapshot, &task_id, &mut plan)
+            .unwrap();
+        assert!(!plan.outbox[0].payload.is_empty());
+
+        // A change of an execution the aggregate no longer holds.
+        let mut gone = snapshot.clone();
+        gone.tasks.remove(&task_id);
+        let mut plan = empty_plan(&snapshot);
+        plan.state_changes.push(StateChange {
+            task: task_id.clone(),
+            expected_revision: 0,
+            from: TaskState::Running,
+            to: TaskState::Completed,
+        });
+        host.attach_operation_message(&gone, &task_id, &mut plan)
+            .unwrap();
+        assert!(plan.outbox.is_empty());
+
+        // Without a record, the message creates one from the decided state.
+        let mut plan = empty_plan(&snapshot);
+        plan.state_changes.push(StateChange {
+            task: task_id.clone(),
+            expected_revision: 0,
+            from: TaskState::Running,
+            to: TaskState::Failed,
+        });
+        plan.variable_writes.push(VariableWrite {
+            scope: task_id.clone(),
+            name: "error.code".into(),
+            value: serde_json::json!("E1").to_string(),
+        });
+        host.attach_operation_message(&snapshot, &task_id, &mut plan)
+            .unwrap();
+        assert_eq!(plan.outbox[0].topic, "task.failed");
+        assert!(plan.outbox[0].payload.contains("E1"));
+    }
+
+    /// A dynamic container whose template already ran does not fan out again.
+    #[tokio::test]
+    async fn a_param_container_that_already_fanned_out_answers_none() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::scheduler::shell::model::PARALLEL_PACKAGE,
+                crate::Vars::new().with("in", serde_json::json!([1, 2])),
+            )
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let model = crate::scheduler::shell::facts::model_of(&snapshot)
+            .unwrap()
+            .expect("the model is durable");
+        let node = snapshot.tasks[&task_id].model_node.clone();
+        snapshot.tasks.insert(
+            TaskId::new("s1#item", 0).unwrap(),
+            crate::scheduler::core::commit::aggregate::TaskSnapshot {
+                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("s1#item")
+                    .unwrap(),
+                parent: Some(task_id.clone()),
+                predecessors: vec![task_id.clone()],
+                state: TaskState::Running,
+                revision: 0,
+            },
+        );
+        assert!(
+            host.param_fanout_children(&snapshot, &task_id, &model, &node)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A container that already admits its children answers no second
+    /// fan-out.
+    #[tokio::test]
+    async fn a_container_that_already_fanned_out_answers_none() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_branch(|branch| branch.with_id("b1").with_if("true"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        snapshot.tasks.insert(
+            TaskId::new("b1", 0).unwrap(),
+            crate::scheduler::core::commit::aggregate::TaskSnapshot {
+                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("b1")
+                    .unwrap(),
+                parent: Some(task_id.clone()),
+                predecessors: vec![task_id.clone()],
+                state: TaskState::Running,
+                revision: 0,
+            },
+        );
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let node = snapshot.tasks[&task_id].model_node.clone();
+        assert!(
+            host.fanout_command(&snapshot, &task_id, &claim, &node, &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The completion operation needs its execution in both phases.
+    #[tokio::test]
+    async fn a_missing_execution_is_an_error_in_both_phases() {
+        let host = host();
+        let snapshot = seeded();
+        let id = id("ghost", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let mut operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: None,
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let run_error = match ApplyAction.run(&host, &mut operation).await {
+            Err(error) => error,
+            Ok(_) => panic!("a missing execution must fail the start"),
+        };
+        assert!(format!("{run_error}").contains("not found"), "{run_error}");
+        let next_error = ApplyAction
+            .next(&host, &operation, Outcome::Effect(Effect::Completed(None)))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{next_error}").contains("not found"),
+            "{next_error}"
+        );
+    }
+
+    /// A stale auto completion on a step already deciding its caught error is
+    /// the bare remainder.
+    #[tokio::test]
+    async fn a_stale_completion_on_a_catch_decider_does_nothing() {
+        let host = host();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_catch(|catch| catch.with_id("c1")));
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        snapshot.variables.insert(
+            (
+                task_id.clone(),
+                crate::scheduler::core::plan::container::FLOW_VAR.to_string(),
+            ),
+            crate::scheduler::core::plan::container::FLOW_CATCHES.to_string(),
+        );
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let mut operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&task_id),
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let outcome = ApplyAction.run(&host, &mut operation).await.unwrap();
+        assert!(matches!(outcome, Outcome::Effect(Effect::Nothing)));
+    }
+
+    /// A decision whose execution already moved past it is the bare
+    /// remainder, not an error.
+    #[tokio::test]
+    async fn a_decision_on_a_settled_execution_does_nothing() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Completed);
+        snapshot.variables.insert(
+            (task_id.clone(), action_fact_var(0)),
+            action_fact(&ActionKind::Complete, &[]),
+        );
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let mut operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&task_id),
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let outcome = ApplyAction.run(&host, &mut operation).await.unwrap();
+        assert!(matches!(outcome, Outcome::Effect(Effect::Nothing)));
+    }
+
+    /// The task-operation plan is the bare remainder of `Effect::Nothing`.
+    #[tokio::test]
+    async fn nothing_plans_the_bare_remainder() {
+        let host = host();
+        let snapshot = seeded();
+        let task_id = task("a");
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&task_id),
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let plan = ApplyAction
+            .next(&host, &operation, Outcome::Effect(Effect::Nothing))
+            .await
+            .unwrap();
+        assert_eq!(plan.source_operation.as_ref(), Some(&claim));
+        assert!(plan.state_changes.is_empty());
+    }
+
+    /// A foreign outcome never reaches the completion planner.
+    #[tokio::test]
+    async fn a_foreign_outcome_is_an_error() {
+        let host = host();
+        let snapshot = seeded();
+        let task_id = task("a");
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&task_id),
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        assert!(
+            ApplyAction
+                .next(&host, &operation, Outcome::Planned)
+                .await
+                .is_err()
+        );
+    }
+
+    /// A decision fact that reaches a step already deciding its caught error is
+    /// dropped before the action is even classified: the catch join decides it.
+    #[tokio::test]
+    async fn a_decision_fact_on_a_catch_decider_does_nothing() {
+        let host = host();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_catch(|catch| catch.with_id("c1")));
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        snapshot.variables.insert(
+            (
+                task_id.clone(),
+                crate::scheduler::core::plan::container::FLOW_VAR.to_string(),
+            ),
+            crate::scheduler::core::plan::container::FLOW_CATCHES.to_string(),
+        );
+        snapshot.variables.insert(
+            (task_id.clone(), action_fact_var(0)),
+            action_fact(&ActionKind::Complete, &[]),
+        );
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let mut operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&task_id),
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let outcome = ApplyAction.run(&host, &mut operation).await.unwrap();
+        assert!(matches!(outcome, Outcome::Effect(Effect::Nothing)));
+    }
+
+    /// A failed effect on a step without handlers takes the failure plan
+    /// (there is no catch fan-out to answer it).
+    #[tokio::test]
+    async fn a_failed_effect_without_handlers_takes_the_failure_plan() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&task_id),
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let plan = ApplyAction
+            .next(
+                &host,
+                &operation,
+                Outcome::Effect(Effect::Failed(crate::ActError::Package("boom".into()))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan.state_changes[0].to, TaskState::Failed);
+        assert_eq!(plan.outbox[0].topic, "task.failed");
+    }
+
+    /// A step waiting for its branches parks even when the effect outcome is
+    /// absent (a client decision on an already effect-free act).
+    #[tokio::test]
+    async fn a_waiting_step_without_an_effect_outcome_still_parks() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_timeout(|timeout| timeout.with_id("t1"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let mut branch = snapshot.tasks[&task_id].clone();
+        branch.parent = Some(task_id.clone());
+        branch.model_node =
+            crate::scheduler::core::model::model_graph::NodeId::parse("t1").unwrap();
+        branch.state = TaskState::Running;
+        snapshot.tasks.insert(task("t1"), branch);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                None,
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(plan.state_changes.is_empty());
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == crate::scheduler::core::plan::container::FLOW_VAR)
+        );
+    }
+
+    /// A park whose operation node names a branch carries no act message: the
+    /// branch emits nothing, so the planned record keeps its own payload.
+    #[tokio::test]
+    async fn a_park_named_by_a_branch_node_has_no_message_payload() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("pkg.test", crate::Vars::new())
+                .with_branch(|branch| branch.with_id("b1").with_if("true"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        let operation_id = id("b1", 0);
+        let claim = commit(&operation_id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .park_for_children_plan(
+                &snapshot,
+                &operation_id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(plan.outbox.len(), 1);
+        assert!(
+            plan.outbox[0].payload.is_empty(),
+            "a branch node emits no act message"
+        );
+        assert!(
+            plan.variable_writes
+                .iter()
+                .any(|write| write.name == crate::scheduler::core::plan::container::FLOW_VAR)
+        );
+    }
+
+    /// A dynamic container whose only template child is still `Created` has
+    /// not fanned out for this generation yet.
+    #[tokio::test]
+    async fn a_param_container_with_only_created_children_fans_out() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::scheduler::shell::model::PARALLEL_PACKAGE,
+                crate::Vars::new().with("in", serde_json::json!([1, 2])),
+            )
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let model = crate::scheduler::shell::facts::model_of(&snapshot)
+            .unwrap()
+            .expect("the model is durable");
+        let node = snapshot.tasks[&task_id].model_node.clone();
+        let root = snapshot
+            .tasks
+            .iter()
+            .find(|(_, task)| task.parent.is_none())
+            .map(|(id, _)| id.clone())
+            .expect("the run has a root");
+        snapshot.variables.insert(
+            (
+                root,
+                crate::scheduler::shell::model::AUTO_MAP_VAR.to_string(),
+            ),
+            serde_json::json!({ "s1#item": true }).to_string(),
+        );
+        snapshot.tasks.insert(
+            TaskId::new("s1#item", 0).unwrap(),
+            crate::scheduler::core::commit::aggregate::TaskSnapshot {
+                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("s1#item")
+                    .unwrap(),
+                parent: Some(task_id.clone()),
+                predecessors: vec![task_id.clone()],
+                state: TaskState::Created,
+                revision: 0,
+            },
+        );
+        let children = host
+            .param_fanout_children(&snapshot, &task_id, &model, &node)
+            .unwrap()
+            .expect("a container with only created items fans out");
+        assert_eq!(children.len(), 2);
+    }
+
+    /// A container plan whose source row carries a package node but whose own
+    /// node is a branch announces nothing: the branch's messages are suppressed.
+    #[tokio::test]
+    async fn a_container_plan_skips_a_suppressed_source_message() {
+        use crate::scheduler::core::plan::container::ContainerFanoutCommand;
+
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("pkg.test", crate::Vars::new())
+                .with_branch(|branch| branch.with_id("b1").with_if("true"))
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Running);
+        let source = task("b1");
+        snapshot.tasks.insert(
+            source.clone(),
+            crate::scheduler::core::commit::aggregate::TaskSnapshot {
+                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("s1")
+                    .unwrap(),
+                parent: Some(task_id.clone()),
+                predecessors: vec![task_id.clone()],
+                state: TaskState::Running,
+                revision: 0,
+            },
+        );
+        let id = id("b1", 0);
+        let claim = commit(&id);
+        let command = ContainerFanoutCommand {
+            process_id: snapshot.process_id.clone(),
+            source,
+            source_operation: claim,
+            children: Vec::new(),
+            inputs: Vec::new(),
+            source_park: TaskState::Running,
+        };
+        let plan = host.container_fanout_plan(&snapshot, &command).unwrap();
+        assert!(
+            plan.outbox
+                .iter()
+                .all(|record| record.topic != "task.completed"),
+            "a branch source emits no act message: {:?}",
+            plan.outbox
+        );
+    }
+}

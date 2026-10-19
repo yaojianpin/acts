@@ -342,3 +342,134 @@ fn back_to_a_step_outside_the_redo_closure_is_refused() {
         Err(GenerationError::SourceOutsideRedoClosure { .. })
     ));
 }
+
+#[test]
+fn the_command_envelope_must_match_the_snapshot() {
+    let mut wrong_process = command();
+    wrong_process.process_id = "other".into();
+    assert_eq!(
+        Reenter::plan((&graph(), &snapshot()), &wrong_process),
+        Err(GenerationError::WrongProcess)
+    );
+
+    let mut wrong_target = command();
+    wrong_target.source_operation.id.task = id("target", 1);
+    assert_eq!(
+        Reenter::plan((&graph(), &snapshot()), &wrong_target),
+        Err(GenerationError::SourceOperationTargetsDifferentTask)
+    );
+
+    let mut empty_target = command();
+    empty_target.target_task_id = "  ".into();
+    assert_eq!(
+        Reenter::plan((&graph(), &snapshot()), &empty_target),
+        Err(GenerationError::EmptyTargetTaskId)
+    );
+
+    let mut never = command();
+    never.target_task_id = "ghost".into();
+    assert!(matches!(
+        Reenter::plan((&graph(), &snapshot()), &never),
+        Err(GenerationError::TargetNeverInstantiated(_))
+    ));
+}
+
+/// A diamond closure reaches one recreation from two paths: the breadth-first
+/// walk must visit it once, not enqueue it twice.
+#[test]
+fn a_diamond_closure_visits_each_execution_once() {
+    use crate::scheduler::core::model::task_graph::TaskGraphBuilder;
+    use crate::scheduler::core::model::task_graph::TaskNode;
+    let mut snapshot = ProcessSnapshot {
+        process_id: "p1".into(),
+        version: ProcessVersion {
+            graph: 3,
+            process: 8,
+            operations: 6,
+        },
+        tasks: HashMap::new(),
+        variables: BTreeMap::new(),
+        operations: HashMap::new(),
+        outbox: HashMap::new(),
+    };
+    for name in ["root", "a", "b", "join"] {
+        snapshot.tasks.insert(
+            id(name, 0),
+            TaskSnapshot {
+                model_node: NodeId::parse(name).unwrap(),
+                parent: None,
+                predecessors: vec![],
+                state: TaskState::Completed,
+                revision: 0,
+            },
+        );
+    }
+    snapshot.tasks.get_mut(&id("root", 0)).unwrap().state = TaskState::Backed;
+    let mut builder = TaskGraphBuilder::new("p1", 3).unwrap();
+    for (exec_id, task) in &snapshot.tasks {
+        builder
+            .add_node(TaskNode {
+                id: exec_id.clone(),
+                model_node: task.model_node.clone(),
+                state: task.state,
+                revision: task.revision,
+            })
+            .unwrap();
+    }
+    builder.set_root(id("root", 0)).unwrap();
+    builder.add_child(id("root", 0), id("a", 0)).unwrap();
+    builder.add_child(id("root", 0), id("b", 0)).unwrap();
+    builder.add_child(id("a", 0), id("join", 0)).unwrap();
+    builder.add_successor(id("root", 0), id("a", 0)).unwrap();
+    builder.add_successor(id("root", 0), id("b", 0)).unwrap();
+    builder.add_successor(id("a", 0), id("join", 0)).unwrap();
+    builder.add_successor(id("b", 0), id("join", 0)).unwrap();
+    let graph = builder.build().unwrap();
+    let mut command = command();
+    command.source = id("root", 0);
+    command.target_task_id = "root".into();
+    command.source_operation.id.task = id("root", 0);
+    let plan = Reenter::plan((&graph, &snapshot), &command).unwrap();
+    let created: Vec<TaskId> = plan
+        .task_creates
+        .iter()
+        .map(|create| create.task.clone())
+        .collect();
+    assert_eq!(
+        created,
+        vec![id("root", 1), id("a", 1), id("b", 1), id("join", 1)]
+    );
+}
+
+#[test]
+fn generation_errors_render() {
+    for error in [
+        GenerationError::WrongProcess,
+        GenerationError::TaskNotFound(id("a", 0)),
+        GenerationError::SourceNotReenterable {
+            source: id("a", 0),
+            state: TaskState::Running,
+        },
+        GenerationError::SourceOperationTargetsDifferentTask,
+        GenerationError::EmptyTargetTaskId,
+        GenerationError::TargetNeverInstantiated("ghost".into()),
+        GenerationError::SourceOutsideRedoClosure {
+            source: id("a", 0),
+            target: "b".into(),
+        },
+        GenerationError::GenerationOverflow,
+        GenerationError::InvalidPlan("bad".into()),
+    ] {
+        assert!(error.to_string().starts_with("generation error:"));
+    }
+}
+
+#[test]
+fn the_source_operation_must_belong_to_the_command_process() {
+    let mut command = command();
+    command.source_operation.id.process_id = "other".into();
+    assert_eq!(
+        Reenter::plan((&graph(), &snapshot()), &command),
+        Err(GenerationError::SourceOperationTargetsDifferentTask)
+    );
+}

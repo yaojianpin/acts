@@ -1049,6 +1049,29 @@ mod tests {
         assert_eq!(keep.kind, "chat");
     }
 
+    /// Redeploying the same declaration reconciles to nothing: every field
+    /// compares equal, so the existing trigger row is left untouched.
+    #[tokio::test]
+    async fn redeploy_of_an_identical_trigger_keeps_its_row() {
+        let (kv, store) = counting_store();
+        let model = trigger_model("m1").with_trigger(|t| t.with_id("same").with_kind("manual"));
+        store.deploy(&model, None).await.unwrap();
+
+        let before = event_rows(&store, "m1").await;
+        assert_eq!(before.len(), 1);
+        kv.batches.store(0, Ordering::SeqCst);
+
+        store.deploy(&model, None).await.unwrap();
+
+        let after = event_rows(&store, "m1").await;
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, before[0].id);
+        assert_eq!(after[0].kind, before[0].kind);
+        assert_eq!(after[0].params, before[0].params);
+        assert_eq!(after[0].schedule, before[0].schedule);
+        assert_eq!(after[0].ver, before[0].ver);
+    }
+
     #[tokio::test]
     async fn redeploy_without_triggers_clears_event_rows_in_one_batch() {
         let (kv, store) = counting_store();
@@ -1957,5 +1980,198 @@ mod tests {
             0,
             "no index row of a removed message row may survive"
         );
+    }
+
+    // ========== index rebuild, publish/deploy validation and sweep helpers ==========
+
+    use crate::store::data::{Delivery, Package, Proc};
+
+    fn empty_store() -> Store {
+        Store::new(Arc::new(MemoryStore::new()))
+    }
+
+    fn proc_row(id: &str, state: &str, removable: bool) -> Proc {
+        Proc {
+            id: id.to_string(),
+            state: state.to_string(),
+            mid: String::new(),
+            name: String::new(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: 0,
+            model: String::new(),
+            env: String::new(),
+            err: None,
+            removable,
+            source_revision: String::new(),
+            v: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_collection_and_every_index_is_idempotent() {
+        let store = empty_store();
+        assert_eq!(store.rebuild_indexes().await.unwrap(), 0);
+        assert_eq!(
+            store.rebuild_collection::<Package>().await.unwrap(),
+            0,
+            "an empty collection has nothing to rebuild"
+        );
+
+        store
+            .packages()
+            .create(&Package {
+                id: "pack1".to_string(),
+                ..Package::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.rebuild_collection::<Package>().await.unwrap(),
+            1,
+            "the rebuild reads the stored document"
+        );
+        // Re-running the rebuild is safe and leaves the same set.
+        assert_eq!(store.rebuild_indexes().await.unwrap(), 1);
+        assert_eq!(store.rebuild_collection::<Package>().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_and_deploy_reject_missing_identity() {
+        let store = empty_store();
+
+        let err = store.publish(&Package::default()).await.unwrap_err();
+        assert!(err.to_string().contains("missing id in package"), "{err}");
+
+        let no_id = Workflow::new();
+        let err = store.deploy(&no_id, None).await.unwrap_err();
+        assert!(err.to_string().contains("missing id in model"), "{err}");
+
+        let no_ver = Workflow::new().with_id("m1").with_ver("");
+        let err = store.deploy(&no_ver, None).await.unwrap_err();
+        assert!(err.to_string().contains("missing ver in model"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn try_mark_removable_covers_absent_unfinished_marked_and_unsettled() {
+        let store = empty_store();
+
+        // No row at all: not removable, no error.
+        assert!(!store.try_mark_removable("missing").await.unwrap());
+
+        // A running process is never marked.
+        store
+            .procs()
+            .create(&proc_row("p-run", "running", false))
+            .await
+            .unwrap();
+        assert!(!store.try_mark_removable("p-run").await.unwrap());
+
+        // A finished process with an unsettled delivery stays alive.
+        store
+            .procs()
+            .create(&proc_row("p-open", "completed", false))
+            .await
+            .unwrap();
+        store
+            .deliveries()
+            .create(&Delivery {
+                id: "d1".to_string(),
+                msg_id: "m1".to_string(),
+                pid: "p-open".to_string(),
+                status: DeliveryStatus::Created,
+                ..Delivery::default()
+            })
+            .await
+            .unwrap();
+        assert!(store.has_unsettled_deliveries("p-open").await.unwrap());
+        assert!(!store.try_mark_removable("p-open").await.unwrap());
+
+        // Settling it (Completed) lets the process be marked.
+        store
+            .update_delivery("d1", |mut row| {
+                row.status = DeliveryStatus::Completed;
+                Some(row)
+            })
+            .await
+            .unwrap();
+        assert!(!store.has_unsettled_deliveries("p-open").await.unwrap());
+        assert!(store.try_mark_removable("p-open").await.unwrap());
+
+        // Already marked: the second call reports no new work.
+        assert!(!store.try_mark_removable("p-open").await.unwrap());
+
+        // Acked is only intermediate and still blocks deletion.
+        store
+            .procs()
+            .create(&proc_row("p-acked", "completed", false))
+            .await
+            .unwrap();
+        store
+            .deliveries()
+            .create(&Delivery {
+                id: "d2".to_string(),
+                msg_id: "m2".to_string(),
+                pid: "p-acked".to_string(),
+                status: DeliveryStatus::Acked,
+                ..Delivery::default()
+            })
+            .await
+            .unwrap();
+        assert!(store.has_unsettled_deliveries("p-acked").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn update_delivery_ignores_an_absent_row() {
+        let store = empty_store();
+        let result = store
+            .update_delivery("missing", |mut row| {
+                row.status = DeliveryStatus::Acked;
+                Some(row)
+            })
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn sweep_helpers_select_marked_and_unmarked_terminal_procs() {
+        let store = empty_store();
+        store
+            .procs()
+            .create(&proc_row("settled", "completed", true))
+            .await
+            .unwrap();
+        store
+            .procs()
+            .create(&proc_row("pending", "error", false))
+            .await
+            .unwrap();
+        store
+            .procs()
+            .create(&proc_row("running", "running", true))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.sweep_settled_procs(10).await.unwrap(),
+            vec!["settled".to_string()]
+        );
+        assert_eq!(
+            store.unmarked_settled_procs(10).await.unwrap(),
+            vec!["pending".to_string()]
+        );
+        assert_eq!(store.terminal_proc_rows(10).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn counting_kv_raw_writes_are_counted() {
+        let kv = Arc::new(CountingKv::default());
+        let dyn_kv: Arc<dyn KvStore> = kv.clone();
+        dyn_kv.put("k", b"v".to_vec()).await.unwrap();
+        dyn_kv.delete("k").await.unwrap();
+        assert_eq!(kv.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(kv.deletes.load(Ordering::SeqCst), 1);
+        assert!(dyn_kv.one("k").await.unwrap().is_none());
     }
 }

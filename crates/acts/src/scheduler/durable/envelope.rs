@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn tampered_digest_is_rejected_by_decode() {
         let mut encoded = ProcessEnvelope::seal(b"payload".to_vec()).unwrap();
-        encoded[18] = if encoded[18] == b'a' { b'b' } else { b'a' };
+        encoded[18] ^= 0x01;
         assert!(matches!(
             ProcessEnvelope::decode(&encoded),
             Err(EnvelopeError::DigestMismatch { .. })
@@ -194,6 +194,75 @@ mod tests {
         assert_eq!(
             ProcessEnvelope::decode(&trailing),
             Err(EnvelopeError::TrailingBytes)
+        );
+    }
+
+    /// Every rejection class `decode` can produce is reached from bytes a
+    /// caller may actually read, and `validate` re-checks the schema and the
+    /// digest shape even when an envelope was built in memory.
+    #[test]
+    fn malformed_headers_and_digests_are_classified() {
+        let mut bad_magic = ProcessEnvelope::seal(b"payload".to_vec()).unwrap();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            ProcessEnvelope::decode(&bad_magic),
+            Err(EnvelopeError::InvalidMagic)
+        );
+
+        let mut bad_digest = ProcessEnvelope::seal(b"payload".to_vec()).unwrap();
+        bad_digest[18] = b'z';
+        assert_eq!(
+            ProcessEnvelope::decode(&bad_digest),
+            Err(EnvelopeError::InvalidDigestEncoding)
+        );
+
+        // A digest that is valid hex but describes other bytes is a mismatch,
+        // not an encoding error.
+        let envelope = ProcessEnvelope {
+            schema_version: AGGREGATE_SCHEMA_VERSION,
+            payload_digest: sha256_hex(b"different"),
+            payload: b"payload".to_vec(),
+        };
+        assert!(matches!(
+            envelope.validate(),
+            Err(EnvelopeError::DigestMismatch { .. })
+        ));
+
+        assert_eq!(
+            ProcessEnvelope {
+                schema_version: 9,
+                payload_digest: sha256_hex(b""),
+                payload: Vec::new(),
+            }
+            .validate(),
+            Err(EnvelopeError::UnsupportedSchema(9))
+        );
+        assert_eq!(
+            ProcessEnvelope {
+                schema_version: LEGACY_AGGREGATE_SCHEMA_VERSION,
+                payload_digest: "ab".into(),
+                payload: Vec::new(),
+            }
+            .validate(),
+            Err(EnvelopeError::InvalidDigestEncoding)
+        );
+        assert_eq!(
+            ProcessEnvelope {
+                schema_version: LEGACY_AGGREGATE_SCHEMA_VERSION,
+                payload_digest: sha256_hex(b"").to_ascii_uppercase(),
+                payload: Vec::new(),
+            }
+            .validate(),
+            Err(EnvelopeError::InvalidDigestEncoding)
+        );
+    }
+
+    #[test]
+    fn envelope_error_display_names_the_envelope() {
+        assert!(
+            EnvelopeError::TruncatedPayload
+                .to_string()
+                .contains("aggregate envelope error")
         );
     }
 

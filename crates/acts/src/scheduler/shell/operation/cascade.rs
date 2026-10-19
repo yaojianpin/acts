@@ -190,3 +190,268 @@ impl ActOperation for AbortTask {
         Ok(plan)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::{
+        operation::{ClaimToken, OperationRecord},
+        task_graph::{TaskId, TaskState},
+    };
+
+    fn host() -> std::sync::Arc<KernelHost> {
+        KernelHost::in_memory().0
+    }
+
+    fn seeded() -> ProcessSnapshot {
+        ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap()
+    }
+
+    fn id_for(snapshot: &ProcessSnapshot, node: &str, sequence: u64) -> OperationId {
+        OperationId {
+            process_id: snapshot.process_id.clone(),
+            task: TaskId::new(node, 0).unwrap(),
+            sequence,
+        }
+    }
+
+    fn commit(id: &OperationId) -> OperationCommit {
+        OperationCommit {
+            id: id.clone(),
+            claim: ClaimToken {
+                owner: "test".into(),
+                fence: 1,
+                lease_until_ms: i64::MAX,
+                heartbeat_revision: 0,
+            },
+        }
+    }
+
+    fn operation<'a>(
+        id: &'a OperationId,
+        claim: &'a OperationCommit,
+        snapshot: &'a ProcessSnapshot,
+        lane: &'a mut CommandLane,
+    ) -> Operation<'a> {
+        Operation {
+            id,
+            claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&id.task),
+            snapshot,
+            now_ms: 0,
+            lane,
+        }
+    }
+
+    /// A skip with no execution left is not a plan: the operation cannot name
+    /// what it settles.
+    #[tokio::test]
+    async fn skip_without_an_execution_is_an_error() {
+        let host = host();
+        let snapshot = seeded();
+        let id = id_for(&snapshot, "a", 2);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: None,
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let error = SkipTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("not found"), "{error}");
+    }
+
+    /// A skip settles a live execution and hands propagation the dead source.
+    #[tokio::test]
+    async fn skip_settles_a_live_execution() {
+        let host = host();
+        let mut snapshot = seeded();
+        snapshot
+            .tasks
+            .get_mut(&TaskId::new("a", 0).unwrap())
+            .unwrap()
+            .state = TaskState::Running;
+        let id = id_for(&snapshot, "a", 2);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = operation(&id, &claim, &snapshot, &mut lane);
+        let plan = SkipTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap();
+        assert_eq!(plan.state_changes.len(), 1);
+        assert_eq!(plan.state_changes[0].to, TaskState::Skipped);
+        assert_eq!(plan.outbox[0].topic, "task.skipped");
+        assert_eq!(
+            plan.operations[0].kind,
+            OperationKind::PropagateTask,
+            "the cascade continues through propagation"
+        );
+    }
+
+    /// The propagation handed off already (a duplicate wake) is not re-created.
+    #[tokio::test]
+    async fn skip_does_not_duplicate_the_propagation() {
+        let host = host();
+        let mut snapshot = seeded();
+        snapshot
+            .tasks
+            .get_mut(&TaskId::new("a", 0).unwrap())
+            .unwrap()
+            .state = TaskState::Waiting;
+        let id = id_for(&snapshot, "a", 2);
+        let next = OperationId {
+            sequence: id.sequence + 1,
+            ..id.clone()
+        };
+        snapshot.operations.insert(
+            next.clone(),
+            OperationRecord::pending(next, OperationKind::PropagateTask),
+        );
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = operation(&id, &claim, &snapshot, &mut lane);
+        let plan = SkipTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap();
+        assert!(plan.operations.is_empty());
+    }
+
+    /// A skip only reaches `Ready`, `Running` and `Waiting`; a terminal
+    /// execution is a decided one.
+    #[tokio::test]
+    async fn skip_refuses_a_terminal_execution() {
+        let host = host();
+        let mut snapshot = seeded();
+        snapshot
+            .tasks
+            .get_mut(&TaskId::new("a", 0).unwrap())
+            .unwrap()
+            .state = TaskState::Completed;
+        let id = id_for(&snapshot, "a", 2);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = operation(&id, &claim, &snapshot, &mut lane);
+        let error = SkipTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error}").contains("expected Ready, Running or Waiting"),
+            "{error}"
+        );
+    }
+
+    /// Every cascade kind runs nothing: the snapshot is its whole input.
+    #[tokio::test]
+    async fn abort_and_skip_are_plan_only() {
+        let host = host();
+        let snapshot = seeded();
+        let pending = Pending {
+            id: &id_for(&snapshot, "a", 0),
+            snapshot: &snapshot,
+            now_ms: 0,
+        };
+        assert_eq!(
+            SkipTask.precheck(&host, &pending).await.unwrap(),
+            Precheck::Proceed
+        );
+        assert_eq!(
+            AbortTask.precheck(&host, &pending).await.unwrap(),
+            Precheck::Proceed
+        );
+        let id = id_for(&snapshot, "a", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let mut operation = operation(&id, &claim, &snapshot, &mut lane);
+        assert!(matches!(
+            SkipTask.run(&host, &mut operation).await.unwrap(),
+            Outcome::Planned
+        ));
+        assert!(matches!(
+            AbortTask.run(&host, &mut operation).await.unwrap(),
+            Outcome::Planned
+        ));
+    }
+
+    #[tokio::test]
+    async fn abort_without_an_execution_is_an_error() {
+        let host = host();
+        let snapshot = seeded();
+        let id = id_for(&snapshot, "a", 2);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: None,
+            snapshot: &snapshot,
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let error = AbortTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("not found"), "{error}");
+    }
+
+    /// A decision that landed while the abort was queued leaves the operation
+    /// its bare remainder: no state change, no propagation.
+    #[tokio::test]
+    async fn abort_of_a_settled_execution_is_a_bare_remainder() {
+        let host = host();
+        let mut snapshot = seeded();
+        snapshot
+            .tasks
+            .get_mut(&TaskId::new("a", 0).unwrap())
+            .unwrap()
+            .state = TaskState::Completed;
+        let id = id_for(&snapshot, "a", 2);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = operation(&id, &claim, &snapshot, &mut lane);
+        let plan = AbortTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap();
+        assert!(plan.state_changes.is_empty());
+        assert!(plan.operations.is_empty());
+    }
+
+    /// A running execution is decided `Aborted` and propagates the decision.
+    #[tokio::test]
+    async fn abort_settles_a_running_execution() {
+        let host = host();
+        let mut snapshot = seeded();
+        snapshot
+            .tasks
+            .get_mut(&TaskId::new("a", 0).unwrap())
+            .unwrap()
+            .state = TaskState::Running;
+        let id = id_for(&snapshot, "a", 2);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let operation = operation(&id, &claim, &snapshot, &mut lane);
+        let plan = AbortTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap();
+        assert_eq!(plan.state_changes.len(), 1);
+        assert_eq!(plan.state_changes[0].to, TaskState::Aborted);
+        assert_eq!(plan.outbox[0].topic, "task.aborted");
+        assert_eq!(plan.operations[0].kind, OperationKind::PropagateTask);
+    }
+}

@@ -185,3 +185,126 @@ fn str_to_state(str: &str) -> LegacyTaskState {
         _ => LegacyTaskState::None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [LegacyTaskState; 13] = [
+        LegacyTaskState::None,
+        LegacyTaskState::Ready,
+        LegacyTaskState::Pending,
+        LegacyTaskState::Running,
+        LegacyTaskState::Interrupt,
+        LegacyTaskState::Completed,
+        LegacyTaskState::Submitted,
+        LegacyTaskState::Backed,
+        LegacyTaskState::Cancelled,
+        LegacyTaskState::Error,
+        LegacyTaskState::Aborted,
+        LegacyTaskState::Skipped,
+        LegacyTaskState::Removed,
+    ];
+
+    /// Every predicate answers only its own vocabulary, so a state added to
+    /// the enum cannot silently inherit another state's classification.
+    #[test]
+    fn predicates_partition_the_vocabulary() {
+        let matching = |predicate: fn(&LegacyTaskState) -> bool| {
+            ALL.iter()
+                .filter(|state| predicate(state))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            matching(LegacyTaskState::is_none),
+            vec![LegacyTaskState::None]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_created),
+            vec![
+                LegacyTaskState::Ready,
+                LegacyTaskState::Pending,
+                LegacyTaskState::Interrupt
+            ]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_abort),
+            vec![LegacyTaskState::Aborted]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_error),
+            vec![LegacyTaskState::Error]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_removed),
+            vec![LegacyTaskState::Removed]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_ready),
+            vec![LegacyTaskState::Ready]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_running),
+            vec![LegacyTaskState::Running]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_pending),
+            vec![LegacyTaskState::Pending]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_skip),
+            vec![LegacyTaskState::Skipped]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_interrupted),
+            vec![LegacyTaskState::Interrupt]
+        );
+        assert_eq!(
+            matching(LegacyTaskState::is_biz_success),
+            vec![
+                LegacyTaskState::Completed,
+                LegacyTaskState::Submitted,
+                LegacyTaskState::Backed,
+                LegacyTaskState::Cancelled,
+                LegacyTaskState::Removed
+            ]
+        );
+        // `is_completed` is the wider terminal set (business success plus the
+        // error/skip/abort vocabulary); it includes every biz-success state.
+        let completed = matching(LegacyTaskState::is_completed);
+        for state in matching(LegacyTaskState::is_biz_success) {
+            assert!(completed.contains(&state), "{state:?} must be completed");
+        }
+        assert!(completed.contains(&LegacyTaskState::Error));
+        assert!(completed.contains(&LegacyTaskState::Skipped));
+        assert!(completed.contains(&LegacyTaskState::Aborted));
+    }
+
+    #[test]
+    fn every_state_round_trips_through_its_string_form() {
+        for state in ALL {
+            let text: String = state.clone().into();
+            assert_eq!(LegacyTaskState::from(text.as_str()), state);
+            assert_eq!(LegacyTaskState::from(text.clone()), state);
+            assert_eq!(
+                String::from(&state),
+                text,
+                "the reference conversion renders the same wire name"
+            );
+            assert_eq!(state.to_string(), text);
+        }
+        // An unknown name degrades to the default state instead of panicking.
+        assert_eq!(LegacyTaskState::from("bogus"), LegacyTaskState::None);
+        assert_eq!(
+            LegacyTaskState::from(String::from("")),
+            LegacyTaskState::None
+        );
+    }
+
+    #[test]
+    fn the_default_state_is_none() {
+        assert_eq!(LegacyTaskState::default(), LegacyTaskState::None);
+        assert!(LegacyTaskState::default().is_none());
+    }
+}

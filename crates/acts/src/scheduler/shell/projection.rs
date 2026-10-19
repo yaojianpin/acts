@@ -1077,3 +1077,387 @@ mod tests {
         assert_eq!(proc_state(TaskState::Skipped), LegacyTaskState::Skipped);
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::model::Workflow;
+    use crate::scheduler::core::model::task_graph::TaskId;
+    use crate::scheduler::shell::ProcessSpec;
+    use crate::store::writebehind::StoreWriter;
+    use crate::store::{KvStore, MemoryStore, StoreBatchOp, StoreGuard};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn snapshot(pid: &str) -> ProcessSnapshot {
+        ProcessSpec::from_workflow(
+            pid,
+            &Workflow::new()
+                .with_id("wf-projection")
+                .with_step(|step| step.with_id("s1")),
+            &|_| None,
+        )
+        .unwrap()
+        .seed_snapshot()
+        .unwrap()
+    }
+
+    fn projector() -> (Arc<Store>, RowProjector) {
+        let store = Arc::new(Store::new(Arc::new(MemoryStore::new())));
+        let writer = StoreWriter::spawn(store.clone(), 1, 64, crate::utils::shared(1));
+        (store.clone(), RowProjector::new(store, writer, None))
+    }
+
+    fn root_id() -> TaskId {
+        TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap()
+    }
+
+    /// Both state tables are total: every execution state has one legacy
+    /// task state and one process state.
+    #[test]
+    fn every_execution_state_has_a_legacy_state() {
+        use crate::scheduler::LegacyTaskState as L;
+        for (state, expected) in [
+            (TaskState::Created, L::Pending),
+            (TaskState::Ready, L::Ready),
+            (TaskState::Running, L::Running),
+            (TaskState::Waiting, L::Interrupt),
+            (TaskState::Completed, L::Completed),
+            (TaskState::Submitted, L::Submitted),
+            (TaskState::Backed, L::Backed),
+            (TaskState::Cancelled, L::Cancelled),
+            (TaskState::Failed, L::Error),
+            (TaskState::Aborted, L::Aborted),
+            (TaskState::Skipped, L::Skipped),
+            (TaskState::Removed, L::Removed),
+        ] {
+            assert_eq!(legacy_task_state(state), expected, "{state:?}");
+        }
+        assert_eq!(proc_state(TaskState::Created), L::None);
+        assert_eq!(proc_state(TaskState::Ready), L::Running);
+        assert_eq!(proc_state(TaskState::Removed), L::Removed);
+        assert_eq!(stamp(Some(5), 9), 5);
+        assert_eq!(stamp(Some(0), 9), 9);
+        assert_eq!(stamp(None, 9), 9);
+    }
+
+    /// An aggregate that predates the model fact has nothing to project.
+    #[tokio::test]
+    async fn an_aggregate_without_a_model_projects_nothing() {
+        let (_store, projector) = projector();
+        let mut snapshot = snapshot("p-no-model");
+        snapshot.variables.retain(|(scope, name), _| {
+            !(scope == &root_id() && name == super::super::model::MODEL_VAR)
+        });
+        assert!(projector.prepared_model(&snapshot).unwrap().is_none());
+        assert_eq!(
+            projector.project(&snapshot).await.unwrap(),
+            ProjectionReport::default()
+        );
+        assert_eq!(
+            projector.project_proc_row(&snapshot).await.unwrap(),
+            ProjectionReport::default()
+        );
+    }
+
+    /// A reclaimed pid is tombstoned: an in-flight projection of the old run
+    /// must not recreate its rows.
+    #[tokio::test]
+    async fn a_tombstoned_process_is_not_projected() {
+        let (store, projector) = projector();
+        let snapshot = snapshot("p-tombstone");
+        projector.forget_process("p-tombstone");
+        assert!(projector.is_reclaimed("p-tombstone"));
+        assert_eq!(
+            projector.project(&snapshot).await.unwrap(),
+            ProjectionReport::default()
+        );
+        assert_eq!(
+            projector.project_proc_row(&snapshot).await.unwrap(),
+            ProjectionReport::default()
+        );
+        assert!(
+            store
+                .procs()
+                .find_opt("p-tombstone")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        projector.resume("p-tombstone");
+        assert!(!projector.is_reclaimed("p-tombstone"));
+    }
+
+    /// An execution whose model node is gone is reported and skipped, while
+    /// the rest of the run projects.
+    #[tokio::test]
+    async fn a_task_without_a_model_node_is_skipped() {
+        let (store, projector) = projector();
+        let mut snapshot = snapshot("p-ghost");
+        // An execution the declaring model no longer names (a corrupt
+        // aggregate): the projection reports it and keeps going.
+        let ghost = TaskId::new("ghost", 0).unwrap();
+        let root = snapshot
+            .tasks
+            .iter()
+            .find(|(_, task)| task.parent.is_none())
+            .map(|(id, _)| id.clone())
+            .unwrap();
+        snapshot.tasks.insert(
+            ghost.clone(),
+            crate::scheduler::core::commit::aggregate::TaskSnapshot {
+                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("ghost")
+                    .unwrap(),
+                parent: Some(root),
+                predecessors: Vec::new(),
+                state: TaskState::Created,
+                revision: 0,
+            },
+        );
+        let report = projector.project(&snapshot).await.unwrap();
+        assert!(report.applied > 0, "the rest of the run projected");
+        let row_id = crate::utils::Id::new("p-ghost", &ghost.wire("p-ghost")).id();
+        assert!(store.tasks().find_opt(&row_id).await.unwrap().is_none());
+        assert!(store.procs().find_opt("p-ghost").await.unwrap().is_some());
+    }
+
+    /// The projection reports its times, and an explicit repair may re-project
+    /// the same aggregate version (the claim refuses only an older one).
+    #[tokio::test]
+    async fn a_repeated_projection_is_unchanged_and_times_are_readable() {
+        let (store, projector) = projector();
+        let snapshot = snapshot("p-repeat");
+        let first = projector.project(&snapshot).await.unwrap();
+        assert!(first.applied > 0);
+        assert!(projector.proc_times("p-repeat").await.unwrap().is_some());
+
+        let second = projector.project(&snapshot).await.unwrap();
+        assert_eq!(second.applied, 0);
+        let third = projector.project_repair(&snapshot).await.unwrap();
+        assert!(third.applied > 0 || third.unchanged > 0);
+        assert!(projector.proc_times("p-missing").await.unwrap().is_none());
+
+        // The vars row is read and repaired with the task row: non-empty
+        // scope data is part of the projection.
+        let mut with_vars = snapshot.clone();
+        with_vars.variables.insert(
+            (TaskId::new("s1", 0).unwrap(), "v".to_string()),
+            "1".to_string(),
+        );
+        with_vars.version.process += 1;
+        let report = projector.project(&with_vars).await.unwrap();
+        assert!(report.applied > 0);
+        let row_id =
+            crate::utils::Id::new("p-repeat", &TaskId::new("s1", 0).unwrap().wire("p-repeat")).id();
+        let vars = store.vars().find_opt(&row_id).await.unwrap().unwrap();
+        assert!(vars.data.contains('v'), "{}", vars.data);
+    }
+
+    /// A terminal execution closes its channel deliveries on the projection
+    /// that observes the transition.
+    #[tokio::test]
+    async fn a_terminal_execution_closes_its_deliveries() {
+        let (_store, projector) = projector();
+        let mut snapshot = snapshot("p-terminal");
+        let s1 = TaskId::new("s1", 0).unwrap();
+        snapshot.tasks.get_mut(&s1).unwrap().state = TaskState::Completed;
+        snapshot
+            .variables
+            .insert((s1.clone(), "v".to_string()), "1".to_string());
+        let report = projector.project(&snapshot).await.unwrap();
+        assert!(report.applied > 0);
+        let row_id = crate::utils::Id::new("p-terminal", &s1.wire("p-terminal")).id();
+        let row = _store.tasks().find_opt(&row_id).await.unwrap().unwrap();
+        assert_eq!(row.state, "completed");
+    }
+
+    /// A store that refuses every write of one row family: the projection
+    /// returns the error (after counting partial work) and leaves the run
+    /// repairable.
+    struct FailingRowsKv {
+        inner: MemoryStore,
+        prefix: &'static str,
+        armed: AtomicBool,
+    }
+
+    impl FailingRowsKv {
+        fn new(prefix: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                inner: MemoryStore::new(),
+                prefix,
+                armed: AtomicBool::new(true),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for FailingRowsKv {
+        async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.one(key).await
+        }
+        async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+            self.inner.many(keys).await
+        }
+        async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+            self.inner.put(key, value).await
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+            if self.armed.load(Ordering::SeqCst)
+                && ops.iter().any(|op| match op {
+                    StoreBatchOp::Put { key, .. } | StoreBatchOp::Delete { key } => {
+                        key.starts_with(self.prefix)
+                    }
+                })
+            {
+                return Err(ActError::Store(format!(
+                    "injected {} write failure",
+                    self.prefix
+                )));
+            }
+            self.inner.batch(ops, guards).await
+        }
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: crate::store::ScanOptions,
+        ) -> Result<Vec<(String, Vec<u8>)>> {
+            self.inner.scan_prefix(key, options).await
+        }
+    }
+
+    fn failing_projector(prefix: &'static str) -> (Arc<Store>, RowProjector, RowProjector) {
+        let kv = FailingRowsKv::new(prefix);
+        let store = Arc::new(Store::new(kv));
+        let writer = StoreWriter::spawn(store.clone(), 1, 64, crate::utils::shared(1));
+        let failing = RowProjector::new(store.clone(), writer.clone(), None);
+        let healthy = RowProjector::new(store.clone(), writer, None);
+        (store, failing, healthy)
+    }
+
+    #[tokio::test]
+    async fn a_proc_row_failure_is_reported_after_the_task_rows() {
+        let (_store, failing, healthy) = failing_projector("procs-");
+        let snapshot = snapshot("p-proc-fail");
+        let error = failing.project(&snapshot).await.unwrap_err();
+        assert!(matches!(error, ActError::Store(_)), "{error:?}");
+        let error = failing.project_proc_row(&snapshot).await.unwrap_err();
+        assert!(matches!(error, ActError::Store(_)), "{error:?}");
+        assert!(healthy.proc_times("p-proc-fail").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_task_row_failure_releases_its_claim() {
+        let (store, failing, _healthy) = failing_projector("tasks-");
+        let snapshot = snapshot("p-task-fail");
+        let error = failing.project(&snapshot).await.unwrap_err();
+        assert!(matches!(error, ActError::Store(_)), "{error:?}");
+        let row_id = crate::utils::Id::new(
+            "p-task-fail",
+            &TaskId::new("s1", 0).unwrap().wire("p-task-fail"),
+        )
+        .id();
+        assert!(store.tasks().find_opt(&row_id).await.unwrap().is_none());
+    }
+
+    /// The claim is per row and version: an equal version is refused unless
+    /// the caller allows it, a newer claim refuses an older one, and a release
+    /// only drops the claim it recorded.
+    #[tokio::test]
+    async fn claim_and_release_are_per_row_and_version() {
+        let (_store, projector) = projector();
+        let mut snapshot = snapshot("p-claim");
+        snapshot.version.process = 5;
+        let mut older = snapshot.clone();
+        older.version.process = 4;
+
+        assert!(projector.claim(&snapshot, "proc", true));
+        assert!(!projector.claim(&snapshot, "proc", false));
+        assert!(!projector.claim(&older, "proc", true));
+
+        // Releasing at another version leaves the recorded claim in place.
+        projector.release(&older, "proc");
+        assert!(!projector.claim(&snapshot, "proc", false));
+        // Releasing at the recorded version drops it.
+        projector.release(&snapshot, "proc");
+        assert!(projector.claim(&snapshot, "proc", true));
+    }
+
+    /// A proc claim already taken at a newer version makes `project_proc_row`
+    /// a no-op rather than re-projecting the older aggregate.
+    #[tokio::test]
+    async fn an_older_proc_version_is_not_reprojected() {
+        let (_store, projector) = projector();
+        let snapshot = snapshot("p-older");
+        let mut newer = snapshot.clone();
+        newer.version.process += 1;
+
+        projector.project(&snapshot).await.unwrap();
+        projector.project(&newer).await.unwrap();
+        assert_eq!(
+            projector.project_proc_row(&snapshot).await.unwrap(),
+            ProjectionReport::default()
+        );
+    }
+
+    /// `proc_env` reads the caller authority from the root scope: a snapshot
+    /// without it still projects, just with no owner entry.
+    #[tokio::test]
+    async fn a_snapshot_without_an_owner_projects_without_one() {
+        let (store, projector) = projector();
+        let mut snapshot = snapshot("p-no-owner");
+        snapshot
+            .variables
+            .remove(&(root_id(), consts::PROC_OWNER.to_string()));
+
+        let report = projector.project(&snapshot).await.unwrap();
+        assert!(report.applied > 0);
+        assert!(
+            store
+                .procs()
+                .find_opt("p-no-owner")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// The prepared-model cache is bounded: the insert at the limit clears it.
+    #[tokio::test]
+    async fn the_model_cache_clears_at_its_limit() {
+        let (_store, projector) = projector();
+        let root = root_id();
+        for i in 0..=MODEL_CACHE_LIMIT {
+            let mut snapshot = snapshot("p-cache");
+            let workflow = Workflow::new()
+                .with_id(&format!("wf-cache-{i}"))
+                .with_step(|step| step.with_id("s1"));
+            snapshot.variables.insert(
+                (root.clone(), super::super::model::MODEL_VAR.to_string()),
+                workflow.to_json().unwrap(),
+            );
+            assert!(projector.prepared_model(&snapshot).unwrap().is_some());
+        }
+    }
+
+    /// The failing double only fails while armed; a disarmed batch applies.
+    #[tokio::test]
+    async fn a_disarmed_failing_rows_kv_applies_its_batch() {
+        let kv = FailingRowsKv::new("tasks-");
+        kv.armed.store(false, Ordering::SeqCst);
+        let kv_dyn: Arc<dyn KvStore> = kv.clone();
+        let applied = kv_dyn
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "tasks-x".to_string(),
+                    value: b"1".to_vec(),
+                }],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(applied);
+        assert!(kv_dyn.one("tasks-x").await.unwrap().is_some());
+    }
+}

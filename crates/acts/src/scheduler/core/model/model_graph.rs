@@ -254,4 +254,104 @@ mod tests {
             Err(GraphError::UnreachableNodes(vec![id("lost")]))
         );
     }
+
+    #[test]
+    fn node_ids_must_not_be_blank() {
+        assert_eq!(NodeId::parse("  "), Err(GraphError::EmptyNodeId));
+        assert_eq!(NodeId::parse(""), Err(GraphError::EmptyNodeId));
+        assert_eq!(id("a").as_str(), "a");
+    }
+
+    #[test]
+    fn structural_mistakes_are_named_in_the_error() {
+        // A second root is refused, keeping the first.
+        let mut b = ModelGraphBuilder::default();
+        b.add_node(node("root", NodeKind::Workflow)).unwrap();
+        b.add_node(node("other", NodeKind::Workflow)).unwrap();
+        b.set_root(id("root")).unwrap();
+        assert_eq!(b.set_root(id("other")), Err(GraphError::MultipleRoots));
+
+        // A second explicit successor for one node is refused.
+        let mut b = ModelGraphBuilder::default();
+        b.add_node(node("root", NodeKind::Workflow)).unwrap();
+        b.add_node(node("a", NodeKind::Act)).unwrap();
+        b.add_node(node("b", NodeKind::Act)).unwrap();
+        b.set_explicit_next(id("root"), id("a")).unwrap();
+        assert_eq!(
+            b.set_explicit_next(id("root"), id("b")),
+            Err(GraphError::MultipleExplicitNext(id("root")))
+        );
+
+        // The root must be a declared node.
+        let mut b = ModelGraphBuilder::default();
+        b.add_node(node("a", NodeKind::Act)).unwrap();
+        b.set_root(id("ghost")).unwrap();
+        assert_eq!(b.build(), Err(GraphError::UnknownNode(id("ghost"))));
+
+        // A root cannot itself be a child.
+        let mut b = ModelGraphBuilder::default();
+        b.add_node(node("root", NodeKind::Workflow)).unwrap();
+        b.set_root(id("root")).unwrap();
+        b.add_child(id("root"), id("root"), ChildRole::Normal)
+            .unwrap();
+        assert_eq!(b.build(), Err(GraphError::RootHasParent));
+    }
+
+    #[test]
+    fn edges_must_name_declared_nodes() {
+        // A child that was never added.
+        let mut b = ModelGraphBuilder::default();
+        b.add_node(node("root", NodeKind::Workflow)).unwrap();
+        b.set_root(id("root")).unwrap();
+        b.add_child(id("root"), id("ghost"), ChildRole::Normal)
+            .unwrap();
+        assert_eq!(b.build(), Err(GraphError::UnknownNode(id("ghost"))));
+
+        // A parent that was never added.
+        let mut b = ModelGraphBuilder::default();
+        for n in [node("root", NodeKind::Workflow), node("a", NodeKind::Act)] {
+            b.add_node(n).unwrap();
+        }
+        b.set_root(id("root")).unwrap();
+        b.add_child(id("ghost"), id("a"), ChildRole::Normal)
+            .unwrap();
+        assert_eq!(b.build(), Err(GraphError::UnknownNode(id("ghost"))));
+
+        // Explicit edges must name declared nodes on both ends.
+        let mut b = ModelGraphBuilder::default();
+        b.add_node(node("root", NodeKind::Workflow)).unwrap();
+        b.set_root(id("root")).unwrap();
+        b.set_explicit_next(id("ghost"), id("root")).unwrap();
+        assert_eq!(b.build(), Err(GraphError::UnknownNode(id("ghost"))));
+
+        let mut b = ModelGraphBuilder::default();
+        b.add_node(node("root", NodeKind::Workflow)).unwrap();
+        b.set_root(id("root")).unwrap();
+        b.set_explicit_next(id("root"), id("ghost")).unwrap();
+        assert_eq!(b.build(), Err(GraphError::UnknownNode(id("ghost"))));
+    }
+
+    #[test]
+    fn building_without_a_root_is_refused() {
+        let mut b = ModelGraphBuilder::default();
+        b.add_node(node("a", NodeKind::Act)).unwrap();
+        assert_eq!(b.build(), Err(GraphError::MissingRoot));
+    }
+
+    #[test]
+    fn graph_errors_render() {
+        for error in [
+            GraphError::EmptyNodeId,
+            GraphError::MissingRoot,
+            GraphError::MultipleRoots,
+            GraphError::RootHasParent,
+            GraphError::DuplicateNode(id("a")),
+            GraphError::UnknownNode(id("a")),
+            GraphError::MultipleParents(id("a")),
+            GraphError::MultipleExplicitNext(id("a")),
+            GraphError::UnreachableNodes(vec![id("a")]),
+        ] {
+            assert!(error.to_string().starts_with("model graph error:"));
+        }
+    }
 }

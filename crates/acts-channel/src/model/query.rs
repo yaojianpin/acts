@@ -351,3 +351,140 @@ mod tests {
         assert_eq!(expr.value(), &json!("abc"));
     }
 }
+
+#[cfg(test)]
+mod query_tests {
+    use super::{Expr, ExprOp, Filter, FilterExpr, FilterType, OrderBy, Query, Sort};
+    use serde_json::{Value as JsonValue, json};
+    use std::str::FromStr;
+
+    #[test]
+    fn defaults_and_builders() {
+        let query = Query::default();
+        assert_eq!(query.offset, 0);
+        assert_eq!(query.limit, 100000);
+        assert!(query.filter.is_none());
+        assert!(query.order_by.is_empty());
+
+        let filter = Filter::and()
+            .expr(Expr::eq("a", 1))
+            .push(Filter::or().expr(Expr::matches("b", "x")));
+        let query = Query::new()
+            .offset(5)
+            .limit(10)
+            .filter(filter)
+            .order("a", Sort::Asc)
+            .order("b", Sort::Desc);
+
+        assert_eq!(query.offset, 5);
+        assert_eq!(query.limit, 10);
+
+        let filter = query.filter.as_ref().expect("the filter is kept");
+        assert_eq!(filter.r#type, FilterType::And);
+        assert_eq!(filter.exprs.len(), 2);
+        match &filter.exprs[0] {
+            FilterExpr::Expr(expr) => {
+                assert_eq!(expr.key, "a");
+                assert_eq!(expr.op, ExprOp::EQ);
+                assert_eq!(expr.value, json!(1));
+            }
+            other => panic!("expected a leaf expression, got {other:?}"),
+        }
+        match &filter.exprs[1] {
+            FilterExpr::Filter(nested) => {
+                assert_eq!(nested.r#type, FilterType::Or);
+                assert_eq!(nested.exprs.len(), 1);
+            }
+            other => panic!("expected a nested filter, got {other:?}"),
+        }
+
+        let order = query.get_order_by();
+        assert_eq!(order.len(), 2);
+        assert_eq!(order[0].field, "a");
+        assert_eq!(order[0].order, Sort::Asc);
+        assert_eq!(order[1].field, "b");
+        assert_eq!(order[1].order, Sort::Desc);
+    }
+
+    #[test]
+    fn order_by_parses_ascending_and_bang_descending() {
+        let asc = OrderBy::from_str("name").unwrap();
+        assert_eq!(asc.field, "name");
+        assert_eq!(asc.order, Sort::Asc);
+
+        let desc = OrderBy::from_str("name!").unwrap();
+        assert_eq!(desc.field, "name");
+        assert_eq!(desc.order, Sort::Desc);
+
+        assert_eq!(OrderBy::from_str("name").unwrap().order, Sort::Asc);
+    }
+
+    #[test]
+    fn serde_uses_the_wire_names() {
+        let query = Query::new()
+            .filter(Filter::or().expr(Expr::ne("x", "y")).expr(Expr::ge("n", 1)))
+            .order("a", Sort::Asc)
+            .order("b", Sort::Desc);
+
+        let value = serde_json::to_value(&query).unwrap();
+        assert_eq!(value["offset"], json!(0));
+        assert_eq!(value["limit"], json!(100000));
+        assert_eq!(
+            value["order_by"],
+            json!([
+                {"field": "a", "order": "asc"},
+                {"field": "b", "order": "desc"}
+            ])
+        );
+        assert_eq!(value["filter"]["type"], json!("or"));
+        assert_eq!(
+            value["filter"]["exprs"][0],
+            json!({"key": "x", "value": "y", "op": "ne"})
+        );
+        assert_eq!(
+            value["filter"]["exprs"][1],
+            json!({"key": "n", "value": 1, "op": "ge"})
+        );
+
+        let back: Query = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(back.order_by.len(), 2);
+        assert_eq!(back.filter.as_ref().unwrap().exprs.len(), 2);
+
+        // every operator has its lower-case wire name, including `match`
+        for (op, text) in [
+            (ExprOp::EQ, "eq"),
+            (ExprOp::NE, "ne"),
+            (ExprOp::LT, "lt"),
+            (ExprOp::LE, "le"),
+            (ExprOp::GT, "gt"),
+            (ExprOp::GE, "ge"),
+            (ExprOp::Match, "match"),
+        ] {
+            assert_eq!(serde_json::to_value(&op).unwrap(), json!(text));
+            assert_eq!(serde_json::from_value::<ExprOp>(json!(text)).unwrap(), op);
+        }
+
+        // filter types and untagged sub-filters roundtrip
+        assert_eq!(serde_json::to_value(FilterType::And).unwrap(), json!("and"));
+        assert_eq!(serde_json::to_value(FilterType::Or).unwrap(), json!("or"));
+        let nested = FilterExpr::Filter(Filter::and());
+        let encoded = serde_json::to_value(&nested).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FilterExpr>(encoded).unwrap(),
+            nested
+        );
+    }
+
+    #[test]
+    fn query_converts_to_and_from_json() {
+        let query = Query::new().offset(2).limit(3).order("id", Sort::Desc);
+        let value = JsonValue::try_from(query).unwrap();
+        let back = Query::try_from(value.clone()).unwrap();
+        assert_eq!(back.offset, 2);
+        assert_eq!(back.limit, 3);
+        assert_eq!(back.order_by[0].field, "id");
+
+        let err = Query::try_from(json!({"offset": "not a number"})).unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+}

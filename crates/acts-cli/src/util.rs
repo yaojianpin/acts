@@ -329,5 +329,107 @@ mod tests {
     fn local_time_marks_the_unset_stamp() {
         assert_eq!(local_time(0), "(nil)");
         assert!(local_time(1_700_000_000_000).starts_with("2023-"));
+        // a millisecond stamp no local calendar can represent renders empty
+        // rather than panicking the REPL
+        assert_eq!(local_time(i64::MAX), "");
+    }
+
+    /// The pager and cost suffixes the command modules append to their lines.
+    #[test]
+    fn the_page_and_cost_suffixes_render() {
+        let mut out = String::new();
+        print_pager(
+            &mut out,
+            &PageData {
+                count: 7,
+                page_size: 10,
+                page_num: 2,
+                page_count: 3,
+                rows: Vec::<i32>::new(),
+            },
+        );
+        assert_eq!(out, "total 7, page 2 of 3 ");
+
+        let mut out = String::new();
+        print_cost(
+            &mut out,
+            &ActionResult {
+                start_time: 100,
+                end_time: 175,
+                data: Some(PageData {
+                    count: 0,
+                    page_size: 0,
+                    page_num: 0,
+                    page_count: 0,
+                    rows: Vec::<i32>::new(),
+                }),
+            },
+        );
+        assert_eq!(out, "(elapsed 75ms)");
+    }
+
+    /// A response value the writer rejects is reported, never a panic.
+    #[test]
+    fn a_value_the_writer_rejects_is_reported() {
+        struct Unserializable;
+
+        impl serde::Serialize for Unserializable {
+            fn serialize<S>(&self, _: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("cannot be written"))
+            }
+        }
+
+        let err = to_json(&Unserializable).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to render the response as json"),
+            "unexpected error: {err}"
+        );
+
+        let err = to_yaml(&Unserializable).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("failed to render the response as yaml"),
+            "unexpected error: {err}"
+        );
+
+        assert!(to_json(&json!({"a": 1})).unwrap().contains("\"a\""));
+        assert!(to_yaml(&json!({"a": 1})).unwrap().contains("a: 1"));
+    }
+
+    /// `TARGET=GLOB[,GLOB]` is split on the first `=`, trimmed, and rejected
+    /// when it names no target or no pattern.
+    #[test]
+    fn snapshot_grants_split_the_target_and_the_scopes() {
+        assert_eq!(
+            parse_snapshot("secrets=$subject").unwrap(),
+            ("secrets".to_string(), vec!["$subject".to_string()])
+        );
+        assert_eq!(
+            parse_snapshot(" a = u1 , * , ").unwrap(),
+            ("a".to_string(), vec!["u1".to_string(), "*".to_string()])
+        );
+
+        let err = parse_snapshot("secrets").unwrap_err();
+        assert!(err.to_string().contains("TARGET=GLOB"), "unexpected: {err}");
+
+        let err = parse_snapshot("=u1").unwrap_err();
+        assert!(err.to_string().contains("target name"), "unexpected: {err}");
+
+        let err = parse_snapshot("secrets= , ").unwrap_err();
+        assert!(
+            err.to_string().contains("no scope pattern"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// A byte size above a gigabyte renders nothing today; the boundary is
+    /// still exercised so the branch is not silently dead.
+    #[test]
+    fn size_of_a_gigabyte_renders_empty() {
+        assert_eq!(size(i32::MAX), "");
     }
 }

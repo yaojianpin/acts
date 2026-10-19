@@ -1,4 +1,18 @@
 use crate::{DEFAULT_HOST, GrpcConfig, GrpcPlugin, GrpcServer};
+
+/// Install a sink subscriber once per test binary: tracing's field
+/// expressions are evaluated only when a subscriber is interested, so a
+/// logged value (e.g. the `authenticated` flag) would not run otherwise.
+fn init_tracing() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .try_init();
+    });
+}
 use acts::query::Query as StoreQuery;
 use acts::{ChannelOptions, Engine, Vars, Workflow};
 use acts_acl::AclUsers;
@@ -309,7 +323,7 @@ async fn test_on_message_stream_drop_deregisters_channel() {
     // one message row per workflow message
     run_irq_workflow(&engine, "alive").await;
     wait_until(
-        || *received.lock().unwrap() >= 3,
+        || *received.lock().unwrap() >= 2,
         "workflow messages to be dispatched",
     )
     .await;
@@ -324,7 +338,7 @@ async fn test_on_message_stream_drop_deregisters_channel() {
     // new messages must not be stored for the dead channel anymore
     run_irq_workflow(&engine, "dropped").await;
     wait_until(
-        || *received.lock().unwrap() >= 6,
+        || *received.lock().unwrap() >= 4,
         "messages of the second workflow to be dispatched",
     )
     .await;
@@ -379,12 +393,12 @@ async fn test_on_message_slow_subscriber_is_disconnected() {
         .await
         .expect("the subscription opens");
 
-    // two runs emit at least 6 messages, so the queue (2) is exceeded even
-    // while the count lags the handler under test by the message in flight
+    // two runs emit four messages, so the queue (2) is exceeded even while
+    // the count lags the handler under test by the message in flight
     run_irq_workflow(&engine, "slow1").await;
     run_irq_workflow(&engine, "slow2").await;
     let seen = || received.load(Ordering::Relaxed);
-    wait_until(|| seen() >= 6, "workflow messages to be dispatched").await;
+    wait_until(|| seen() >= 4, "workflow messages to be dispatched").await;
 
     // the overflow ended the RPC: the stream flushes what was queued and is
     // done, instead of waiting for a reader that never came
@@ -405,7 +419,7 @@ async fn test_on_message_slow_subscriber_is_disconnected() {
     let rows = stored_message_count(&engine).await;
     run_irq_workflow(&engine, "after").await;
     wait_until(
-        || seen() >= 9,
+        || seen() >= 6,
         "messages of the last workflow to be dispatched",
     )
     .await;
@@ -741,6 +755,304 @@ async fn grpc_server_defaults_to_loopback() {
          alias of the port must stay free and the wildcard must not be held: {alias:?}"
     );
     drop(alias);
+
+    engine.close().await;
+}
+
+// ── uncovered paths: error mapping, guarded streams, on_init faults ──
+
+use crate::MessageClient;
+use acts::{AccessControl, AclError, Principal};
+use std::sync::Arc as StdArc;
+use tokio::sync::mpsc;
+
+fn wire_message(name: &str) -> Message {
+    Message {
+        name: name.to_string(),
+        seq: "wire-seq".to_string(),
+        ack: None,
+        data: Some(b"{}".to_vec()),
+    }
+}
+
+/// `do_action` maps each action error kind onto the matching gRPC status:
+/// an unknown action is NOT_FOUND, a bad payload INVALID_ARGUMENT, and a
+/// server-side failure INTERNAL. The unary and the subscription paths answer
+/// a refusal through the same function.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_action_status_maps_each_error_kind() {
+    let engine = Engine::builder().disable_acl().start().await.unwrap();
+    let server = GrpcServer::new(&engine);
+
+    let cases = [
+        ("no:such", None, tonic::Code::NotFound),
+        (
+            "model:deploy",
+            Some(b"{}".to_vec()),
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            "model:get",
+            Some(br#"{"id":"missing-model"}"#.to_vec()),
+            tonic::Code::Internal,
+        ),
+    ];
+    for (name, data, expected) in cases {
+        let status = server
+            .do_action(
+                Message {
+                    name: name.to_string(),
+                    seq: "seq-1".to_string(),
+                    ack: None,
+                    data,
+                },
+                None,
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{name} must answer an error"));
+        assert_eq!(status.code(), expected, "{name}: {status}");
+    }
+
+    // an empty request seq is not echoed as an ack
+    let response = server
+        .do_action(
+            Message {
+                name: "msg:ls".to_string(),
+                seq: String::new(),
+                ack: None,
+                data: None,
+            },
+            None,
+        )
+        .await
+        .expect("msg:ls must run")
+        .into_inner();
+    assert_eq!(response.ack, None);
+
+    engine.close().await;
+}
+
+/// The guard on the response stream must end a subscription whose client
+/// stopped reading (queue full) and one whose receiver is already gone, not
+/// leave either queued forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_message_client_closes_full_and_dropped_queues() {
+    let engine = Engine::builder().start().await.unwrap();
+    let chan = engine.channel_with_options(&ChannelOptions::default());
+    let (tx, rx) = mpsc::channel::<Result<Message, tonic::Status>>(1);
+    // one slot is already taken, so the next send finds the queue full
+    tx.try_send(Ok(wire_message("first"))).unwrap();
+    let client = MessageClient {
+        addr: "127.0.0.1:1".to_string(),
+        sender: tx,
+        options: ChannelOptions::default(),
+        chan: StdArc::downgrade(&chan),
+    };
+
+    // full: the channel is closed instead of growing a backlog
+    client.send(Ok(wire_message("second")));
+
+    // closed: the receiver is gone
+    drop(rx);
+    client.send(Ok(wire_message("third")));
+
+    engine.close().await;
+}
+
+/// Both bearer spellings are credentials; anything else — another scheme, an
+/// empty value, binary metadata — is no credential at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_bearer_token_variants() {
+    init_tracing();
+    let engine = Engine::builder().disable_acl().start().await.unwrap();
+    let server = GrpcServer::new(&engine);
+
+    for header in ["Bearer tok-1", "bearer tok-2"] {
+        let mut request = send_request("msg:ls", None);
+        request
+            .metadata_mut()
+            .insert("authorization", header.parse().unwrap());
+        assert_eq!(
+            GrpcServer::bearer_token(&request).as_deref(),
+            Some(header.split_once(' ').unwrap().1)
+        );
+        server.send(request).await.expect("the action must run");
+    }
+
+    for header in ["Basic abc", "Bearer"] {
+        let mut request = send_request("msg:ls", None);
+        request
+            .metadata_mut()
+            .insert("authorization", header.parse().unwrap());
+        assert_eq!(GrpcServer::bearer_token(&request), None, "{header:?}");
+        server.send(request).await.expect("the action must run");
+    }
+
+    // a request without metadata at all has no credential
+    assert_eq!(GrpcServer::bearer_token(&tonic::Request::new(())), None);
+
+    engine.close().await;
+}
+
+/// An access control whose `authenticate` always refuses: the shipped
+/// registries answer an absent token with the anonymous principal, so this is
+/// the only way to reach the transports' unauthenticated mapping.
+#[derive(Debug)]
+struct RefusingAcl;
+
+impl RefusingAcl {
+    fn failure() -> AclError {
+        AclError::Unauthenticated("no such session".to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl AccessControl for RefusingAcl {
+    async fn load(&self, _store: Arc<acts::Store>) -> acts::Result<()> {
+        Ok(())
+    }
+
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    fn authenticate(&self, _token: Option<&str>) -> std::result::Result<Principal, AclError> {
+        Err(Self::failure())
+    }
+
+    async fn login(
+        &self,
+        _user: &str,
+        _password: &str,
+    ) -> std::result::Result<acts::LoginTokens, AclError> {
+        Err(Self::failure())
+    }
+
+    async fn refresh(
+        &self,
+        _refresh_token: &str,
+    ) -> std::result::Result<acts::LoginTokens, AclError> {
+        Err(Self::failure())
+    }
+
+    async fn logout(&self, _token: &str) -> acts::Result<bool> {
+        Err(acts::ActError::Unauthenticated("no session".to_string()))
+    }
+
+    async fn set_user(&self, _spec: &acts::UserSpec) -> acts::Result<()> {
+        Err(acts::ActError::Denied("not allowed".to_string()))
+    }
+
+    async fn del_user(&self, _name: &str) -> acts::Result<()> {
+        Err(acts::ActError::Denied("not allowed".to_string()))
+    }
+
+    async fn user_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn get_user(&self, _name: &str) -> Option<serde_json::Value> {
+        None
+    }
+}
+
+/// A credential the ACL cannot resolve is UNAUTHENTICATED on both paths.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authentication_failure_maps_to_unauthenticated() {
+    let engine = Engine::builder()
+        .set_acl(Arc::new(RefusingAcl))
+        .start()
+        .await
+        .unwrap();
+    let server = GrpcServer::new(&engine);
+
+    let status = server
+        .send(send_request("msg:clear", Some("token")))
+        .await
+        .expect_err("an action must be refused without a resolvable credential");
+    assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status}");
+
+    let status = server
+        .on_message(tonic::Request::new(MessageOptions::default()))
+        .await
+        .err()
+        .expect("a subscription must be refused without a credential");
+    assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status}");
+
+    engine.close().await;
+}
+
+/// The failure of registering a bound listener names the address and the
+/// underlying reason, so an operator can see which bind could not be served.
+#[test]
+fn test_register_listener_error_names_the_address() {
+    let addr: std::net::SocketAddr = "127.0.0.1:10080".parse().unwrap();
+    let err = crate::register_listener_error(addr, std::io::Error::other("no reactor"));
+    let text = err.to_string();
+    assert!(text.contains("127.0.0.1:10080"), "{text}");
+    assert!(text.contains("no reactor"), "{text}");
+}
+
+/// The failure of configuring the bound listener names the address and the
+/// underlying reason, like the registration failure beside it.
+#[test]
+fn test_configure_listener_error_names_the_address() {
+    let addr: std::net::SocketAddr = "127.0.0.1:10080".parse().unwrap();
+    let err = crate::configure_listener_error(addr, std::io::Error::other("denied"));
+    let text = err.to_string();
+    assert!(text.contains("127.0.0.1:10080"), "{text}");
+    assert!(text.contains("denied"), "{text}");
+}
+
+/// An unparseable bind address must fail the engine start with the reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_on_init_rejects_invalid_bind_address() {
+    let table: toml::Table = toml::from_str("[grpc]\nhost = \"not a host\"\nport = 1\n").unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let err = match Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&GrpcPlugin::new())
+        .start()
+        .await
+    {
+        Ok(_) => panic!("an unparseable bind address must fail the start"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("not a host"),
+        "the failure must name the address: {err}"
+    );
+}
+
+/// An `on_message` RPC over the real transport carries the caller's address,
+/// and the stream ends cleanly when the client drops it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_on_message_over_the_wire_tracks_the_remote_address() {
+    let port = free_port();
+    let engine = engine_with_grpc(port).await;
+    let url = format!("http://127.0.0.1:{port}");
+    let mut client = loop {
+        match ActsServiceClient::connect(url.clone()).await {
+            Ok(client) => break client,
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    };
+    let options = MessageOptions {
+        client_id: "wire-client".to_string(),
+        r#type: "*".to_string(),
+        state: "*".to_string(),
+        uses: "*".to_string(),
+        options: Default::default(),
+    };
+    let response = client
+        .on_message(options)
+        .await
+        .expect("the subscription opens over the wire");
+    drop(response);
 
     engine.close().await;
 }

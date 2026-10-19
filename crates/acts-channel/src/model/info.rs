@@ -135,3 +135,204 @@ impl From<EventInfo> for serde_json::Value {
         serde_json::to_value(val).unwrap()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{EventInfo, MessageInfo, ModelInfo, PackageInfo, PageData, ProcInfo, TaskInfo};
+    use serde_json::json;
+
+    fn package_info() -> PackageInfo {
+        PackageInfo {
+            id: "pkg".to_string(),
+            name: "package".to_string(),
+            desc: "a package".to_string(),
+            icon: "icon.svg".to_string(),
+            doc: "docs".to_string(),
+            version: "1.0".to_string(),
+            schema: "{}".to_string(),
+            options: Some("{}".to_string()),
+            run_as: "user".to_string(),
+            resources: "[]".to_string(),
+            catalog: "app".to_string(),
+            create_time: 1,
+            update_time: 2,
+            timestamp: 3,
+        }
+    }
+
+    fn task_info() -> TaskInfo {
+        TaskInfo {
+            id: "task".to_string(),
+            prev: Some("prev".to_string()),
+            name: "act".to_string(),
+            pid: "proc".to_string(),
+            nid: "node".to_string(),
+            r#type: "act".to_string(),
+            state: "created".to_string(),
+            data: "{}".to_string(),
+            start_time: 1,
+            end_time: 2,
+            timestamp: 3,
+        }
+    }
+
+    fn proc_info() -> ProcInfo {
+        ProcInfo {
+            id: "proc".to_string(),
+            name: "workflow".to_string(),
+            mid: "model".to_string(),
+            state: "running".to_string(),
+            start_time: 1,
+            end_time: 2,
+            timestamp: 3,
+            tasks: vec![task_info()],
+        }
+    }
+
+    fn model_info() -> ModelInfo {
+        ModelInfo {
+            id: "model".to_string(),
+            name: "workflow".to_string(),
+            desc: "a model".to_string(),
+            ver: "1.0".to_string(),
+            size: 10,
+            create_time: 1,
+            update_time: 2,
+            data: "{}".to_string(),
+        }
+    }
+
+    fn message_info() -> MessageInfo {
+        MessageInfo {
+            id: "msg".to_string(),
+            tid: "task".to_string(),
+            name: "act".to_string(),
+            state: "completed".to_string(),
+            r#type: "msg".to_string(),
+            pid: "proc".to_string(),
+            nid: "node".to_string(),
+            inputs: "{}".to_string(),
+            outputs: "{}".to_string(),
+            create_time: 1,
+            update_time: 2,
+            retry_times: 0,
+            status: "acked".to_string(),
+            timestamp: 3,
+            uses: Some("uses".to_string()),
+        }
+    }
+
+    fn event_info() -> EventInfo {
+        EventInfo {
+            id: "evt".to_string(),
+            name: "trigger".to_string(),
+            mid: "model".to_string(),
+            ver: 1,
+            uses: "uses".to_string(),
+            params: "{}".to_string(),
+            create_time: 1,
+            timestamp: 2,
+        }
+    }
+
+    #[test]
+    fn package_info_roundtrips_and_converts() {
+        let info = package_info();
+        let value: serde_json::Value = info.clone().into();
+        assert_eq!(value["id"], json!("pkg"));
+        assert_eq!(value["options"], json!("{}"));
+
+        let text = serde_json::to_string(&info).unwrap();
+        let back: PackageInfo = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.name, "package");
+        assert_eq!(back.create_time, 1);
+        assert_eq!(back.timestamp, 3);
+    }
+
+    #[test]
+    fn task_info_roundtrips_and_converts() {
+        let info = task_info();
+        let value: serde_json::Value = info.clone().into();
+        assert_eq!(value["id"], json!("task"));
+        assert_eq!(value["prev"], json!("prev"));
+        assert_eq!(value["type"], json!("act"));
+
+        let back: TaskInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(back.prev.as_deref(), Some("prev"));
+        assert_eq!(back.state, "created");
+    }
+
+    #[test]
+    fn proc_info_roundtrips_with_its_tasks() {
+        let info = proc_info();
+        let value: serde_json::Value = info.clone().into();
+        assert_eq!(value["id"], json!("proc"));
+        assert_eq!(value["tasks"][0]["id"], json!("task"));
+
+        let back: ProcInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(back.tasks.len(), 1);
+        assert_eq!(back.tasks[0].name, "act");
+    }
+
+    #[test]
+    fn model_info_roundtrips_and_converts() {
+        let info = model_info();
+        let value: serde_json::Value = info.clone().into();
+        assert_eq!(value["id"], json!("model"));
+        assert_eq!(value["size"], json!(10));
+
+        let back: ModelInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(back.ver, "1.0");
+        assert_eq!(back.update_time, 2);
+    }
+
+    #[test]
+    fn message_info_roundtrips_and_converts() {
+        let info = message_info();
+        let value: serde_json::Value = info.clone().into();
+        assert_eq!(value["id"], json!("msg"));
+        assert_eq!(value["uses"], json!("uses"));
+
+        let back: MessageInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(back.status, "acked");
+        assert_eq!(back.uses.as_deref(), Some("uses"));
+
+        // `uses` is optional on the wire
+        let mut value: serde_json::Value = info.into();
+        value.as_object_mut().unwrap().remove("uses");
+        let back: MessageInfo = serde_json::from_value(value).unwrap();
+        assert!(back.uses.is_none());
+    }
+
+    #[test]
+    fn event_info_roundtrips_and_converts() {
+        let info = event_info();
+        let value: serde_json::Value = info.clone().into();
+        assert_eq!(value["id"], json!("evt"));
+        assert_eq!(value["ver"], json!(1));
+
+        let back: EventInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(back.name, "trigger");
+        assert_eq!(back.uses, "uses");
+    }
+
+    #[test]
+    fn page_data_carries_the_page_shape() {
+        let page = PageData {
+            count: 1,
+            page_size: 10,
+            page_num: 2,
+            page_count: 3,
+            rows: vec![proc_info()],
+        };
+        let value = serde_json::to_value(&page).unwrap();
+        assert_eq!(value["count"], json!(1));
+        assert_eq!(value["page_size"], json!(10));
+        assert_eq!(value["page_num"], json!(2));
+        assert_eq!(value["page_count"], json!(3));
+        assert_eq!(value["rows"][0]["id"], json!("proc"));
+        let back: PageData<ProcInfo> = serde_json::from_value(value).unwrap();
+        assert_eq!(back.count, 1);
+        assert_eq!(back.rows.len(), 1);
+    }
+}

@@ -279,4 +279,69 @@ type = "*"
         )))
         .expect("the ceiling is a valid value");
     }
+
+    #[test]
+    fn definition_describes_pub_and_sub() {
+        let meta = NatsPackage::definition();
+        assert_eq!(meta.id, "acts.app.pubsub.nats");
+        assert!(meta.schema["properties"]["mode"].is_object());
+        assert_eq!(meta.options.unwrap()["ui:order"][0], "mode");
+    }
+
+    /// Each credential shape reaches the client options; the connection itself
+    /// is allowed to fail here — what this covers is the branch that builds
+    /// the options, before the broker is dialled.
+    #[tokio::test]
+    async fn each_credential_shape_builds_connection_options() {
+        let configs = [
+            NatsConfig {
+                url: "nats://127.0.0.1:1".to_string(),
+                token: Some("token".to_string()),
+                username: None,
+                password: None,
+                timeout_ms: DEFAULT_TIMEOUT_MS,
+            },
+            NatsConfig {
+                url: "nats://127.0.0.1:1".to_string(),
+                token: None,
+                username: Some("user".to_string()),
+                password: Some("pass".to_string()),
+                timeout_ms: DEFAULT_TIMEOUT_MS,
+            },
+            NatsConfig {
+                url: "nats://127.0.0.1:1".to_string(),
+                token: None,
+                username: None,
+                password: None,
+                timeout_ms: DEFAULT_TIMEOUT_MS,
+            },
+        ];
+        for config in &configs {
+            let _ = tokio::time::timeout(Duration::from_secs(2), connect(config)).await;
+        }
+    }
+
+    #[test]
+    fn credentials_and_mode_deserialize() {
+        let package = NatsPackage::new(&config(
+            "[nats]\nurl = \"nats://localhost:4222\"\ntoken = \"t\"\nusername = \"u\"\npassword = \"p\"\n",
+        ))
+        .unwrap();
+        assert_eq!(package.config.token.as_deref(), Some("t"));
+        assert_eq!(package.config.username.as_deref(), Some("u"));
+        assert_eq!(package.config.password.as_deref(), Some("p"));
+
+        assert!(
+            serde_json::from_value::<NatsPackageParams>(json!({
+                "mode": "pub", "subject": "s", "message": 1
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<NatsPackageParams>(json!({
+                "mode": "sub", "subject": "s"
+            }))
+            .is_ok()
+        );
+    }
 }

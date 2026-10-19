@@ -257,3 +257,78 @@ impl Engine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[derive(Clone)]
+    struct FuncPackage;
+
+    #[async_trait::async_trait]
+    impl crate::ActPackage for FuncPackage {
+        fn new(_: &Config) -> crate::Result<Self> {
+            Ok(Self)
+        }
+
+        fn definition() -> crate::ActPackageDefinition {
+            crate::ActPackageDefinition {
+                id: "engine.test.func",
+                name: "engine test func",
+                desc: "",
+                icon: "",
+                doc: "",
+                version: "0.1.0",
+                schema: json!({}),
+                options: None,
+                run_as: crate::ActRunAs::Func,
+                resources: vec![],
+                catalog: crate::ActPackageCatalog::App,
+            }
+        }
+    }
+
+    /// A `Func` package passed through the builder is registered in the
+    /// engine's own package registry, so its `uses` resolves at run time.
+    #[tokio::test]
+    async fn a_func_package_is_registered_by_the_engine() {
+        let engine = Engine::builder()
+            .add_package::<FuncPackage>()
+            .start()
+            .await
+            .unwrap();
+        assert!(engine.runtime().package().get("engine.test.func").is_some());
+    }
+
+    /// A run the engine never started has no unknown effects, and resolving
+    /// one answers the missing aggregate instead of silently succeeding.
+    #[tokio::test]
+    async fn an_absent_run_has_no_unknown_effects() {
+        let engine = Engine::builder().start().await.unwrap();
+        assert!(
+            engine
+                .effect_unknowns("never-started")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let err = engine
+            .resolve_effect("never-started", "k", EffectResolution::NotApplied)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    /// A leftover `[acl]` table is ignored — the engine still starts, so a
+    /// config written for the token era cannot brick an upgrade.
+    #[tokio::test]
+    async fn a_stale_acl_section_is_ignored() {
+        let mut config = Config::default();
+        config
+            .table
+            .insert("acl".to_string(), toml::Value::Table(toml::Table::new()));
+        let engine = Engine::builder().set_config(&config).start().await.unwrap();
+        assert!(engine.config().table.contains_key("acl"));
+    }
+}

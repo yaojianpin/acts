@@ -316,3 +316,139 @@ fn repository_heartbeat_uses_operation_revision_cas() {
         Err(CommitError::OperationRevisionConflict { .. })
     ));
 }
+
+fn create(
+    task: TaskId,
+    parent: Option<TaskId>,
+    predecessors: Vec<TaskId>,
+) -> crate::scheduler::core::model::transition_plan::TaskCreate {
+    crate::scheduler::core::model::transition_plan::TaskCreate {
+        model_node: NodeId::parse(task.node.as_str()).unwrap(),
+        task,
+        parent,
+        predecessors,
+        initial_state: TaskState::Ready,
+    }
+}
+
+#[test]
+fn a_create_must_name_existing_parent_and_predecessors() {
+    let mut p = plan();
+    p.state_changes.clear();
+    p.variable_writes.clear();
+    let ghost = TaskId::new("ghost", 0).unwrap();
+    p.task_creates = vec![create(
+        TaskId::new("child", 0).unwrap(),
+        Some(ghost.clone()),
+        vec![],
+    )];
+    let mut repo = repository();
+    assert_eq!(
+        repo.compare_and_commit(&p),
+        Err(CommitError::TaskNotFound(ghost.clone()))
+    );
+
+    let mut p = plan();
+    p.state_changes.clear();
+    p.variable_writes.clear();
+    p.task_creates = vec![create(
+        TaskId::new("child", 0).unwrap(),
+        None,
+        vec![ghost.clone()],
+    )];
+    let mut repo = repository();
+    assert_eq!(
+        repo.compare_and_commit(&p),
+        Err(CommitError::TaskNotFound(ghost))
+    );
+}
+
+#[test]
+fn a_create_cannot_rewind_an_existing_generation() {
+    let mut snapshot = repository().load("p1").unwrap().unwrap();
+    snapshot.tasks.insert(
+        TaskId::new("t1", 2).unwrap(),
+        crate::scheduler::core::commit::aggregate::TaskSnapshot {
+            model_node: NodeId::parse("t1").unwrap(),
+            parent: None,
+            predecessors: vec![],
+            state: TaskState::Completed,
+            revision: 0,
+        },
+    );
+    let mut repo = MemoryProcessRepository::default();
+    repo.insert(snapshot).unwrap();
+    let mut p = plan();
+    p.state_changes.clear();
+    p.variable_writes.clear();
+    p.task_creates = vec![create(TaskId::new("t1", 1).unwrap(), None, vec![])];
+    assert!(matches!(
+        repo.compare_and_commit(&p),
+        Err(CommitError::GenerationNotMonotonic(_))
+    ));
+}
+
+#[test]
+fn variable_writes_must_target_a_known_scope() {
+    let mut p = plan();
+    p.variable_writes[0].scope = TaskId::new("ghost", 0).unwrap();
+    let mut repo = repository();
+    assert!(matches!(
+        repo.compare_and_commit(&p),
+        Err(CommitError::TaskNotFound(_))
+    ));
+}
+
+#[test]
+fn a_plan_cannot_create_an_operation_or_outbox_key_twice() {
+    // An already persisted operation id.
+    let mut snapshot = repository().load("p1").unwrap().unwrap();
+    let existing = OperationId {
+        process_id: "p1".into(),
+        task: id(),
+        sequence: 1,
+    };
+    snapshot.operations.insert(
+        existing.clone(),
+        OperationRecord::pending(existing.clone(), OperationKind::ExecuteTask),
+    );
+    let mut repo = MemoryProcessRepository::default();
+    repo.insert(snapshot).unwrap();
+    assert_eq!(
+        repo.compare_and_commit(&plan()),
+        Err(CommitError::OperationAlreadyExists(existing))
+    );
+
+    // An already persisted outbox key.
+    let mut snapshot = repository().load("p1").unwrap().unwrap();
+    let outbox_id = crate::scheduler::core::outbox::records::OutboxId {
+        process_id: "p1".into(),
+        key: "complete:p1:t1:0".into(),
+    };
+    snapshot.outbox.insert(
+        outbox_id.clone(),
+        crate::scheduler::core::outbox::records::OutboxRecord::pending(
+            outbox_id,
+            "task.completed".into(),
+            "{}".into(),
+            0,
+        )
+        .unwrap(),
+    );
+    let mut repo = MemoryProcessRepository::default();
+    repo.insert(snapshot).unwrap();
+    assert_eq!(
+        repo.compare_and_commit(&plan()),
+        Err(CommitError::OutboxAlreadyExists("complete:p1:t1:0".into()))
+    );
+}
+
+#[test]
+fn a_state_mismatch_at_the_same_revision_is_a_conflict() {
+    let mut p = plan();
+    p.state_changes[0].from = TaskState::Waiting;
+    assert!(matches!(
+        repository().compare_and_commit(&p),
+        Err(CommitError::TaskConflict { .. })
+    ));
+}

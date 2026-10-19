@@ -319,3 +319,49 @@ impl KernelHost {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::{operation::OperationState, task_graph::TaskId};
+
+    fn host() -> std::sync::Arc<KernelHost> {
+        KernelHost::in_memory().0
+    }
+
+    fn seeded() -> ProcessSnapshot {
+        ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap()
+    }
+
+    async fn persist(host: &KernelHost, snapshot: &ProcessSnapshot) {
+        host.processes
+            .create(snapshot, SystemClock.now_ms(), host.timer_poll_ms())
+            .await
+            .expect("the seed aggregate is created");
+    }
+
+    /// An effect that may have run is quarantined, never silently retried.
+    #[tokio::test]
+    async fn marking_an_unknown_effect_quarantines_its_operation() {
+        let host = host();
+        persist(&host, &seeded()).await;
+        let id = OperationId {
+            process_id: "p".into(),
+            task: TaskId::new("root", 0).unwrap(),
+            sequence: 0,
+        };
+        let claimed = host
+            .prepare(&id, Slot::Direct)
+            .await
+            .unwrap()
+            .expect("the seed operation is claimable");
+        host.mark_effect_unknown(&claimed).await.unwrap();
+        let snapshot = host.snapshot("p").await.unwrap().unwrap();
+        assert!(matches!(
+            snapshot.operations[&id].state,
+            OperationState::EffectUnknown { .. }
+        ));
+    }
+}

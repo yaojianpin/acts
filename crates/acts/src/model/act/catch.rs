@@ -26,3 +26,20 @@ impl Catch {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catch_builder_defaults_and_setters() {
+        let catch = Catch::new();
+        assert!(catch.on.is_none());
+        assert!(catch.steps.is_empty());
+
+        let catch = catch.with_on("err1").with_step(|step| step.with_id("s1"));
+        assert_eq!(catch.on.as_deref(), Some("err1"));
+        assert_eq!(catch.steps.len(), 1);
+        assert_eq!(catch.steps[0].id, "s1");
+    }
+}

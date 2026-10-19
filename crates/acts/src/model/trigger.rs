@@ -173,3 +173,112 @@ impl Trigger {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn trigger_kind_parse_and_as_str_roundtrip() {
+        for (name, kind) in [
+            (TRIGGER_MANUAL, TriggerKind::Manual),
+            (TRIGGER_CHAT, TriggerKind::Chat),
+            (TRIGGER_HOOK, TriggerKind::Hook),
+            (TRIGGER_SCHEDULE, TriggerKind::Schedule),
+        ] {
+            assert_eq!(TriggerKind::parse(name), Some(kind));
+            assert_eq!(kind.as_str(), name);
+        }
+        assert_eq!(TriggerKind::parse("custom"), None);
+    }
+
+    #[test]
+    fn trigger_builders() {
+        let trigger = Trigger::new()
+            .with_id("t1")
+            .with_name("name")
+            .with_desc("desc")
+            .with_kind(TRIGGER_CHAT)
+            .with_params_data(json!({ "a": 1 }))
+            .with_schedule("* * * * * *")
+            .with_metadata("k", "v");
+
+        assert_eq!(trigger.id, "t1");
+        assert_eq!(trigger.name, "name");
+        assert_eq!(trigger.desc, "desc");
+        assert_eq!(trigger.kind, TRIGGER_CHAT);
+        assert_eq!(trigger.params, json!({ "a": 1 }));
+        assert_eq!(trigger.schedule.as_deref(), Some("* * * * * *"));
+        assert_eq!(trigger.metadata.get::<String>("k").unwrap(), "v");
+        assert!(trigger.is_builtin());
+        assert_eq!(trigger.builtin_kind(), Some(TriggerKind::Chat));
+
+        let built = Trigger::new().with_params_vars(|vars| vars.with("b", 2));
+        assert_eq!(built.params["b"], 2);
+    }
+
+    #[test]
+    fn trigger_valid_rejects_missing_id_and_kind() {
+        let err = Trigger::new()
+            .with_kind(TRIGGER_MANUAL)
+            .valid()
+            .unwrap_err();
+        assert!(err.to_string().contains("id is empty"), "{err}");
+
+        let err = Trigger::new().with_id("t1").valid().unwrap_err();
+        assert!(err.to_string().contains("kind is empty"), "{err}");
+    }
+
+    #[test]
+    fn trigger_valid_schedule_branches() {
+        // a custom (non-builtin) kind needs no schedule
+        assert!(
+            Trigger::new()
+                .with_id("t1")
+                .with_kind("custom.kind")
+                .valid()
+                .is_ok()
+        );
+        assert!(
+            !Trigger::new()
+                .with_id("t1")
+                .with_kind("custom.kind")
+                .is_builtin()
+        );
+
+        // a builtin schedule requires a non-empty schedule
+        let err = Trigger::new()
+            .with_id("t1")
+            .with_kind(TRIGGER_SCHEDULE)
+            .valid()
+            .unwrap_err();
+        assert!(err.to_string().contains("missing schedule"), "{err}");
+
+        let err = Trigger::new()
+            .with_id("t1")
+            .with_kind(TRIGGER_SCHEDULE)
+            .with_schedule("   ")
+            .valid()
+            .unwrap_err();
+        assert!(err.to_string().contains("missing schedule"), "{err}");
+
+        // ...and it must parse
+        let err = Trigger::new()
+            .with_id("t1")
+            .with_kind(TRIGGER_SCHEDULE)
+            .with_schedule("not a cron")
+            .valid()
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid schedule"), "{err}");
+
+        assert!(
+            Trigger::new()
+                .with_id("t1")
+                .with_kind(TRIGGER_SCHEDULE)
+                .with_schedule("* * * * * *")
+                .valid()
+                .is_ok()
+        );
+    }
+}

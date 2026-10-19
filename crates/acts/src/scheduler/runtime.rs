@@ -1248,3 +1248,389 @@ fn is_workdir_segment(pid: &str) -> bool {
         && !pid.contains(['/', '\\', ':', '\0'])
         && !pid.chars().any(char::is_control)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime() -> Arc<Runtime> {
+        Runtime::new(&Config::default(), None).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn accessors_report_the_wired_components() {
+        let runtime = runtime();
+        let registry = runtime.snapshot_registry();
+        assert_eq!(registry.len(), 0);
+        registry.register("profile", SnapshotOptions::default());
+        assert_eq!(registry.len(), 1);
+        assert!(registry.store("profile").is_some());
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(registry.purge_expired(), 0);
+
+        let debug = format!("{runtime:?}");
+        assert!(debug.contains("Runtime"));
+        assert!(
+            debug.contains("<1 entries>"),
+            "the snapshot count is rendered"
+        );
+        assert!(debug.contains("health"));
+
+        // The writer gauges and the loop metrics are readable straight away.
+        let _ = runtime.store_writer_depth();
+        let _ = runtime.store_writer_high_watermark();
+        let _ = runtime.store_writer_saturated();
+        let _ = runtime.ready_metrics();
+        let _ = runtime.outbox_metrics();
+        let _ = runtime.recovery_metrics();
+        let _ = runtime.projection_metrics();
+        let _ = runtime.cleanup_metrics();
+        let _ = runtime.scheduler_health();
+        let _ = runtime.config().scheduler_workers();
+
+        runtime.close().await;
+    }
+
+    #[test]
+    fn workdir_names_must_be_safe_segments() {
+        let root = std::env::temp_dir().join(format!("acts-wd-{}", crate::utils::longid()));
+        for pid in ["", ".", "..", "a/b", "a\\b", "c:", "a\0b"] {
+            assert!(
+                prepare_workdir(&root, pid).is_err(),
+                "{pid:?} is not a single path component"
+            );
+        }
+        let dir = prepare_workdir(&root, "run1").unwrap();
+        assert!(dir.is_dir());
+        // A pid already occupied by a file cannot be materialized.
+        std::fs::write(root.join("occupied"), b"x").unwrap();
+        let error = prepare_workdir(&root, "occupied").unwrap_err();
+        assert!(error.to_string().contains("failed to create"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn an_error_action_requires_its_code_and_unsupported_events_are_refused() {
+        use crate::event::EventAction;
+
+        let runtime = runtime();
+        let error = runtime
+            .do_action(&Action::new("pid", "tid", EventAction::Error, Vars::new()))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(crate::utils::consts::ACT_ERR_CODE)
+        );
+
+        for event in [
+            EventAction::Push,
+            EventAction::Remove,
+            EventAction::SetProcessVars,
+        ] {
+            let error = runtime
+                .do_action(&Action::new("pid", "tid", event, Vars::new()))
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("not served by the kernel engine")
+            );
+        }
+        runtime.close().await;
+    }
+
+    async fn insert_model(runtime: &Runtime, workflow: &Workflow) {
+        runtime
+            .store()
+            .models()
+            .create(&crate::store::data::Model {
+                id: workflow.id.clone(),
+                name: workflow.name.clone(),
+                desc: String::new(),
+                ver: "0.1.0".into(),
+                size: 0,
+                create_time: 0,
+                update_time: 0,
+                data: serde_json::to_string(workflow).unwrap(),
+                view: None,
+                timestamp: 0,
+                v: 0,
+            })
+            .await
+            .unwrap();
+    }
+
+    fn event(mid: &str, schedule: Option<&str>) -> crate::store::data::Event {
+        crate::store::data::Event {
+            id: format!("event-{}", crate::utils::longid()),
+            name: String::new(),
+            mid: mid.into(),
+            ver: "0.1.0".into(),
+            kind: "schedule".into(),
+            params: "null".into(),
+            schedule: schedule.map(str::to_string),
+            last_run: 0,
+            next_run: 0,
+            create_time: 0,
+            timestamp: 0,
+            v: 1,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_trigger_without_a_schedule_rolls_forward_to_zero() {
+        let runtime = runtime();
+        let workflow = Workflow::new()
+            .with_id("wf-trigger-none")
+            .with_step(|step| step.with_id("s1"));
+        insert_model(&runtime, &workflow).await;
+        let event = event(&workflow.id, None);
+        runtime.store().events().create(&event).await.unwrap();
+        runtime.fire_schedule(&event).await.unwrap();
+        let stored = runtime.store().events().find(&event.id).await.unwrap();
+        assert_eq!(stored.next_run, 0, "no cron expression means not armed");
+        assert!(stored.last_run > 0);
+        runtime.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_trigger_with_a_schedule_arms_its_next_fire() {
+        let runtime = runtime();
+        let workflow = Workflow::new()
+            .with_id("wf-trigger-cron")
+            .with_step(|step| step.with_id("s1"));
+        insert_model(&runtime, &workflow).await;
+        let event = event(&workflow.id, Some("* * * * * *"));
+        runtime.store().events().create(&event).await.unwrap();
+        runtime.fire_schedule(&event).await.unwrap();
+        let stored = runtime.store().events().find(&event.id).await.unwrap();
+        assert!(stored.next_run > stored.last_run);
+        runtime.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn the_trigger_timer_logs_a_failing_fire_and_keeps_ticking() {
+        let runtime = runtime();
+        // A due schedule row whose model does not exist: `fire_schedule` fails
+        // and the timer loop logs it instead of dying.
+        let event = event("missing-model", Some("* * * * * *"));
+        runtime.store().events().create(&event).await.unwrap();
+        runtime.init_trigger_timer();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The failing row is still due (the start never rolled it), so it is
+        // retried; the loop survived and health saw the store succeed.
+        assert!(runtime.scheduler_health().trigger.consecutive_failures == 0);
+        runtime.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn the_retry_timer_drops_a_delivery_without_a_canonical_message() {
+        use crate::store::data::{Delivery, DeliveryStatus};
+
+        let runtime = runtime();
+        let now = crate::utils::time::time_millis();
+        let delivery = Delivery {
+            id: format!("orphan-{}", crate::utils::longid()),
+            msg_id: format!("missing-{}", crate::utils::longid()),
+            pid: "p".into(),
+            tid: "t".into(),
+            chan_id: "chan".into(),
+            chan_pattern: "*".into(),
+            status: DeliveryStatus::Created,
+            retry_times: 0,
+            create_time: 0,
+            update_time: 0,
+            timestamp: now,
+            v: 1,
+        };
+        runtime
+            .store()
+            .deliveries()
+            .create(&delivery)
+            .await
+            .unwrap();
+        runtime.init_retry_timer().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if runtime
+                .store()
+                .deliveries()
+                .find_opt(&delivery.id)
+                .await
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the orphan delivery was never dropped"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        runtime.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn the_snapshot_timer_purges_expired_entries() {
+        let runtime = runtime();
+        let registry = runtime.snapshot_registry();
+        let store = registry.register("ttl", SnapshotOptions::default().with_ttl(0));
+        store.upsert("scope", 1, Vars::new().with("a", 1));
+        runtime.init_snapshot_timer();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if store.list().is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the expired snapshot entry was never purged"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        runtime.close().await;
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    #[test]
+    fn an_error_action_carries_its_legacy_code_and_message() {
+        use crate::event::EventAction as E;
+        use crate::scheduler::core::commit::command::ActionKind as K;
+
+        let options = Vars::new()
+            .with(crate::utils::consts::ACT_ERR_CODE, "E1")
+            .with(crate::utils::consts::ACT_ERR_MESSAGE, "boom");
+        let kind = Runtime::kernel_kind(&Action::new("p", "t", E::Error, options))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            kind,
+            K::Fail {
+                code: "E1".into(),
+                message: "boom".into()
+            }
+        );
+
+        // A missing message is an empty one, not a failure.
+        let kind = Runtime::kernel_kind(&Action::new(
+            "p",
+            "t",
+            E::Error,
+            Vars::new().with(crate::utils::consts::ACT_ERR_CODE, "E2"),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            kind,
+            K::Fail {
+                code: "E2".into(),
+                message: String::new()
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    /// A reclaim mark left by an interrupted cleanup whose rows disappeared
+    /// anyway must be cleared, so the pid is not blocked forever.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_reclaim_mark_without_rows_is_cleared() {
+        let runtime = Runtime::new(&Config::default(), None).unwrap();
+        let pid = format!("ghost-{}", crate::utils::longid());
+        runtime.kernel().begin_reclaim(&pid);
+        assert!(runtime.kernel().is_reclaiming(&pid));
+        assert_eq!(runtime.sweep_removable().await.unwrap(), 0);
+        assert!(
+            !runtime.kernel().is_reclaiming(&pid),
+            "the mark is cleared once the rows are provably gone"
+        );
+        runtime.close().await;
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    /// `resolve_scope_params` is exercised from here because `TaskId` is a
+    /// core (scheduler-private) type: inside the scheduler this test can name
+    /// it, while `snapshot.rs` (crate root) cannot.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn scope_params_resolve_in_order_and_report_missing_names() {
+        use crate::scheduler::core::model::task_graph::TaskId;
+
+        let runtime = Runtime::new(&Config::default(), None).unwrap();
+        let model = crate::model::Workflow::new()
+            .with_id("wf-scope")
+            .with_step(|step| step.with_id("s1"));
+        let spec = crate::scheduler::ScopeSpec {
+            process_id: "p-scope".into(),
+            node: "s1".into(),
+            task_id: TaskId::new("s1", 0).unwrap(),
+            model,
+            vars: vec![("known".into(), serde_json::json!("value").to_string())],
+            env: Vec::new(),
+            owner: crate::ScopePolicy::deny_all(),
+        };
+        let (scope, task, _ctx) = crate::scheduler::headless_scope(&runtime, &spec).unwrap();
+
+        let options = SnapshotOptions {
+            scope: vec!["known".into()],
+            ..SnapshotOptions::default()
+        };
+        assert_eq!(
+            crate::snapshot::resolve_scope_params(&task, &scope, &options).unwrap(),
+            vec![serde_json::json!("value")]
+        );
+
+        let options = SnapshotOptions {
+            scope: vec!["known".into(), "missing".into(), "also-missing".into()],
+            ..SnapshotOptions::default()
+        };
+        assert_eq!(
+            crate::snapshot::resolve_scope_params(&task, &scope, &options).unwrap_err(),
+            vec!["missing".to_string(), "also-missing".to_string()]
+        );
+        assert_eq!(crate::snapshot::join_scope(&[]), "");
+
+        runtime.close().await;
+    }
+
+    /// A pid left marked by a failed cleanup whose rows are gone anyway is
+    /// unmarked by the sweep, so it is not blocked forever.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn the_sweep_finishes_a_reclaiming_pid_without_rows() {
+        let runtime = Runtime::new(&Config::default(), None).unwrap();
+        runtime.kernel().begin_reclaim("never-existed");
+        assert!(runtime.kernel().is_reclaiming("never-existed"));
+
+        assert_eq!(runtime.sweep_removable().await.unwrap(), 0);
+        assert!(
+            !runtime.kernel().is_reclaiming("never-existed"),
+            "the sweep must clear a mark whose rows are gone"
+        );
+
+        runtime.close().await;
+    }
+}

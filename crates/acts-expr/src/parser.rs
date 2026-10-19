@@ -405,3 +405,231 @@ impl<'a> Parser<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Context, Expr, Value};
+
+    fn parse_error(source: &str) -> Error {
+        Expr::compile(source).expect_err(source)
+    }
+
+    fn eval(source: &str) -> Value {
+        Expr::compile(source)
+            .unwrap()
+            .eval(&Context::new())
+            .unwrap()
+    }
+
+    #[test]
+    fn precedence_climbs_from_the_loosest_operator() {
+        assert_eq!(eval("1 + 2 * 3 == 7 && 2 < 3"), Value::Bool(true));
+        assert_eq!(eval("false || true && false"), Value::Bool(false));
+        assert_eq!(eval("1 - 2 - 3"), Value::Int(-4));
+        assert_eq!(eval("2 * 3 % 4"), Value::Int(2));
+        assert_eq!(eval("-(1 + 2) * 2"), Value::Int(-6));
+        assert_eq!(eval("!false == true"), Value::Bool(true));
+        assert_eq!(eval("1 + 2 == 3 == true"), Value::Bool(true));
+    }
+
+    #[test]
+    fn postfix_chains_read_left_to_right() {
+        let mut context = Context::new();
+        context.set(
+            "obj",
+            Value::map([
+                ("list", Value::list([1, 2])),
+                (
+                    "f",
+                    Value::function(|args| match args {
+                        [Value::Map(_), Value::Int(i)] => Ok(Value::Int(i + 1)),
+                        _ => Ok(Value::Null),
+                    }),
+                ),
+            ]),
+        );
+        let expr = Expr::compile("obj.list[1] + obj.f(2)").unwrap();
+        assert_eq!(expr.eval(&context).unwrap(), Value::Int(5));
+        assert_eq!(expr.references(), ["f", "obj"]);
+    }
+
+    #[test]
+    fn a_call_needs_a_function_or_method() {
+        assert_eq!(
+            parse_error("1()"),
+            Error::Parse {
+                message: "only a function or a method can be called".to_string(),
+                pos: 1
+            }
+        );
+        assert_eq!(
+            parse_error("'a'()"),
+            Error::Parse {
+                message: "only a function or a method can be called".to_string(),
+                pos: 3
+            }
+        );
+        assert_eq!(
+            parse_error("(1)()"),
+            Error::Parse {
+                message: "only a function or a method can be called".to_string(),
+                pos: 3
+            }
+        );
+    }
+
+    #[test]
+    fn a_member_name_must_be_an_identifier() {
+        assert_eq!(
+            parse_error("a.true"),
+            Error::Parse {
+                message: "expected a member name after '.', found 'true'".to_string(),
+                pos: 2
+            }
+        );
+        assert_eq!(
+            parse_error("a.1"),
+            Error::Parse {
+                message: "expected a member name after '.', found '1'".to_string(),
+                pos: 2
+            }
+        );
+        assert_eq!(
+            parse_error("a.'x'"),
+            Error::Parse {
+                message: "expected a member name after '.', found a string".to_string(),
+                pos: 2
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_sources_report_the_first_problem() {
+        assert_eq!(
+            parse_error(""),
+            Error::Parse {
+                message: "expected a value, found the end of the expression".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            parse_error("1 + )"),
+            Error::Parse {
+                message: "expected a value, found ')'".to_string(),
+                pos: 4
+            }
+        );
+        assert_eq!(
+            parse_error("f(1"),
+            Error::Parse {
+                message: "expected ')' to close the arguments, found the end of the expression"
+                    .to_string(),
+                pos: 3
+            }
+        );
+        assert_eq!(
+            parse_error("a[0"),
+            Error::Parse {
+                message: "expected ']' to close the index, found the end of the expression"
+                    .to_string(),
+                pos: 3
+            }
+        );
+        assert_eq!(
+            parse_error("f(,1)"),
+            Error::Parse {
+                message: "expected a value, found ','".to_string(),
+                pos: 2
+            }
+        );
+        assert_eq!(
+            parse_error("1 2"),
+            Error::Parse {
+                message: "expected after the expression, found '2'".to_string(),
+                pos: 2
+            }
+        );
+        assert_eq!(
+            parse_error("[1]"),
+            Error::Parse {
+                message: "list literals ('[...]') are not supported; inject the list instead"
+                    .to_string(),
+                pos: 0
+            }
+        );
+    }
+
+    #[test]
+    fn comparisons_do_not_chain() {
+        for source in ["1 < 2 < 3", "1 <= 2 > 3", "1 > 2 >= 3"] {
+            let err = parse_error(source);
+            assert!(
+                err.to_string()
+                    .contains("comparison operators do not chain"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn nesting_is_bounded_in_groups_unaries_and_arguments() {
+        let grouped = format!(
+            "{}1{}",
+            "(".repeat(MAX_DEPTH + 1),
+            ")".repeat(MAX_DEPTH + 1)
+        );
+        assert!(
+            parse_error(&grouped)
+                .to_string()
+                .contains("nests too deeply")
+        );
+
+        let unary = format!("{}true", "!".repeat(MAX_DEPTH + 1));
+        assert!(parse_error(&unary).to_string().contains("nests too deeply"));
+
+        let call = format!("f({})", "(".repeat(MAX_DEPTH + 1));
+        assert!(parse_error(&call).to_string().contains("nests too deeply"));
+
+        let allowed = format!("{}1{}", "(".repeat(MAX_DEPTH), ")".repeat(MAX_DEPTH));
+        assert_eq!(Expr::compile(&allowed).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn empty_argument_lists_are_allowed_and_mixed_ones_are_not() {
+        let mut context = Context::new();
+        context.set("f", Value::function(|args| Ok(Value::from(args.len()))));
+        assert_eq!(
+            Expr::compile("f()").unwrap().eval(&context).unwrap(),
+            Value::from(0)
+        );
+        assert_eq!(
+            Expr::compile("f(1, 2)").unwrap().eval(&context).unwrap(),
+            Value::from(2)
+        );
+        assert_eq!(
+            parse_error("f(1,)"),
+            Error::Parse {
+                message: "expected a value, found ')'".to_string(),
+                pos: 4
+            }
+        );
+        assert_eq!(
+            parse_error("f(1 2)"),
+            Error::Parse {
+                message: "expected ')' to close the arguments, found '2'".to_string(),
+                pos: 4
+            }
+        );
+    }
+
+    #[test]
+    fn node_count_reflects_the_expression() {
+        assert_eq!(Expr::compile("1").unwrap().len(), 1);
+        // `1 + 2` is three nodes; a literal root is one.
+        assert_eq!(Expr::compile("1 + 2").unwrap().len(), 3);
+        assert!(!Expr::compile("1").unwrap().is_empty());
+        assert_eq!(BinOp::Add.symbol(), "+");
+        assert_eq!(BinOp::Rem.symbol(), "%");
+    }
+}

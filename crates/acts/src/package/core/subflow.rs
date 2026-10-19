@@ -120,4 +120,20 @@ mod tests {
         serde_json::from_value::<super::SubflowPackageParams>(value.clone()).unwrap();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
+
+    /// A non-string `to` is the package's input error, reported with its
+    /// package id.
+    #[tokio::test]
+    async fn pack_subflow_execute_rejects_malformed_target() {
+        let ctx = crate::package::tests::completed_context().await;
+        let err = super::SubflowPackage
+            .execute(&ctx, &serde_json::json!({"to": 1}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid ActPackage(acts.core.subflow)"),
+            "got: {err}"
+        );
+    }
 }

@@ -96,3 +96,32 @@ mod catch_join;
 mod fanout;
 mod flow;
 mod join;
+
+#[test]
+fn container_errors_render() {
+    for error in [
+        ContainerError::WrongProcess,
+        ContainerError::TaskNotFound(id("a", 0)),
+        ContainerError::SourceNotContainer {
+            source: id("a", 0),
+            state: TaskState::Completed,
+        },
+        ContainerError::SourceOperationTargetsDifferentTask,
+        ContainerError::InvalidSourcePark(TaskState::Completed),
+        ContainerError::EmptyChildTaskId,
+        ContainerError::ForwardSibling(1),
+        ContainerError::ReadmitNotCreated {
+            task: id("a", 0),
+            state: TaskState::Running,
+        },
+        ContainerError::GraphVersionConflict {
+            graph: 1,
+            snapshot: 2,
+        },
+        ContainerError::GenerationOverflow,
+        ContainerError::SequenceOverflow,
+        ContainerError::InvalidPlan("bad".into()),
+    ] {
+        assert!(error.to_string().starts_with("container error:"));
+    }
+}

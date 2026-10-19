@@ -193,3 +193,163 @@ impl KernelHost {
         Err(last_error.expect("a release retry loop always records its conflict"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::{
+        operation::{OperationRecord, OperationState},
+        task_graph::{TaskId, TaskState},
+    };
+
+    fn host() -> std::sync::Arc<KernelHost> {
+        KernelHost::in_memory().0
+    }
+
+    fn id(sequence: u64) -> OperationId {
+        OperationId {
+            process_id: "p".into(),
+            task: TaskId::new("a", 0).unwrap(),
+            sequence,
+        }
+    }
+
+    fn root_id(sequence: u64) -> OperationId {
+        OperationId {
+            process_id: "p".into(),
+            task: TaskId::new("root", 0).unwrap(),
+            sequence,
+        }
+    }
+
+    async fn persist(host: &KernelHost, snapshot: &ProcessSnapshot) {
+        host.processes
+            .create(snapshot, SystemClock.now_ms(), host.timer_poll_ms())
+            .await
+            .expect("the seed aggregate is created");
+    }
+
+    fn seeded() -> ProcessSnapshot {
+        ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap()
+    }
+
+    /// A ready record whose aggregate is gone has no work to drive.
+    #[tokio::test]
+    async fn a_missing_aggregate_is_skipped() {
+        let host = host();
+        assert!(
+            host.prepare(&id(0), Slot::Direct).await.unwrap().is_none(),
+            "no aggregate means no operation"
+        );
+    }
+
+    /// An operation the aggregate no longer holds is a programming error, not
+    /// a silent no-op.
+    #[tokio::test]
+    async fn a_missing_operation_is_an_error() {
+        let host = host();
+        persist(&host, &seeded()).await;
+        let error = match host.prepare(&id(9), Slot::Direct).await {
+            Err(error) => error,
+            Ok(_) => panic!("a missing operation must fail the prepare"),
+        };
+        assert!(format!("{error}").contains("not found"), "{error}");
+    }
+
+    /// An operation past the claimable states is not driven again.
+    #[tokio::test]
+    async fn a_completed_operation_is_not_reclaimed() {
+        let host = host();
+        let mut snapshot = seeded();
+        let op_id = id(0);
+        let mut record = OperationRecord::pending(op_id.clone(), OperationKind::ExecuteTask);
+        record.state =
+            OperationState::Completed(crate::scheduler::core::model::operation::CommitToken {
+                process_version: 1,
+                digest: "done".into(),
+            });
+        snapshot.operations.insert(op_id.clone(), record);
+        persist(&host, &snapshot).await;
+        assert!(host.prepare(&op_id, Slot::Direct).await.unwrap().is_none());
+    }
+
+    /// The idle timer preflight leaves the operation `Pending`: nothing is due,
+    /// so nothing is claimed.
+    #[tokio::test]
+    async fn an_idle_timer_is_not_claimed() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_timeout(|timeout| timeout.with_id("t1"))
+        });
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let mut snapshot = spec.seed_snapshot().unwrap();
+        let owner = TaskId::new("s1", 0).unwrap();
+        snapshot.tasks.get_mut(&owner).unwrap().state = TaskState::Running;
+        // The declared branch is in flight: the round blocks on it.
+        snapshot.tasks.insert(
+            TaskId::new("t1", 0).unwrap(),
+            crate::scheduler::core::commit::aggregate::TaskSnapshot {
+                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("t1")
+                    .unwrap(),
+                parent: Some(owner.clone()),
+                predecessors: vec![owner.clone()],
+                state: TaskState::Running,
+                revision: 0,
+            },
+        );
+        let op_id = OperationId {
+            process_id: "p".into(),
+            task: owner,
+            sequence: 0,
+        };
+        snapshot.operations.insert(
+            op_id.clone(),
+            OperationRecord::pending(op_id.clone(), OperationKind::DispatchTimeout),
+        );
+        persist(&host, &snapshot).await;
+        assert!(host.prepare(&op_id, Slot::Direct).await.unwrap().is_none());
+    }
+
+    /// A release that guards the pre-claim revision is refused at once: the
+    /// operation revision moved, and that is not the replace-level CAS the
+    /// loop retries.
+    #[tokio::test]
+    async fn a_stale_release_is_refused() {
+        let host = host();
+        persist(&host, &seeded()).await;
+        let mut claimed = host
+            .prepare(&root_id(0), Slot::Direct)
+            .await
+            .unwrap()
+            .expect("the seed operation is claimable");
+        assert!(claimed.revision > 0);
+        // The claim committed; a release that guards the pre-claim revision
+        // can never take.
+        claimed.revision = 0;
+        let error = host.release_claim(&claimed, 1).await.unwrap_err();
+        assert!(
+            !is_conflict(&error),
+            "a stale revision is a refusal: {error}"
+        );
+    }
+
+    /// A release the state machine refuses is not a conflict and is surfaced
+    /// at once.
+    #[tokio::test]
+    async fn a_refused_release_surfaces_the_domain_error() {
+        let host = host();
+        persist(&host, &seeded()).await;
+        let mut claimed = host
+            .prepare(&root_id(0), Slot::Direct)
+            .await
+            .unwrap()
+            .expect("the seed operation is claimable");
+        // The fence no longer matches the claim the record carries.
+        claimed.claim.claim.fence = 99;
+        let error = host.release_claim(&claimed, 1).await.unwrap_err();
+        assert!(!is_conflict(&error), "a refusal is not a lost CAS: {error}");
+    }
+}

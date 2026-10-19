@@ -211,3 +211,26 @@ impl Vars {
         JsonValue::Object(self.inner.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_iterators_are_exhausted() {
+        let map = JsonMap::from_iter([("a".to_string(), json!(1)), ("b".to_string(), json!(2))]);
+        let mut iter = Iter { iter: map.iter() };
+        assert_eq!(iter.next().map(|(k, _)| k.as_str()), Some("a"));
+        assert_eq!(iter.next().map(|(k, _)| k.as_str()), Some("b"));
+        assert!(iter.next().is_none());
+
+        let mut map = JsonMap::from_iter([("c".to_string(), json!(3))]);
+        let mut iter = IterMut {
+            iter: map.iter_mut(),
+        };
+        let (_, value) = iter.next().unwrap();
+        *value = json!(30);
+        assert!(iter.next().is_none());
+        assert_eq!(map.get("c"), Some(&json!(30)));
+    }
+}

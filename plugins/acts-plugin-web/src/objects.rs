@@ -143,3 +143,20 @@ impl From<validator::ValidationErrors> for AppError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An error carrying details serializes them in the same envelope as the
+    /// plain one, with the status it was built with.
+    #[test]
+    fn app_error_with_details_answers_its_status() {
+        let err = AppError {
+            message: "failed".to_string(),
+            details: Some("the reason".to_string()),
+            status: StatusCode::BAD_REQUEST,
+        };
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+}

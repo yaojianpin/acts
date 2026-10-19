@@ -334,4 +334,101 @@ mod tests {
             Err(TaskGraphError::UnreachableTasks(vec![eid("lost", 0)]))
         );
     }
+
+    #[test]
+    fn builder_rejects_blank_process_and_task_identity() {
+        assert_eq!(
+            TaskGraphBuilder::new("  ", 0).err(),
+            Some(TaskGraphError::EmptyProcessId)
+        );
+        assert_eq!(TaskId::new(" ", 0).err(), Some(TaskGraphError::EmptyTaskId));
+    }
+
+    #[test]
+    fn structural_mistakes_are_named_in_the_error() {
+        // Duplicate task identity.
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
+        b.add_node(node("root", 0)).unwrap();
+        assert_eq!(
+            b.add_node(node("root", 0)),
+            Err(TaskGraphError::DuplicateTask(eid("root", 0)))
+        );
+
+        // A second root is refused.
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
+        for name in ["root", "other"] {
+            b.add_node(node(name, 0)).unwrap();
+        }
+        b.set_root(eid("root", 0)).unwrap();
+        assert_eq!(
+            b.set_root(eid("other", 0)),
+            Err(TaskGraphError::MultipleRoots)
+        );
+
+        // A task has at most one parent.
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
+        for name in ["root", "a", "b"] {
+            b.add_node(node(name, 0)).unwrap();
+        }
+        b.add_child(eid("root", 0), eid("b", 0)).unwrap();
+        assert_eq!(
+            b.add_child(eid("a", 0), eid("b", 0)),
+            Err(TaskGraphError::MultipleParents(eid("b", 0)))
+        );
+
+        // The root cannot be a child.
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
+        b.add_node(node("root", 0)).unwrap();
+        b.set_root(eid("root", 0)).unwrap();
+        b.add_child(eid("root", 0), eid("root", 0)).unwrap();
+        assert_eq!(b.build(), Err(TaskGraphError::RootHasParent));
+
+        // The root must be a declared node.
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
+        b.set_root(eid("ghost", 0)).unwrap();
+        assert_eq!(b.build(), Err(TaskGraphError::UnknownTask(eid("ghost", 0))));
+
+        // A successor edge must name declared nodes.
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
+        b.add_node(node("root", 0)).unwrap();
+        b.set_root(eid("root", 0)).unwrap();
+        b.add_successor(eid("root", 0), eid("ghost", 0)).unwrap();
+        assert_eq!(b.build(), Err(TaskGraphError::UnknownTask(eid("ghost", 0))));
+    }
+
+    #[test]
+    fn built_graph_accessors_default_to_empty_slices() {
+        let mut b = TaskGraphBuilder::new("p1", 0).unwrap();
+        b.add_node(node("root", 0)).unwrap();
+        b.set_root(eid("root", 0)).unwrap();
+        let graph = b.build().unwrap();
+        assert!(graph.node(&eid("root", 0)).is_some());
+        assert!(graph.node(&eid("ghost", 0)).is_none());
+        assert_eq!(graph.children(&eid("ghost", 0)), &[]);
+        assert_eq!(graph.predecessors(&eid("ghost", 0)), &[]);
+        assert_eq!(graph.successors(&eid("ghost", 0)), &[]);
+        assert_eq!(graph.revision, 0);
+        assert_eq!(graph.process_id, "p1");
+    }
+
+    #[test]
+    fn graph_errors_render() {
+        for error in [
+            TaskGraphError::EmptyProcessId,
+            TaskGraphError::EmptyTaskId,
+            TaskGraphError::MissingRoot,
+            TaskGraphError::MultipleRoots,
+            TaskGraphError::RootHasParent,
+            TaskGraphError::DuplicateTask(eid("a", 0)),
+            TaskGraphError::UnknownTask(eid("a", 0)),
+            TaskGraphError::MultipleParents(eid("a", 0)),
+            TaskGraphError::DuplicateSuccessor {
+                from: eid("a", 0),
+                to: eid("b", 0),
+            },
+            TaskGraphError::UnreachableTasks(vec![eid("a", 0)]),
+        ] {
+            assert!(error.to_string().starts_with("execution graph error:"));
+        }
+    }
 }

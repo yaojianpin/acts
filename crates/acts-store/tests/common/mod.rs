@@ -4734,3 +4734,523 @@ macro_rules! gen_guarded_batch_tests {
         }
     };
 }
+
+/// Raw [`KvStore`](acts::KvStore) behavior shared by every external backend.
+///
+/// The `gen_store_tests!` suites drive the store through the collection layer,
+/// which only reaches a subset of the trait surface. These tests exercise the
+/// trait directly so each backend's own key encoding, batching, scanning and
+/// error mapping is covered: `$init` must produce a fresh
+/// `Arc<dyn acts::KvStore>` per call.
+#[allow(unused_macros)]
+macro_rules! gen_kv_tests {
+    ($init:expr) => {
+        fn kv_uid() -> String {
+            nanoid::nanoid!(12)
+        }
+
+        /// Scan through the trait with the given operation and return the
+        /// matching `(key, value)` rows in backend order.
+        async fn kv_scan(
+            store: &dyn acts::KvStore,
+            key: &str,
+            prefix: &str,
+            op: acts::ScanOperation,
+            is_rev: bool,
+        ) -> Vec<(String, Vec<u8>)> {
+            store
+                .scan_prefix(key, acts::ScanOptions::new(op, prefix.to_string(), is_rev))
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn kv_single_key_roundtrip_and_many() {
+            use acts::KvStore;
+            let store = ($init).await;
+
+            let base = format!("kv-{}-", kv_uid());
+            let a = format!("{base}a");
+            let b = format!("{base}b");
+            let missing = format!("{base}missing");
+
+            assert_eq!(store.one(&a).await.unwrap(), None);
+            store.put(&a, b"a1".to_vec()).await.unwrap();
+            store.put(&b, b"b1".to_vec()).await.unwrap();
+            // a second put overwrites instead of failing on the primary key
+            store.put(&a, b"a2".to_vec()).await.unwrap();
+            assert_eq!(store.one(&a).await.unwrap(), Some(b"a2".to_vec()));
+
+            // `many` preserves the caller's order and reports misses as None.
+            assert!(store.many(&[]).await.unwrap().is_empty());
+            let values = store
+                .many(&[a.clone(), missing.clone(), b.clone()])
+                .await
+                .unwrap();
+            assert_eq!(
+                values,
+                vec![Some(b"a2".to_vec()), None, Some(b"b1".to_vec())]
+            );
+
+            store.delete(&a).await.unwrap();
+            // deleting an absent key is a no-op, not an error
+            store.delete(&a).await.unwrap();
+            assert_eq!(store.one(&a).await.unwrap(), None);
+            store.delete(&b).await.unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn kv_many_reads_past_the_chunk_limit() {
+            use acts::{KvStore, StoreBatchOp};
+            let store = ($init).await;
+
+            let base = format!("kv-chunk-{}-", kv_uid());
+            let keys: Vec<String> = (0..600).map(|i| format!("{base}{i:04}")).collect();
+            let ops: Vec<StoreBatchOp> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, key)| StoreBatchOp::Put {
+                    key: key.clone(),
+                    value: format!("v{i}").into_bytes(),
+                })
+                .collect();
+            assert!(store.batch(&ops, &[]).await.unwrap());
+
+            // More than one chunk (500) on the backends that chunk the IN list,
+            // requested in reverse so the result cannot come back sorted by
+            // the query by accident.
+            let lookup: Vec<String> = keys.iter().rev().cloned().collect();
+            let values = store.many(&lookup).await.unwrap();
+            assert_eq!(values.len(), keys.len());
+            for (row, value) in values.iter().enumerate() {
+                let original = keys.len() - 1 - row;
+                assert_eq!(value, &Some(format!("v{original}").into_bytes()));
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn kv_guardless_batch_applies_every_op() {
+            use acts::{KvStore, StoreBatchOp};
+            let store = ($init).await;
+
+            let base = format!("kv-batch-{}-", kv_uid());
+            let (a, b, c, d) = (
+                format!("{base}a"),
+                format!("{base}b"),
+                format!("{base}c"),
+                format!("{base}d"),
+            );
+
+            // An empty batch is a successful no-op.
+            assert!(store.batch(&[], &[]).await.unwrap());
+
+            // Guardless single-op batches take the put/delete fast path.
+            assert!(
+                store
+                    .batch(
+                        &[StoreBatchOp::Put {
+                            key: a.clone(),
+                            value: b"a1".to_vec(),
+                        }],
+                        &[]
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .batch(
+                        &[StoreBatchOp::Put {
+                            key: b.clone(),
+                            value: b"b1".to_vec(),
+                        }],
+                        &[]
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .batch(
+                        &[StoreBatchOp::Put {
+                            key: c.clone(),
+                            value: b"c1".to_vec(),
+                        }],
+                        &[]
+                    )
+                    .await
+                    .unwrap()
+            );
+
+            // A multi-op batch: overwrite, delete and create in one unit.
+            assert!(
+                store
+                    .batch(
+                        &[
+                            StoreBatchOp::Put {
+                                key: a.clone(),
+                                value: b"a2".to_vec(),
+                            },
+                            StoreBatchOp::Delete { key: b.clone() },
+                            StoreBatchOp::Put {
+                                key: d.clone(),
+                                value: b"d1".to_vec(),
+                            },
+                        ],
+                        &[]
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(store.one(&a).await.unwrap(), Some(b"a2".to_vec()));
+            assert_eq!(store.one(&b).await.unwrap(), None);
+            assert_eq!(store.one(&c).await.unwrap(), Some(b"c1".to_vec()));
+            assert_eq!(store.one(&d).await.unwrap(), Some(b"d1".to_vec()));
+
+            // Guardless single-op delete fast path.
+            assert!(
+                store
+                    .batch(&[StoreBatchOp::Delete { key: c.clone() }], &[])
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(store.one(&c).await.unwrap(), None);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn kv_batch_checks_every_guard_before_writing() {
+            use acts::{KvStore, StoreBatchOp, StoreGuard};
+            let store = ($init).await;
+
+            let base = format!("kv-guards-{}-", kv_uid());
+            let (k1, k2) = (format!("{base}k1"), format!("{base}k2"));
+            let target = format!("{base}target");
+            let refused_target = format!("{base}refused");
+            store.put(&k1, b"v1".to_vec()).await.unwrap();
+            store.put(&k2, b"v2".to_vec()).await.unwrap();
+            store.put(&target, b"before".to_vec()).await.unwrap();
+
+            // Every guard holds: the whole batch applies.
+            assert!(
+                store
+                    .batch(
+                        &[
+                            StoreBatchOp::Put {
+                                key: target.clone(),
+                                value: b"after".to_vec(),
+                            },
+                            StoreBatchOp::Put {
+                                key: format!("{base}side"),
+                                value: b"side".to_vec(),
+                            },
+                        ],
+                        &[
+                            StoreGuard::holds(&k1, b"v1".to_vec()),
+                            StoreGuard::holds(&k2, b"v2".to_vec()),
+                        ]
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(store.one(&target).await.unwrap(), Some(b"after".to_vec()));
+
+            // The second guard is stale: no op applies, including the delete
+            // of a row whose own guard was satisfied.
+            assert!(
+                !store
+                    .batch(
+                        &[
+                            StoreBatchOp::Delete {
+                                key: target.clone()
+                            },
+                            StoreBatchOp::Put {
+                                key: refused_target.clone(),
+                                value: b"nope".to_vec(),
+                            },
+                        ],
+                        &[
+                            StoreGuard::holds(&k1, b"v1".to_vec()),
+                            StoreGuard::holds(&k2, b"stale".to_vec()),
+                        ]
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(store.one(&target).await.unwrap(), Some(b"after".to_vec()));
+            assert_eq!(store.one(&refused_target).await.unwrap(), None);
+
+            // An absent guard refuses a key that exists, and an expected value
+            // refuses a key that is missing.
+            assert!(
+                !store
+                    .batch(
+                        &[StoreBatchOp::Put {
+                            key: k1.clone(),
+                            value: b"overwritten".to_vec(),
+                        }],
+                        &[StoreGuard::absent(&k1)]
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(store.one(&k1).await.unwrap(), Some(b"v1".to_vec()));
+            assert!(
+                !store
+                    .batch(
+                        &[StoreBatchOp::Put {
+                            key: format!("{base}ghost"),
+                            value: b"ghost".to_vec(),
+                        }],
+                        &[StoreGuard::holds(
+                            &format!("{base}ghost"),
+                            b"ghost".to_vec(),
+                        )]
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(store.one(&format!("{base}ghost")).await.unwrap(), None);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn kv_scan_covers_every_operation() {
+            use acts::{KvStore, ScanOperation};
+            let store = ($init).await;
+
+            let id = kv_uid();
+            let prefix = format!("kv-scan-{id}-tasks-state-");
+            for (i, name) in ["a", "b", "c", "d"].iter().enumerate() {
+                store
+                    .put(&format!("{prefix}{name}"), vec![i as u8])
+                    .await
+                    .unwrap();
+            }
+            // A row outside the scan prefix must never leak in.
+            store
+                .put(&format!("kv-scan-{id}-other-a"), vec![9])
+                .await
+                .unwrap();
+
+            let keys = |rows: Vec<(String, Vec<u8>)>| {
+                rows.into_iter().map(|(key, _)| key).collect::<Vec<_>>()
+            };
+            let full = |name: &str| format!("{prefix}{name}");
+
+            // Eq matches the full value-key prefix, not the whole key.
+            let rows = kv_scan(&*store, &full("a"), &prefix, ScanOperation::Eq, false).await;
+            assert_eq!(keys(rows), [full("a")]);
+
+            let rows = kv_scan(&*store, &full("a"), &prefix, ScanOperation::Ne, false).await;
+            assert_eq!(keys(rows), [full("b"), full("c"), full("d")]);
+
+            let rows = kv_scan(&*store, &full("a"), &prefix, ScanOperation::Ne, true).await;
+            assert_eq!(keys(rows), [full("d"), full("c"), full("b")]);
+
+            let rows = kv_scan(
+                &*store,
+                &prefix,
+                &prefix,
+                ScanOperation::In {
+                    values: vec![full("a"), full("c")],
+                },
+                false,
+            )
+            .await;
+            assert_eq!(keys(rows), [full("a"), full("c")]);
+
+            // Both bounds (half-open), lower only, upper only, and no bounds.
+            let rows = kv_scan(
+                &*store,
+                &prefix,
+                &prefix,
+                ScanOperation::Range {
+                    lower: Some(full("b")),
+                    upper: Some(full("d")),
+                },
+                false,
+            )
+            .await;
+            assert_eq!(keys(rows), [full("b"), full("c")]);
+
+            let rows = kv_scan(
+                &*store,
+                &prefix,
+                &prefix,
+                ScanOperation::Range {
+                    lower: Some(full("c")),
+                    upper: None,
+                },
+                false,
+            )
+            .await;
+            assert_eq!(keys(rows), [full("c"), full("d")]);
+
+            let rows = kv_scan(
+                &*store,
+                &prefix,
+                &prefix,
+                ScanOperation::Range {
+                    lower: None,
+                    upper: Some(full("b")),
+                },
+                false,
+            )
+            .await;
+            assert_eq!(keys(rows), [full("a")]);
+
+            let rows = kv_scan(
+                &*store,
+                &prefix,
+                &prefix,
+                ScanOperation::Range {
+                    lower: None,
+                    upper: None,
+                },
+                false,
+            )
+            .await;
+            assert_eq!(keys(rows), [full("a"), full("b"), full("c"), full("d")]);
+
+            // An Eq key outside the scan prefix matches nothing (backends that
+            // narrow by key prefix must fall back to the prefix scan).
+            let rows = kv_scan(
+                &*store,
+                "not-under-the-prefix",
+                &prefix,
+                ScanOperation::Eq,
+                true,
+            )
+            .await;
+            assert!(rows.is_empty());
+
+            // An unknown prefix scans nothing.
+            let rows = kv_scan(
+                &*store,
+                "kv-scan-unknown-",
+                "kv-scan-unknown-",
+                ScanOperation::Range {
+                    lower: None,
+                    upper: None,
+                },
+                false,
+            )
+            .await;
+            assert!(rows.is_empty());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn kv_scan_treats_like_wildcards_literally() {
+            use acts::KvStore;
+            let store = ($init).await;
+
+            let id = kv_uid();
+            let prefix = format!("kv-esc-{id}-_%");
+            // `%` and `_` are ordinary key characters: a prefix containing
+            // them must not act as a LIKE pattern.
+            let literal = format!("{prefix}value");
+            let wildcard_match = format!("kv-esc-{id}-XZvalue");
+            store.put(&literal, b"literal".to_vec()).await.unwrap();
+            store
+                .put(&wildcard_match, b"wildcard".to_vec())
+                .await
+                .unwrap();
+            // A backslash in the prefix is literal too.
+            let slash_prefix = format!("kv-esc-{id}-\\done_");
+            let slash_key = format!("{slash_prefix}value");
+            store.put(&slash_key, b"slash".to_vec()).await.unwrap();
+
+            let rows = kv_scan(
+                &*store,
+                &prefix,
+                &prefix,
+                acts::ScanOperation::Range {
+                    lower: None,
+                    upper: None,
+                },
+                false,
+            )
+            .await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, literal);
+            assert_eq!(rows[0].1, b"literal".to_vec());
+
+            let rows = kv_scan(
+                &*store,
+                &slash_prefix,
+                &slash_prefix,
+                acts::ScanOperation::Range {
+                    lower: None,
+                    upper: None,
+                },
+                false,
+            )
+            .await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, slash_key);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn kv_concurrent_writers_keep_every_key() {
+            use acts::{KvStore, StoreBatchOp, StoreGuard};
+            let store = ($init).await;
+
+            let base = format!("kv-conc-{}-", kv_uid());
+            let mut handles = Vec::new();
+            for writer in 0..8u32 {
+                let store = store.clone();
+                let base = base.clone();
+                handles.push(tokio::spawn(async move {
+                    for row in 0..10u32 {
+                        let key = format!("{base}{writer}-{row:02}");
+                        store.put(&key, vec![writer as u8]).await.unwrap();
+                    }
+                    // One guarded create per writer: each key is owned by a
+                    // single writer, so every absent guard must hold.
+                    let key = format!("{base}guard-{writer}");
+                    assert!(
+                        store
+                            .batch(
+                                &[StoreBatchOp::Put {
+                                    key: key.clone(),
+                                    value: b"g".to_vec(),
+                                }],
+                                &[StoreGuard::absent(&key)]
+                            )
+                            .await
+                            .unwrap()
+                    );
+                }));
+            }
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            let mut keys = Vec::with_capacity(88);
+            for writer in 0..8u32 {
+                for row in 0..10u32 {
+                    keys.push(format!("{base}{writer}-{row:02}"));
+                }
+                keys.push(format!("{base}guard-{writer}"));
+            }
+            let values = store.many(&keys).await.unwrap();
+            assert_eq!(values.len(), keys.len());
+            assert!(
+                values.iter().all(|value| value.is_some()),
+                "every concurrent write is stored"
+            );
+            for writer in 0..8u32 {
+                assert_eq!(
+                    store.one(&format!("{base}{writer}-00")).await.unwrap(),
+                    Some(vec![writer as u8])
+                );
+            }
+        }
+    };
+}

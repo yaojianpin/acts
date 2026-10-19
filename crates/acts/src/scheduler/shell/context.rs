@@ -271,3 +271,255 @@ impl Context {
         Context::scope(self, || self.runtime.env().eval::<T>(expr))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::task_graph::TaskId;
+    use crate::scheduler::shell::scope::ScopeSpec;
+    use crate::store::MemoryStore;
+    use crate::{Config, MissingParamAction, Vars, model::Workflow};
+
+    fn new_runtime(config: &Config) -> Arc<Runtime> {
+        Runtime::new(config, Some(Arc::new(MemoryStore::new()))).unwrap()
+    }
+
+    fn spec(owner: crate::ScopePolicy, vars: Vec<(String, String)>) -> ScopeSpec {
+        ScopeSpec {
+            process_id: "p-ctx".into(),
+            node: "s1".into(),
+            task_id: TaskId::new("s1", 0).unwrap(),
+            model: Workflow::new()
+                .with_id("wf-ctx")
+                .with_var("v", 1)
+                .with_env("declared", "from-env")
+                .with_step(|step| {
+                    step.with_id("s1")
+                        .with_uses("test.irq", Vars::new().with("p", "${{ v }}"))
+                }),
+            vars,
+            env: vec![("declared".into(), serde_json::json!("from-env"))],
+            owner,
+        }
+    }
+
+    fn ctx(runtime: &Arc<Runtime>, spec: &ScopeSpec) -> Context {
+        crate::scheduler::shell::scope::headless_scope(runtime, spec)
+            .unwrap()
+            .2
+    }
+
+    fn open_owner() -> crate::ScopePolicy {
+        crate::ScopePolicy {
+            subject: "u1".into(),
+            all: true,
+            ..crate::ScopePolicy::default()
+        }
+    }
+
+    /// The debug rendering names the run and the execution, the task-local
+    /// scope can be entered from outside or reused inside, and the engine
+    /// handles are the scope's and the runtime's.
+    #[tokio::test]
+    async fn the_context_renders_scopes_with_and_without_a_running_scope() {
+        let runtime = new_runtime(&Config::default());
+        let ctx = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("v".into(), "1".into())]),
+        );
+        let text = format!("{ctx:?}");
+        assert!(text.contains("Context"), "{text}");
+        assert!(text.contains("p-ctx"), "{text}");
+
+        // Outside: the scope is installed for the call and removed after.
+        let pid = Context::scope(&ctx, || ctx.proc.id().to_string());
+        assert_eq!(pid, "p-ctx");
+        assert!(Context::try_with_current(|_| ()).is_err());
+
+        // Inside: the installed scope is reused, never re-installed.
+        let seen = Context::scope(&ctx, || {
+            Context::try_with_current(|inner| inner.proc.id().to_string()).unwrap()
+        });
+        assert_eq!(seen, "p-ctx");
+
+        // Clone, task handle and the cancellation child all point at the run.
+        let clone = ctx.clone();
+        assert_eq!(clone.task().id, ctx.task().id);
+        assert!(!ctx.cancellation_token().is_cancelled());
+    }
+
+    /// The env surface: the run directory has its own name, the run env is
+    /// read first, the process env answers a scalar, a type mismatch reads as
+    /// absent, and a missing name is `None`.
+    #[tokio::test]
+    async fn the_context_answers_env_from_the_run_and_the_process() {
+        let mut config = Config::default();
+        config.data.workdir = Some(
+            std::env::temp_dir()
+                .join(format!("acts-ctx-env-{}", crate::utils::longid()))
+                .display()
+                .to_string(),
+        );
+        let runtime = new_runtime(&config);
+        let ctx = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("v".into(), "1".into())]),
+        );
+
+        let dir: String = ctx.get_env(consts::ENV_WORK_DIR).unwrap();
+        assert!(dir.contains("p-ctx"), "{dir}");
+        assert_eq!(
+            ctx.get_env::<String>("declared").as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(ctx.eval::<i32>("v").unwrap(), 1);
+        assert!(ctx.workdir().is_some());
+
+        // A process env variable that cannot convert to the requested type is
+        // treated as absent instead of failing the effect.
+        assert!(ctx.get_env::<i32>("PATH").is_none());
+        assert!(ctx.get_env::<String>("ACTS_SURELY_MISSING_KEY").is_none());
+    }
+
+    /// A registered snapshot target seals its value onto the headless task;
+    /// the value never reaches `find`.
+    #[tokio::test]
+    async fn a_snapshot_target_seals_its_data() {
+        let runtime = new_runtime(&Config::default());
+        let options = crate::snapshot::SnapshotOptions {
+            scope: vec!["uid".into()],
+            on_missing: MissingParamAction::Error,
+            ..crate::snapshot::SnapshotOptions::per_task()
+        };
+        runtime.register_snapshot("profile", options).unwrap();
+        runtime.snapshot_store("profile").unwrap().upsert(
+            "u9",
+            1,
+            Vars::new().with("name", "sealed"),
+        );
+
+        let ctx = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("uid".into(), "\"u9\"".into())]),
+        );
+        ctx.prepare().await.unwrap();
+        let sealed = ctx.task().sealed(&ctx.proc, "profile").unwrap();
+        assert_eq!(sealed.get::<String>("name").as_deref(), Some("sealed"));
+        assert!(ctx.task().find::<Vars>(&ctx.proc, "profile").is_none());
+
+        // A second prepare keeps the local seal instead of re-resolving.
+        ctx.prepare().await.unwrap();
+        assert!(ctx.task().has_sealed_local("profile"));
+    }
+
+    /// A missing scope parameter follows the target's `on_missing`: skip the
+    /// target, or refuse the prepare with the missing names.
+    #[tokio::test]
+    async fn a_missing_scope_parameter_follows_on_missing() {
+        let runtime = new_runtime(&Config::default());
+        let mut skip = crate::snapshot::SnapshotOptions::per_task();
+        skip.scope = vec!["uid".into()];
+        skip.on_missing = MissingParamAction::Skip;
+        runtime.register_snapshot("skip", skip).unwrap();
+        let ctx = ctx(&runtime, &spec(open_owner(), Vec::new()));
+        ctx.prepare().await.unwrap();
+        assert!(!ctx.task().has_sealed_local("skip"));
+
+        let mut error = crate::snapshot::SnapshotOptions::per_task();
+        error.scope = vec!["uid".into()];
+        error.on_missing = MissingParamAction::Error;
+        runtime.register_snapshot("error", error).unwrap();
+        let failure = ctx.prepare().await.unwrap_err();
+        assert!(
+            format!("{failure}").contains("missing required params"),
+            "{failure}"
+        );
+    }
+
+    /// A scope the caller does not own is denied before the store is read,
+    /// and absent data follows `on_missing` like an absent parameter.
+    #[tokio::test]
+    async fn snapshot_authority_and_absent_data_are_enforced() {
+        let runtime = new_runtime(&Config::default());
+        let options = crate::snapshot::SnapshotOptions {
+            scope: vec!["uid".into()],
+            on_missing: MissingParamAction::Error,
+            ..crate::snapshot::SnapshotOptions::per_task()
+        };
+        runtime.register_snapshot("profile", options).unwrap();
+        runtime.snapshot_store("profile").unwrap().upsert(
+            "u9",
+            1,
+            Vars::new().with("name", "sealed"),
+        );
+
+        // deny_all: the subject may read nothing, whatever the scope key.
+        let denied = ctx(
+            &runtime,
+            &spec(
+                crate::ScopePolicy::deny_all(),
+                vec![("uid".into(), "\"u9\"".into())],
+            ),
+        );
+        let failure = denied.prepare().await.unwrap_err();
+        assert!(matches!(failure, ActError::Denied(_)), "{failure:?}");
+
+        // Owned, but the store has no entry for the scope: Error refuses.
+        let missing = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("uid".into(), "\"u-missing\"".into())]),
+        );
+        let failure = missing.prepare().await.unwrap_err();
+        assert!(
+            format!("{failure}").contains("has no data for scope"),
+            "{failure}"
+        );
+
+        // ...and Skip leaves the target unsealed (a fresh registry, so the
+        // Error target above does not decide this case).
+        let runtime = new_runtime(&Config::default());
+        let mut skip = crate::snapshot::SnapshotOptions {
+            scope: vec!["uid".into()],
+            ..crate::snapshot::SnapshotOptions::per_task()
+        };
+        skip.on_missing = MissingParamAction::Skip;
+        runtime.register_snapshot("skip", skip).unwrap();
+        let missing = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("uid".into(), "\"u-missing\"".into())]),
+        );
+        missing.prepare().await.unwrap();
+        assert!(!missing.task().has_sealed_local("skip"));
+    }
+
+    /// A `PerProc` target already sealed on the evaluation's lineage is not
+    /// re-resolved: the first value wins for this prepare.
+    #[tokio::test]
+    async fn a_per_proc_seal_is_resolved_once_per_lineage() {
+        let runtime = new_runtime(&Config::default());
+        runtime
+            .register_snapshot("profile", crate::snapshot::SnapshotOptions::per_proc())
+            .unwrap();
+        runtime
+            .snapshot_store("profile")
+            .unwrap()
+            .upsert("", 1, Vars::new().with("name", "first"));
+        let ctx = ctx(&runtime, &spec(open_owner(), Vec::new()));
+        ctx.prepare().await.unwrap();
+        let first = ctx.task().sealed(&ctx.proc, "profile").unwrap();
+        assert_eq!(first.get::<String>("name").as_deref(), Some("first"));
+
+        runtime.snapshot_store("profile").unwrap().upsert(
+            "",
+            2,
+            Vars::new().with("name", "second"),
+        );
+        ctx.prepare().await.unwrap();
+        let kept = ctx.task().sealed(&ctx.proc, "profile").unwrap();
+        assert_eq!(
+            kept.get::<String>("name").as_deref(),
+            Some("first"),
+            "the local seal is the preparation's value"
+        );
+    }
+}

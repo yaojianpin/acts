@@ -311,3 +311,27 @@ mod tests {
         assert_eq!(rets, vec![7; 8]);
     }
 }
+
+#[cfg(test)]
+mod recv_without_sender_tests {
+    use super::*;
+
+    /// The watch channel exists only to wake waiters; the value and the fire
+    /// flag are the authoritative state. A receiver whose sender is gone must
+    /// therefore return the value instead of hanging or panicking. The
+    /// `tx` field is given a sender of its own channel so the `closed`
+    /// receiver has no sender left to observe.
+    #[tokio::test]
+    async fn recv_returns_the_value_when_the_watch_sender_is_gone() {
+        let (unused_tx, _unused_rx) = watch::channel(false);
+        let (tx, closed) = watch::channel(false);
+        drop(tx);
+        let signal = Signal {
+            data: Arc::new(Mutex::new(7)),
+            is_closed: Arc::new(Mutex::new(false)),
+            closed,
+            tx: unused_tx,
+        };
+        assert_eq!(signal.recv().await, 7);
+    }
+}

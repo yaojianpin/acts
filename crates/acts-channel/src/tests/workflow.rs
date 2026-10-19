@@ -101,3 +101,35 @@ async fn workflow_models() {
     assert!(ret.data.is_some());
     tx.send(()).unwrap();
 }
+
+/// Deploy without pinning a model id: the server assigns one, and the model is
+/// still listed.
+#[tokio::test]
+async fn workflow_deploy_without_mid() {
+    let (tx, rx) = oneshot::channel();
+    let port = start_server(rx).await;
+    let url = format!("http://{}:{port}", server_addr());
+
+    let mut client = ActsChannel::connect(&url).await.unwrap();
+    let yml = r"
+    id: test_auto_mid
+    name: test
+    ver: '1.0'
+    steps:
+    - name: act1
+    ";
+    let ret = client.deploy(yml, None).await.unwrap();
+    assert!(ret.data.unwrap());
+
+    let page = client
+        .send::<PageData<ModelInfo>>("model:ls", Vars::new())
+        .await
+        .unwrap()
+        .data
+        .unwrap();
+    assert!(
+        page.rows.iter().any(|model| model.name == "test"),
+        "the deployed model is listed"
+    );
+    tx.send(()).unwrap();
+}

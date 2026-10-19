@@ -157,4 +157,20 @@ mod tests {
         serde_json::from_value::<super::ActionPackageParams>(params.clone()).unwrap();
         jsonschema::validate(&meta.schema, &params).unwrap()
     }
+
+    /// Params the package's own parser cannot read are reported as a package
+    /// error (a run would normally be refused by the schema first).
+    #[tokio::test]
+    async fn pack_action_execute_rejects_unparseable_params() {
+        let ctx = crate::package::tests::completed_context().await;
+        let err = super::ActionPackage
+            .execute(&ctx, &serde_json::json!("not an object"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid ActPackage(acts.core.action)"),
+            "got: {err}"
+        );
+    }
 }

@@ -388,4 +388,69 @@ mod cached_instance_tests {
         let third = package.create("test.cached", &config).unwrap();
         assert!(!Arc::ptr_eq(&first, &third));
     }
+
+    #[test]
+    fn the_registry_debugs_its_entries() {
+        let package = Package::new();
+        package.register(
+            CachedPackage::definition().id,
+            &ActPackageRegister::new::<CachedPackage>(),
+        );
+        let text = format!("{package:?}");
+        assert!(text.contains("Package"), "got: {text}");
+        assert!(text.contains("test.cached"), "got: {text}");
+        // a missing id is a runtime error, not a panic
+        let err = package
+            .create("test.missing", &Config::default())
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot find package 'test.missing'")
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct DefaultsPackage;
+
+    #[async_trait::async_trait]
+    impl ActPackage for DefaultsPackage {
+        fn new(_config: &Config) -> Result<Self> {
+            Ok(Self)
+        }
+
+        fn definition() -> ActPackageDefinition {
+            ActPackageDefinition {
+                id: "test.defaults",
+                name: "Defaults",
+                desc: "",
+                icon: "",
+                doc: "",
+                version: "0.1.0",
+                schema: json!({}),
+                options: None,
+                run_as: ActRunAs::Func,
+                resources: vec![],
+                catalog: ActPackageCatalog::Core,
+            }
+        }
+    }
+
+    /// A package that implements only the required surface: it is not
+    /// declared idempotent, and both hooks answer "nothing to add".
+    #[tokio::test]
+    async fn the_trait_defaults_answer_nothing() {
+        assert!(!<DefaultsPackage as ActPackage>::idempotent());
+        let ctx = crate::package::tests::completed_context().await;
+        let package = DefaultsPackage::new(&Config::default()).unwrap();
+        assert!(package.execute(&ctx, &json!(null)).await.unwrap().is_none());
+        let runtime: Arc<crate::scheduler::Runtime> = ctx.runtime.clone();
+        assert!(
+            package
+                .start(&runtime, &json!(null), &Vars::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }

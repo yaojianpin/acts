@@ -218,3 +218,433 @@ fn a_live_source_leaves_admitted_successors_alone() {
     assert!(plan.state_changes.is_empty());
     assert!(plan.operations.is_empty());
 }
+
+#[test]
+fn readiness_of_a_task_without_predecessors_is_ready() {
+    let graph = graph();
+    let snapshot = snapshot(TaskState::Completed, TaskState::Completed);
+    // `root` has children but no predecessors.
+    assert_eq!(
+        readiness(&graph, &snapshot, &id("root"), JoinPolicy::AllSucceeded).unwrap(),
+        JoinReadiness::Ready
+    );
+    // A predecessor missing from the aggregate is corrupt, not ready.
+    let mut corrupt = snapshot.clone();
+    corrupt.tasks.remove(&id("a"));
+    assert!(matches!(
+        readiness(&graph, &corrupt, &id("join"), JoinPolicy::AllSucceeded),
+        Err(PropagationError::TaskNotFound(_))
+    ));
+}
+
+#[test]
+fn a_non_terminal_source_is_refused() {
+    let mut snapshot = snapshot(TaskState::Running, TaskState::Running);
+    snapshot.tasks.get_mut(&id("a")).unwrap().state = TaskState::Running;
+    assert!(matches!(
+        Propagate::plan(
+            (&graph(), &snapshot),
+            &command("a", JoinPolicy::AllSucceeded)
+        ),
+        Err(PropagationError::SourceNotTerminal { .. })
+    ));
+}
+
+#[test]
+fn a_flow_naming_an_uninstantiated_node_is_refused() {
+    let mut command = command("a", JoinPolicy::AllSucceeded);
+    command.flow = Some(FlowTarget {
+        node: "ghost".into(),
+        reopen: false,
+        auto: true,
+        vars: Vec::new(),
+    });
+    assert!(matches!(
+        Propagate::plan(
+            (
+                &graph(),
+                &snapshot(TaskState::Completed, TaskState::Completed)
+            ),
+            &command
+        ),
+        Err(PropagationError::FlowTargetNotInstantiated(_))
+    ));
+}
+
+/// A reopen whose inherited predecessor is still in flight creates the new
+/// generation `Created` (its predecessor's own propagation admits it later)
+/// and carries the declared vars onto its scope.
+#[test]
+fn a_reopen_with_a_live_predecessor_waits_as_created() {
+    let snapshot = ProcessSnapshot {
+        process_id: "p1".into(),
+        version: ProcessVersion {
+            graph: 4,
+            process: 4,
+            operations: 2,
+        },
+        tasks: HashMap::from([
+            (
+                id("src"),
+                TaskSnapshot {
+                    model_node: NodeId::parse("src").unwrap(),
+                    parent: None,
+                    predecessors: vec![],
+                    state: TaskState::Completed,
+                    revision: 0,
+                },
+            ),
+            (
+                id("target"),
+                TaskSnapshot {
+                    model_node: NodeId::parse("target").unwrap(),
+                    parent: None,
+                    predecessors: vec![id("other")],
+                    state: TaskState::Completed,
+                    revision: 2,
+                },
+            ),
+            (
+                id("other"),
+                TaskSnapshot {
+                    model_node: NodeId::parse("other").unwrap(),
+                    parent: None,
+                    predecessors: vec![],
+                    state: TaskState::Running,
+                    revision: 0,
+                },
+            ),
+        ]),
+        variables: BTreeMap::new(),
+        operations: HashMap::new(),
+        outbox: HashMap::new(),
+    };
+    let graph = {
+        let mut b = TaskGraphBuilder::new("p1", 4).unwrap();
+        for name in ["src", "target", "other"] {
+            b.add_node(TaskNode {
+                id: id(name),
+                model_node: NodeId::parse(name).unwrap(),
+                state: TaskState::Created,
+                revision: 0,
+            })
+            .unwrap();
+        }
+        b.set_root(id("src")).unwrap();
+        b.add_child(id("src"), id("target")).unwrap();
+        b.add_child(id("src"), id("other")).unwrap();
+        b.add_successor(id("src"), id("target")).unwrap();
+        b.build().unwrap()
+    };
+    let mut command = command("src", JoinPolicy::AllSucceeded);
+    command.flow = Some(FlowTarget {
+        node: "target".into(),
+        reopen: true,
+        auto: false,
+        vars: vec![("declared".into(), "value".into())],
+    });
+    let plan = Propagate::plan((&graph, &snapshot), &command).unwrap();
+    let create = plan
+        .task_creates
+        .iter()
+        .find(|create| create.task.node.as_str() == "target")
+        .expect("the flow re-creates the node");
+    assert_eq!(create.task, TaskId::new("target", 1).unwrap());
+    assert_eq!(
+        create.initial_state,
+        TaskState::Created,
+        "a live predecessor admits the re-entry later"
+    );
+    assert!(
+        plan.operations.iter().all(|op| op.id.task != create.task),
+        "no start operation before its predecessor settles"
+    );
+    assert!(
+        plan.variable_writes.iter().any(|write| {
+            write.scope == create.task && write.name == "auto" && write.value == "0"
+        })
+    );
+    assert!(plan.variable_writes.iter().any(|write| {
+        write.scope == create.task && write.name == "declared" && write.value == "value"
+    }));
+}
+
+#[test]
+fn an_aborted_source_aborts_a_running_successor() {
+    let mut b = TaskGraphBuilder::new("p1", 4).unwrap();
+    for name in ["root", "a", "b"] {
+        b.add_node(TaskNode {
+            id: id(name),
+            model_node: NodeId::parse(name).unwrap(),
+            state: TaskState::Created,
+            revision: 0,
+        })
+        .unwrap();
+    }
+    b.set_root(id("root")).unwrap();
+    b.add_child(id("root"), id("a")).unwrap();
+    b.add_child(id("root"), id("b")).unwrap();
+    b.add_successor(id("a"), id("b")).unwrap();
+    let graph = b.build().unwrap();
+    let mut snapshot = snapshot(TaskState::Aborted, TaskState::Running);
+    snapshot.tasks.get_mut(&id("b")).unwrap().state = TaskState::Running;
+    let plan =
+        Propagate::plan((&graph, &snapshot), &command("a", JoinPolicy::AllSucceeded)).unwrap();
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(plan.operations[0].kind, OperationKind::AbortTask);
+}
+
+#[test]
+fn the_propagation_envelope_must_match_the_snapshot() {
+    let mut cmd = command("a", JoinPolicy::AllSucceeded);
+    cmd.process_id = "other".into();
+    assert_eq!(
+        Propagate::plan(
+            (
+                &graph(),
+                &snapshot(TaskState::Completed, TaskState::Completed)
+            ),
+            &cmd
+        ),
+        Err(PropagationError::WrongProcess)
+    );
+
+    let mut cmd = command("a", JoinPolicy::AllSucceeded);
+    cmd.process_id = "p1".into();
+    let mut stale = snapshot(TaskState::Completed, TaskState::Completed);
+    stale.version.graph = 5;
+    assert_eq!(
+        Propagate::plan((&graph(), &stale), &cmd),
+        Err(PropagationError::GraphVersionConflict {
+            graph: 4,
+            snapshot: 5
+        })
+    );
+
+    let mut cmd = command("a", JoinPolicy::AllSucceeded);
+    cmd.source_operation.id.task = id("b");
+    assert_eq!(
+        Propagate::plan(
+            (
+                &graph(),
+                &snapshot(TaskState::Completed, TaskState::Completed)
+            ),
+            &cmd
+        ),
+        Err(PropagationError::SourceOperationTargetsDifferentTask)
+    );
+
+    let mut cmd = command("a", JoinPolicy::AllSucceeded);
+    cmd.task = id("elsewhere");
+    cmd.source_operation.id.task = id("elsewhere");
+    assert!(matches!(
+        Propagate::plan(
+            (
+                &graph(),
+                &snapshot(TaskState::Completed, TaskState::Completed)
+            ),
+            &cmd
+        ),
+        Err(PropagationError::TaskNotInGraph(_))
+    ));
+}
+
+#[test]
+fn propagation_errors_render() {
+    for error in [
+        PropagationError::WrongProcess,
+        PropagationError::GraphVersionConflict {
+            graph: 1,
+            snapshot: 2,
+        },
+        PropagationError::SourceOperationTargetsDifferentTask,
+        PropagationError::TaskNotInGraph(id("a")),
+        PropagationError::TaskNotFound(id("a")),
+        PropagationError::SourceNotTerminal {
+            task: id("a"),
+            state: TaskState::Running,
+        },
+        PropagationError::FlowTargetNotInstantiated("x".into()),
+        PropagationError::EmptyFlowTarget,
+        PropagationError::GenerationOverflow,
+        PropagationError::InvalidPlan("bad".into()),
+    ] {
+        assert!(error.to_string().starts_with("propagation error:"));
+    }
+}
+
+/// A reopen whose inherited predecessors have all settled is admitted
+/// immediately (`Ready` + its start operation), and its scope carries the
+/// source's user variables under the inherited parent.
+#[test]
+fn a_reopen_with_settled_predecessors_is_admitted_and_carries_parent_data() {
+    let snapshot = ProcessSnapshot {
+        process_id: "p1".into(),
+        version: ProcessVersion {
+            graph: 4,
+            process: 4,
+            operations: 2,
+        },
+        tasks: HashMap::from([
+            (
+                id("src"),
+                TaskSnapshot {
+                    model_node: NodeId::parse("src").unwrap(),
+                    parent: None,
+                    predecessors: vec![],
+                    state: TaskState::Completed,
+                    revision: 0,
+                },
+            ),
+            (
+                id("target"),
+                TaskSnapshot {
+                    model_node: NodeId::parse("target").unwrap(),
+                    parent: Some(id("parent")),
+                    predecessors: vec![id("done")],
+                    state: TaskState::Completed,
+                    revision: 2,
+                },
+            ),
+            (
+                id("done"),
+                TaskSnapshot {
+                    model_node: NodeId::parse("done").unwrap(),
+                    parent: None,
+                    predecessors: vec![],
+                    state: TaskState::Completed,
+                    revision: 0,
+                },
+            ),
+            (
+                id("parent"),
+                TaskSnapshot {
+                    model_node: NodeId::parse("parent").unwrap(),
+                    parent: None,
+                    predecessors: vec![],
+                    state: TaskState::Waiting,
+                    revision: 0,
+                },
+            ),
+        ]),
+        variables: BTreeMap::from([
+            ((id("src"), "answer".to_string()), "\"42\"".to_string()),
+            ((id("src"), "auto".to_string()), "1".to_string()),
+            ((id("src"), "error.code".to_string()), "\"E\"".to_string()),
+            ((id("src"), "__private".to_string()), "true".to_string()),
+        ]),
+        operations: HashMap::new(),
+        outbox: HashMap::new(),
+    };
+    let graph = {
+        let mut b = TaskGraphBuilder::new("p1", 4).unwrap();
+        for name in ["src", "target", "done", "parent"] {
+            b.add_node(TaskNode {
+                id: id(name),
+                model_node: NodeId::parse(name).unwrap(),
+                state: TaskState::Created,
+                revision: 0,
+            })
+            .unwrap();
+        }
+        b.set_root(id("src")).unwrap();
+        b.add_child(id("src"), id("target")).unwrap();
+        b.add_child(id("src"), id("done")).unwrap();
+        b.add_child(id("src"), id("parent")).unwrap();
+        b.add_successor(id("src"), id("target")).unwrap();
+        b.build().unwrap()
+    };
+    let mut command = command("src", JoinPolicy::AllSucceeded);
+    command.flow = Some(FlowTarget {
+        node: "target".into(),
+        reopen: true,
+        auto: true,
+        vars: vec![("declared".into(), "value".into())],
+    });
+    let plan = Propagate::plan((&graph, &snapshot), &command).unwrap();
+    let create = plan
+        .task_creates
+        .iter()
+        .find(|create| create.task.node.as_str() == "target")
+        .expect("the flow re-creates the node");
+    assert_eq!(create.initial_state, TaskState::Ready);
+    assert_eq!(create.parent, Some(id("parent")));
+    assert_eq!(create.predecessors, vec![id("done")]);
+    assert!(
+        plan.operations
+            .iter()
+            .any(|op| { op.id.task == create.task && op.kind == OperationKind::ExecuteTask }),
+        "the settled re-entry is admitted with its start operation"
+    );
+    assert!(
+        plan.variable_writes
+            .iter()
+            .any(|write| write.scope == id("parent") && write.name == "answer"),
+        "the source's user data travels to the inherited parent scope"
+    );
+    assert!(
+        plan.variable_writes
+            .iter()
+            .all(|write| write.name != "auto" || write.scope != id("parent")),
+        "the auto decision is not copied as user data"
+    );
+    assert!(
+        plan.variable_writes
+            .iter()
+            .all(|write| write.name != "error.code" && !write.name.starts_with("__")),
+        "private and failure facts are carried by their own walks"
+    );
+}
+
+#[test]
+fn the_envelope_checks_each_process_identity_independently() {
+    // The graph agrees, the snapshot does not.
+    let mut foreign = snapshot(TaskState::Completed, TaskState::Completed);
+    foreign.process_id = "other".into();
+    assert_eq!(
+        Propagate::plan(
+            (&graph(), &foreign),
+            &command("a", JoinPolicy::AllSucceeded)
+        ),
+        Err(PropagationError::WrongProcess)
+    );
+
+    // The source operation names a foreign process but the right task.
+    let mut command = command("a", JoinPolicy::AllSucceeded);
+    command.source_operation.id.process_id = "other".into();
+    assert_eq!(
+        Propagate::plan(
+            (
+                &graph(),
+                &snapshot(TaskState::Completed, TaskState::Completed)
+            ),
+            &command
+        ),
+        Err(PropagationError::SourceOperationTargetsDifferentTask)
+    );
+}
+
+#[test]
+fn an_aborted_source_skips_an_admitted_non_running_successor() {
+    let mut b = TaskGraphBuilder::new("p1", 4).unwrap();
+    for name in ["root", "a", "b"] {
+        b.add_node(TaskNode {
+            id: id(name),
+            model_node: NodeId::parse(name).unwrap(),
+            state: TaskState::Created,
+            revision: 0,
+        })
+        .unwrap();
+    }
+    b.set_root(id("root")).unwrap();
+    b.add_child(id("root"), id("a")).unwrap();
+    b.add_child(id("root"), id("b")).unwrap();
+    b.add_successor(id("a"), id("b")).unwrap();
+    let graph = b.build().unwrap();
+    let mut snapshot = snapshot(TaskState::Aborted, TaskState::Ready);
+    snapshot.tasks.get_mut(&id("b")).unwrap().state = TaskState::Ready;
+    let plan =
+        Propagate::plan((&graph, &snapshot), &command("a", JoinPolicy::AllSucceeded)).unwrap();
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
+}

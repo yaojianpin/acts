@@ -413,3 +413,318 @@ impl KernelHost {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::{
+        operation::{OperationRecord, OperationState},
+        task_graph::{TaskId, TaskState},
+    };
+
+    fn host() -> std::sync::Arc<KernelHost> {
+        KernelHost::in_memory().0
+    }
+
+    fn op(node: &str, sequence: u64, kind: OperationKind) -> OperationId {
+        let id = OperationId {
+            process_id: "p".into(),
+            task: TaskId::new(node, 0).unwrap(),
+            sequence,
+        };
+        let _ = kind;
+        id
+    }
+
+    async fn persist(host: &KernelHost, snapshot: &ProcessSnapshot) {
+        host.processes
+            .create(snapshot, SystemClock.now_ms(), host.timer_poll_ms())
+            .await
+            .expect("the seed aggregate is created");
+    }
+
+    fn seeded() -> ProcessSnapshot {
+        ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap()
+    }
+
+    /// Every driven kind has its own driver; the persisted vocabulary kinds
+    /// have none yet.
+    #[test]
+    fn the_driver_table_names_every_kind() {
+        for kind in [
+            OperationKind::ExecuteTask,
+            OperationKind::ApplyAction,
+            OperationKind::SkipTask,
+            OperationKind::AbortTask,
+            OperationKind::DispatchTimeout,
+            OperationKind::PropagateTask,
+            OperationKind::ReenterTask,
+        ] {
+            assert!(driver(kind).is_some(), "{kind:?} must be driven");
+        }
+        for kind in [
+            OperationKind::DeliverMessage,
+            OperationKind::FireTrigger,
+            OperationKind::RunPostCommit,
+        ] {
+            assert!(driver(kind).is_none(), "{kind:?} is vocabulary only");
+        }
+    }
+
+    /// A command lane handed back for the effect can be retaken.
+    #[tokio::test]
+    async fn a_released_lane_is_resumed() {
+        let host = host();
+        let mut lane = CommandLane::hold(&host, "p").await;
+        lane.release();
+        lane.resume().await;
+        // The detached lane never held anything and must not try to resume.
+        let mut detached = CommandLane::detached(&host);
+        assert_eq!(detached.process_id, "");
+        detached.release();
+    }
+
+    /// A kernel that does not drive a persisted kind fails the operation
+    /// loudly instead of silently dropping it.
+    #[tokio::test]
+    async fn an_undriven_kind_is_an_error() {
+        let host = host();
+        let mut snapshot = seeded();
+        let id = op("a", 0, OperationKind::DeliverMessage);
+        snapshot.operations.insert(
+            id.clone(),
+            OperationRecord::pending(id.clone(), OperationKind::DeliverMessage),
+        );
+        persist(&host, &snapshot).await;
+        let error = host.execute_one(&id).await.unwrap_err();
+        assert!(format!("{error}").contains("not driven"), "{error}");
+    }
+
+    /// The start's own plan fails when the execution it names is gone; the
+    /// failure surfaces and the operation stays open for recovery.
+    #[tokio::test]
+    async fn a_start_whose_execution_is_gone_fails() {
+        let host = host();
+        let mut snapshot = seeded();
+        let id = op("ghost", 0, OperationKind::ExecuteTask);
+        snapshot.operations.insert(
+            id.clone(),
+            OperationRecord::pending(id.clone(), OperationKind::ExecuteTask),
+        );
+        persist(&host, &snapshot).await;
+        let error = host.execute_one(&id).await.unwrap_err();
+        assert!(format!("{error}").contains("not found"), "{error}");
+    }
+
+    /// An observation that proves nothing leaves the operation alone.
+    #[tokio::test]
+    async fn unproven_observations_are_ignored() {
+        let host = host();
+        for observation in [
+            crate::scheduler::shell::effects::EffectObservation::NotApplied,
+            crate::scheduler::shell::effects::EffectObservation::Unknown,
+        ] {
+            assert!(
+                !host
+                    .converge_observed_effect(&op("a", 0, OperationKind::ApplyAction), observation)
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+
+    /// An unknown effect whose aggregate is gone has nothing to converge.
+    #[tokio::test]
+    async fn a_missing_aggregate_cannot_converge() {
+        let host = host();
+        assert!(
+            !host
+                .converge_observed_effect(
+                    &op("a", 0, OperationKind::ApplyAction),
+                    crate::scheduler::shell::effects::EffectObservation::Failed("boom".into()),
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    fn unknown_apply_action(snapshot: &mut ProcessSnapshot) -> OperationId {
+        let id = op("a", 0, OperationKind::ApplyAction);
+        let mut record = OperationRecord::pending(id.clone(), OperationKind::ApplyAction);
+        record.state = OperationState::EffectUnknown { attempt: 1 };
+        snapshot.operations.insert(id.clone(), record);
+        snapshot
+            .tasks
+            .get_mut(&TaskId::new("a", 0).unwrap())
+            .unwrap()
+            .state = TaskState::Running;
+        id
+    }
+
+    /// An executor's failure proof is replayed through the failure plan.
+    #[tokio::test]
+    async fn a_failed_observation_fails_the_execution() {
+        let host = host();
+        let mut snapshot = seeded();
+        let id = unknown_apply_action(&mut snapshot);
+        persist(&host, &snapshot).await;
+        assert!(
+            host.converge_observed_effect(
+                &id,
+                crate::scheduler::shell::effects::EffectObservation::Failed("boom".into()),
+            )
+            .await
+            .unwrap()
+        );
+        let snapshot = host.snapshot("p").await.unwrap().unwrap();
+        assert_eq!(
+            snapshot.tasks[&TaskId::new("a", 0).unwrap()].state,
+            TaskState::Failed
+        );
+    }
+
+    /// An applied observation completes the execution without running the
+    /// effect again.
+    #[tokio::test]
+    async fn an_applied_observation_completes_the_execution() {
+        let host = host();
+        let mut snapshot = seeded();
+        let id = unknown_apply_action(&mut snapshot);
+        persist(&host, &snapshot).await;
+        assert!(
+            host.converge_observed_effect(
+                &id,
+                crate::scheduler::shell::effects::EffectObservation::Applied(
+                    crate::scheduler::shell::effects::EffectOutcome { outputs: None },
+                ),
+            )
+            .await
+            .unwrap()
+        );
+        let snapshot = host.snapshot("p").await.unwrap().unwrap();
+        assert_eq!(
+            snapshot.tasks[&TaskId::new("a", 0).unwrap()].state,
+            TaskState::Completed
+        );
+    }
+
+    /// Only an `EffectUnknown` operation may be re-queued as not applied.
+    #[tokio::test]
+    async fn a_known_operation_is_not_requeued() {
+        let host = host();
+        let mut snapshot = seeded();
+        let id = op("a", 0, OperationKind::ApplyAction);
+        snapshot.operations.insert(
+            id.clone(),
+            OperationRecord::pending(id.clone(), OperationKind::ApplyAction),
+        );
+        persist(&host, &snapshot).await;
+        let record = host.snapshot("p").await.unwrap().unwrap().operations[&id].clone();
+        assert!(!host.retry_unknown_effect(&record).await.unwrap());
+    }
+
+    /// A proven-not-applied unknown effect returns to the retry queue.
+    #[tokio::test]
+    async fn a_not_applied_unknown_effect_is_requeued() {
+        let host = host();
+        let mut snapshot = seeded();
+        let id = unknown_apply_action(&mut snapshot);
+        persist(&host, &snapshot).await;
+        let record = host.snapshot("p").await.unwrap().unwrap().operations[&id].clone();
+        assert!(host.retry_unknown_effect(&record).await.unwrap());
+        let snapshot = host.snapshot("p").await.unwrap().unwrap();
+        assert!(matches!(
+            snapshot.operations[&id].state,
+            OperationState::RetryScheduled { attempt: 1 }
+        ));
+    }
+
+    /// An effect-free decision whose plan fails surfaces the error directly:
+    /// nothing crossed the effect boundary, so the operation is not marked
+    /// unknown.
+    #[tokio::test]
+    async fn an_effect_free_plan_error_surfaces_without_marking_unknown() {
+        let host = host();
+        let mut snapshot = seeded();
+        let task_id = TaskId::new("a", 0).unwrap();
+        snapshot.tasks.get_mut(&task_id).unwrap().state = TaskState::Waiting;
+        snapshot.variables.insert(
+            (task_id.clone(), "__action@0".to_string()),
+            serde_json::json!({ "kind": { "action": "back" }, "inputs": [] }).to_string(),
+        );
+        let id = op("a", 0, OperationKind::ApplyAction);
+        snapshot.operations.insert(
+            id.clone(),
+            OperationRecord::pending(id.clone(), OperationKind::ApplyAction),
+        );
+        persist(&host, &snapshot).await;
+        let error = host.execute_one(&id).await.unwrap_err();
+        assert!(format!("{error}").contains("'to'"), "{error}");
+        let snapshot = host.snapshot("p").await.unwrap().unwrap();
+        assert!(
+            matches!(
+                snapshot.operations[&id].state,
+                OperationState::CommitPrepared(_)
+            ),
+            "an effect-free failure stays open for recovery: {:?}",
+            snapshot.operations[&id].state
+        );
+    }
+
+    /// An observed failure whose replan fails marks the operation unknown: the
+    /// effect ran, so recovery must reconcile rather than replay it.
+    #[tokio::test]
+    async fn a_failed_observation_whose_replan_fails_is_marked_unknown() {
+        let host = host();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_catch(|catch| catch.with_id("c1")));
+        let mut snapshot = ProcessSpec::from_workflow("p", &workflow, &|_| None)
+            .unwrap()
+            .seed_snapshot()
+            .unwrap();
+        let task_id = TaskId::new("s1", 0).unwrap();
+        snapshot.tasks.get_mut(&task_id).unwrap().state = TaskState::Running;
+        let id = op("s1", 0, OperationKind::ApplyAction);
+        let mut record = OperationRecord::pending(id.clone(), OperationKind::ApplyAction);
+        record.state = OperationState::EffectUnknown { attempt: 1 };
+        snapshot.operations.insert(id.clone(), record);
+        // Break the auto map so the catch fan-out cannot plan.
+        let root = snapshot
+            .tasks
+            .iter()
+            .find(|(_, task)| task.parent.is_none())
+            .map(|(id, _)| id.clone())
+            .unwrap();
+        let key = (
+            root,
+            crate::scheduler::shell::model::AUTO_MAP_VAR.to_string(),
+        );
+        let raw = snapshot.variables.get(&key).unwrap();
+        let mut map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(raw).unwrap();
+        map.remove("c1");
+        snapshot
+            .variables
+            .insert(key, serde_json::Value::Object(map).to_string());
+        persist(&host, &snapshot).await;
+        let error = host
+            .converge_observed_effect(
+                &id,
+                crate::scheduler::shell::effects::EffectObservation::Failed("boom".into()),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("auto map"), "{error}");
+        let snapshot = host.snapshot("p").await.unwrap().unwrap();
+        assert!(
+            matches!(
+                snapshot.operations[&id].state,
+                OperationState::EffectUnknown { attempt: 2 }
+            ),
+            "the observed effect is unknown, not retryable: {:?}",
+            snapshot.operations[&id].state
+        );
+    }
+}

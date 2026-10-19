@@ -1138,3 +1138,446 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+    use acts::{Config, Engine, Principal, Step, Workflow};
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn params(url: String) -> HttpPackageParams {
+        HttpPackageParams {
+            url,
+            method: "GET".to_string(),
+            content_type: ContentType::Json,
+            headers: Vec::new(),
+            params: Vec::new(),
+            body: None,
+            timeout_ms: None,
+        }
+    }
+
+    fn package(config: HttpConfig) -> HttpPackage {
+        HttpPackage::from_config(&config).expect("build http package")
+    }
+
+    fn private() -> HttpConfig {
+        HttpConfig {
+            allow_private_addresses: true,
+            ..Default::default()
+        }
+    }
+
+    fn never() -> CancellationToken {
+        CancellationToken::new()
+    }
+
+    async fn serve(response: Vec<u8>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response).await;
+            let _ = socket.shutdown().await;
+        });
+        addr
+    }
+
+    // ---- MIME mapping and text decoding ----
+
+    #[test]
+    fn response_mime_types_map_to_content_types() {
+        for (mime, expected) in [
+            ("application/json; charset=utf-8", "json"),
+            ("text/html; charset=utf-8", "html"),
+            ("application/x-www-form-urlencoded", "urlencoded"),
+            ("multipart/form-data; boundary=x", "form-data"),
+            ("image/png", "image"),
+            ("audio/mpeg", "audio"),
+            ("video/mp4", "video"),
+            ("text/plain", "text"),
+            ("application/javascript", "text"),
+            ("application/octet-stream", "none"),
+            ("", "none"),
+        ] {
+            let mapped = get_content_type(mime);
+            let got = match mapped {
+                ContentType::Json => "json",
+                ContentType::Html => "html",
+                ContentType::UrlEncoded => "urlencoded",
+                ContentType::FormData => "form-data",
+                ContentType::Image => "image",
+                ContentType::Audio => "audio",
+                ContentType::Video => "video",
+                ContentType::Text => "text",
+                ContentType::None => "none",
+                ContentType::Binary => "binary",
+            };
+            assert_eq!(got, expected, "{mime}");
+        }
+    }
+
+    #[test]
+    fn a_text_body_is_decoded_with_its_charset() {
+        let latin1 = [0x63, 0x61, 0x66, 0xe9];
+        assert_eq!(
+            decode_text(&latin1, Some("text/plain; charset=iso-8859-1")),
+            "café"
+        );
+        assert_eq!(
+            decode_text(&latin1, Some("text/plain; charset=\"ISO-8859-1\"")),
+            "café"
+        );
+        // no charset, an unknown charset, and a malformed parameter all fall
+        // back to UTF-8
+        assert_eq!(decode_text(b"hello", None), "hello");
+        assert_eq!(
+            decode_text(b"hello", Some("text/plain; charset=nonsense")),
+            "hello"
+        );
+        assert_eq!(
+            decode_text(b"hello", Some("text/plain; bogus; charset")),
+            "hello"
+        );
+    }
+
+    // ---- request construction ----
+
+    #[tokio::test]
+    async fn every_request_content_type_builds_a_body() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok".to_vec();
+        for (content_type, body) in [
+            (ContentType::Text, json!("text")),
+            (ContentType::Html, json!("<p>hi</p>")),
+            (ContentType::Json, json!({ "a": 1 })),
+            (ContentType::UrlEncoded, json!({ "a": "1" })),
+            (ContentType::FormData, json!({ "a": "1" })),
+            (ContentType::Binary, json!(STANDARD.encode([1u8, 2, 3]))),
+            (ContentType::Image, json!(STANDARD.encode([1u8, 2, 3]))),
+            (ContentType::Video, json!(STANDARD.encode([1u8, 2, 3]))),
+            (ContentType::Audio, json!(STANDARD.encode([1u8, 2, 3]))),
+            (ContentType::None, json!("ignored")),
+        ] {
+            let addr = serve(response.clone()).await;
+            let mut request = params(format!("http://{addr}/"));
+            request.method = "POST".to_string();
+            request.content_type = content_type;
+            request.body = Some(body);
+            let out = package(private())
+                .request(&never(), &request)
+                .await
+                .expect("the request is sent")
+                .expect("a response is read");
+            assert_eq!(out.get::<String>(DATA_KEY).as_deref(), Some("ok"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_match_its_content_type_is_refused() {
+        for (content_type, body) in [
+            (ContentType::Text, json!({ "a": 1 })),
+            (ContentType::Html, json!(3)),
+            (ContentType::UrlEncoded, json!([1, 2])),
+            (ContentType::FormData, json!("no")),
+            (ContentType::Binary, json!(3)),
+            (ContentType::Image, json!(false)),
+            (ContentType::Video, json!(null)),
+            (ContentType::Audio, json!([1])),
+        ] {
+            let mut request = params("http://127.0.0.1:9/".to_string());
+            request.method = "POST".to_string();
+            request.content_type = content_type;
+            request.body = Some(body);
+            let err = package(private())
+                .request(&never(), &request)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("did not match the body content"),
+                "{err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_base64_media_is_refused() {
+        let mut request = params("http://127.0.0.1:9/".to_string());
+        request.content_type = ContentType::Binary;
+        request.body = Some(json!("!!!not base64!!!"));
+        let err = package(private())
+            .request(&never(), &request)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActError::Package(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn invalid_headers_are_reported() {
+        let mut request = params("http://127.0.0.1:9/".to_string());
+        request.headers = vec![Pair {
+            key: "bad header".to_string(),
+            value: json!("v"),
+        }];
+        let err = package(private())
+            .request(&never(), &request)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActError::Runtime(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_url_method_or_scheme_is_refused() {
+        let err = package(private())
+            .request(&never(), &params("not a url".to_string()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid url"), "{err}");
+
+        let err = package(private())
+            .request(&never(), &params("ftp://example.com/".to_string()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unsupported url scheme"), "{err}");
+
+        let mut request = params("http://127.0.0.1:9/".to_string());
+        request.method = "GET GET".to_string();
+        let err = package(private())
+            .request(&never(), &request)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid method"), "{err}");
+    }
+
+    // ---- responses ----
+
+    #[tokio::test]
+    async fn a_non_success_status_is_an_exception_carrying_the_body() {
+        let addr = serve(
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nboom"
+                .to_vec(),
+        )
+        .await;
+        let err = package(private())
+            .request(&never(), &params(format!("http://{addr}/")))
+            .await
+            .unwrap_err();
+        match err {
+            ActError::Exception { ecode, message } => {
+                assert_eq!(ecode, "500");
+                assert_eq!(message, "boom");
+            }
+            other => panic!("expected an exception, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_json_response_that_does_not_parse_fails() {
+        let addr = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\n\r\nnope"
+                .to_vec(),
+        )
+        .await;
+        let err = package(private())
+            .request(&never(), &params(format!("http://{addr}/")))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse json response"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_of_an_unknown_type_is_not_read() {
+        let addr = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\n\r\nabc"
+                .to_vec(),
+        )
+        .await;
+        let out = package(private())
+            .request(&never(), &params(format!("http://{addr}/")))
+            .await
+            .unwrap()
+            .expect("a response is read");
+        assert!(out.get::<String>(DATA_KEY).is_none(), "{out}");
+    }
+
+    #[tokio::test]
+    async fn binary_responses_are_base64_encoded() {
+        let addr = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\n\r\nabc".to_vec(),
+        )
+        .await;
+        let out = package(private())
+            .request(&never(), &params(format!("http://{addr}/")))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out.get::<String>(DATA_KEY).as_deref(),
+            Some(STANDARD.encode(b"abc").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hostname_resolving_to_a_private_address_is_dialled_when_allowed() {
+        let addr = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+        )
+        .await;
+        let out = package(private())
+            .request(
+                &never(),
+                &params(format!("http://localhost:{}/", addr.port())),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.get::<String>(DATA_KEY).as_deref(), Some("ok"));
+    }
+
+    /// The body read is cancellable on its own: a server that sends headers
+    /// and then stalls cannot hold a cancelled act while it waits.
+    #[tokio::test]
+    async fn a_cancelled_body_read_gives_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\npartial",
+                )
+                .await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            token.cancel();
+        });
+
+        let out = package(private())
+            .request(&cancel, &params(format!("http://{addr}/")))
+            .await
+            .expect("a cancelled act reports no failure of its own");
+        assert!(out.is_none(), "{out:?}");
+    }
+
+    #[test]
+    fn reserved_and_documentation_addresses_are_never_allowed() {
+        let policy = EgressPolicy::new(&HttpConfig {
+            allow_private_addresses: true,
+            ..Default::default()
+        });
+        for ip in ["240.0.0.1", "198.51.100.7", "255.255.255.255", "ff02::1"] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(!policy.address_allowed(ip), "{ip} must be blocked");
+        }
+    }
+
+    #[test]
+    fn an_empty_or_trailing_dot_allowlist_entry_is_normalized() {
+        let policy = EgressPolicy::new(&HttpConfig {
+            allowed_hosts: vec![" ".to_string(), "Api.Example.com.".to_string()],
+            ..Default::default()
+        });
+        assert!(policy.host_allowed("api.example.com."));
+        assert!(policy.host_allowed("API.EXAMPLE.COM"));
+        assert!(!policy.host_allowed("other.example.com"));
+    }
+
+    // ---- through the engine ----
+
+    fn config(text: &str) -> Config {
+        Config {
+            data: Default::default(),
+            table: toml::from_str::<toml::Table>(text).unwrap(),
+        }
+    }
+
+    async fn run(engine: &Engine, workflow: &Workflow) -> (bool, Vars) {
+        let ended = engine.signal::<Vec<(bool, Vars)>>(Vec::new());
+        let error_ended = ended.clone();
+        engine.channel().on_error(move |e| {
+            let ended = error_ended.clone();
+            let outputs = e.outputs.clone();
+            async move {
+                ended.update(|all| all.push((true, outputs.clone())));
+                ended.close();
+            }
+        });
+        let complete_ended = ended.clone();
+        engine.channel().on_complete(move |e| {
+            let ended = complete_ended.clone();
+            let outputs = e.outputs.clone();
+            async move {
+                ended.update(|all| all.push((false, outputs.clone())));
+                ended.close();
+            }
+        });
+        let executor = engine.executor(&Principal::unrestricted());
+        executor.model().deploy(workflow, None).await.unwrap();
+        executor
+            .proc()
+            .start(&workflow.id, Vars::new())
+            .await
+            .unwrap();
+        let mut all = ended.recv().await;
+        all.pop().expect("one terminal event")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_reads_a_response_into_the_act_outputs() {
+        let addr = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello"
+                .to_vec(),
+        )
+        .await;
+        let engine = Engine::builder()
+            .set_config(&config("[http]\nallow-private-addresses = true\n"))
+            .add_package::<HttpPackage>()
+            .start()
+            .await
+            .unwrap();
+        let mut workflow = Workflow::new().with_id("http_exec");
+        workflow.steps.push(Step::new().with_id("s1").with_uses(
+            "acts.core.http",
+            json!({ "url": format!("http://{addr}/"), "method": "GET", "content-type": "json", "body": {} }).into(),
+        ));
+
+        let (failed, outputs) = run(&engine, &workflow).await;
+        assert!(!failed, "{outputs}");
+        assert_eq!(outputs.get::<String>(DATA_KEY).as_deref(), Some("hello"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_refuses_malformed_params() {
+        let engine = Engine::builder()
+            .set_config(&config(""))
+            .add_package::<HttpPackage>()
+            .start()
+            .await
+            .unwrap();
+        let workflow = Workflow::new()
+            .with_id("http_bad_params")
+            .with_step(|step| step.with_id("s1").with_uses("acts.core.http", Vars::new()));
+
+        let (failed, outputs) = run(&engine, &workflow).await;
+        assert!(failed, "{outputs}");
+        assert!(
+            outputs.to_string().contains("validation error")
+                || outputs.to_string().contains("invalid ActPackage"),
+            "{outputs}"
+        );
+    }
+}

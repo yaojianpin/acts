@@ -72,4 +72,11 @@ mod tests {
         let meta = super::IrqPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
+
+    #[test]
+    fn pack_irq_new() {
+        let _package = super::IrqPackage::new(&crate::Config::default()).unwrap();
+        // the IRQ act waits for the client: it is not a function package
+        assert_eq!(super::IrqPackage::definition().run_as, crate::ActRunAs::Irq);
+    }
 }

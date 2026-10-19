@@ -361,3 +361,262 @@ fn type_error(operation: &'static str, value: &Value) -> Error {
         got: value.type_name(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Expr;
+
+    fn eval(source: &str, context: &Context) -> Result<Value> {
+        Expr::compile(source).unwrap().eval(context)
+    }
+
+    fn error(source: &str, context: &Context) -> Error {
+        eval(source, context).expect_err(source)
+    }
+
+    #[test]
+    fn context_get_answers_both_ways() {
+        let mut context = Context::new();
+        assert_eq!(context.get("a"), None);
+        context.set("a", 1);
+        assert_eq!(context.get("a"), Some(&Value::Int(1)));
+    }
+
+    #[test]
+    fn index_errors_name_the_missing_key_and_the_wrong_key_kind() {
+        let mut context = Context::new();
+        context
+            .set("obj", Value::map([("k", 1)]))
+            .set("items", Value::list([1]));
+
+        assert_eq!(
+            error("obj['nope']", &context),
+            Error::Missing {
+                name: "nope".to_string()
+            }
+        );
+        assert_eq!(
+            error("items[true]", &context),
+            Error::Type {
+                operation: "[]",
+                got: "list"
+            }
+        );
+        assert_eq!(
+            error("obj[0]", &context),
+            Error::Type {
+                operation: "[]",
+                got: "map"
+            }
+        );
+        assert_eq!(
+            error("null[0]", &context),
+            Error::Type {
+                operation: "[]",
+                got: "null"
+            }
+        );
+        // The index expression itself is evaluated and can fail.
+        assert_eq!(
+            error("items[missing]", &context),
+            Error::Unknown {
+                name: "missing".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn member_access_requires_a_map() {
+        let mut context = Context::new();
+        context
+            .set("obj", Value::map([("k", 1)]))
+            .set("items", Value::list([1]));
+
+        assert_eq!(
+            error("items.k", &context),
+            Error::Type {
+                operation: ".",
+                got: "list"
+            }
+        );
+        assert_eq!(
+            error("obj.missing", &context),
+            Error::Missing {
+                name: "missing".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn calls_check_the_name_is_a_function() {
+        let mut context = Context::new();
+        context
+            .set("add", Value::function(|args| Ok(Value::from(args.len()))))
+            .set("value", 1);
+
+        assert_eq!(eval("add()", &context).unwrap(), Value::from(0));
+        assert_eq!(eval("add(1, 2)", &context).unwrap(), Value::from(2));
+        assert_eq!(
+            error("value()", &context),
+            Error::Type {
+                operation: "call",
+                got: "int"
+            }
+        );
+        assert_eq!(
+            error("missing()", &context),
+            Error::Unknown {
+                name: "missing".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_method_falls_through_to_unknown() {
+        let mut context = Context::new();
+        context.set("obj", Value::map([("k", 1)])).set("value", 2);
+
+        // A member that is not a function does not answer the call.
+        assert_eq!(
+            error("obj.k()", &context),
+            Error::UnknownMethod {
+                name: "k".to_string()
+            }
+        );
+        // A context name that is not a function does not answer it either.
+        assert_eq!(
+            error("obj.value()", &context),
+            Error::UnknownMethod {
+                name: "value".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn unary_operators_evaluate_both_types() {
+        assert_eq!(eval("-1", &Context::new()).unwrap(), Value::Int(-1));
+        assert_eq!(eval("-1.5", &Context::new()).unwrap(), Value::Float(-1.5));
+        assert_eq!(eval("!false", &Context::new()).unwrap(), Value::Bool(true));
+        assert_eq!(
+            error("-'s'", &Context::new()),
+            Error::Type {
+                operation: "-",
+                got: "string"
+            }
+        );
+        assert_eq!(
+            error("!'s'", &Context::new()),
+            Error::Type {
+                operation: "!",
+                got: "string"
+            }
+        );
+    }
+
+    #[test]
+    fn logic_evaluates_the_right_side_and_checks_both() {
+        let context = Context::new();
+        assert_eq!(eval("true && true", &context).unwrap(), Value::Bool(true));
+        assert_eq!(eval("true && false", &context).unwrap(), Value::Bool(false));
+        assert_eq!(eval("false || true", &context).unwrap(), Value::Bool(true));
+        assert_eq!(
+            eval("false || false", &context).unwrap(),
+            Value::Bool(false)
+        );
+
+        assert_eq!(
+            error("true && 1", &context),
+            Error::Type {
+                operation: "&&",
+                got: "int"
+            }
+        );
+        assert_eq!(
+            error("1 || true", &context),
+            Error::Type {
+                operation: "||",
+                got: "int"
+            }
+        );
+        assert_eq!(
+            error("false || 1", &context),
+            Error::Type {
+                operation: "||",
+                got: "int"
+            }
+        );
+    }
+
+    #[test]
+    fn arithmetic_handles_every_operator_on_uints() {
+        let mut context = Context::new();
+        context.set("big", u64::MAX);
+
+        assert_eq!(
+            eval("big + 1", &context),
+            Err(Error::Overflow { operation: "+" })
+        );
+        assert_eq!(
+            eval("big / 0", &context),
+            Err(Error::DivideByZero { operation: "/" })
+        );
+        assert_eq!(
+            eval("big % 0", &context),
+            Err(Error::DivideByZero { operation: "%" })
+        );
+        assert_eq!(
+            eval("big / 2", &context).unwrap(),
+            Value::UInt(u64::MAX / 2)
+        );
+        assert_eq!(eval("big - big", &context).unwrap(), Value::Int(0));
+        assert_eq!(
+            eval("big - 1.0", &context).unwrap(),
+            Value::Float(u64::MAX as f64 - 1.0)
+        );
+        assert_eq!(
+            error("big + true", &context),
+            Error::Type {
+                operation: "+",
+                got: "bool"
+            }
+        );
+    }
+
+    #[test]
+    fn integer_overflow_and_float_division_are_errors() {
+        let context = Context::new();
+        assert_eq!(
+            eval("9223372036854775807 + 1", &context),
+            Err(Error::Overflow { operation: "+" })
+        );
+        assert_eq!(
+            eval("1.0 / 0.0", &context),
+            Err(Error::DivideByZero { operation: "/" })
+        );
+        assert_eq!(
+            eval("1.0 % 0.0", &context),
+            Err(Error::DivideByZero { operation: "%" })
+        );
+    }
+
+    #[test]
+    fn comparison_blames_the_operand_without_an_overload() {
+        let context = Context::new();
+        assert_eq!(
+            error("true < 1", &context),
+            Error::Type {
+                operation: "<",
+                got: "bool"
+            }
+        );
+        assert_eq!(
+            error("'a' < 1", &context),
+            Error::Type {
+                operation: "<",
+                got: "int"
+            }
+        );
+        assert_eq!(eval("1 < 2.5", &context).unwrap(), Value::Bool(true));
+    }
+}

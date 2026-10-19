@@ -473,3 +473,269 @@ impl KernelHost {
         Ok(plan)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::core::model::{
+        operation::ClaimToken,
+        task_graph::{TaskId, TaskState},
+    };
+
+    fn host() -> std::sync::Arc<KernelHost> {
+        KernelHost::in_memory().0
+    }
+
+    fn id(node: &str, sequence: u64) -> OperationId {
+        OperationId {
+            process_id: "p".into(),
+            task: TaskId::new(node, 0).unwrap(),
+            sequence,
+        }
+    }
+
+    fn commit(id: &OperationId) -> OperationCommit {
+        OperationCommit {
+            id: id.clone(),
+            claim: ClaimToken {
+                owner: "test".into(),
+                fence: 1,
+                lease_until_ms: i64::MAX,
+                heartbeat_revision: 0,
+            },
+        }
+    }
+
+    fn snapshot() -> ProcessSnapshot {
+        ProcessSpec::linear("p", "root", &["a"])
+            .seed_snapshot()
+            .unwrap()
+    }
+
+    /// Every terminal start verdict needs the execution it decides.
+    #[tokio::test]
+    async fn terminal_starts_need_their_execution() {
+        let host = host();
+        let snapshot = snapshot();
+        let id = id("a", 0);
+        let claim = commit(&id);
+        for outcome in [
+            Outcome::Start(Start::Failed(Failure::new("E", "boom"))),
+            Outcome::Start(Start::Skipped),
+            Outcome::Start(Start::Unresolved),
+        ] {
+            let mut lane = CommandLane::detached(&host);
+            let operation = Operation {
+                id: &id,
+                claim: &claim,
+                task_id: id.task.clone(),
+                task: None,
+                snapshot: &snapshot,
+                now_ms: 0,
+                lane: &mut lane,
+            };
+            let error = ExecuteTask
+                .next(&host, &operation, outcome)
+                .await
+                .unwrap_err();
+            assert!(format!("{error}").contains("not found"), "{error}");
+        }
+    }
+
+    /// Without a model, a guard is not the flow's to decide: the step runs.
+    #[tokio::test]
+    async fn a_missing_model_runs_the_guard() {
+        let host = host();
+        let mut snapshot = snapshot();
+        let root = TaskId::new("root", 0).unwrap();
+        snapshot
+            .variables
+            .remove(&(root, crate::scheduler::shell::model::MODEL_VAR.to_string()));
+        assert!(matches!(
+            host.guard_verdict(&snapshot, &TaskId::new("a", 0).unwrap())
+                .await
+                .unwrap(),
+            Guard::Run
+        ));
+    }
+
+    /// A node the model does not declare is not guarded.
+    #[tokio::test]
+    async fn an_unknown_node_runs() {
+        let host = host();
+        let snapshot = snapshot();
+        assert!(matches!(
+            host.guard_verdict(&snapshot, &TaskId::new("ghost", 0).unwrap())
+                .await
+                .unwrap(),
+            Guard::Run
+        ));
+    }
+
+    /// The handler's `if` selected it at dispatch; the flow never re-runs it.
+    #[tokio::test]
+    async fn a_handler_step_skips_the_flow_guard() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_timeout(|timeout| timeout.with_id("t1").with_if("false"))
+        });
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        assert!(matches!(
+            host.guard_verdict(&snapshot, &TaskId::new("t1", 0).unwrap())
+                .await
+                .unwrap(),
+            Guard::Run
+        ));
+    }
+
+    /// A false guard falls through instead of running the step.
+    #[tokio::test]
+    async fn a_false_guard_skips_the_step() {
+        let host = host();
+        let workflow =
+            crate::model::Workflow::new().with_step(|step| step.with_id("s1").with_if("false"));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        assert!(matches!(
+            host.guard_verdict(&snapshot, &TaskId::new("s1", 0).unwrap())
+                .await
+                .unwrap(),
+            Guard::Skip
+        ));
+    }
+
+    /// A guard that evaluates to null cannot decide the step: it fails.
+    #[tokio::test]
+    async fn a_null_guard_fails_the_step() {
+        let host = host();
+        let workflow =
+            crate::model::Workflow::new().with_step(|step| step.with_id("s1").with_if("null"));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        match host
+            .guard_verdict(&snapshot, &TaskId::new("s1", 0).unwrap())
+            .await
+            .unwrap()
+        {
+            Guard::Fail(failure) => assert!(failure.message.contains("evaluated to null")),
+            _ => panic!("a null guard must fail"),
+        }
+    }
+
+    /// A non-boolean guard is an invalid predicate and fails the step.
+    #[tokio::test]
+    async fn an_invalid_guard_fails_the_step() {
+        let host = host();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_if("$not_declared()"));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        assert!(matches!(
+            host.guard_verdict(&snapshot, &TaskId::new("s1", 0).unwrap())
+                .await
+                .unwrap(),
+            Guard::Fail(_)
+        ));
+    }
+
+    /// A predicate runner failure is an error of the operation, not a verdict.
+    #[tokio::test]
+    async fn a_predicate_error_fails_the_operation() {
+        struct Broken;
+        #[async_trait::async_trait]
+        impl crate::scheduler::shell::predicate::PredicateRunner for Broken {
+            async fn evaluate(
+                &self,
+                _request: crate::scheduler::shell::predicate::PredicateRequest,
+            ) -> Result<PredicateValue> {
+                Err(ActError::Runtime("predicate exploded".into()))
+            }
+        }
+        let host = host();
+        host.attach_predicate_runner(std::sync::Arc::new(Broken));
+        let workflow =
+            crate::model::Workflow::new().with_step(|step| step.with_id("s1").with_if("true"));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        match host
+            .guard_verdict(&snapshot, &TaskId::new("s1", 0).unwrap())
+            .await
+            .unwrap()
+        {
+            Guard::Fail(failure) => {
+                assert!(
+                    failure.message.contains("predicate exploded"),
+                    "{}",
+                    failure.message
+                )
+            }
+            _ => panic!("a predicate error must fail the step"),
+        }
+    }
+
+    /// The run bound stops a loop that never closed its guard.
+    #[tokio::test]
+    async fn the_run_bound_fails_the_step() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| step.with_id("s1"));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        let limit = host.max_node_run_times;
+        let task_id = TaskId::new("s1", limit).unwrap();
+        match host.guard_verdict(&snapshot, &task_id).await.unwrap() {
+            Guard::Fail(failure) => assert_eq!(failure.code, ELOOP_ECODE),
+            _ => panic!("a generation past the bound must fail"),
+        }
+    }
+
+    /// A guard skip carries the fall-through marker, its message and the
+    /// propagation hand-off.
+    #[tokio::test]
+    async fn a_guard_skip_plans_the_fall_through() {
+        let host = host();
+        let mut snapshot = snapshot();
+        let task_id = TaskId::new("a", 0).unwrap();
+        snapshot.tasks.get_mut(&task_id).unwrap().state = TaskState::Ready;
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let task = snapshot.tasks.get(&task_id).unwrap().clone();
+        let plan = host
+            .guard_skip_plan(&snapshot, &id, &task_id, &task, &claim)
+            .unwrap();
+        assert!(plan.variable_writes.iter().any(|write| {
+            write.name == crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR
+        }));
+        assert_eq!(plan.state_changes[0].to, TaskState::Skipped);
+        assert_eq!(plan.outbox[0].topic, "task.skipped");
+        assert_eq!(plan.operations[0].kind, OperationKind::PropagateTask);
+    }
+
+    /// A hand-off that is already durable is not created a second time.
+    #[tokio::test]
+    async fn a_guard_skip_does_not_duplicate_the_propagation() {
+        let host = host();
+        let mut snapshot = snapshot();
+        let task_id = TaskId::new("a", 0).unwrap();
+        snapshot.tasks.get_mut(&task_id).unwrap().state = TaskState::Ready;
+        let id = id("a", 0);
+        let propagate = OperationId {
+            sequence: id.sequence + 1,
+            ..id.clone()
+        };
+        snapshot.operations.insert(
+            propagate.clone(),
+            crate::scheduler::core::model::operation::OperationRecord::pending(
+                propagate,
+                OperationKind::PropagateTask,
+            ),
+        );
+        let claim = commit(&id);
+        let task = snapshot.tasks.get(&task_id).unwrap().clone();
+        let plan = host
+            .guard_skip_plan(&snapshot, &id, &task_id, &task, &claim)
+            .unwrap();
+        assert!(plan.operations.is_empty());
+    }
+}

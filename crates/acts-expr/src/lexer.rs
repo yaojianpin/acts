@@ -337,3 +337,326 @@ impl<'a> Lexer<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex(source: &str) -> Result<Vec<Token>> {
+        let mut lexer = Lexer::new(source);
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next_token()?;
+            let end = token == Token::End;
+            tokens.push(token);
+            if end {
+                return Ok(tokens);
+            }
+        }
+    }
+
+    fn token(source: &str) -> Token {
+        let tokens = lex(source).unwrap();
+        assert_eq!(tokens.len(), 2, "{source}: {tokens:?}");
+        tokens[0].clone()
+    }
+
+    fn error(source: &str) -> Error {
+        lex(source).expect_err(source)
+    }
+
+    fn string(token: &Token) -> Arc<str> {
+        match token {
+            Token::Str(s) => s.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn ident(token: &Token) -> Arc<str> {
+        match token {
+            Token::Ident(s) => s.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn numbers_are_ints_or_floats() {
+        assert_eq!(token("12"), Token::Int(12));
+        assert_eq!(token("0"), Token::Int(0));
+        assert_eq!(token("007"), Token::Int(7));
+        assert_eq!(token("1.5"), Token::Float(1.5));
+        assert_eq!(token("0.25"), Token::Float(0.25));
+        assert_eq!(token("1e3"), Token::Float(1000.0));
+        assert_eq!(token("1E3"), Token::Float(1000.0));
+        assert_eq!(token("1e+3"), Token::Float(1000.0));
+        assert_eq!(token("1e-1"), Token::Float(0.1));
+        assert_eq!(token("2.5e2"), Token::Float(250.0));
+    }
+
+    #[test]
+    fn a_dot_without_a_digit_is_member_access() {
+        assert_eq!(
+            lex("1.foo").unwrap(),
+            [
+                Token::Int(1),
+                Token::Dot,
+                Token::Ident(Arc::from("foo")),
+                Token::End
+            ]
+        );
+        // `1e` is not an exponent either: the `e` is an identifier.
+        assert_eq!(
+            lex("1e").unwrap(),
+            [Token::Int(1), Token::Ident(Arc::from("e")), Token::End]
+        );
+    }
+
+    #[test]
+    fn a_number_out_of_range_is_a_parse_error() {
+        let err = error("9223372036854775808");
+        assert_eq!(
+            err,
+            Error::Parse {
+                message: "the int literal '9223372036854775808' is out of range".to_string(),
+                pos: 0
+            }
+        );
+    }
+
+    #[test]
+    fn strings_accept_both_quotes_and_every_escape() {
+        assert_eq!(string(&token("'abc'")).as_ref(), "abc");
+        assert_eq!(string(&token("\"abc\"")).as_ref(), "abc");
+        assert_eq!(string(&token(r"'a\nb'")).as_ref(), "a\nb");
+        assert_eq!(string(&token(r"'a\rb'")).as_ref(), "a\rb");
+        assert_eq!(string(&token(r"'a\tb'")).as_ref(), "a\tb");
+        assert_eq!(string(&token(r"'a\\b'")).as_ref(), "a\\b");
+        assert_eq!(string(&token(r"'a\'b'")).as_ref(), "a'b");
+        assert_eq!(string(&token(r#""a\"b""#)).as_ref(), "a\"b");
+        assert_eq!(string(&token(r"'\u0041'")).as_ref(), "A");
+        assert_eq!(string(&token(r"'\u00e9'")).as_ref(), "é");
+        // A bare UTF-8 character is copied whole, not byte by byte.
+        assert_eq!(string(&token("'héllo'")).as_ref(), "héllo");
+        assert_eq!(string(&token("''")).as_ref(), "");
+    }
+
+    #[test]
+    fn malformed_strings_are_parse_errors() {
+        assert_eq!(
+            error("'abc"),
+            Error::Parse {
+                message: "unterminated string".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error("'abc\\"),
+            Error::Parse {
+                message: "unterminated string".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error(r"'\x'"),
+            Error::Parse {
+                message: "unknown escape '\\x'".to_string(),
+                pos: 1
+            }
+        );
+        assert_eq!(
+            error(r"'\u12'"),
+            Error::Parse {
+                message: "a '\\u' escape needs four hex digits".to_string(),
+                pos: 1
+            }
+        );
+        assert_eq!(
+            error(r"'\uZZZZ'"),
+            Error::Parse {
+                message: "a '\\u' escape needs four hex digits".to_string(),
+                pos: 1
+            }
+        );
+        assert_eq!(
+            error(r"'\uD800'"),
+            Error::Parse {
+                message: "'\\uD800' is not a character".to_string(),
+                pos: 1
+            }
+        );
+    }
+
+    #[test]
+    fn identifiers_and_keywords() {
+        assert_eq!(ident(&token("abc")), Arc::from("abc"));
+        assert_eq!(ident(&token("_x1")), Arc::from("_x1"));
+        assert_eq!(ident(&token("$env")), Arc::from("$env"));
+        assert_eq!(ident(&token("a$b2")), Arc::from("a$b2"));
+        assert_eq!(token("true"), Token::True);
+        assert_eq!(token("false"), Token::False);
+        assert_eq!(token("null"), Token::Null);
+    }
+
+    #[test]
+    fn punctuators_map_to_their_tokens() {
+        let cases = [
+            ("+", Token::Plus),
+            ("-", Token::Minus),
+            ("*", Token::Star),
+            ("/", Token::Slash),
+            ("%", Token::Percent),
+            ("==", Token::EqEq),
+            ("!=", Token::NotEq),
+            ("<", Token::Lt),
+            ("<=", Token::Le),
+            (">", Token::Gt),
+            (">=", Token::Ge),
+            ("&&", Token::AndAnd),
+            ("||", Token::OrOr),
+            ("!", Token::Not),
+            (".", Token::Dot),
+            (",", Token::Comma),
+            ("(", Token::LParen),
+            (")", Token::RParen),
+            ("[", Token::LBracket),
+            ("]", Token::RBracket),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(token(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn whitespace_is_skipped_and_positions_point_at_the_token() {
+        let mut lexer = Lexer::new("  12\t+\n x ");
+        assert_eq!(lexer.next_token().unwrap(), Token::Int(12));
+        assert_eq!(lexer.token_start(), 2);
+        assert_eq!(lexer.next_token().unwrap(), Token::Plus);
+        assert_eq!(lexer.token_start(), 5);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident(Arc::from("x")));
+        assert_eq!(lexer.token_start(), 8);
+        assert_eq!(lexer.next_token().unwrap(), Token::End);
+        assert_eq!(lexer.token_start(), 10);
+        assert_eq!(lexer.next_token().unwrap(), Token::End);
+        assert_eq!(lexer.token_start(), 10);
+    }
+
+    #[test]
+    fn lone_symbols_say_what_they_are() {
+        assert_eq!(
+            error("="),
+            Error::Parse {
+                message: "'=' is not an operator; write '==' to compare".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error("&"),
+            Error::Parse {
+                message: "unexpected character '&'".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error("|"),
+            Error::Parse {
+                message: "unexpected character '|'".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error("~"),
+            Error::Parse {
+                message: "unexpected character '~'".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error("é"),
+            Error::Parse {
+                message: "unexpected character 'é'".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error("?"),
+            Error::Parse {
+                message: "conditional expressions ('?:') are not supported".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error("{"),
+            Error::Parse {
+                message: "object literals ('{...}') are not supported; inject the object instead"
+                    .to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error("}"),
+            Error::Parse {
+                message: "unexpected '}'".to_string(),
+                pos: 0
+            }
+        );
+        assert_eq!(
+            error(" ="),
+            Error::Parse {
+                message: "'=' is not an operator; write '==' to compare".to_string(),
+                pos: 1
+            }
+        );
+    }
+
+    #[test]
+    fn describe_and_text_read_as_the_source_does() {
+        assert_eq!(Token::Int(1).describe(), "'1'");
+        assert_eq!(Token::Float(1.5).describe(), "'1.5'");
+        assert_eq!(string(&Token::Str(Arc::from("x"))).as_ref(), "x");
+        assert_eq!(Token::Str(Arc::from("x")).describe(), "a string");
+        assert_eq!(Token::Ident(Arc::from("x")).describe(), "'x'");
+        assert_eq!(Token::True.describe(), "'true'");
+        assert_eq!(Token::False.describe(), "'false'");
+        assert_eq!(Token::Null.describe(), "'null'");
+        assert_eq!(Token::End.describe(), "the end of the expression");
+        assert_eq!(Token::Plus.describe(), "'+'");
+
+        let punctuators = [
+            (Token::Plus, "+"),
+            (Token::Minus, "-"),
+            (Token::Star, "*"),
+            (Token::Slash, "/"),
+            (Token::Percent, "%"),
+            (Token::EqEq, "=="),
+            (Token::NotEq, "!="),
+            (Token::Lt, "<"),
+            (Token::Le, "<="),
+            (Token::Gt, ">"),
+            (Token::Ge, ">="),
+            (Token::AndAnd, "&&"),
+            (Token::OrOr, "||"),
+            (Token::Not, "!"),
+            (Token::Dot, "."),
+            (Token::Comma, ","),
+            (Token::LParen, "("),
+            (Token::RParen, ")"),
+            (Token::LBracket, "["),
+            (Token::RBracket, "]"),
+        ];
+
+        for (token, expected) in punctuators {
+            assert_eq!(token.text(), expected);
+        }
+        assert_eq!(Token::Int(1).text(), "");
+        assert_eq!(Token::Str(Arc::from("x")).text(), "");
+        assert_eq!(Token::End.text(), "");
+    }
+
+    #[test]
+    fn an_empty_source_is_only_the_end_token() {
+        assert_eq!(lex("").unwrap(), [Token::End]);
+        assert_eq!(lex("   ").unwrap(), [Token::End]);
+    }
+}

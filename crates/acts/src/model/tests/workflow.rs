@@ -458,3 +458,150 @@ fn model_workflow_with_expose() {
     let m = Workflow::new().with_expose(Variant::create("v1", 0));
     assert!(m.exposes().contains_key("v1"));
 }
+
+#[test]
+fn model_workflow_model_base_id() {
+    use crate::ModelBase;
+    let m = Workflow::new().with_id("wf-id");
+    assert_eq!(m.id(), "wf-id");
+}
+
+#[test]
+fn model_workflow_from_yml_and_json_errors() {
+    let err = Workflow::from_yml("steps: not-a-list").unwrap_err();
+    assert!(matches!(err, crate::ActError::Model(_)), "{err}");
+
+    let err = Workflow::from_json("{\"steps\": 42}").unwrap_err();
+    assert!(matches!(err, crate::ActError::Model(_)), "{err}");
+}
+
+#[test]
+fn model_workflow_step_lookup() {
+    let m = Workflow::new()
+        .with_step(|step| step.with_id("s1"))
+        .with_step(|step| step.with_id("s2"));
+    assert_eq!(m.step("s2").unwrap().id, "s2");
+    assert!(m.step("missing").is_none());
+}
+
+#[test]
+fn model_workflow_with_env_updates_existing() {
+    let m = Workflow::new()
+        .with_env("a", 1)
+        .with_env("b", 2)
+        .with_env("a", 10);
+    assert_eq!(m.env.len(), 2);
+    assert_eq!(m.env().get::<i32>("a").unwrap(), 10);
+
+    let mut m = Workflow::new();
+    m.set_env(&[Variant::create("a", 1), Variant::create("b", 2)]);
+    m.set_env(&[Variant::create("a", 10)]);
+    assert_eq!(m.env.len(), 2);
+    assert_eq!(m.env().get::<i32>("a").unwrap(), 10);
+}
+
+#[test]
+fn model_workflow_rn_accepts_colon_segments() {
+    let m = Workflow::new().with_id("m1").with_rn("orders:eu");
+    assert!(m.valid().is_ok());
+}
+
+#[test]
+fn model_workflow_rn_rejects_malformed_names() {
+    for rn in ["a b", "a*", "a?", "a[b]", "a{b}", "a::b", ":a", "a:"] {
+        let m = Workflow::new().with_id("m1").with_rn(rn);
+        let err = m.valid().unwrap_err();
+        assert!(err.to_string().contains("invalid rn"), "{rn}: {err}");
+    }
+}
+
+#[test]
+fn model_workflow_valid_rejects_duplicate_trigger_ids() {
+    let m = Workflow::new()
+        .with_id("m1")
+        .with_trigger(|t| t.with_id("t1").with_kind("manual"))
+        .with_trigger(|t| t.with_id("t1").with_kind("manual"));
+    let err = m.valid().unwrap_err();
+    assert!(err.to_string().contains("dup event id"), "{err}");
+}
+
+#[test]
+fn model_workflow_valid_rejects_bad_triggers() {
+    let m = Workflow::new()
+        .with_id("m1")
+        .with_trigger(|t| t.with_id("t1").with_kind("schedule"));
+    assert!(m.valid().is_err());
+
+    let m = Workflow::new()
+        .with_id("m1")
+        .with_trigger(|t| t.with_id("t1").with_kind("custom"));
+    assert!(m.valid().is_ok());
+}
+
+#[test]
+fn model_workflow_valid_rejects_while_with_next() {
+    let m = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("s1").with_while("${{ a }}").with_next("s1"));
+    let err = m.valid().unwrap_err();
+    assert!(err.to_string().contains("cannot combine 'while'"), "{err}");
+}
+
+#[test]
+fn model_workflow_valid_rejects_forward_next() {
+    let m = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("s1").with_next("s2"));
+    let err = m.valid().unwrap_err();
+    assert!(err.to_string().contains("found next node error"), "{err}");
+}
+
+#[test]
+fn model_workflow_valid_accepts_declared_next() {
+    let m = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("s1"))
+        .with_step(|step| step.with_id("s2").with_next("s1"));
+    assert!(m.valid().is_ok());
+}
+
+#[test]
+fn model_workflow_valid_rejects_duplicate_branch_and_nested_ids() {
+    let m = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("s1").with_branch(|b| b.with_id("b1")))
+        .with_step(|step| step.with_id("s2").with_branch(|b| b.with_id("b1")));
+    assert!(m.valid().is_err());
+
+    let m = Workflow::new().with_id("m1").with_step(|step| {
+        step.with_id("s1")
+            .with_branch(|b| b.with_id("b1").with_step(|inner| inner.with_id("s1")))
+    });
+    assert!(m.valid().is_err());
+
+    let m = Workflow::new().with_id("m1").with_step(|step| {
+        step.with_id("s1")
+            .with_timeout(|inner| inner.with_id("t1"))
+            .with_timeout(|inner| inner.with_id("t1"))
+    });
+    assert!(m.valid().is_err());
+}
+
+#[test]
+fn model_workflow_tree_output_covers_branches_links_and_catches() {
+    let m = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_branch(|b| b.with_id("b1").with_step(|inner| inner.with_id("sb1")))
+                .with_catch(|c| c.with_id("c1"))
+                .with_timeout(|t| t.with_id("to1"))
+        })
+        .with_step(|step| step.with_id("s2").with_next("s1"));
+    let output = m.tree_output();
+    assert!(output.contains("id:m1"), "{output}");
+    assert!(output.contains("id:b1"), "{output}");
+    assert!(output.contains("id:sb1"), "{output}");
+    assert!(output.contains("id:c1"), "{output}");
+    assert!(output.contains("id:to1"), "{output}");
+}

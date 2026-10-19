@@ -126,3 +126,50 @@ fn only_abort_and_fail_walk_upward() {
     .unwrap_err();
     assert!(matches!(error, UpwardError::UnsupportedTarget(_)));
 }
+
+#[test]
+fn the_command_must_address_the_snapshot_process() {
+    let snapshot = snapshot(vec![task("step1", 0, None, TaskState::Aborted)]);
+    let error = Upward::plan(
+        &snapshot,
+        &UpwardCommand {
+            process_id: "other".into(),
+            source: id("step1", 0),
+            to: TaskState::Aborted,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, UpwardError::WrongProcess);
+}
+
+#[test]
+fn a_missing_source_or_ancestor_is_named() {
+    let base = snapshot(vec![task("step1", 0, None, TaskState::Aborted)]);
+    assert!(matches!(
+        Upward::plan(&base, &abort_command(id("ghost", 0))),
+        Err(UpwardError::TaskNotFound(_))
+    ));
+    // An ancestor edge that names a missing task is corrupt.
+    let mut corrupt = base;
+    corrupt.tasks.get_mut(&id("step1", 0)).unwrap().parent = Some(id("ghost", 0));
+    assert!(matches!(
+        Upward::plan(&corrupt, &abort_command(id("step1", 0))),
+        Err(UpwardError::TaskNotFound(_))
+    ));
+}
+
+#[test]
+fn upward_errors_render() {
+    for error in [
+        UpwardError::WrongProcess,
+        UpwardError::TaskNotFound(id("a", 0)),
+        UpwardError::UnsupportedTarget(TaskState::Skipped),
+        UpwardError::SourceNotDecided {
+            source: id("a", 0),
+            state: TaskState::Running,
+            to: TaskState::Aborted,
+        },
+    ] {
+        assert!(error.to_string().starts_with("upward walk error:"));
+    }
+}

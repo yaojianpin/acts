@@ -596,14 +596,16 @@ mod tests {
             .unwrap();
         let rows = ret.as_array().unwrap();
         assert_eq!(rows.len(), 2);
-        assert!(
-            rows.iter()
-                .any(|r| r["scope"] == "u1" && r["data"]["val"] == 1)
-        );
-        assert!(
-            rows.iter()
-                .any(|r| r["scope"] == "u2" && r["data"]["val"] == 2)
-        );
+        let u1 = rows
+            .iter()
+            .find(|r| r["scope"] == "u1")
+            .expect("u1's snapshot is listed");
+        assert_eq!(u1["data"]["val"], 1);
+        let u2 = rows
+            .iter()
+            .find(|r| r["scope"] == "u2")
+            .expect("u2's snapshot is listed");
+        assert_eq!(u2["data"]["val"], 2);
     }
 
     #[tokio::test]
@@ -1339,7 +1341,562 @@ mod tests {
 
         // Nothing escaped: the root has no entries, not even `..`
         // materialized somewhere else.
-        assert!(!root.exists() || std::fs::read_dir(&root).unwrap().next().is_none());
+        // A rejected pid may not create the root at all; either way it holds
+        // no entries.
+        let entries = std::fs::read_dir(&root).map(|dir| dir.count()).unwrap_or(0);
+        assert_eq!(entries, 0, "nothing may be created under the workdir root");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- the wire table: every arm ----
+
+    #[test]
+    fn every_error_variant_displays_its_wire_kind() {
+        assert_eq!(
+            Error::NotFound("x".to_string()).to_string(),
+            "not found action 'x'"
+        );
+        assert_eq!(Error::Invalid("bad".to_string()).to_string(), "bad");
+        assert_eq!(Error::Internal("boom".to_string()).to_string(), "boom");
+        assert_eq!(
+            Error::Unauthenticated("token".to_string()).to_string(),
+            "unauthenticated: token"
+        );
+        assert_eq!(
+            Error::Denied("right".to_string()).to_string(),
+            "permission denied: right"
+        );
+    }
+
+    #[test]
+    fn value_keeps_an_acl_refusal_apart_from_a_server_fault() {
+        assert_eq!(value(Ok(1u8)).unwrap(), json!(1));
+        assert_eq!(unit_ok(Ok(())).unwrap(), json!(true));
+        assert!(matches!(
+            value::<()>(Err(crate::ActError::Unauthenticated("u".to_string()))).unwrap_err(),
+            Error::Unauthenticated(_)
+        ));
+        assert!(matches!(
+            value::<()>(Err(crate::ActError::Denied("d".to_string()))).unwrap_err(),
+            Error::Denied(_)
+        ));
+        assert!(matches!(
+            value::<()>(Err(crate::ActError::Store("s".to_string()))).unwrap_err(),
+            Error::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn deny_and_acl_error_keep_the_refusal_kind() {
+        assert!(matches!(
+            deny(crate::AclError::Unauthenticated("u".to_string())),
+            Error::Unauthenticated(_)
+        ));
+        assert!(matches!(
+            deny(crate::AclError::Denied("d".to_string())),
+            Error::Denied(_)
+        ));
+
+        for err in [
+            crate::ActError::Config("c".to_string()),
+            crate::ActError::Convert("v".to_string()),
+            crate::ActError::Model("m".to_string()),
+            crate::ActError::Action("a".to_string()),
+        ] {
+            assert!(
+                matches!(acl_error(err), Error::Invalid(_)),
+                "a caller's bad rule is invalid input"
+            );
+        }
+        assert!(matches!(
+            acl_error(crate::ActError::Unauthenticated("u".to_string())),
+            Error::Unauthenticated(_)
+        ));
+        assert!(matches!(
+            acl_error(crate::ActError::Denied("d".to_string())),
+            Error::Denied(_)
+        ));
+        assert!(matches!(
+            acl_error(crate::ActError::Store("s".to_string())),
+            Error::Internal(_)
+        ));
+    }
+
+    /// A registry whose management calls succeed, so the table's success
+    /// arms (and the serializer behind them) run too.
+    #[derive(Debug, Default)]
+    struct TestAcl;
+
+    fn tokens() -> crate::LoginTokens {
+        crate::LoginTokens {
+            token: "t".to_string(),
+            refresh_token: "r".to_string(),
+            expires_in: 60,
+            refresh_expires_in: 60,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::AccessControl for TestAcl {
+        async fn load(&self, _store: std::sync::Arc<crate::Store>) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn enabled(&self) -> bool {
+            true
+        }
+
+        fn authenticate(
+            &self,
+            _token: Option<&str>,
+        ) -> std::result::Result<crate::Principal, crate::AclError> {
+            Ok(crate::Principal::unrestricted())
+        }
+
+        async fn login(
+            &self,
+            _user: &str,
+            password: &str,
+        ) -> std::result::Result<crate::LoginTokens, crate::AclError> {
+            if password == "ok" {
+                Ok(tokens())
+            } else {
+                Err(crate::AclError::Denied("bad password".to_string()))
+            }
+        }
+
+        async fn refresh(
+            &self,
+            refresh_token: &str,
+        ) -> std::result::Result<crate::LoginTokens, crate::AclError> {
+            if refresh_token == "r" {
+                Ok(tokens())
+            } else {
+                Err(crate::AclError::Unauthenticated(
+                    "unknown refresh token".to_string(),
+                ))
+            }
+        }
+
+        async fn logout(&self, _token: &str) -> crate::Result<bool> {
+            Ok(true)
+        }
+
+        async fn set_user(&self, _spec: &crate::UserSpec) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn del_user(&self, _name: &str) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn user_names(&self) -> Vec<String> {
+            vec!["u1".to_string()]
+        }
+
+        async fn get_user(&self, name: &str) -> Option<JsonValue> {
+            (name == "u1").then(|| json!({ "name": "u1" }))
+        }
+    }
+
+    /// With a working registry the management arms answer their success
+    /// values (and a bad credential keeps its refusal kind).
+    #[tokio::test]
+    async fn the_acl_actions_answer_a_working_registry() {
+        let engine = crate::Engine::builder()
+            .set_acl(std::sync::Arc::new(TestAcl))
+            .start()
+            .await
+            .unwrap();
+
+        let login = apply(
+            &engine,
+            "acl:login",
+            Vars::new().with("user", "u1").with("password", "ok"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(login["token"], "t");
+        let err = apply(
+            &engine,
+            "acl:login",
+            Vars::new().with("user", "u1").with("password", "bad"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+
+        let refreshed = apply(
+            &engine,
+            "acl:refresh",
+            Vars::new().with("refresh_token", "r"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refreshed["refresh_token"], "r");
+        let err = apply(
+            &engine,
+            "acl:refresh",
+            Vars::new().with("refresh_token", "bad"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Unauthenticated(_)), "got: {err}");
+
+        assert_eq!(
+            apply(&engine, "acl:logout", Vars::new().with("token", "t"))
+                .await
+                .unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            apply(&engine, "acl:users", Vars::new()).await.unwrap(),
+            json!(["u1"])
+        );
+        assert_eq!(
+            apply(&engine, "acl:getuser", Vars::new().with("user", "u1"))
+                .await
+                .unwrap(),
+            json!({"name": "u1"})
+        );
+        let err = apply(&engine, "acl:getuser", Vars::new().with("user", "u2"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "got: {err}");
+
+        assert_eq!(
+            apply(
+                &engine,
+                "acl:setuser",
+                Vars::new().with("user", json!({ "name": "u1", "enabled": true })),
+            )
+            .await
+            .unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            apply(&engine, "acl:deluser", Vars::new().with("user", "u1"))
+                .await
+                .unwrap(),
+            json!(true)
+        );
+    }
+
+    /// One pass over the action table, so every arm's argument handling and
+    /// error mapping runs. The catalogues are exercised against the engine's
+    /// real store; things that do not exist answer their normal errors.
+    #[tokio::test]
+    async fn the_action_table_reaches_every_executor() {
+        let engine = open_engine().await;
+
+        // Task actions: a pid/tid pair that names nothing still runs the
+        // arm's dispatch (the action itself then fails at the runtime).
+        for action in [
+            "act:push",
+            "act:remove",
+            "act:submit",
+            "act:complete",
+            "act:abort",
+            "act:cancel",
+            "act:back",
+            "act:skip",
+            "act:error",
+        ] {
+            let _ = apply(
+                &engine,
+                action,
+                Vars::new().with("pid", "nope").with("tid", "nope"),
+            )
+            .await;
+        }
+
+        // model catalogue
+        let yml = "id: tbl\nver: 0.1.0\nrn: tbl\nsteps:\n  - name: s\n";
+        let deployed = apply(
+            &engine,
+            "model:deploy",
+            Vars::new()
+                .with("model", yml)
+                .with("mid", "tbl")
+                .with("view", serde_json::json!({"a": 1})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deployed, json!(true));
+        let err = apply(&engine, "model:deploy", Vars::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("model is required"));
+        let err = apply(
+            &engine,
+            "model:deploy",
+            Vars::new().with("model", "id: [unclosed"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got: {err}");
+        // parses, but the model itself is invalid: the caller's input again
+        let err = apply(
+            &engine,
+            "model:deploy",
+            Vars::new().with(
+                "model",
+                "id: dup\nver: 0.1.0\nrn: dup\nsteps:\n  - id: same\n  - id: same\n",
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got: {err}");
+        for fmt in ["text", "tree", "yaml"] {
+            let got = apply(
+                &engine,
+                "model:get",
+                Vars::new().with("id", "tbl").with("fmt", fmt),
+            )
+            .await
+            .unwrap();
+            assert_eq!(got["id"], "tbl");
+        }
+        assert!(apply(&engine, "model:ls", Vars::new()).await.is_ok());
+        assert!(
+            apply(&engine, "model:get", Vars::new().with("id", "gone"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            apply(&engine, "model:rm", Vars::new().with("id", "tbl"))
+                .await
+                .unwrap(),
+            json!(true)
+        );
+
+        // package catalogue
+        assert!(apply(&engine, "pack:ls", Vars::new()).await.is_ok());
+        let err = apply(&engine, "pack:publish", Vars::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("package 'id' is required"));
+        let err = apply(
+            &engine,
+            "pack:publish",
+            Vars::new().with("id", "p").with("run_as", "bogus"),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("'run_as' is invalid"));
+        let err = apply(
+            &engine,
+            "pack:publish",
+            Vars::new()
+                .with("id", "p")
+                .with("run_as", "func")
+                .with("catalog", "bogus"),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("'catalog' is invalid"));
+        let published = apply(
+            &engine,
+            "pack:publish",
+            Vars::new()
+                .with("id", "tbl-pack")
+                .with("name", "pack")
+                .with("desc", "d")
+                .with("icon", "i")
+                .with("doc", "doc")
+                .with("version", "0.1.0")
+                .with("schema", serde_json::json!({"type": "object"}))
+                .with("options", serde_json::json!({"a": 1}))
+                .with("run_as", "func")
+                .with("catalog", "app")
+                .with(
+                    "resources",
+                    vec![crate::ActResource {
+                        name: "r".to_string(),
+                        desc: "d".to_string(),
+                        value: serde_json::json!(1),
+                    }],
+                ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(published, json!(true));
+        assert!(
+            apply(&engine, "pack:get", Vars::new().with("id", "tbl-pack"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            apply(&engine, "pack:get", Vars::new().with("id", "gone"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            apply(&engine, "pack:rm", Vars::new().with("id", "tbl-pack"))
+                .await
+                .unwrap(),
+            json!(true)
+        );
+
+        // process catalogue
+        assert!(apply(&engine, "proc:ls", Vars::new()).await.is_ok());
+        assert!(
+            apply(&engine, "proc:get", Vars::new().with("pid", "gone"))
+                .await
+                .is_err()
+        );
+        assert!(
+            apply(&engine, "proc:start", Vars::new().with("id", "gone-model"))
+                .await
+                .is_err()
+        );
+        let err = apply(&engine, "proc:start_from_model", Vars::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("fmt is required"));
+        assert!(
+            apply(
+                &engine,
+                "proc:start_from_model",
+                Vars::new()
+                    .with("fmt", "bogus")
+                    .with("model", "id: m\nver: 0.1.0\nrn: m\nsteps:\n  - name: s\n"),
+            )
+            .await
+            .is_err()
+        );
+
+        // task catalogue
+        assert!(apply(&engine, "task:ls", Vars::new()).await.is_ok());
+        let err = apply(
+            &engine,
+            "task:get",
+            Vars::new().with("pid", "gone").with("tid", "gone"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Internal(_)), "got: {err}");
+        let err = apply(&engine, "task:get", Vars::new().with("pid", "gone"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("tid is required"));
+
+        // message catalogue and deliveries
+        assert!(apply(&engine, "msg:ls", Vars::new()).await.is_ok());
+        assert!(
+            apply(&engine, "msg:get", Vars::new().with("id", "gone"))
+                .await
+                .is_err()
+        );
+        let _ = apply(&engine, "msg:ack", Vars::new().with("id", "gone")).await;
+        assert_eq!(
+            apply(&engine, "msg:redo", Vars::new()).await.unwrap(),
+            JsonValue::Null
+        );
+        assert_eq!(
+            apply(&engine, "msg:redo", Vars::new().with("id", "gone"))
+                .await
+                .unwrap(),
+            JsonValue::Null
+        );
+        assert_eq!(
+            apply(&engine, "msg:clear", Vars::new()).await.unwrap(),
+            JsonValue::Null
+        );
+        assert_eq!(
+            apply(&engine, "msg:clear", Vars::new().with("pid", "gone"))
+                .await
+                .unwrap(),
+            JsonValue::Null
+        );
+        assert_eq!(
+            apply(&engine, "msg:clear", Vars::new().with("id", "gone"))
+                .await
+                .unwrap(),
+            JsonValue::Null
+        );
+        assert_eq!(
+            apply(&engine, "msg:rm", Vars::new().with("id", "gone"))
+                .await
+                .unwrap(),
+            json!(true),
+            "deleting an absent delivery is an idempotent success"
+        );
+        let sub = apply(
+            &engine,
+            crate::acl::ACTION_SUBSCRIBE,
+            Vars::new().with("client_id", "c1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sub, json!("system/c1"));
+        let err = apply(&engine, "msg:unsub", Vars::new()).await.unwrap_err();
+        assert!(err.to_string().contains("client_id is required"));
+        assert_eq!(
+            apply(&engine, "msg:unsub", Vars::new().with("client_id", "c1"))
+                .await
+                .unwrap(),
+            JsonValue::Null
+        );
+
+        // trigger catalogue
+        assert!(apply(&engine, "evt:ls", Vars::new()).await.is_ok());
+        assert!(
+            apply(&engine, "evt:get", Vars::new().with("id", "gone"))
+                .await
+                .is_err()
+        );
+        let err = apply(&engine, "evt:start", Vars::new()).await.unwrap_err();
+        assert!(err.to_string().contains("id is required"));
+        assert!(
+            apply(&engine, "evt:start", Vars::new().with("id", "gone"))
+                .await
+                .is_err()
+        );
+
+        // access-control management (the anonymous registry refuses writes
+        // and answers no user, which is exactly what the table maps)
+        let err = apply(&engine, "acl:setuser", Vars::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("user is required"));
+        let err = apply(
+            &engine,
+            "acl:setuser",
+            Vars::new().with("user", serde_json::json!({"name": "u1", "enabled": true})),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got: {err}");
+        let err = apply(&engine, "acl:deluser", Vars::new().with("user", "u1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got: {err}");
+        let err = apply(&engine, "acl:getuser", Vars::new().with("user", "u1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "got: {err}");
+        assert_eq!(
+            apply(&engine, "acl:users", Vars::new()).await.unwrap(),
+            json!([])
+        );
+
+        // login/refresh/logout carry their own credential
+        let err = apply(&engine, "acl:login", Vars::new()).await.unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+        let err = apply(
+            &engine,
+            "acl:refresh",
+            Vars::new().with("refresh_token", "r"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+        assert_eq!(
+            apply(&engine, "acl:logout", Vars::new().with("token", "t"))
+                .await
+                .unwrap(),
+            json!(false)
+        );
     }
 }

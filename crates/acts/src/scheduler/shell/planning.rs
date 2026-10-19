@@ -336,3 +336,185 @@ pub(super) fn find_step<'a>(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Vars;
+    use crate::model::Workflow;
+    use crate::scheduler::core::model::task_graph::TaskState;
+
+    /// Only the two scheduled states start an execution; every settled or
+    /// waiting state does not.
+    #[test]
+    fn only_created_and_ready_are_startable() {
+        assert!(startable(TaskState::Created));
+        assert!(startable(TaskState::Ready));
+        for state in [
+            TaskState::Running,
+            TaskState::Waiting,
+            TaskState::Completed,
+            TaskState::Submitted,
+            TaskState::Backed,
+            TaskState::Cancelled,
+            TaskState::Failed,
+            TaskState::Aborted,
+            TaskState::Skipped,
+            TaskState::Removed,
+        ] {
+            assert!(!startable(state), "{state:?}");
+        }
+    }
+
+    /// A package failure carries the engine ecode only when the error is an
+    /// engine exception; every other error reads empty through `$ecode()`.
+    #[test]
+    fn a_package_failure_carries_an_engine_ecode() {
+        let exception = crate::ActError::Exception {
+            ecode: "EBUSY".into(),
+            message: "busy".into(),
+        };
+        let failure = package_failure(&exception);
+        assert_eq!(failure.code, "EPACKAGE");
+        assert_eq!(failure.ecode, "EBUSY");
+
+        let plain = crate::ActError::Runtime("plain".into());
+        assert_eq!(package_failure(&plain).ecode, "");
+    }
+
+    fn handler_model() -> Workflow {
+        Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.transform.set", Vars::new())
+                .with_branch(|branch| {
+                    branch
+                        .with_id("sb")
+                        .with_if("true")
+                        .with_step(|inner| inner.with_id("si"))
+                })
+                .with_timeout(|timeout| {
+                    timeout.with_id("t1").with_branch(|branch| {
+                        branch
+                            .with_id("tb")
+                            .with_if("true")
+                            .with_step(|inner| inner.with_id("ti"))
+                    })
+                })
+                .with_catch(|catch| {
+                    catch.with_id("c1").with_branch(|branch| {
+                        branch
+                            .with_id("cb")
+                            .with_if("true")
+                            .with_step(|inner| inner.with_id("ci"))
+                    })
+                })
+        })
+    }
+
+    /// A timeout branch is a container like any other: the fan-out looks its
+    /// shape up through the handler walk.
+    #[test]
+    fn a_timeout_branch_container_is_walked() {
+        let model = handler_model();
+        let step = &model.steps[0];
+        match walk_step(step, "tb") {
+            Some(ContainerShape::Steps(steps)) => {
+                assert_eq!(steps.len(), 1);
+                assert_eq!(steps[0].id, "ti");
+            }
+            _ => panic!("the timeout's branch must be found through the handler walk"),
+        }
+        match walk_step(step, "t1") {
+            Some(ContainerShape::Branches(branches)) => {
+                assert_eq!(branches.len(), 1);
+                assert_eq!(branches[0].id, "tb");
+            }
+            _ => panic!("the timeout handler owns its branch container"),
+        }
+        assert!(walk_step(step, "missing").is_none());
+    }
+
+    /// A handler list is a declaration chain of its own: the fall-through of
+    /// one timeout step is the next timeout step.
+    #[test]
+    fn a_handler_list_has_its_own_declaration_order() {
+        let model = Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.transform.set", Vars::new())
+                .with_timeout(|timeout| timeout.with_id("t1"))
+                .with_timeout(|timeout| timeout.with_id("t2"))
+        });
+        assert_eq!(declaration_successor(&model, "t1").as_deref(), Some("t2"));
+        assert_eq!(declaration_successor(&model, "t2"), None);
+        assert_eq!(declaration_successor(&model, "missing"), None);
+    }
+
+    /// A handler is found through a branch of the declaring step, and through
+    /// a handler nested inside another handler.
+    #[test]
+    fn handlers_are_found_through_nested_containers() {
+        let model = handler_model();
+        assert!(is_handler_step(&model, "t1"));
+        assert!(is_handler_step(&model, "c1"));
+        // A handler's branch steps are the handler's own flow, not handlers.
+        assert!(!is_handler_step(&model, "tb"));
+        assert!(!is_handler_step(&model, "ti"));
+        assert!(!is_handler_step(&model, "cb"));
+        assert!(!is_handler_step(&model, "ci"));
+        assert!(!is_handler_step(&model, "s1"));
+        assert!(!is_handler_step(&model, "missing"));
+
+        // A catch nested inside a branch of a plain step.
+        let model = Workflow::new().with_step(|step| {
+            step.with_id("s1").with_branch(|branch| {
+                branch.with_id("b1").with_if("true").with_step(|inner| {
+                    inner
+                        .with_id("i1")
+                        .with_catch(|catch| catch.with_id("deep"))
+                })
+            })
+        });
+        assert!(is_handler_step(&model, "deep"));
+    }
+
+    /// A handler step never flows: its own `next` is the dispatcher's, not the
+    /// flow's.
+    #[test]
+    fn a_handler_step_has_no_flow_target() {
+        let model = handler_model();
+        assert_eq!(
+            flow_target(&model, "t1", false),
+            None,
+            "a handler never flows"
+        );
+        assert_eq!(flow_target(&model, "ci", false), None);
+        assert_eq!(
+            flow_target(&model, "s1", false),
+            None,
+            "the last top-level step"
+        );
+        assert_eq!(flow_target(&model, "s1", true), None);
+        assert_eq!(flow_target(&model, "missing", false), None);
+    }
+
+    /// A container shape is looked up by model node, the root included.
+    #[test]
+    fn container_shapes_resolve_by_model_node() {
+        let model = handler_model();
+        let root = crate::scheduler::core::model::model_graph::NodeId::parse(
+            crate::utils::consts::TASK_ROOT_TID,
+        )
+        .unwrap();
+        assert!(matches!(
+            container_shape(&model, &root),
+            Some(ContainerShape::Steps(_))
+        ));
+        let s1 = crate::scheduler::core::model::model_graph::NodeId::parse("s1").unwrap();
+        assert!(matches!(
+            container_shape(&model, &s1),
+            Some(ContainerShape::Branches(_))
+        ));
+        let missing = crate::scheduler::core::model::model_graph::NodeId::parse("missing").unwrap();
+        assert!(container_shape(&model, &missing).is_none());
+    }
+}

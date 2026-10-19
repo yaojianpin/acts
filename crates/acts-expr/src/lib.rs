@@ -163,3 +163,27 @@ impl Expr {
 pub fn eval(source: &str, context: &Context) -> Result<Value> {
     Expr::compile(source)?.eval(context)
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn a_compiled_expression_reports_its_size() {
+        let expr = Expr::compile("1 + 2").unwrap();
+        assert_eq!(expr.len(), 3);
+        assert!(!expr.is_empty());
+
+        let clone = expr.clone();
+        assert_eq!(clone.eval(&Context::new()).unwrap(), Value::Int(3));
+        assert!(format!("{expr:?}").starts_with("Expr {"));
+    }
+
+    #[test]
+    fn the_one_step_eval_compiles_first() {
+        let mut context = Context::new();
+        context.set("a", 1);
+        assert_eq!(eval("a + 1", &context).unwrap(), Value::Int(2));
+        assert_eq!(eval("a +", &context).unwrap_err().position(), Some(3));
+    }
+}

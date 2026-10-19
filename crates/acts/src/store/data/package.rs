@@ -55,3 +55,41 @@ impl DbCollectionIden for Package {
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_metadata_and_current_upcast() {
+        assert_eq!(Package::iden(), "packages");
+        assert_eq!(
+            Package::ordered_index_fields(),
+            &["timestamp", "create_time", "update_time"]
+        );
+        assert_eq!(Package::version(), 0);
+
+        let row = Package {
+            id: "p1".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        let restored = Package::upcast(json).unwrap();
+        assert_eq!(restored.id, "p1");
+    }
+
+    #[test]
+    fn package_upcast_accepts_missing_version_and_rejects_unknown() {
+        let row = Package {
+            id: "p2".into(),
+            ..Default::default()
+        };
+        let mut json = serde_json::to_value(&row).unwrap();
+        json.as_object_mut().unwrap().remove("v");
+        assert_eq!(Package::upcast(json).unwrap().id, "p2");
+
+        let json = serde_json::json!({"id": "p3", "v": 7});
+        let err = Package::upcast(json).unwrap_err();
+        assert!(err.to_string().contains("unsupported package version: 7"));
+    }
+}

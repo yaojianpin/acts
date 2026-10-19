@@ -1151,6 +1151,7 @@ impl std::error::Error for SnapshotCodecError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::core::outbox::records::{OutboxId, OutboxRecord};
 
     fn encoded_u32(bytes: &[u8], offset: usize) -> u32 {
         let field = bytes
@@ -1296,6 +1297,609 @@ mod tests {
             "4887924dd93a41c07aa4518a2da3a19f85e48073ec243d299cae3d66219ff83a"
         );
     }
+    fn task_snapshot(model: &str) -> TaskSnapshot {
+        TaskSnapshot {
+            model_node: NodeId::parse(model).unwrap(),
+            parent: None,
+            predecessors: vec![],
+            state: TaskState::Ready,
+            revision: 0,
+        }
+    }
+
+    fn outbox_record(process_id: &str, key: &str) -> OutboxRecord {
+        OutboxRecord::pending(
+            OutboxId {
+                process_id: process_id.into(),
+                key: key.into(),
+            },
+            "topic".into(),
+            "{}".into(),
+            0,
+        )
+        .unwrap()
+    }
+
+    fn v2_header(process_id: &str) -> Writer {
+        let mut writer = Writer::default();
+        writer.raw(PAYLOAD_MAGIC);
+        writer.string(process_id).unwrap();
+        writer.u64(0);
+        writer.u64(0);
+        writer.u64(0);
+        writer
+    }
+
+    fn v3_header(process_id: &str) -> Writer {
+        let mut writer = Writer::default();
+        writer.raw(PAYLOAD_MAGIC_V3);
+        writer.string(process_id).unwrap();
+        writer.u64(0);
+        writer.u64(0);
+        writer.u64(0);
+        writer
+    }
+
+    fn log_header(process_id: &str, sequence: u64) -> Writer {
+        let mut writer = Writer::default();
+        writer.raw(PAYLOAD_MAGIC_V4_LOG);
+        writer.string(process_id).unwrap();
+        writer.u64(sequence);
+        writer
+    }
+
+    /// The V2 writer/reader pair still carries outbox records (the fixture
+    /// format predates the L8 log), and every duplicate a hostile payload can
+    /// express is rejected rather than silently overwriting a record.
+    #[test]
+    fn v2_outbox_round_trips_and_duplicates_are_rejected() {
+        let mut source = snapshot();
+        let record = outbox_record("p", "k");
+        source.outbox.insert(record.id.clone(), record);
+        let encoded = SnapshotCodecV2::encode(&source).unwrap();
+        assert_eq!(SnapshotCodecV2::decode(&encoded).unwrap(), source);
+
+        let id = TaskId::new("dup", 0).unwrap();
+        let task = task_snapshot("model-dup");
+        let mut duplicate_task = v2_header("p");
+        duplicate_task.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_task.task_id(&id).unwrap();
+            duplicate_task.string(task.model_node.as_str()).unwrap();
+            duplicate_task.optional_task(None).unwrap();
+            duplicate_task.count(0).unwrap();
+            duplicate_task.u8(task_state_tag(TaskState::Ready));
+            duplicate_task.u64(0);
+        }
+        assert_eq!(
+            SnapshotCodecV2::decode(&duplicate_task.bytes),
+            Err(SnapshotCodecError::DuplicateTask(id.clone()))
+        );
+
+        let mut duplicate_variable = v2_header("p");
+        duplicate_variable.count(0).unwrap();
+        duplicate_variable.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_variable.task_id(&id).unwrap();
+            duplicate_variable.string("name").unwrap();
+            duplicate_variable.string("value").unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV2::decode(&duplicate_variable.bytes),
+            Err(SnapshotCodecError::DuplicateVariable(
+                id.clone(),
+                "name".into()
+            ))
+        );
+
+        let operation_id = OperationId {
+            process_id: "p".into(),
+            task: id.clone(),
+            sequence: 3,
+        };
+        let operation = OperationRecord {
+            id: operation_id.clone(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::Pending,
+            revision: 1,
+        };
+        let mut duplicate_operation = v2_header("p");
+        duplicate_operation.count(0).unwrap();
+        duplicate_operation.count(0).unwrap();
+        duplicate_operation.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_operation.operation(&operation).unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV2::decode(&duplicate_operation.bytes),
+            Err(SnapshotCodecError::DuplicateOperation(operation_id))
+        );
+
+        let duplicate = outbox_record("p", "same");
+        let bytes =
+            crate::scheduler::core::outbox::outbox_codec::OutboxCodec::encode(&duplicate).unwrap();
+        let mut duplicate_outbox = v2_header("p");
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_outbox.bytes(&bytes).unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV2::decode(&duplicate_outbox.bytes),
+            Err(SnapshotCodecError::DuplicateOutboxKey("same".into()))
+        );
+
+        let mut trailing = SnapshotCodecV2::encode(&snapshot()).unwrap();
+        trailing.push(0);
+        assert_eq!(
+            SnapshotCodecV2::decode(&trailing),
+            Err(SnapshotCodecError::TrailingBytes)
+        );
+    }
+
+    /// The V3 reader applies the same duplicate checks to the wire-shaped
+    /// records a committed snapshot can contain.
+    #[test]
+    fn v3_duplicate_records_are_rejected() {
+        let id = TaskId::new("dup", 0).unwrap();
+        let task = task_snapshot("model-dup");
+
+        let mut duplicate_task = v3_header("p");
+        duplicate_task.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_task.task_record(&id, &task, "p").unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV3::decode(&duplicate_task.bytes),
+            Err(SnapshotCodecError::DuplicateTask(id.clone()))
+        );
+
+        let mut duplicate_variable = v3_header("p");
+        duplicate_variable.count(0).unwrap();
+        duplicate_variable.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_variable
+                .variable_record(&id, "name", "value", "p")
+                .unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV3::decode(&duplicate_variable.bytes),
+            Err(SnapshotCodecError::DuplicateVariable(
+                id.clone(),
+                "name".into()
+            ))
+        );
+
+        let operation_id = OperationId {
+            process_id: "p".into(),
+            task: id.clone(),
+            sequence: 3,
+        };
+        let operation = OperationRecord {
+            id: operation_id.clone(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::Pending,
+            revision: 1,
+        };
+        let mut duplicate_operation = v3_header("p");
+        duplicate_operation.count(0).unwrap();
+        duplicate_operation.count(0).unwrap();
+        duplicate_operation.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_operation.wire_operation(&operation).unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV3::decode(&duplicate_operation.bytes),
+            Err(SnapshotCodecError::DuplicateOperation(operation_id))
+        );
+
+        let duplicate = outbox_record("p", "same");
+        let mut duplicate_outbox = v3_header("p");
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_outbox.outbox_record(&duplicate).unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV3::decode(&duplicate_outbox.bytes),
+            Err(SnapshotCodecError::DuplicateOutboxKey("same".into()))
+        );
+    }
+
+    /// Collecting a log entry from changes that name records the snapshot does
+    /// not have is a caller bug, not an empty entry.
+    #[test]
+    fn log_collection_reports_every_missing_record_kind() {
+        let source = snapshot();
+        let absent_task = TaskId::new("absent", 0).unwrap();
+
+        let mut changes = LogChanges::default();
+        changes.tasks.insert(absent_task.clone());
+        let missing = LogPayload::collect(&source, 0, &changes)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("task"));
+
+        let mut changes = LogChanges::default();
+        changes
+            .variables
+            .insert((absent_task.clone(), "missing".into()));
+        let missing = LogPayload::collect(&source, 0, &changes)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("variable"));
+
+        let mut changes = LogChanges::default();
+        changes.operations.insert(OperationId {
+            process_id: "p".into(),
+            task: absent_task.clone(),
+            sequence: 1,
+        });
+        let missing = LogPayload::collect(&source, 0, &changes)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("operation"));
+
+        let mut changes = LogChanges::default();
+        changes.outbox.insert(OutboxId {
+            process_id: "p".into(),
+            key: "missing".into(),
+        });
+        let missing = LogPayload::collect(&source, 0, &changes)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("outbox"));
+    }
+
+    fn head(base_seq: u64, next_seq: u64) -> HeadPayload {
+        HeadPayload {
+            process_id: "p".into(),
+            version: ProcessVersion {
+                graph: 1,
+                process: 2,
+                operations: 3,
+            },
+            epoch: 4,
+            base_seq,
+            next_seq,
+        }
+    }
+
+    /// The head writer and reader both validate the log window, so an inverted
+    /// window cannot be persisted or loaded.
+    #[test]
+    fn head_codec_rejects_invalid_windows_and_documents() {
+        let empty_process = SnapshotCodecV4::encode_head(&HeadPayload {
+            process_id: "   ".into(),
+            ..head(0, 0)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(empty_process.contains("empty process id"));
+        let inverted_window = SnapshotCodecV4::encode_head(&head(2, 1))
+            .unwrap_err()
+            .to_string();
+        assert!(inverted_window.contains("inverted"));
+
+        let mut invalid_magic = SnapshotCodecV4::encode_head(&head(0, 2)).unwrap();
+        invalid_magic[0] ^= 0xff;
+        assert_eq!(
+            SnapshotCodecV4::decode_head(&invalid_magic),
+            Err(SnapshotCodecError::InvalidMagic)
+        );
+
+        let mut trailing = SnapshotCodecV4::encode_head(&head(0, 2)).unwrap();
+        trailing.push(0);
+        assert_eq!(
+            SnapshotCodecV4::decode_head(&trailing),
+            Err(SnapshotCodecError::TrailingBytes)
+        );
+
+        let mut empty = Writer::default();
+        empty.raw(PAYLOAD_MAGIC_V4_HEAD);
+        empty.string("").unwrap();
+        empty.u64(0);
+        empty.u64(0);
+        empty.u64(0);
+        empty.u64(0);
+        empty.u64(0);
+        empty.u64(0);
+        let empty_process = SnapshotCodecV4::decode_head(&empty.bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(empty_process.contains("empty process id"));
+
+        let mut inverted = Writer::default();
+        inverted.raw(PAYLOAD_MAGIC_V4_HEAD);
+        inverted.string("p").unwrap();
+        inverted.u64(0);
+        inverted.u64(0);
+        inverted.u64(0);
+        inverted.u64(0);
+        inverted.u64(2);
+        inverted.u64(1);
+        let inverted_window = SnapshotCodecV4::decode_head(&inverted.bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(inverted_window.contains("inverted"));
+    }
+
+    /// A bounded collection count must both fit the remaining bytes and carry
+    /// a positive per-item minimum; a zero minimum would divide by zero.
+    #[test]
+    fn reader_rejects_zero_minimum_item_size_and_overflowing_counts() {
+        let zero = 0u32.to_be_bytes();
+        let mut zero_minimum = Reader::new(&zero);
+        assert_eq!(
+            zero_minimum.count_bounded(0),
+            Err(SnapshotCodecError::Truncated)
+        );
+
+        let two = 2u32.to_be_bytes();
+        let mut too_many = Reader::new(&two);
+        assert_eq!(
+            too_many.count_bounded(4),
+            Err(SnapshotCodecError::Truncated)
+        );
+
+        let empty = 0u32.to_be_bytes();
+        let mut valid = Reader::new(&empty);
+        assert_eq!(valid.count_bounded(4), Ok(0));
+    }
+
+    #[test]
+    fn base_codec_rejects_foreign_magic_and_trailing_bytes() {
+        let mut encoded = SnapshotCodecV4::encode_base(&snapshot(), 3).unwrap();
+        encoded[0] ^= 0xff;
+        assert_eq!(
+            SnapshotCodecV4::decode_base(&encoded),
+            Err(SnapshotCodecError::InvalidMagic)
+        );
+
+        let mut trailing = SnapshotCodecV4::encode_base(&snapshot(), 3).unwrap();
+        trailing.push(0);
+        assert_eq!(
+            SnapshotCodecV4::decode_base(&trailing),
+            Err(SnapshotCodecError::TrailingBytes)
+        );
+    }
+
+    /// The log reader rejects a foreign magic, duplicate records and trailing
+    /// bytes; each entry is self-contained and independently validated.
+    #[test]
+    fn log_codec_rejects_duplicates_and_trailing_bytes() {
+        let source = snapshot();
+        let changes = LogChanges {
+            tasks: source.tasks.keys().cloned().collect(),
+            variables: source.variables.keys().cloned().collect(),
+            operations: source.operations.keys().cloned().collect(),
+            outbox: source.outbox.keys().cloned().collect(),
+        };
+        let mut invalid_magic =
+            SnapshotCodecV4::encode_log(&LogPayload::collect(&source, 0, &changes).unwrap())
+                .unwrap();
+        invalid_magic[0] ^= 0xff;
+        assert_eq!(
+            SnapshotCodecV4::decode_log(&invalid_magic),
+            Err(SnapshotCodecError::InvalidMagic)
+        );
+
+        let id = TaskId::new("dup", 0).unwrap();
+        let task = task_snapshot("model-dup");
+        let mut duplicate_task = log_header("p", 0);
+        duplicate_task.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_task.task_record(&id, &task, "p").unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV4::decode_log(&duplicate_task.bytes),
+            Err(SnapshotCodecError::DuplicateTask(id.clone()))
+        );
+
+        let mut duplicate_variable = log_header("p", 0);
+        duplicate_variable.count(0).unwrap();
+        duplicate_variable.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_variable
+                .variable_record(&id, "name", "value", "p")
+                .unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV4::decode_log(&duplicate_variable.bytes),
+            Err(SnapshotCodecError::DuplicateVariable(
+                id.clone(),
+                "name".into()
+            ))
+        );
+
+        let operation_id = OperationId {
+            process_id: "p".into(),
+            task: id.clone(),
+            sequence: 3,
+        };
+        let operation = OperationRecord {
+            id: operation_id.clone(),
+            kind: OperationKind::ExecuteTask,
+            state: OperationState::Pending,
+            revision: 1,
+        };
+        let mut duplicate_operation = log_header("p", 0);
+        duplicate_operation.count(0).unwrap();
+        duplicate_operation.count(0).unwrap();
+        duplicate_operation.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_operation.wire_operation(&operation).unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV4::decode_log(&duplicate_operation.bytes),
+            Err(SnapshotCodecError::DuplicateOperation(operation_id))
+        );
+
+        let duplicate = outbox_record("p", "same");
+        let mut duplicate_outbox = log_header("p", 0);
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(0).unwrap();
+        duplicate_outbox.count(2).unwrap();
+        for _ in 0..2 {
+            duplicate_outbox.outbox_record(&duplicate).unwrap();
+        }
+        assert_eq!(
+            SnapshotCodecV4::decode_log(&duplicate_outbox.bytes),
+            Err(SnapshotCodecError::DuplicateOutboxKey("same".into()))
+        );
+
+        let mut trailing =
+            SnapshotCodecV4::encode_log(&LogPayload::collect(&source, 0, &changes).unwrap())
+                .unwrap();
+        trailing.push(0);
+        assert_eq!(
+            SnapshotCodecV4::decode_log(&trailing),
+            Err(SnapshotCodecError::TrailingBytes)
+        );
+    }
+
+    /// Every lifecycle state, operation kind and task state has a distinct
+    /// stored tag and survives a round trip.
+    #[test]
+    fn every_state_kind_and_tag_round_trips() {
+        let mut source = snapshot();
+        let root = TaskId::new("root", 0).unwrap();
+        source.tasks.get_mut(&root).unwrap().state = TaskState::Cancelled;
+        let removed = TaskId::new("removed", 2).unwrap();
+        source.tasks.insert(
+            removed.clone(),
+            TaskSnapshot {
+                state: TaskState::Removed,
+                ..task_snapshot("model-removed")
+            },
+        );
+
+        let claim = ClaimToken {
+            owner: "runtime".into(),
+            fence: 1,
+            lease_until_ms: 10,
+            heartbeat_revision: 0,
+        };
+        let commit = CommitToken {
+            process_version: 5,
+            digest: "digest".into(),
+        };
+        let states = [
+            (OperationKind::ExecuteTask, OperationState::Pending),
+            (
+                OperationKind::DeliverMessage,
+                OperationState::Claimed(claim.clone()),
+            ),
+            (
+                OperationKind::FireTrigger,
+                OperationState::CommitPrepared(claim.clone()),
+            ),
+            (
+                OperationKind::RunPostCommit,
+                OperationState::Committed(commit.clone()),
+            ),
+            (
+                OperationKind::AbortTask,
+                OperationState::RetryScheduled { attempt: 2 },
+            ),
+            (
+                OperationKind::SkipTask,
+                OperationState::EffectUnknown { attempt: 3 },
+            ),
+            (
+                OperationKind::ApplyAction,
+                OperationState::Quarantined {
+                    reason: "review".into(),
+                },
+            ),
+            (
+                OperationKind::PropagateTask,
+                OperationState::Superseded { by_generation: 7 },
+            ),
+            (
+                OperationKind::DispatchTimeout,
+                OperationState::Completed(commit),
+            ),
+            (OperationKind::ReenterTask, OperationState::Claimed(claim)),
+        ];
+        for (sequence, (kind, state)) in states.into_iter().enumerate() {
+            let id = OperationId {
+                process_id: "p".into(),
+                task: root.clone(),
+                sequence: sequence as u64,
+            };
+            source.operations.insert(
+                id.clone(),
+                OperationRecord {
+                    id,
+                    kind,
+                    state,
+                    revision: sequence as u64,
+                },
+            );
+        }
+        let encoded = SnapshotCodecV3::encode(&source).unwrap();
+        assert_eq!(SnapshotCodecV3::decode(&encoded).unwrap(), source);
+    }
+
+    /// Unknown tags are refused by every tagged reader instead of being mapped
+    /// onto a neighbouring variant.
+    #[test]
+    fn unknown_tags_are_rejected() {
+        assert_eq!(decode_task_state(7).unwrap(), TaskState::Cancelled);
+        assert_eq!(decode_task_state(11).unwrap(), TaskState::Removed);
+        assert_eq!(
+            decode_task_state(12),
+            Err(SnapshotCodecError::InvalidTag(12))
+        );
+        for (tag, expected) in [
+            (3, OperationKind::DeliverMessage),
+            (4, OperationKind::FireTrigger),
+            (5, OperationKind::RunPostCommit),
+            (7, OperationKind::AbortTask),
+        ] {
+            assert_eq!(decode_operation_kind(tag).unwrap(), expected);
+            assert_eq!(operation_kind_tag(expected), tag);
+        }
+        assert_eq!(
+            decode_operation_kind(10),
+            Err(SnapshotCodecError::InvalidTag(10))
+        );
+
+        assert_eq!(
+            Reader::new(&[2]).optional_task(),
+            Err(SnapshotCodecError::InvalidTag(2))
+        );
+        assert_eq!(
+            Reader::new(&[2]).wire_optional_task(),
+            Err(SnapshotCodecError::InvalidTag(2))
+        );
+        assert_eq!(
+            Reader::new(&[9]).operation_state(),
+            Err(SnapshotCodecError::InvalidTag(9))
+        );
+        let mut superseded = [7u8; 9];
+        superseded[1..].copy_from_slice(&7u64.to_be_bytes());
+        assert_eq!(
+            Reader::new(&superseded).operation_state().unwrap(),
+            OperationState::Superseded { by_generation: 7 }
+        );
+    }
+
+    #[test]
+    fn codec_error_display_names_the_codec() {
+        assert!(
+            SnapshotCodecError::InvalidMagic
+                .to_string()
+                .contains("snapshot codec error")
+        );
+    }
+
     /// The upcast anchor: the V2 bytes are exactly what the pre-C5 kernel
     /// wrote (the old golden, unchanged), the V2 reader still loads them, and
     /// the V3 reader refuses them only by magic — which is what

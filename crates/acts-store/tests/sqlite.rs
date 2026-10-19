@@ -25,6 +25,11 @@ gen_guarded_batch_tests!({
     (first, second)
 });
 
+gen_kv_tests!(async {
+    let store: Arc<dyn KvStore> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
+    store
+});
+
 #[tokio::test]
 async fn sqlite_scan_pushes_eq_value_prefix_into_where() {
     let store = SqliteStore::open_in_memory().await.unwrap();
@@ -94,4 +99,152 @@ async fn sqlite_scan_applies_range_bounds() {
         rows.into_iter().map(|(key, _)| key).collect::<Vec<_>>(),
         ["tasks-n-2", "tasks-n-3"]
     );
+}
+
+#[tokio::test]
+async fn sqlite_file_backend_persists_across_reopen() {
+    let path = std::env::temp_dir().join(format!(
+        "acts-store-sqlite-file-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let path_str = path.to_string_lossy().into_owned();
+
+    {
+        let store = SqliteStore::open(&path_str).await.unwrap();
+        store
+            .put("sqlite-file-key", b"persisted".to_vec())
+            .await
+            .unwrap();
+    }
+
+    // Reopening runs the table setup against an existing database: the table
+    // must already hold the committed row.
+    let store = SqliteStore::open(&path_str).await.unwrap();
+    assert_eq!(
+        store.one("sqlite-file-key").await.unwrap(),
+        Some(b"persisted".to_vec())
+    );
+    store.delete("sqlite-file-key").await.unwrap();
+    drop(store);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path_str}-wal"));
+    let _ = std::fs::remove_file(format!("{path_str}-shm"));
+}
+
+#[tokio::test]
+async fn sqlite_open_reports_unusable_path() {
+    let parent = std::env::temp_dir().join(format!(
+        "acts-store-sqlite-missing-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    // SQLite creates the database file, not missing parent directories.
+    let path = parent.join("nested").join("acts.db");
+    let error = SqliteStore::open(path.to_str().unwrap()).await;
+    assert!(error.is_err());
+}
+
+/// Replace the table with an incompatible one behind the store's back: every
+/// statement then fails deterministically (new pooled connections keep the
+/// wrong table because `CREATE TABLE IF NOT EXISTS` leaves it alone). The
+/// store must report the failures as `ActError::Store` and roll back a batch's
+/// open transaction instead of leaking a partial write.
+#[tokio::test]
+async fn sqlite_maps_failed_statements() {
+    use acts::{StoreBatchOp, StoreGuard};
+
+    let path = std::env::temp_dir().join(format!(
+        "acts-store-sqlite-errors-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let path_str = path.to_string_lossy().into_owned();
+    let store = SqliteStore::open(&path_str).await.unwrap();
+    store.put("sqlite-warm", b"v".to_vec()).await.unwrap();
+
+    let mut raw = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true),
+    )
+    .await
+    .unwrap();
+    sqlx::query("DROP TABLE acts_store")
+        .execute(&mut raw)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE acts_store (wrong TEXT)")
+        .execute(&mut raw)
+        .await
+        .unwrap();
+
+    assert!(store.one("sqlite-warm").await.is_err());
+    assert!(store.put("sqlite-warm", b"v".to_vec()).await.is_err());
+    assert!(store.delete("sqlite-warm").await.is_err());
+    assert!(store.many(&["sqlite-warm".to_string()]).await.is_err());
+    assert!(
+        store
+            .scan_prefix(
+                "sqlite-",
+                ScanOptions::new(
+                    ScanOperation::Range {
+                        lower: None,
+                        upper: None,
+                    },
+                    "sqlite-".to_string(),
+                    false,
+                ),
+            )
+            .await
+            .is_err()
+    );
+    // A multi-op batch opens a transaction and rolls it back on failure.
+    assert!(
+        store
+            .batch(
+                &[
+                    StoreBatchOp::Put {
+                        key: "sqlite-a".to_string(),
+                        value: vec![],
+                    },
+                    StoreBatchOp::Put {
+                        key: "sqlite-b".to_string(),
+                        value: vec![],
+                    },
+                ],
+                &[],
+            )
+            .await
+            .is_err()
+    );
+    // A guarded batch fails on the guard read.
+    assert!(
+        store
+            .batch(
+                &[StoreBatchOp::Put {
+                    key: "sqlite-c".to_string(),
+                    value: vec![],
+                }],
+                &[StoreGuard::absent("sqlite-c")],
+            )
+            .await
+            .is_err()
+    );
+
+    drop(raw);
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path_str}-wal"));
+    let _ = std::fs::remove_file(format!("{path_str}-shm"));
 }

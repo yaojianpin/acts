@@ -508,10 +508,9 @@ mod tests {
     #[test]
     fn missing_err_format() {
         let err = missing_err("profile", &["unit".to_string(), "project".to_string()]);
-        assert!(
-            err.to_string().contains("profile") && err.to_string().contains("unit"),
-            "got: {err}"
-        );
+        let text = err.to_string();
+        assert!(text.contains("profile"), "got: {text}");
+        assert!(text.contains("unit"), "got: {text}");
     }
 
     #[test]
@@ -672,5 +671,66 @@ mod tests {
             );
             assert_eq!(store.purge_expired(), 0, "ttl {ttl}");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn the_manager_registers_validates_and_services_scopes() {
+        let runtime = Runtime::new(&crate::Config::default(), None).unwrap();
+        let manager = SnapshotManager::new(&runtime);
+
+        // A valid registration, then the full write/read/remove surface.
+        manager
+            .register("profile", SnapshotOptions::default())
+            .unwrap();
+        assert!(manager.read("profile", "u1").is_none());
+        assert!(manager.list("profile").is_empty());
+        manager
+            .upsert("profile", "u1", 1, Vars::new().with("name", "ada"))
+            .unwrap();
+        assert_eq!(manager.list("profile").len(), 1);
+        assert_eq!(
+            manager
+                .read("profile", "u1")
+                .unwrap()
+                .data
+                .get::<String>("name")
+                .unwrap(),
+            "ada"
+        );
+        manager.remove("profile", "u1").unwrap();
+        assert!(manager.read("profile", "u1").is_none());
+
+        // `upsert` auto-registers an unknown target; `remove` refuses it.
+        manager.upsert("auto", "s", 1, Vars::new()).unwrap();
+        assert!(manager.list("auto").len() == 1);
+        assert!(manager.remove("never-registered", "s").is_err());
+        assert!(manager.read("never-registered", "s").is_none());
+        assert!(manager.list("never-registered").is_empty());
+
+        // Invalid options are refused at registration.
+        let invalid = SnapshotOptions::default().with_ttl(MAX_TTL_SECS + 1);
+        assert!(manager.register("bad", invalid).is_err());
+
+        runtime.close().await;
+    }
+
+    /// A same-revision refresh replaces only the ttl basis: the eviction must
+    /// recognise the entry as refreshed by its timestamp and keep it.
+    #[test]
+    fn an_expired_read_keeps_a_same_revision_refresh() {
+        let store = SnapshotStore::new(SnapshotOptions::default().with_ttl(1));
+        store.upsert("s1", 1, Vars::new().with("a", 1));
+        let mut observed = store.entries.read().get("s1").cloned().unwrap();
+        observed.timestamp = 1;
+        // A replay of the same revision refreshes the ttl basis (and keeps
+        // the cached value).
+        store.upsert("s1", 1, Vars::new().with("a", 2));
+        let got = store
+            .evict_expired("s1", &observed)
+            .expect("a refreshed entry survives the read");
+        assert_eq!(got.rev, 1);
+        assert_eq!(got.data.get::<i32>("a").unwrap(), 1);
+        assert!(store.get("s1").is_some());
     }
 }

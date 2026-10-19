@@ -81,3 +81,53 @@ impl std::fmt::Display for OutboxRepositoryError {
     }
 }
 impl std::error::Error for OutboxRepositoryError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_repository_error_renders_its_context() {
+        let id = OutboxId {
+            process_id: "p".into(),
+            key: "k".into(),
+        };
+        assert_eq!(
+            OutboxRepositoryError::InvalidPageLimit.to_string(),
+            "invalid outbox page limit"
+        );
+        assert_eq!(
+            OutboxRepositoryError::NotFound(id.clone()).to_string(),
+            "outbox record k not found"
+        );
+        assert_eq!(
+            OutboxRepositoryError::RevisionConflict {
+                id: id.clone(),
+                expected: 2,
+                actual: 3,
+            }
+            .to_string(),
+            "outbox record k revision conflict: expected 2, found 3"
+        );
+        assert_eq!(
+            OutboxRepositoryError::InvalidRecord(OutboxError::InvalidTopic).to_string(),
+            "invalid outbox record: outbox error: InvalidTopic"
+        );
+        assert_eq!(
+            OutboxRepositoryError::CorruptData("bad bytes".into()).to_string(),
+            "corrupt outbox data: bad bytes"
+        );
+        assert_eq!(
+            OutboxRepositoryError::ConcurrentModification(id).to_string(),
+            "outbox record k modified concurrently"
+        );
+        assert_eq!(
+            OutboxRepositoryError::ConcurrentProcess("p".into()).to_string(),
+            "process p modified concurrently"
+        );
+        assert_eq!(
+            OutboxRepositoryError::Unavailable("offline".into()).to_string(),
+            "outbox repository unavailable: offline"
+        );
+    }
+}

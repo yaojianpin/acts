@@ -18,3 +18,15 @@ impl Retry {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_builder_defaults_and_times() {
+        let retry = Retry::new();
+        assert_eq!(retry.times, 0);
+        assert_eq!(retry.with_times(3).times, 3);
+    }
+}

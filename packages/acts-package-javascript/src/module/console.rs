@@ -63,3 +63,13 @@ impl ActModule for ConsoleModule {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_console_module_has_a_default() {
+        let _ = ConsoleModule::default();
+    }
+}
