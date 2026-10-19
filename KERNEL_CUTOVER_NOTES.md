@@ -4534,6 +4534,101 @@ BREAKING 行(仅文档口径澄清)。
 - CHANGELOG:以 **BREAKING** 记录公开读面变化(无 `exposes` 时的 outputs、vars 行 `data`、act message 的
   `inputs` 不再携带逐项绑定;`${{ index }}`/`${{ value }}` 不变)。
 
+### L5 完成(2026-10-19):派生索引懒写 + claim 复用预检的 load
+
+**任务**:§11 B 的 L5。两项独立取证、独立可回滚:①同一 commit 里未变化的派生索引/恢复条目不再重写;
+②`prepare` 的预检 load 直接作为 claim 的 CAS token,去掉 claim 内部对同一 aggregate 的第二次整包 load。
+不改 A5 revision guard、A2 ready 语义、A11 回收批次、effect 前预检的拒绝语义与 A1a 的 `EffectUnknown` 分类。
+
+**改动**(生产代码)
+
+- `durable/document_store.rs`:新增 `write_index_if_changed`。`build_replace_transaction` 的 recovery/outbox/ready
+  三个索引与 `build_outbox_confirm_transaction` 的 outbox 索引只在字节不同时才 put/delete;每个键的
+  exact/absent guard 仍原样保留(guard 是 CAS 契约,写是冗余)。`replace_recovery_entries` 对与
+  `current_entries` 逐字节相同的条目跳过 put(该键的 `require_exact` 已在)。
+- `store/collection.rs::update_ops_json`:派生行索引只写新文档新增的键;旧/新都携带的键不 delete、不 put
+  (索引键的值恒为空,重写相同键不改变任何查询结果)。数据行与“新文档不再携带的旧键删除”不变。
+  `rebuild_index` 仍是索引损坏的唯一修复入口。
+- `durable/async_document_store.rs`:`commit_operation_event` 拆出 `commit_operation_event_from(loaded, …)`;
+  `shell/mod.rs::operation_event_from` 转发它;`shell/operation/prepare.rs` 把预检用的 `LoadedProcess`
+  (其 exact documents 就是 CAS token)交给 `ClaimAndPrepare`,不再在 claim 里第二次 `load` 同一 aggregate。
+  预检仍在 claim 之前(`DispatchTimeout` 的 idle 短路、`place_run`、状态判断都不动);guard 失败仍按
+  原来的 conflict/重读路径处理。
+- 无持久化格式/键布局/公开面变化,因此无 golden 重冻结、无 CHANGELOG BREAKING。未改 manifest。
+
+**探针形状**(临时,交付前已删;可按此重建)
+
+- `KernelHost` 直驱 + `CountingKv`(`MemoryStore` 装饰器,按 key 族统计 `one`/`many`/`batch` 的 key 数),
+  release,`--test-threads=1`;每轮 fresh host/store,`start_process` 后清零计数,`run_until_quiescent`。
+- **engine**:30 步线性 `Workflow`(31 节点)→ `ProcessSpec::from_workflow`,挂 `RowProjector` + 投递传输,
+  62 次 executed op(**31 节点 × start/completion**,与 §10「P1 完成」的 93-hop 形状不同:此处步骤无包 effect,
+  所以每节点恰好 2 个操作);**lean**:同图 `ProcessSpec::linear`,无行投影。
+- 写次数 = `KvStore::batch` 里每个 `put/delete` 计一次,字节 = put 的 value 长度(索引键为空值,所以字节为 0);
+  读次数 = `one`/`many` 的 key 数 + `scan_prefix` 返回条目。两次运行计数逐字相同,计数器是结构性的,
+  与构建 profile 无关(下面只给 release)。
+
+**结果(engine,内存 store,release,62 op)**
+
+| 量 | 改前 | 改后 | 变化 |
+|---|---:|---:|---:|
+| 总写次数/op | 44.23 | **26.00** | −41.2% |
+| `kernel/indexes` 写/op | 9.98 | **8.97** | −10.1% |
+| ├ outbox index | 3.00 | **2.00** | −33.3%(claim commit 不再重写未变的 outbox 索引) |
+| ├ recovery index | 2.00 | 2.00 | 0(claim/plan 都移动操作状态) |
+| ├ ready index | 2.00 | 1.98 | 0(仅在 commit 不改 ready 文档时省) |
+| └ recovery-entries | 2.98 | 2.98 | 0(线性链每跳恰好移动当前操作条目) |
+| 行写/op(数据+索引) | 25.66 | **8.45** | −67.1% |
+| ├ `tasks` 家族 | 19.63 | **7.39** | 索引键 17.18 → 4.94/op |
+| └ `procs` 家族 | 6.03 | **1.06** | 索引键 5.03 → 0.06/op |
+| 总写字节 | 1,228,017 B | **1,228,017 B** | **0** |
+| aggregate load/op | 3 | **2** | −33.3% |
+| head key 读/op | 6.00 | **4.00** | −33.3% |
+| `read_many` 调用/key | 372 / 1,116 | **248 / 744** | −33.3% |
+| `scan_prefix` 调用/读条目 | 219 / 2,726 | **157 / 1,838** | −28.3% / −32.6% |
+
+- lean 形状同向:总写 1,151 → **1,088**(−5.5%,全部来自 claim 的 outbox 索引),head 读 372 → **248**;
+  写字节 201,811 不变。
+- **字节收益为 0 是预期**:被省掉的写全是空值索引键;L5 动的是真后端的**操作次数**,不是字节量
+  (字节量归 L8,已做 append-only)。恢复条目与 recovery/ready 索引在“操作真的移动”的 commit 上仍然必写,
+  所以 `kernel/indexes` 只降 10%,不像行索引那样降 67%。
+- 读侧收益来自一次完整 aggregate load 的消除:每次 claim 的 load 覆盖 head+base+3 索引+log 扫描+head 复核。
+
+**测试**
+
+- 新增 `durable/async_document_store.rs::a_commit_that_leaves_derived_indexes_unchanged_does_not_rewrite_them`:
+  只移动任务 revision 的 commit 里没有任何 `kernel/indexes/` mutation,而 recovery index/entry 的 guard 仍在
+  (改前同一 batch 会写三个索引 + 恢复条目)。
+- 新增 `store/collection.rs::update_writes_only_index_keys_the_document_adds`:`pid`/`tid` 未变的行更新只做
+  data row、旧 `state` 键删除、新 `state` 键写入(3 个 op),不再重写未变的索引键。
+- 既有套件覆盖:索引仍在变更的 commit 上写入(所有 load 的 index 一致性校验)、A5 旧投影拒绝、
+  A2 ready 移动/修复、A11 回收、effect/outbox/reliability 全部保留。
+
+**验证**
+
+```text
+cargo test -p acts --lib --tests -> 940 passed, 0 failed, 0 ignored (163.29 s)
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings -> EXIT 0
+cargo fmt --check -> EXIT 0
+cargo test -p acts-store --features sled,sqlite --test mem --test sled --test sqlite --test engine_sqlite
+  -> engine_sqlite 2 / mem 94 / sled 96 / sqlite 97 passed,全部 0 failed
+cargo test -p acts-acl -> 13+10 passed;cargo test -p acts-expr --all-features -> 42+3 passed
+```
+
+- **postgres 未跑**:`localhost:5433` 无服务(`Test-NetConnection` = False)。带 `postgres` feature 的组合命令
+  (`-p acts-store --features sled,sqlite,postgres`)在本机 2400 s 超时,卡在 `postgres.rs` 的连接/等待上
+  (输出里的 `store_*` 超过 60 s 与 `FAILED` 都来自 postgres 二进制的 `gen_store_tests!` 展开,同一批用例在
+  mem/sled/sqlite 各自全绿)。按 §11.C 的服务依赖口径如实记录,不据此改写代码。
+
+**边界/剩余**
+
+- 只做 L5;未动 L6/L7,未改 `procs`/`tasks`/`vars` 行表去留、节点寻址/action target。
+- 行索引的懒写以“存储行存在”为前提计算旧键集合;索引缺失属于损坏,由 `rebuild_index` 修复,
+  行更新不再顺带愈合(与改前“delete+put 同键”文档口径一致)。
+- claim 复用的 load 在跨进程竞争下可能更早丢 guard → 报可重试 conflict(与原 commit 内 load 与 guard 之间的
+  同一类竞态);单 pid 由 A4 command lane 串行,正常路径不出现。
+
+---
+
 ## 11. 任务(合并:内核切换遗留 + scheduler 重构设计 C1-C8c)
 
 > **维护规则**:提示词只含**当前要执行的那一项任务与限制约束**(下一节),任务清单在本节正文。
@@ -4556,7 +4651,7 @@ BREAKING 行(仅文档口径澄清)。
 > A7(Recovery 统一成 `RecoverOperation(observed) -> Decision`)已完成(§10「A7 完成」);
 > A8(Admission 分离)已完成(§10「A8 完成」);A9(durable run handle)已完成(§10「A9 完成」);
 > A10(拆分控制面调度器)已完成(§10「A10 完成」)。
-> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L3、L4、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L3 完成」「L4 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L5**。
+> **第三波 A1-A11 已全部完成;第二波 P1、P2、L1、L3、L4、L5、L8、L9、L10、L11、L12 已完成(§10「P1 完成」「P2 完成」「L1 完成」「L3 完成」「L4 完成」「L5 完成」「L8 完成」「L9 完成」「L10 完成」「L11 完成」「L12 完成」),下一执行项为 §11 B 的 L6**。
 >
 > **编号约定**:`C1…C8c` = `KERNEL_REFACTOR_DESIGN.md` 的提交切分(**沿用它的编号**,便于两文档对齐;属第一波);
 > `P*` = 性能项、`L*` = 其他遗留项(属第二波);`A1…A11` = 架构修正项(属第三波,设计见设计文档 §3.10)。
@@ -4602,7 +4697,7 @@ BREAKING 行(仅文档口径澄清)。
 - 性能项的最终验收(留给 P1 引出的下一笔):hop 吞吐显著上升(目标 legacy 量级);`870+` 用例仍全绿;§10 记录前后对比数值与探针形状
   (探针代码已删,可按 §10「P6-1」的形状重建)。参考:一次 `examples/simple`(≈500 hops,debug,内存 store)= 708 次聚合读、726 次提交、569 行读。
 
-**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L3、L4、L8、L9、L10、L11、L12 已完成,§12 当前指向 L5。**
+**状态:第三波(A1-A11)已全部完成;第二波 P1、P2、L1、L3、L4、L5、L8、L9、L10、L11、L12 已完成,§12 当前指向 L6。**
 
 | 编号 | 任务 | 来源 | 状态 / 验收 |
 |---|---|---|---|
@@ -4611,7 +4706,7 @@ BREAKING 行(仅文档口径澄清)。
 | **L2** | 聚合文档回收/归档:~~先定保留策略 / pid 复用语义 / 历史取舍~~ **已由 A11 取代**。A11 明确:存储只服务恢复,终态且消息全部投递/结算后回收;不做历史归档;回收后 PID 可复用,旧 pid 重复执行由业务系统负责 | 原 §6;2026-10-17 用户裁决 | **被 A11 取代**(设计见 `KERNEL_REFACTOR_DESIGN.md` §3.10);不再单独执行 |
 | **L3** | `sealed` 边界:实现(聚合持久化 sealed 或投影携带),或写成永久已知边界 | 原 §2 | **已做(§10「L3 完成」)**。选**永久边界**:sealed 是 effect prepare 的 per-evaluation 授权/解析结果,不进聚合/投影/`proc:get`,恢复不重建;`TaskVars.sealed` 保留字段并继续写空串(行格式不变);设计见 `KERNEL_REFACTOR_DESIGN.md` §3.11;doc-only,零行为变更 |
 | **L4** | 逐项绑定 `index`/`value` 的上浮:给一个不参与折叠的载体,或写成永久边界 | 原 §7b | **已做(§10「L4 完成」)**。选**实现**:`__fanout_index`/`__fanout_value` 私有载体,`scope_vars` 以 `index`/`value` 别名求值;完成不折叠、不进 vars 行、不进入 `outputs` 或 message `inputs`;恢复从聚合重建;设计见 `KERNEL_REFACTOR_DESIGN.md` §3.12;CHANGELOG BREAKING |
-| **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | 未做,**低优先**:§10「P6-1」已证与 hop 吞吐无关(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义 |
+| **L5** | 索引键合并/懒写(`tasks` 家族 ~9 写/hop、`kernel/indexes` 18.6 写/hop)+ `load1` 少一次(需把 claim 提前、预检挪后) | 原 §1.b① / §1.b(i)① | **已做(§10「L5 完成」)**。两项独立落地:①未变化的派生索引/恢复条目不再重写(guard 保留)、行更新只写新增索引键;②claim 复用 `prepare` 的预检 load 作为 CAS token。engine 探针 62 op:总写 44.23 → 26.00/op(−41.2%),行索引 25.66 → 8.45/op,aggregate load 3 → 2/op,写字节不变(省的均为空值索引键) |
 | **L6** | 投影降频或 wake 驱动(§9.3.3) | 原 §1.c | 未做;等 P1 把那 ~1 ms 分解出来再定。别把"引擎级用例单例已被 tick 主导"误当 hop 吞吐(§5f) |
 | **L7** | 文档收口:`lib.rs` 顶部注释、`CHANGELOG.md`(`kernel_engine` 已不存在;`cache_cap` 语义 = 在飞 run 数上限)、`README` 里可能残留的 legacy 说法 | 原 §4 | 未做 |
 | **L8** | **减字节:整包聚合 → append-only 操作日志**(§9.3.4:16.0 MB 里 14.7 MB 是整包聚合)。属**持久化格式变更**:head + base + 每 commit 的变更日志;阈值(32)压缩;懒迁移旧 V2/V3;golden 重冻结 + CHANGELOG BREAKING | 原 §1.b③ / §1.b(i)② / §1.b(iii) | **已做(§10「L8 完成」)**。验收:同一探针 187 commits 聚合写 205,207 B 总量 / 1,097 B/commit(改前每 commit 一个整包文档,终态 50,249 B;§5i 形状 14.7 MB),普通 commit 只写 head+一个变更 entry,每 32 个 commit 才写一次 base;旧 V2/V3 迁移/中断重入/guard 冲突/reclaim 全绿;golden 新族 fingerprint 冻结;`-p acts --lib --tests` 绿 |
@@ -4678,43 +4773,46 @@ cadence 与异常兜底的频率。A2 已把 recovery 分页改为位置游标,�
 ```
 你是 acts(D:/private/github/workflow/acts,Rust edition 2024)的执行 agent。
 
-# 当前任务:L5 —— 索引键合并/懒写与 `load1` 少一次(§11 B)
+# 当前任务:L6 —— 投影降频或 wake 驱动(§11 B)
 
-**依据**:§11 B 的 L5(原 §1.b① / §1.b(i)①)。§10「P6-1」已证明这两处与 hop 吞吐无关
-(`recovery_entries`/两索引文档每 hop < 1 µs),只在真后端(sled/pg)的写次数/字节上有意义,
-因此优先级低;先把收益量出来,再决定动哪一块。
+**依据**:§11 B 的 L6(原 §1.c / §9.3.3)。§10「P1 完成」把 engine 形状的行投影量到
+**0.428 ms/op(11.1%)**:`proj.frame` 0.58 call/op、`proj.task` 1.93 call/op、`proj.proc` 0.58 call/op、
+`proj.read` 2.50 call/op、`proj.write` 3.08 call/op。§5j 已做“行内容未变则不写”,§10「L5 完成」又去掉了
+行更新里未变索引键的重写;剩下的成本主要是**每 hop 为被触达的每一行读旧行、构造并比较 JSON**,以及
+`project_touched` 的调用节奏。先把当前形状重新量一遍,再决定降频还是改成 wake 驱动。
 
-**目标**:按两项分别取证、分别改(能独立回滚):
+**目标**(二选一或组合,各自可独立回滚):
 
-1. **索引键合并/懒写**:`tasks` 家族的索引写(~9 写/hop)与 `kernel/indexes`
-   (recovery/outbox/ready,~18.6 写/hop)。合并同一 commit 的索引键或对未变化的派生索引懒写。
-   不改 A5 的 revision guard 语义、A2 的 ready 语义、A11 的“聚合+索引同一原子批回收”。
-2. **load 路径少一次读**:按 §10「P6-1」的探针形状定位 `load1`,把 claim 提前、预检挪后再取数
-   (或等价地消除一次重复读)。不得改变 effect 前预检的拒绝语义,也不得改变 A1a 的
-   `EffectUnknown` 分类。
+1. **降频/按可见状态投影**:只在提交真的改变了行的可见内容时投影该行;利用 A5 的 claim 表与持久
+   revision,避免每 hop 对同一行重复读-比较。不得跳过“行 current 才能让 lifecycle/outbox 看见”的契约。
+2. **wake 驱动/合批**:把同步 `execute_decision` 里的 per-hop 投影改成由提交后的通知驱动、按批落行,
+   或把同一 snapshot 的多行投影合并成一次有界批。合批不得让外部观察者(lifecycle、outbox transport)
+   看到尚未 current 的行,也不得改变 `Projection::Touched`/`Whole` 的语义边界。
 
 **边界**
 
-- 只做 L5;不提前做 §11 B 的 L6/L7;不顺手改 `procs`/`tasks`/`vars` 行表的去留(§10 已登记为待决)。
-- 不顺手改节点寻址/action target(§10「Feature B 完成」§4 的相邻边界;需要时另立任务)。
+- 只做 L6;不提前做 L7,不改 `procs`/`tasks`/`vars` 行表的去留(§10 待决)。
+- 不改 A5 的持久 `source_revision`、store-level 条件写与 repair queue 协议;不改 A1b 的
+  “提交后投影 → 发送 → 一批确认”顺序;不改 A11 回收判定。
+- 不把“缩短 tick”当作降频手段;性能对照只用同一探针形状,别把引擎级用例的 tick 主导误当 hop 吞吐(§5f)。
 - 探针/临时插桩只留在工作区,不提交;生产代码与文档分开提交。
 
 **验收**
 
-- §10 写「L5 完成」,给出改前/改后数值(写次数/字节,注明探针形状、后端与 release/debug);
-  若无收益,明确写“放弃/不做”,不要静默降级。
-- `cargo test -p acts --lib --tests`;动到 store 面时跑 `-p acts-store --features sled,sqlite,postgres`
-  (postgres 需要 `localhost:5433` 的 Postgres 16,缺服务就如实记录);不改 manifest 就不跑 `cargo deny`。
+- 用 §10「P1 完成」的探针形状(30 步 engine + `examples/simple`,release、内存 store;必要时补 sled)
+  给出改前/改后的 `proj.*` ms/op 与行读/写次数/op;若某方向收益不足,明确写“放弃/不做”,不要静默降级。
+- §10 写「L6 完成」(含探针形状、后端、release/debug);`cargo test -p acts --lib --tests`;
+  动到 store 面时跑 `-p acts-store --features sled,sqlite,postgres`(postgres 需要 `localhost:5433`
+  的 Postgres 16,缺服务就如实记录);不改 manifest 就不跑 `cargo deny`。
 - `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`、`cargo fmt --check`。
 - 若改持久化键布局/公开面:按既有 codec/upcast 规则同步 golden/row 断言,并在 CHANGELOG 记 BREAKING。
-- 更新 §11 B 状态;§12 原地指向下一项(L6)。
+- 更新 §11 B 状态;§12 原地指向下一项(L7)。
 
 # 限制与约束
 
-- **先读**:§10「P6-1」「A2 完成」「A5 完成」「A11 完成」;
-  `scheduler/durable/document_store.rs`/`async_document_store.rs` 的索引键与原子提交、
-  `store/collection.rs` 的派生索引写、`scheduler/runtime.rs` 与 `scheduler/shell/operation/dispatch.rs`
-  的 load/claim/预检路径。
+- **先读**:§10「P1 完成」「A5 完成」「A6 完成」「L5 完成」;
+  `scheduler/shell/projection.rs`、`store/collection.rs::write_if_newer`、
+  `scheduler/shell/operation/dispatch.rs::execute_decision`、`scheduler/runtime.rs` 的投影/repair 循环。
 - 遵守 §11.C 门禁;探针与临时插桩不提交;生产代码与文档分开提交。
 ```
 
