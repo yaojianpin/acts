@@ -40,6 +40,12 @@ pub(crate) const MODEL_VAR: &str = "__model";
 /// created execution's `auto` variable from it.
 pub(crate) const AUTO_MAP_VAR: &str = "__auto";
 
+/// The root-scope variable mapping every step node id to its durable `Msg`
+/// run-bound decision (the package's `run_as` at import time): a node whose
+/// package runs as `Msg` is delivered once — its completion record — so its
+/// start announces no `Created` message.
+pub(crate) const MSG_MAP_VAR: &str = "__msg";
+
 /// A flat process: `root` with `children` in declaration order (implicit
 /// successor chain) plus optional explicit edges, e.g. a join that both
 /// branches point at. Every node becomes one execution at generation 0.
@@ -281,6 +287,7 @@ fn import_step(
     place: StepPlace,
     auto: &mut std::collections::BTreeSet<String>,
     auto_map: &mut serde_json::Map<String, serde_json::Value>,
+    msg_map: &mut serde_json::Map<String, serde_json::Value>,
     seed_variables: &mut Vec<(Option<String>, String, String)>,
 ) -> Result<()> {
     if step.id.trim().is_empty() {
@@ -295,6 +302,13 @@ fn import_step(
     }
     let step_auto = is_auto(step.uses.as_deref(), run_as);
     auto_map.insert(step.id.clone(), serde_json::Value::Bool(step_auto));
+    msg_map.insert(
+        step.id.clone(),
+        serde_json::Value::Bool(matches!(
+            step.uses.as_deref().and_then(run_as),
+            Some(crate::ActRunAs::Msg)
+        )),
+    );
     if place == StepPlace::TopLevel && step_auto {
         auto.insert(step.id.clone());
     }
@@ -351,6 +365,7 @@ fn import_step(
                 StepPlace::Catch,
                 auto,
                 auto_map,
+                msg_map,
                 seed_variables,
             )?;
         }
@@ -367,6 +382,7 @@ fn import_step(
             StepPlace::Timeout,
             auto,
             auto_map,
+            msg_map,
             seed_variables,
         )?;
     }
@@ -390,6 +406,7 @@ fn import_step(
                 StepPlace::Nested,
                 auto,
                 auto_map,
+                msg_map,
                 seed_variables,
             )?;
         }
@@ -486,6 +503,7 @@ impl ProcessSpec {
         ));
 
         let mut auto_map = serde_json::Map::new();
+        let mut msg_map = serde_json::Map::new();
         let mut auto = std::collections::BTreeSet::new();
         for step in &workflow.steps {
             import_step(
@@ -494,6 +512,7 @@ impl ProcessSpec {
                 StepPlace::TopLevel,
                 &mut auto,
                 &mut auto_map,
+                &mut msg_map,
                 &mut seed_variables,
             )?;
         }
@@ -501,6 +520,11 @@ impl ProcessSpec {
             None,
             AUTO_MAP_VAR.to_string(),
             serde_json::Value::Object(auto_map).to_string(),
+        ));
+        seed_variables.push((
+            None,
+            MSG_MAP_VAR.to_string(),
+            serde_json::Value::Object(msg_map).to_string(),
         ));
 
         Ok(Self {

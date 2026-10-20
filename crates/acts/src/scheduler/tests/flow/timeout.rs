@@ -43,14 +43,14 @@ async fn sch_timeout_a_branch_fires_once_and_the_owner_waits_for_it() {
         "the act still waits for its client"
     );
 
-    // No second dispatch of the same one-shot branch on later ticks.
+    // No second dispatch of the same one-shot branch on later ticks: the
+    // branch's msg act is delivered exactly once.
     tokio::time::sleep(std::time::Duration::from_millis(TEST_TICK_MS * 3)).await;
-    let created = fixture
-        .announced("t1")
-        .into_iter()
-        .filter(|state| *state == MessageState::Created)
-        .count();
-    assert_eq!(created, 1, "a timeout branch must fire once");
+    assert_eq!(
+        fixture.announced("t1"),
+        vec![MessageState::Completed],
+        "a timeout branch fires once: its single delivery is the completion"
+    );
 
     let act = fixture.wait_created("wait").await;
     fixture.next(&act.pid, &act.tid).await.unwrap();

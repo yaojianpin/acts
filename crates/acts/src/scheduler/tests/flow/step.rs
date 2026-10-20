@@ -259,11 +259,12 @@ async fn sch_step_steps_declared_params_stay_on_its_node() {
 // ---------------------------------------------------------------------------
 
 /// Every `uses` step announces its act. `Msg`/`Set` self-complete, an `Irq`
-/// waits until the client answers (`step/uses`).
+/// waits until the client answers (`step/uses`); a `Msg` act's one
+/// announcement is its `Completed` message.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_step_uses_packages_announce_and_settle() {
-    // Msg: a self-completing act whose params are announced.
+    // Msg: a self-completing act whose params ride its single delivery.
     let workflow = Workflow::new().with_id("flow-uses-msg").with_step(|step| {
         step.with_id("msg1").with_uses(
             USES_MSG,
@@ -272,11 +273,11 @@ async fn sch_step_uses_packages_announce_and_settle() {
     });
     let mut fixture = FlowFixture::deploy(&workflow).await;
     completed(&fixture.run(Vars::new()).await);
-    let created = fixture.wait_message("msg1", MessageState::Created).await;
-    assert_eq!(created.r#type, "act");
-    assert!(created.is_msg());
+    let delivered = fixture.wait_message("msg1", MessageState::Completed).await;
+    assert_eq!(delivered.r#type, "act");
+    assert!(delivered.is_msg());
     assert_eq!(
-        created
+        delivered
             .params()
             .unwrap()
             .get::<String>("channel")

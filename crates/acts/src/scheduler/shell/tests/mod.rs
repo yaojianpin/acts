@@ -6974,10 +6974,12 @@ async fn kernel_timeout_branches_fire_and_settle() {
 
 /// Every `uses` step writes a durable `message.created` record when it
 /// starts — the legacy act's Created message: the Irq step waits on it
-/// (Waiting), the Func step pairs it with its completion.
+/// (Waiting), the Func step pairs it with its completion. The Msg step is the
+/// exception the run_as decides: it writes no `Created` record at all, so its
+/// single delivery is the `task.completed` record that carries its params.
 #[tokio::test]
 async fn uses_steps_write_created_message_records() {
-    // A registry with one Func and one Irq package, so the run_as
+    // A registry with one Func, one Irq and one Msg package, so the run_as
     // decisions match the shapes under test.
     struct LocalFuncPackage;
     #[async_trait::async_trait]
@@ -7023,6 +7025,28 @@ async fn uses_steps_write_created_message_records() {
             }
         }
     }
+    struct LocalMsgPackage;
+    #[async_trait::async_trait]
+    impl crate::package::ActPackage for LocalMsgPackage {
+        fn new(_: &crate::Config) -> crate::Result<Self> {
+            Ok(Self)
+        }
+        fn definition() -> crate::package::ActPackageDefinition {
+            crate::package::ActPackageDefinition {
+                id: "test.msg",
+                name: "Msg",
+                desc: "",
+                icon: "",
+                doc: "",
+                version: "0.1.0",
+                schema: serde_json::json!({}),
+                options: None,
+                run_as: crate::package::ActRunAs::Msg,
+                resources: Vec::new(),
+                catalog: crate::package::ActPackageCatalog::App,
+            }
+        }
+    }
     let package = crate::package::Package::default();
     package.register(
         "test.func",
@@ -7032,6 +7056,10 @@ async fn uses_steps_write_created_message_records() {
         "test.irq",
         &crate::package::ActPackageRegister::new::<LocalIrqPackage>(),
     );
+    package.register(
+        "test.msg",
+        &crate::package::ActPackageRegister::new::<LocalMsgPackage>(),
+    );
     let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
 
     let (host, mut wake_rx) = KernelHost::in_memory();
@@ -7039,6 +7067,10 @@ async fn uses_steps_write_created_message_records() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses("test.func", crate::Vars::new().with("k1", "v1"))
+        })
+        .with_step(|step| {
+            step.with_id("s_msg")
+                .with_uses("test.msg", crate::Vars::new().with("key", "msg-1"))
         })
         .with_step(|step| {
             step.with_id("s2")
@@ -7096,6 +7128,49 @@ async fn uses_steps_write_created_message_records() {
     assert_eq!(s2_payload["kind"], "act");
     assert_eq!(s2_payload["inputs"]["params"]["key"], "irq-1");
 
+    // The Msg step wrote no `Created` record: its one durable announcement is
+    // the `task.completed` record, and that payload carries the same params a
+    // `Created` would have.
+    let record_of = |nid: &str, topic: &str| {
+        snapshot
+            .outbox
+            .values()
+            .find(|record| {
+                record.topic == topic
+                    && serde_json::from_str::<serde_json::Value>(&record.payload)
+                        .ok()
+                        .and_then(|payload| {
+                            payload
+                                .get("nid")
+                                .and_then(|nid| nid.as_str())
+                                .map(String::from)
+                        })
+                        .as_deref()
+                        == Some(nid)
+            })
+            .unwrap_or_else(|| panic!("no {topic} record for '{nid}'"))
+    };
+    assert!(
+        snapshot.outbox.values().all(|record| {
+            record.topic != "message.created"
+                || serde_json::from_str::<serde_json::Value>(&record.payload)
+                    .ok()
+                    .and_then(|payload| {
+                        payload
+                            .get("nid")
+                            .and_then(|nid| nid.as_str())
+                            .map(String::from)
+                    })
+                    != Some("s_msg".to_string())
+        }),
+        "a Msg act announces no Created record"
+    );
+    let msg_message = record_of("s_msg", "task.completed");
+    let msg_payload: serde_json::Value = serde_json::from_str(&msg_message.payload).unwrap();
+    assert_eq!(msg_payload["uses"], "test.msg");
+    assert_eq!(msg_payload["kind"], "act");
+    assert_eq!(msg_payload["inputs"]["params"]["key"], "msg-1");
+
     // The Irq execution is parked on its message; the plain leaf behind
     // it waits for the client.
     let state = |task: &str| state_of(&snapshot, task);
@@ -7105,6 +7180,10 @@ async fn uses_steps_write_created_message_records() {
     );
     assert_eq!(
         state("s1"),
+        crate::scheduler::core::model::task_graph::TaskState::Completed
+    );
+    assert_eq!(
+        state("s_msg"),
         crate::scheduler::core::model::task_graph::TaskState::Completed
     );
 
@@ -7118,7 +7197,8 @@ async fn uses_steps_write_created_message_records() {
             .filter(|topic| *topic == "message.created")
             .count(),
         3,
-        "two uses steps and the workflow root announced themselves: {delivered:?}"
+        "the Func and Irq steps and the workflow root announced themselves; \
+         the Msg step did not: {delivered:?}"
     );
     // The root's own message is task-shaped (kind = workflow), the acts'
     // carry their package.

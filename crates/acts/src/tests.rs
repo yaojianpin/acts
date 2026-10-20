@@ -1099,7 +1099,8 @@ async fn a_recovered_run_carries_no_error_facts_in_its_outputs() {
         async move {
             if let Some(params) = e.params()
                 && let Some(key) = params.get::<String>("key")
-                && e.is_state(MessageState::Created)
+                && (e.is_state(MessageState::Created)
+                    || (e.is_msg() && e.is_state(MessageState::Completed)))
             {
                 seen.lock().push(key);
             }

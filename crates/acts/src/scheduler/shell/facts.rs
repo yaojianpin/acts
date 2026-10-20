@@ -65,6 +65,29 @@ pub(super) fn auto_decision(
     }
 }
 
+/// The durable `Msg` run-bound decision of one model node, from the
+/// import-time map: a node whose package runs as `Msg` is delivered once —
+/// its completion record — so its start announces no `Created` message. A
+/// missing entry is an import inconsistency, not a default.
+pub(super) fn msg_decision(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    node: &str,
+) -> Result<bool> {
+    let Some(raw) = root_variable(snapshot, model::MSG_MAP_VAR)? else {
+        return Err(runtime(
+            "aggregate has no msg map; it predates the nested import",
+        ));
+    };
+    let map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&raw).map_err(runtime)?;
+    match map.get(node) {
+        Some(serde_json::Value::Bool(msg)) => Ok(*msg),
+        other => Err(runtime(format!(
+            "msg map has no decision for node '{node}': {other:?}"
+        ))),
+    }
+}
+
 /// The scope chain of one execution (nearest → root) merged nearest-wins
 /// into name→json-string pairs: the variable space an effect's params and a
 /// branch predicate resolve against.

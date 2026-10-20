@@ -17,8 +17,8 @@
 //! aggregate and never off a row: the dispatch admits one execution of the
 //! branch's model node and advances the marker in the same atomic commit, so a
 //! re-dispatch would allocate a second generation (the read model keeps one row
-//! per model node and cannot see any of it) — and the branch act's single
-//! `Created` message is the external side effect the legacy cells counted. The
+//! branch act's single `Completed` delivery is the external side effect the
+//! legacy cells counted. The
 //! marker itself is a one-entry-per-branch list (`claim` never appends a branch
 //! twice), so it pins that the claim was not torn, not that a duplicate was
 //! attempted.
@@ -88,14 +88,14 @@ fn two_timeout_workflow(window: &str) -> Workflow {
 /// Start `workflow`, register a counter for the branch's `msg1` message, and
 /// answer `(pid, "step1", counter)` once the step's act waits with every write
 /// of the wait settled — the state a tick and a client completion are both
-/// aimed at. The message counter counts the branch's `Created` announcements,
-/// the branch's external side effect.
+/// aimed at. The message counter counts the branch msg's single `Completed`
+/// delivery, the branch's external side effect.
 async fn waiting_timed_run(
     engine: &Engine,
     workflow: &Workflow,
 ) -> (String, String, Arc<AtomicUsize>) {
     let created = capture_created(engine, "act1");
-    let fired = created_count(engine, "msg1");
+    let fired = delivered_count(engine, "msg1");
     let pid = start_run(engine, workflow).await;
     let (announced, step1) = expect_created(&created).await;
     assert_eq!(
@@ -112,9 +112,10 @@ async fn waiting_timed_run(
     (pid, step1, fired)
 }
 
-/// A counter of the `Created` messages keyed `key`: how many times the act was
-/// announced, the side effect a duplicate branch dispatch would repeat.
-fn created_count(engine: &Engine, key: &str) -> Arc<AtomicUsize> {
+/// A counter of the `Completed` messages keyed `key`: how many times the msg
+/// act was delivered, the side effect a duplicate branch dispatch would
+/// repeat.
+fn delivered_count(engine: &Engine, key: &str) -> Arc<AtomicUsize> {
     let count = Arc::new(AtomicUsize::new(0));
     let seen = count.clone();
     let key = key.to_string();
@@ -122,7 +123,7 @@ fn created_count(engine: &Engine, key: &str) -> Arc<AtomicUsize> {
         let seen = seen.clone();
         let key = key.clone();
         async move {
-            if e.is_params_key(&key) && e.is_state(MessageState::Created) {
+            if e.is_params_key(&key) && e.is_state(MessageState::Completed) {
                 seen.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -488,8 +489,8 @@ async fn each_timeout_branch_fires_once_across_ticks_and_a_restart_inner() {
     let kv = FaultKv::new();
     let store = kv.store();
     let engine = engine_on(store.clone()).await;
-    let fired1 = created_count(&engine, "msg1");
-    let fired2 = created_count(&engine, "msg2");
+    let fired1 = delivered_count(&engine, "msg1");
+    let fired2 = delivered_count(&engine, "msg2");
     let created = capture_created(&engine, "act1");
     let pid = start_run(&engine, &two_timeout_workflow("true")).await;
     let (_, _step1) = expect_created(&created).await;
@@ -539,8 +540,8 @@ async fn each_timeout_branch_fires_once_across_ticks_and_a_restart_inner() {
     // is still in flight and its branch executions are terminal, so only the
     // durable marker keeps the fresh rounds from admitting them again
     let reloaded = restart(&engine, store.clone()).await;
-    let re1 = created_count(&reloaded, "msg1");
-    let re2 = created_count(&reloaded, "msg2");
+    let re1 = delivered_count(&reloaded, "msg1");
+    let re2 = delivered_count(&reloaded, "msg2");
     assert!(
         !poll_settle(
             || async {
@@ -645,7 +646,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
     let kv = FaultKv::new();
     let store = kv.store();
     let engine = engine_on(store.clone()).await;
-    let fired = created_count(&engine, "msg1");
+    let fired = delivered_count(&engine, "msg1");
     let created = capture_created(&engine, "act1");
     // a window that never opens inside the test: the branch is declared and
     // alive, so a stray pass would have something to fire if it looked too hard
@@ -699,7 +700,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
 
     // the same fresh boot: recovery over the settled aggregate drives nothing
     let reloaded = restart(&engine, store.clone()).await;
-    let re_fired = created_count(&reloaded, "msg1");
+    let re_fired = delivered_count(&reloaded, "msg1");
     assert!(
         !poll_settle(
             || async {

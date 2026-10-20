@@ -4,8 +4,9 @@
 //! admission, the step's own `if`/`while` guard and its run bound, then the
 //! act's start-time package resolution (the legacy act's `run()`, which
 //! validates params before it either waits or executes) — and phase 3 plans
-//! what the verdict means: the started execution, the act's `Created` message,
-//! the `ApplyAction` operation its effect will run, and the timer a node
+//! what the verdict means: the started execution, the act's `Created` message
+//! (a `Msg` act skips it — its single delivery is the completion record), the
+//! `ApplyAction` operation its effect will run, and the timer a node
 //! declaring `timeouts` arms.
 
 use super::*;
@@ -255,8 +256,14 @@ impl ActOperation for ExecuteTask {
                 // The execution announces itself: the act's Created message
                 // for a `uses` step, the task-level one (type = the node kind)
                 // for a package-less execution — the legacy engine's `on_task`
-                // fired for every task, not only the acts.
+                // fired for every task, not only the acts. A `Msg` act is the
+                // exception: it waits for no client, so it is delivered once —
+                // its completion record, which carries the same payload — and
+                // no `Created` precedes it.
+                let announces_created =
+                    !has_package || !msg_decision(snapshot, id.task.node.as_str())?;
                 if !created_exists
+                    && announces_created
                     && let Some(payload) = host.operation_message_payload(
                         snapshot,
                         &task_id,

@@ -70,8 +70,9 @@ fn block_workflow(id: &str, acts: Vec<Act>) -> Workflow {
 // Inline act `if`
 // ---------------------------------------------------------------------------
 
-/// `if: true` keeps the inline `msg` act: it announces Created then Completed
-/// and its execution ends `Completed` (`sch_act_if_true`).
+/// `if: true` keeps the inline `msg` act: a `Msg` act is delivered once — its
+/// `Completed` message, no `Created` before it — and its execution ends
+/// `Completed` (`sch_act_if_true`).
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_if_true_runs_the_inline_act() {
@@ -92,7 +93,8 @@ async fn sch_act_if_true_runs_the_inline_act() {
     assert_eq!(fixture.state("msg1").await, TaskState::Completed);
     assert_eq!(
         fixture.announced("msg1"),
-        vec![MessageState::Created, MessageState::Completed]
+        vec![MessageState::Completed],
+        "a Msg act is delivered exactly once, already completed"
     );
     fixture.close().await;
 }

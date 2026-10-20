@@ -664,7 +664,7 @@ fn package_block_workflow(mode: &str) -> Workflow {
     workflow_with(step)
 }
 
-/// One `Created` act message a cell observed: the model node it names and the
+/// One act announcement a cell observed: the model node it names and the
 /// item facts its params resolved to.
 #[derive(Clone, Debug)]
 struct AnnouncedAct {
@@ -679,9 +679,11 @@ struct AnnouncedAct {
 /// The messages a cell has seen, shared with the engine's handler.
 type Announced = Arc<Mutex<Vec<AnnouncedAct>>>;
 
-/// Every `Created` act message the engine announces, with the params a
+/// Every act announcement the engine delivers, with the params a
 /// container package's act resolved (`key`/`value`/`index`) — what a param
-/// fan-out's per-item act resolves its item to. The items share one act model
+/// fan-out's per-item act resolves its item to. An irq act announces itself
+/// at `Created` (it then waits for the client); a msg act is delivered once,
+/// already `Completed`. The items share one act model
 /// node (they are two generations of it), so the node id alone cannot tell them
 /// apart and the resolved params must.
 fn capture_act_items(engine: &Engine) -> Announced {
@@ -690,7 +692,9 @@ fn capture_act_items(engine: &Engine) -> Announced {
     engine.channel().on_message(move |e| {
         let rec = rec.clone();
         async move {
-            if !e.is_state(MessageState::Created) {
+            if !e.is_state(MessageState::Created)
+                && !(e.is_msg() && e.is_state(MessageState::Completed))
+            {
                 return;
             }
             let Some(params) = e.inputs.get::<Vars>("params") else {
@@ -716,7 +720,7 @@ fn capture_act_items(engine: &Engine) -> Announced {
     seen
 }
 
-/// The keys of the `Created` act messages the engine announced, sorted: how a
+/// The keys of the act announcements the engine delivered, sorted: how a
 /// cell names the acts a container drove, without knowing their assigned ids.
 fn announced_keys(seen: &Announced) -> Vec<String> {
     let mut keys: Vec<String> = seen

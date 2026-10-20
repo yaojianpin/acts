@@ -47,7 +47,9 @@ impl Client {
                 }
             }
 
+            // a msg act is delivered once, already completed
             if e.is_msg()
+                && e.is_state(MessageState::Completed)
                 && let Some(action) = self.messages.get(&key)
             {
                 action(executor, e);
