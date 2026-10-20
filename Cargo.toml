@@ -117,6 +117,22 @@ acts-plugin-grpc = { path = "./plugins/acts-plugin-grpc", version = "0.25.0" }
 acts-plugin-web = { path = "./plugins/acts-plugin-web", version = "0.25.0" }
 acts-plugin-nats = { path = "./plugins/acts-plugin-nats", version = "0.25.0" }
 
+# The kernel persists through the aggregate document family on every
+# operation, so an unoptimized build pays its codec, hashing and formatting
+# costs on the hot path. `opt-level = 2` keeps debug assertions (and the
+# `cargo test` behaviour) while removing the build-provenance half of the
+# debug/release gap; `examples/simple` drops from ~2.8 s to ~0.3 s.
+[profile.dev]
+opt-level = 2
+
+# SHA-256 is the single hottest dependency call (every aggregate envelope and
+# every canonical digest). Fully optimize it even though the workspace itself
+# stays at the debug level above.
+[profile.dev.package.sha2]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
 [profile.release]
 codegen-units = 1
 lto = true

@@ -69,12 +69,12 @@ impl KernelHost {
     /// failure leaves the operation open for recovery.
     pub(in crate::scheduler::shell) async fn dispatch(
         &self,
-        claimed: &Claimed,
+        claimed: &mut Claimed,
         plan: TransitionPlan,
         projection: Projection,
         effect_started: bool,
     ) -> Result<()> {
-        let id = &claimed.id;
+        let id = claimed.id.clone();
         // Fold every pure-internal hand-off this operation's plan created
         // (`PropagateTask`/`SkipTask`/`AbortTask`/`ReenterTask`) into this same
         // transition. A plan the fold cannot merge is committed as it is and
@@ -87,7 +87,7 @@ impl KernelHost {
             .any(|intent| super::fold::folds_into_plan(intent.kind))
         {
             match self
-                .fold_internal(&claimed.snapshot, plan.clone(), claimed.now_ms)
+                .fold_internal(claimed.snapshot(), plan.clone(), claimed.now_ms)
                 .await
             {
                 Ok(folded) => folded,
@@ -103,14 +103,44 @@ impl KernelHost {
         } else {
             plan
         };
-        let (receipt, mut loaded) = match self
+        let now = SystemClock.now_ms();
+        let outcome = match self
             .processes
-            .commit_transition(&plan, SystemClock.now_ms(), self.timer_poll_ms)
+            .commit_transition_from(claimed.take_loaded(), &plan, now, self.timer_poll_ms)
             .await
-            .map_err(repository_error)
         {
+            // The claimed documents moved under us — a concurrent outbox
+            // confirmation or a writer from another instance. That change may
+            // not have moved the version the plan is formed from, so retry
+            // once from a fresh load, which is the path every transition took
+            // before the claim's aggregate was reused. A version that really
+            // moved fails the retry's own precondition, exactly as before.
+            Ok(crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict { .. }) => {
+                match self
+                    .processes
+                    .commit_transition(&plan, now, self.timer_poll_ms)
+                    .await
+                {
+                    Ok(committed) => Ok(committed),
+                    // The fresh state moved the version too: the plan is
+                    // stale, which is the same retryable conflict the lost
+                    // compare-and-swap reported before the claim's aggregate
+                    // was reused. Keeping the conflict classification is what
+                    // lets the caller release the claim (or quarantine an
+                    // effect that already ran).
+                    Err(crate::scheduler::durable::async_document_store::AsyncRepositoryError::Domain(
+                        crate::scheduler::core::commit::aggregate::CommitError::VersionConflict { .. },
+                    )) => Ok(
+                        crate::scheduler::durable::async_document_store::TransitionCommitOutcome::Conflict {},
+                    ),
+                    Err(error) => Err(error),
+                }
+            }
+            other => other,
+        };
+        let (receipt, mut loaded) = match outcome.map_err(repository_error) {
             Err(error) => {
-                // The domain refused the plan against the fresh aggregate —
+                // The domain refused the plan against the claimed aggregate —
                 // a writer committed between this operation's claim and its
                 // commit (with the command lane (A4), that writer ran in this
                 // operation's effect window). The plan did not commit, and an

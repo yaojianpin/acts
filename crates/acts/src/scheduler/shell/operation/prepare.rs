@@ -150,7 +150,7 @@ impl KernelHost {
                 claim,
             },
             revision: prepared.revision,
-            snapshot: loaded.snapshot,
+            loaded: Some(loaded),
             now_ms: now,
         }))
     }

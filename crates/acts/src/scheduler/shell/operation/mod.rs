@@ -153,11 +153,34 @@ pub(super) struct Claimed {
     /// The prepared record's revision: what a claimed operation that cannot commit its plan
     /// releases its claim against ([`prepare::release_claim`]).
     pub(super) revision: u64,
-    pub(super) snapshot: crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    /// The aggregate the claim committed, with the exact document bytes it
+    /// was read as. Phase 4 commits the plan against this same copy instead of
+    /// decoding the whole aggregate a second time: the durable documents are
+    /// its CAS token, and the claim is the only writer that could have moved
+    /// them (the command lane holds the pid). `None` once dispatch took it.
+    pub(super) loaded: Option<crate::scheduler::durable::document_store::LoadedProcess>,
     pub(super) now_ms: i64,
 }
 
 impl Claimed {
+    pub(super) fn snapshot(&self) -> &crate::scheduler::core::commit::aggregate::ProcessSnapshot {
+        &self
+            .loaded
+            .as_ref()
+            .expect("the claimed aggregate is present until dispatch takes it")
+            .snapshot
+    }
+
+    /// Hand the claimed aggregate to phase 4, which commits the plan against
+    /// it. The rest of the claim (identity, token, revision) stays readable.
+    pub(super) fn take_loaded(
+        &mut self,
+    ) -> crate::scheduler::durable::document_store::LoadedProcess {
+        self.loaded
+            .take()
+            .expect("the claimed aggregate is taken once, by dispatch")
+    }
+
     /// The claimed operation as phases 2 and 3 read it: the identity, the
     /// claim, the authoritative snapshot, and the execution the operation
     /// names (absent for an operation whose execution a decision removed) —
@@ -165,13 +188,13 @@ impl Claimed {
     /// release (A4, [`CommandLane`]).
     pub(super) fn operation<'a>(&'a self, lane: &'a mut CommandLane) -> Operation<'a> {
         let task_id = self.id.task.clone();
-        let task = self.snapshot.tasks.get(&task_id);
+        let task = self.snapshot().tasks.get(&task_id);
         Operation {
             id: &self.id,
             claim: &self.claim,
             task_id,
             task,
-            snapshot: &self.snapshot,
+            snapshot: self.snapshot(),
             now_ms: self.now_ms,
             lane,
         }
@@ -286,7 +309,7 @@ impl KernelHost {
         let mut lane = CommandLane::hold(self, &id.process_id).await;
         // Phase 1 — prepare: the slot policy, the kind's pre-claim check, the
         // claim. `None` is "nothing to drive", never an error.
-        let Some(claimed) = self.prepare(id, Slot::Policy).await? else {
+        let Some(mut claimed) = self.prepare(id, Slot::Policy).await? else {
             return Ok(false);
         };
         let driver = driver(claimed.kind).ok_or_else(|| {
@@ -329,7 +352,7 @@ impl KernelHost {
             }
         };
         // Phase 4 — dispatch: commit, project, deliver, wake, settle.
-        self.dispatch(&claimed, plan, Projection::Touched, effect_started)
+        self.dispatch(&mut claimed, plan, Projection::Touched, effect_started)
             .await?;
         Ok(true)
     }
@@ -360,7 +383,7 @@ impl KernelHost {
             }
         };
         let mut lane = CommandLane::hold(self, &id.process_id).await;
-        let Some(claimed) = self.prepare_reconciliation(id).await? else {
+        let Some(mut claimed) = self.prepare_reconciliation(id).await? else {
             return Ok(false);
         };
         let operation = claimed.operation(&mut lane);
@@ -380,7 +403,7 @@ impl KernelHost {
                 return Err(error);
             }
         };
-        self.dispatch(&claimed, plan, Projection::Touched, true)
+        self.dispatch(&mut claimed, plan, Projection::Touched, true)
             .await?;
         Ok(true)
     }

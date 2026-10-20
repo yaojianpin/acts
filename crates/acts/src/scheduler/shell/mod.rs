@@ -2564,7 +2564,7 @@ impl KernelHost {
         // path carries no claim, commit, wake, projection or slot code of its
         // own (see [`operation`]). The slot policy does not apply here: the decision
         // is already durable, the intent was committed above.
-        let Some(claimed) = self.prepare(&operation_id, operation::Slot::Direct).await? else {
+        let Some(mut claimed) = self.prepare(&operation_id, operation::Slot::Direct).await? else {
             return Err(conflict(format!(
                 "action intent {operation_id:?} is not claimable"
             )));
@@ -2588,8 +2588,13 @@ impl KernelHost {
             // every other operation's. The run's rows whole — an action is decided
             // against the aggregate as a whole, not as one operation's effect.
             Ok(plan) => {
-                self.dispatch(&claimed, plan, operation::Projection::Whole, effect_started)
-                    .await
+                self.dispatch(
+                    &mut claimed,
+                    plan,
+                    operation::Projection::Whole,
+                    effect_started,
+                )
+                .await
             }
             Err(error) => {
                 // An effect that may already have run cannot be retried

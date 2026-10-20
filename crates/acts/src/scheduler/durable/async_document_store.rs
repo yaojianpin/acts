@@ -165,11 +165,48 @@ impl AsyncDocumentStore for KvDocumentStore {
 /// checks to the same decoder used by the deterministic synchronous repository.
 pub(crate) struct AsyncProcessRepository {
     store: Arc<dyn AsyncDocumentStore>,
+    /// The last aggregate decoded per process, keyed by pid and validated by
+    /// the exact head bytes before use (see [`Self::load`]).
+    ///
+    /// Loading an aggregate decodes its base snapshot and replays its log —
+    /// work linear in the run's whole history, paid twice by every operation
+    /// (the claim and its plan commit). The head document is the aggregate's
+    /// version token: every commit writes a new one, so a cached entry is
+    /// reused only while the head read back still equals the bytes it was
+    /// decoded from. Anything that moves the aggregate — this process or
+    /// another writer — misses the cache and takes the full decode path.
+    cached: parking_lot::Mutex<HashMap<String, Arc<LoadedProcess>>>,
 }
+
+/// Loaded aggregates kept resident: enough for the runs a driver works through
+/// in one pass, bounded so a long-lived high-concurrency server does not retain
+/// every run's history.
+const LOAD_CACHE_CAP: usize = 64;
 
 impl AsyncProcessRepository {
     pub(crate) fn new(store: Arc<dyn AsyncDocumentStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            cached: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Publish a just-committed aggregate to the load cache. Its document
+    /// bytes are the ones the commit wrote, so the next `load` hits while the
+    /// head still names them.
+    fn cache_loaded(&self, loaded: &LoadedProcess) {
+        let mut cache = self.cached.lock();
+        if cache.len() >= LOAD_CACHE_CAP
+            && !cache.contains_key(&loaded.snapshot.process_id)
+            && let Some(evicted) = cache.keys().next().cloned()
+        {
+            cache.remove(&evicted);
+        }
+        cache.insert(loaded.snapshot.process_id.clone(), Arc::new(loaded.clone()));
+    }
+
+    fn forget_loaded(&self, process_id: &str) {
+        self.cached.lock().remove(process_id);
     }
 
     pub(crate) async fn create(
@@ -187,7 +224,9 @@ impl AsyncProcessRepository {
         {
             return Err(AsyncRepositoryError::Conflict(snapshot.process_id.clone()));
         }
-        Ok(loaded_after_write(snapshot, write))
+        let loaded = loaded_after_write(snapshot, write);
+        self.cache_loaded(&loaded);
+        Ok(loaded)
     }
 
     /// Read a stable page from the compact recovery projection, then validate
@@ -347,10 +386,12 @@ impl AsyncProcessRepository {
         match outcome {
             ReplaceOutcome::Committed(write) => {
                 loaded.install_replace_documents(write);
+                self.cache_loaded(&loaded);
                 Ok(OperationCommitOutcome::Committed { operation, loaded })
             }
             ReplaceOutcome::AlreadyCommitted(process) => {
                 let operation = authoritative_operation(&process, id)?;
+                self.cache_loaded(&process);
                 Ok(OperationCommitOutcome::AlreadyCommitted {
                     operation,
                     loaded: *process,
@@ -368,9 +409,32 @@ impl AsyncProcessRepository {
         now_ms: i64,
         poll_ms: i64,
     ) -> Result<TransitionCommitOutcome, AsyncRepositoryError> {
-        let mut loaded = self.load(&plan.process_id).await?.ok_or_else(|| {
+        let loaded = self.load(&plan.process_id).await?.ok_or_else(|| {
             AsyncRepositoryError::Domain(CommitError::ProcessNotFound(plan.process_id.clone()))
         })?;
+        self.commit_transition_from(loaded, plan, now_ms, poll_ms)
+            .await
+    }
+
+    /// Apply a pure domain transition to an aggregate the caller already
+    /// holds. The claim's commit hands its `LoadedProcess` back, so the
+    /// operation's plan is committed with that copy instead of decoding the
+    /// whole aggregate a second time; its documents are the CAS token, and the
+    /// command lane guarantees the claim is the last writer of this pid. A
+    /// concurrent writer surfaces as a version conflict here, exactly as it
+    /// does after a fresh load.
+    pub(crate) async fn commit_transition_from(
+        &self,
+        mut loaded: LoadedProcess,
+        plan: &crate::scheduler::core::model::transition_plan::TransitionPlan,
+        now_ms: i64,
+        poll_ms: i64,
+    ) -> Result<TransitionCommitOutcome, AsyncRepositoryError> {
+        if loaded.snapshot.process_id != plan.process_id {
+            return Err(AsyncRepositoryError::Domain(CommitError::ProcessNotFound(
+                plan.process_id.clone(),
+            )));
+        }
         // In place, like the operation event above.
         let entries = recovery_entries(&loaded.snapshot);
         let ready_at = plan
@@ -398,9 +462,11 @@ impl AsyncProcessRepository {
         match outcome {
             ReplaceOutcome::Committed(write) => {
                 loaded.install_replace_documents(write);
+                self.cache_loaded(&loaded);
                 Ok(TransitionCommitOutcome::Committed { receipt, loaded })
             }
             ReplaceOutcome::AlreadyCommitted(process) => {
+                self.cache_loaded(&process);
                 Ok(TransitionCommitOutcome::AlreadyCommitted {
                     receipt,
                     loaded: *process,
@@ -829,7 +895,12 @@ impl AsyncProcessRepository {
             )
             .await
         {
-            Ok(ReplaceOutcome::Committed(_) | ReplaceOutcome::AlreadyCommitted(_)) => Ok(evolved),
+            Ok(ReplaceOutcome::Committed(write)) => {
+                loaded.install_replace_documents(write);
+                self.cache_loaded(&loaded);
+                Ok(evolved)
+            }
+            Ok(ReplaceOutcome::AlreadyCommitted(_)) => Ok(evolved),
             Ok(ReplaceOutcome::Conflict) => {
                 Err(OutboxRepositoryError::ConcurrentModification(id.clone()))
             }
@@ -916,6 +987,7 @@ impl AsyncProcessRepository {
         };
         if applied {
             loaded.install_confirmed_documents(write.write);
+            self.cache_loaded(loaded);
             return Ok(OutboxBatchOutcome { confirmed });
         }
         // The guard moved. If the authoritative aggregate already equals this
@@ -927,6 +999,7 @@ impl AsyncProcessRepository {
             .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?;
         if current.is_some_and(|current| current.snapshot == loaded.snapshot) {
             loaded.install_confirmed_documents(write.write);
+            self.cache_loaded(loaded);
             Ok(OutboxBatchOutcome { confirmed })
         } else {
             restore_records(&mut loaded.snapshot, previous);
@@ -1011,6 +1084,7 @@ impl AsyncProcessRepository {
                         .atomic_batch(transaction.guards(), transaction.mutations())
                         .await?
                     {
+                        self.forget_loaded(process_id);
                         return Ok(ReclaimOutcome::Reclaimed {
                             document_bytes: document_bytes as u64,
                             orphan_indexes: recovery_entries.len(),
@@ -1041,6 +1115,7 @@ impl AsyncProcessRepository {
                         + log_entries.len()
                         + recovery_entries.len();
                     if orphan_indexes == 0 {
+                        self.forget_loaded(process_id);
                         return Ok(ReclaimOutcome::Absent {
                             document_bytes: 0,
                             orphan_indexes: 0,
@@ -1072,6 +1147,7 @@ impl AsyncProcessRepository {
                         .atomic_batch(transaction.guards(), transaction.mutations())
                         .await?
                     {
+                        self.forget_loaded(process_id);
                         return Ok(ReclaimOutcome::Absent {
                             document_bytes: document_bytes as u64,
                             orphan_indexes,
@@ -1126,8 +1202,43 @@ impl AsyncProcessRepository {
         &self,
         process_id: &str,
     ) -> Result<Option<LoadedProcess>, AsyncRepositoryError> {
+        let head_key = process_key(process_id)?;
+        let cached = self.cached.lock().get(process_id).cloned();
+        if let Some(cached) = cached {
+            // The head is the version token and the three derived documents
+            // are guards of it: a hit means this process's aggregate is
+            // exactly the state that was decoded, down to the documents a
+            // repair pass may have rewritten. Reading those five documents
+            // replaces decoding the base snapshot and every log entry.
+            let keys = [
+                head_key.clone(),
+                recovery_index_key(process_id)?,
+                outbox_index_key(process_id)?,
+                ready_index_key(process_id)?,
+                process_base_key(process_id)?,
+            ];
+            let mut documents = self.store.read_many(&keys).await?.into_iter();
+            let head = documents.next().flatten();
+            let recovery_index = documents.next().flatten();
+            let outbox_index = documents.next().flatten();
+            let ready_index = documents.next().flatten();
+            let base = documents.next().flatten();
+            if head.as_deref() == Some(cached.original_document())
+                && recovery_index.as_deref() == cached.original_recovery_index()
+                && outbox_index.as_deref() == cached.original_outbox_index()
+                && ready_index.as_deref() == cached.original_ready_index()
+                && base.as_deref() == cached.original_base()
+            {
+                // The head, base and every derived document are the exact
+                // bytes this aggregate was decoded from. Log entries are
+                // immutable for a head (a commit that appends one writes a
+                // new epoch), so the cached replay is still the authoritative
+                // snapshot and the decode/verify pass can be skipped.
+                return Ok(Some((*cached).clone()));
+            }
+        }
         let keys = vec![
-            process_key(process_id)?,
+            head_key,
             recovery_index_key(process_id)?,
             outbox_index_key(process_id)?,
             ready_index_key(process_id)?,
@@ -1142,6 +1253,7 @@ impl AsyncProcessRepository {
             let ready_index = documents.next().flatten();
             let base = documents.next().flatten();
             let Some(process) = process else {
+                self.forget_loaded(process_id);
                 return Ok(None);
             };
             let log_entries = self.store.scan_prefix(&log_prefix).await?;
@@ -1156,8 +1268,17 @@ impl AsyncProcessRepository {
                 ready_index,
             ) {
                 Ok(loaded) if loaded.is_legacy() => match self.migrate_legacy(loaded).await? {
-                    MigrationOutcome::Migrated(loaded) => return Ok(Some(loaded)),
-                    MigrationOutcome::Failed(loaded) => return Ok(Some(loaded)),
+                    MigrationOutcome::Migrated(loaded) => {
+                        self.cache_loaded(&loaded);
+                        return Ok(Some(loaded));
+                    }
+                    MigrationOutcome::Failed(loaded) => {
+                        // The legacy document stays readable, but the next
+                        // load must retry the migration: caching it would
+                        // pin the un-migrated read forever.
+                        self.forget_loaded(process_id);
+                        return Ok(Some(loaded));
+                    }
                     MigrationOutcome::Conflict if attempt + 1 < LOAD_ATTEMPTS => {
                         tracing::debug!(
                             process_id,
@@ -1183,6 +1304,7 @@ impl AsyncProcessRepository {
                         .next()
                         .flatten();
                     if current.as_deref() == Some(head_bytes.as_slice()) {
+                        self.cache_loaded(&loaded);
                         return Ok(Some(loaded));
                     }
                     if attempt + 1 < LOAD_ATTEMPTS {
@@ -1193,6 +1315,7 @@ impl AsyncProcessRepository {
                         );
                         continue;
                     }
+                    self.cache_loaded(&loaded);
                     return Ok(Some(loaded));
                 }
                 Err(error) => {
