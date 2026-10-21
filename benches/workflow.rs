@@ -231,10 +231,16 @@ async fn arm_batch(
     tasks
 }
 
-/// Benchmark: complete a fixed batch of IRQ tasks.
+/// Benchmark: one `act().complete()` of an IRQ task.
 ///
-/// One Criterion iteration always measures exactly `ACT_BATCH_SIZE` completion
-/// operations.
+/// The reported time and throughput are per completion, the same unit
+/// `examples/prof` averages. Each Criterion iteration still prepares and times
+/// a fixed `ACT_BATCH_SIZE` batch, but the routine divides its measured total
+/// by that batch before returning it: Criterion divides the returned duration
+/// by `iters` itself, so without the division the printed `time` is the time
+/// of eight completions while `thrpt` would be per completion. That mismatch
+/// made this benchmark look ~8x slower than `examples/prof` for the same
+/// per-completion cost.
 ///
 /// Engine creation, workflow deployment, and task arming are outside the
 /// measured interval. Only calls to `act().complete()` are accumulated.
@@ -246,7 +252,8 @@ async fn arm_batch(
 fn act(c: &mut Criterion) {
     let mut group = c.benchmark_group("act");
 
-    group.throughput(Throughput::Elements(ACT_BATCH_SIZE));
+    // `time` is the time of one completion and `thrpt` its rate.
+    group.throughput(Throughput::Elements(1));
 
     group.sample_size(10);
 
@@ -299,7 +306,11 @@ fn act(c: &mut Criterion) {
 
                 engine.close().await;
 
-                measured
+                // Criterion divides the returned duration by `iters`, and one
+                // iteration times `ACT_BATCH_SIZE` completions: divide the
+                // measured total by the batch size so Criterion's per-iteration
+                // estimate is the time of one completion, not of the batch.
+                measured / ACT_BATCH_SIZE as u32
             }
         });
     });

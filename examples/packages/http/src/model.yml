@@ -27,5 +27,5 @@ steps:
       content-type: json
       # body data from prev http response data
       body:
-        data: '${{ $inputs().data }}'
+        data: '${{ $inputs() }}'
 
