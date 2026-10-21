@@ -28,8 +28,8 @@
 //!    `core::decision`'s.
 //!
 //! Everything kind-specific lives in one module per kind under this one —
-//! [`task`], [`action`], [`timeout`], [`cascade`], [`propagate`], [`reentry`]
-//! — so this driver never matches on an [`OperationKind`].
+//! [`task`], [`action`], [`timeout`], [`cascade`], [`propagate`], [`reentry`],
+//! [`return_to_parent`] — so this driver never matches on an [`OperationKind`].
 
 mod action;
 mod cascade;
@@ -38,6 +38,7 @@ mod fold;
 mod prepare;
 mod propagate;
 mod reentry;
+mod return_to_parent;
 mod task;
 mod timeout;
 
@@ -46,6 +47,7 @@ use self::cascade::{AbortTask, SkipTask};
 pub(super) use self::dispatch::Projection;
 use self::propagate::PropagateTask;
 use self::reentry::ReenterTask;
+use self::return_to_parent::ReturnToParent;
 use self::task::ExecuteTask;
 use self::timeout::DispatchTimeout;
 
@@ -290,6 +292,7 @@ pub(super) fn driver(kind: OperationKind) -> Option<&'static dyn ActOperation> {
         OperationKind::DispatchTimeout => Some(&DispatchTimeout),
         OperationKind::PropagateTask => Some(&PropagateTask),
         OperationKind::ReenterTask => Some(&ReenterTask),
+        OperationKind::ReturnToParent => Some(&ReturnToParent),
         OperationKind::DeliverMessage
         | OperationKind::FireTrigger
         | OperationKind::RunPostCommit => None,
@@ -484,6 +487,7 @@ mod tests {
             OperationKind::DispatchTimeout,
             OperationKind::PropagateTask,
             OperationKind::ReenterTask,
+            OperationKind::ReturnToParent,
         ] {
             assert!(driver(kind).is_some(), "{kind:?} must be driven");
         }

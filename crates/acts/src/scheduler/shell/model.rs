@@ -81,6 +81,9 @@ pub(crate) struct ProcessSpec {
 pub(crate) const BLOCK_PACKAGE: &str = "acts.core.block";
 pub(crate) const PARALLEL_PACKAGE: &str = "acts.core.parallel";
 pub(crate) const SEQUENCE_PACKAGE: &str = "acts.core.sequence";
+/// The subflow package: its acts run an effect (they start the child run) and
+/// then wait for that run's outcome before the act completes.
+pub(crate) const SUBFLOW_PACKAGE: &str = "acts.core.subflow";
 
 /// Materialize the inline acts of the container packages into the model's own
 /// shape, so the kernel's fan-out machinery drives them.
@@ -233,9 +236,14 @@ fn container_branch(id: String, steps: Vec<crate::model::Step>) -> crate::model:
 /// execution, an `Irq` waits for a client response. A step without a package
 /// self-completes; an unregistered package defaults to the `ActRunAs`
 /// default (`Irq`) and waits.
+///
+/// A subflow is the one `Func` package that waits: its effect starts the
+/// child run, then the act stays waiting until the child returns its outcome
+/// (the durable `ReturnToParent` operation).
 fn is_auto(uses: Option<&str>, run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>) -> bool {
     match uses {
         None => true,
+        Some(SUBFLOW_PACKAGE) => false,
         Some(id) => match run_as(id) {
             Some(crate::ActRunAs::Func | crate::ActRunAs::Msg) => true,
             Some(crate::ActRunAs::Irq) | None => false,
@@ -1316,6 +1324,34 @@ steps:
         for step in &branch.steps {
             assert_eq!(auto.get(&step.id), Some(&serde_json::Value::Bool(true)));
         }
+    }
+
+    /// A subflow declares `run_as: Func` but its act waits for the child run,
+    /// so the durable auto decision must be false; the start operation still
+    /// seeds its effect (see `operation::task`).
+    #[test]
+    fn model_imports_a_subflow_step_as_waiting() {
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("sub")
+                .with_uses(SUBFLOW_PACKAGE, crate::Vars::new())
+        });
+        let imported =
+            ProcessSpec::from_workflow("p1", &workflow, &|_| Some(crate::ActRunAs::Func)).unwrap();
+        let snapshot = imported.seed_snapshot().unwrap();
+        assert_eq!(
+            durable_auto(&snapshot).get("sub"),
+            Some(&serde_json::Value::Bool(false)),
+            "the act waits for the child, not the package's run_as"
+        );
+        let task = crate::scheduler::core::model::task_graph::TaskId::new("sub", 0).unwrap();
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(task, "auto".to_string()))
+                .map(String::as_str),
+            Some("0"),
+            "the per-execution decision parks the act"
+        );
     }
 
     /// `mode: parallel` materializes one branch per act (the container admits

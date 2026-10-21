@@ -58,6 +58,13 @@ pub(crate) enum OperationKind {
     /// the durable fact `__reenter_target` the deciding commit writes (`Back`
     /// names an earlier step, `Cancel` the closed execution itself).
     ReenterTask,
+    /// A subflow child's hand-back: once the child run settled, the operation
+    /// returns its outcome (outputs and terminal state) to the parent act that
+    /// started it, completing/failing/skipping/aborting that act. The child
+    /// retains the operation until the parent decision is committed, so the
+    /// return survives a crash between the child's terminal commit and the
+    /// parent's action.
+    ReturnToParent,
     DeliverMessage,
     FireTrigger,
     RunPostCommit,
@@ -82,6 +89,7 @@ impl OperationKind {
                 | Self::DispatchTimeout
                 | Self::PropagateTask
                 | Self::ReenterTask
+                | Self::ReturnToParent
         )
     }
 }
@@ -950,6 +958,7 @@ mod tests {
             (OperationKind::AbortTask, true),
             (OperationKind::DispatchTimeout, true),
             (OperationKind::ReenterTask, true),
+            (OperationKind::ReturnToParent, true),
             (OperationKind::DeliverMessage, false),
             (OperationKind::FireTrigger, false),
             (OperationKind::RunPostCommit, false),

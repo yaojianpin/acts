@@ -322,6 +322,21 @@ impl KernelHost {
                 None => None,
             };
             self.report_lifecycle_decision(&loaded.snapshot, decision.lifecycle.as_ref(), times);
+            // A subflow child that just settled owes its waiting parent a
+            // hand-back. The operation is durable in the child aggregate, so
+            // a crash after this commit (or before the parent's decision)
+            // still delivers it on recovery.
+            if matches!(
+                decision.lifecycle,
+                Some(LifecycleDirective::Completed | LifecycleDirective::Errored { .. })
+            ) && let Err(error) = self.ensure_parent_return(&loaded.snapshot).await
+            {
+                tracing::warn!(
+                    pid = %loaded.snapshot.process_id,
+                    error = %error,
+                    "recording the subflow parent hand-back failed; the child remains retained"
+                );
+            }
             // The commit's own outbox records are now visible to the
             // transport — after the aggregate commit and after the projection
             // — and their outcomes are persisted in one batch confirmation. A

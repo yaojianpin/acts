@@ -30,6 +30,7 @@ fn operation_kind_tag(
             "DispatchTimeout"
         }
         crate::scheduler::core::model::operation::OperationKind::ReenterTask => "ReenterTask",
+        crate::scheduler::core::model::operation::OperationKind::ReturnToParent => "ReturnToParent",
         crate::scheduler::core::model::operation::OperationKind::DeliverMessage => "DeliverMessage",
         crate::scheduler::core::model::operation::OperationKind::FireTrigger => "FireTrigger",
         crate::scheduler::core::model::operation::OperationKind::RunPostCommit => "RunPostCommit",

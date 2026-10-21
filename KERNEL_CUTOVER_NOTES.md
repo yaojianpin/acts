@@ -1334,9 +1334,10 @@ on_complete/on_error)。所以 P1d 的收益是「包 API 不再点名 `Runtime`
 
 ### 已知边界(本轮新增,未静默降级)
 
-- **`acts.core.subflow`**:`set_auto_complete(false)` 在 kernel 下本就是空操作(无头 scope 的 `__sign` 是私有键,
-  不折进聚合),故一并删除并在包内注释登记:kernel 无"子 run 完成回灌父 act"的通道(`return_to_act` 已删),
-  subflow act 现在与其子 run 同时完成;父/子 run 关联(`ACT_USE_PARENT_*`)仍随 inputs 传给子 run,但无消费者。
+- ~~**`acts.core.subflow` 无回灌通道**~~ → **已实现**:subflow step 在导入期判定为非 auto(`model::is_auto`),start 在把
+  act 置 `Waiting` 的同一提交里种下 effect 操作;子 run 终止提交在子聚合里创建持久的 `ReturnToParent` 操作,把子 run 的
+  outputs/终态作为 `Complete`/`Fail`/`Abort`/`Skip` 应用到等待中的父 act(`operation/return_to_parent.rs`)。
+  父/子关联仍是随 inputs 传给子 run 的 `ACT_USE_PARENT_*`;本次补上了它们的消费者。
 - **`acts.core.action`**:`Push`/`Remove`/`SetProcessVars` 仍无 kernel 动作面(`Runtime::kernel_kind` 返回 `None`
   并报错),与 P3 记录一致。
 - **节点寻址的 action 无法区分同一节点的多个实例(2026-10-15 登记,含实测)**:action/message 只带 `tid` = 模型节点 id

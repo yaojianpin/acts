@@ -25,6 +25,7 @@ pub(crate) mod message;
 pub(crate) mod outputs;
 pub(crate) mod runtime;
 pub(crate) mod step;
+pub(crate) mod subflow;
 pub(crate) mod timeout;
 pub(crate) mod vars;
 

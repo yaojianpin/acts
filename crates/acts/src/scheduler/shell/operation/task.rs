@@ -286,7 +286,22 @@ impl ActOperation for ExecuteTask {
                         },
                     );
                 }
-                if !action_exists && auto {
+                // A waiting act normally runs no effect (an `Irq` waits for
+                // its client), but a subflow's effect starts the child run
+                // the act then waits for. Seed that operation here, in the
+                // same commit that parked the act, so the child can never
+                // finish before the parent is waiting.
+                let runs_while_waiting = if auto {
+                    false
+                } else {
+                    match task {
+                        Some(task) => {
+                            host.step_runs_while_waiting(snapshot, &task_id, &task.model_node)?
+                        }
+                        None => false,
+                    }
+                };
+                if !action_exists && (auto || runs_while_waiting) {
                     plan.operations.push(OperationIntent {
                         id: action_id,
                         kind: OperationKind::ApplyAction,

@@ -73,13 +73,13 @@ impl ActPackage for SubflowPackage {
                 ))
             })?;
         let task = ctx.task();
-        // NOTE (kernel cutover): the legacy engine kept the act from
-        // auto-completing (`task.set_auto_complete(false)`) so the subflow act
-        // waited for its child run and the child's `return_to_act` completed
-        // it. The kernel drives every `Func` act to completion through its own
-        // effect operation and has no parent/child run linkage yet, so the child is
-        // started with the parent's authority and the act completes with it —
-        // registered as a kernel gap in KERNEL_CUTOVER_NOTES.md §10.
+        // The act waits: the kernel imports a subflow step as non-auto
+        // (`model::is_auto`), still runs this effect in the same commit window
+        // that parked the act, and the child's terminal commit creates the
+        // durable `ReturnToParent` operation that completes/fails/skips the
+        // act with the child's outputs. `$parent_pid`/`$parent_tid` are the
+        // linkage the hand-back reads from the child's root scope.
+        //
         // A subflow is not a caller: it is a live run spawning work of its
         // own, so there is no action to check and no principal to check it
         // against. What the child must have is the *parent's* authority —

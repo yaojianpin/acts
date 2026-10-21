@@ -1244,6 +1244,16 @@ impl KernelHost {
                     // event (see `dispatch`); the repair is where the
                     // observer gets to see the now-projected state.
                     self.report_lifecycle(&loaded.snapshot).await;
+                    // The same commit withheld its subflow hand-back; the
+                    // repair creates it now (the helper is a no-op for a live
+                    // or already-recorded child).
+                    if let Err(error) = self.ensure_parent_return(&loaded.snapshot).await {
+                        tracing::warn!(
+                            pid = %process_id,
+                            error = %error,
+                            "recording the subflow parent hand-back after projection repair failed"
+                        );
+                    }
                     true
                 }
                 Err(error) => {
@@ -1322,23 +1332,35 @@ impl KernelHost {
         let mut applied = 0usize;
         for process_id in process_ids {
             match self.load(&process_id).await {
-                Ok(Some(loaded)) => match projector.project_repair(&loaded.snapshot).await {
-                    Ok(report) => {
-                        applied += report.applied;
-                        if report.applied > 0 {
-                            projector.note_repaired();
+                Ok(Some(loaded)) => {
+                    match projector.project_repair(&loaded.snapshot).await {
+                        Ok(report) => {
+                            applied += report.applied;
+                            if report.applied > 0 {
+                                projector.note_repaired();
+                            }
+                            projector.finish_repair(&process_id);
                         }
-                        projector.finish_repair(&process_id);
+                        Err(error) => {
+                            projector.enqueue_repair(&process_id);
+                            tracing::warn!(
+                                pid = %process_id,
+                                error = %error,
+                                "projection boot catch-up failed; queued for repair"
+                            );
+                        }
                     }
-                    Err(error) => {
-                        projector.enqueue_repair(&process_id);
+                    // A child that settled before its return was recorded
+                    // (the crash window between its terminal commit and the
+                    // hand-back commit) gets its durable return now.
+                    if let Err(error) = self.ensure_parent_return(&loaded.snapshot).await {
                         tracing::warn!(
                             pid = %process_id,
                             error = %error,
-                            "projection boot catch-up failed; queued for repair"
+                            "recording a recovered subflow parent hand-back failed"
                         );
                     }
-                },
+                }
                 Ok(None) => {
                     projector.finish_repair(&process_id);
                 }
@@ -2885,6 +2907,22 @@ impl KernelHost {
                 package,
             },
         )))
+    }
+
+    /// Whether a waiting act (`auto == "0"`) still has a package effect to
+    /// run. Only a `Func` package does — the subflow, whose act starts the
+    /// child and then waits for the child's return — while an `Irq` waits for
+    /// its client without executing anything.
+    fn step_runs_while_waiting(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        model_node: &crate::scheduler::core::model::model_graph::NodeId,
+    ) -> Result<bool> {
+        let Some((runner, request)) = self.step_effect(snapshot, task_id, model_node)? else {
+            return Ok(false);
+        };
+        Ok(runner.executes_while_waiting(&request.package))
     }
 
     /// Resolve one `uses` step's package at start (the legacy act's `run()`

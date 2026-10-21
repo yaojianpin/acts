@@ -1096,6 +1096,7 @@ fn operation_kind_tag(kind: OperationKind) -> u8 {
         AbortTask => 7,
         DispatchTimeout => 8,
         ReenterTask => 9,
+        ReturnToParent => 10,
     }
 }
 fn decode_operation_kind(tag: u8) -> Result<OperationKind, SnapshotCodecError> {
@@ -1111,6 +1112,7 @@ fn decode_operation_kind(tag: u8) -> Result<OperationKind, SnapshotCodecError> {
         7 => Ok(AbortTask),
         8 => Ok(DispatchTimeout),
         9 => Ok(ReenterTask),
+        10 => Ok(ReturnToParent),
         value => Err(SnapshotCodecError::InvalidTag(value)),
     }
 }
@@ -1823,9 +1825,13 @@ mod tests {
             ),
             (
                 OperationKind::DispatchTimeout,
-                OperationState::Completed(commit),
+                OperationState::Completed(commit.clone()),
             ),
             (OperationKind::ReenterTask, OperationState::Claimed(claim)),
+            (
+                OperationKind::ReturnToParent,
+                OperationState::Completed(commit),
+            ),
         ];
         for (sequence, (kind, state)) in states.into_iter().enumerate() {
             let id = OperationId {
@@ -1867,8 +1873,12 @@ mod tests {
             assert_eq!(operation_kind_tag(expected), tag);
         }
         assert_eq!(
-            decode_operation_kind(10),
-            Err(SnapshotCodecError::InvalidTag(10))
+            decode_operation_kind(10).unwrap(),
+            OperationKind::ReturnToParent
+        );
+        assert_eq!(
+            decode_operation_kind(11),
+            Err(SnapshotCodecError::InvalidTag(11))
         );
 
         assert_eq!(

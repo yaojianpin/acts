@@ -116,6 +116,15 @@ pub(crate) trait EffectRunner: Send + Sync {
         false
     }
 
+    /// Whether the package's work runs even though the act waits for an
+    /// external answer (`auto == "0"`). A waiting act normally executes
+    /// nothing — an `Irq` waits for its client — but a subflow's act must
+    /// start the child before it waits for the child's return. The default
+    /// is "no"; the package runner answers from the package's `run_as`.
+    fn executes_while_waiting(&self, _package: &str) -> bool {
+        false
+    }
+
     /// The executor's own observation for `key`. A runner that does not keep
     /// one answers [`EffectObservation::Unknown`], which keeps the operation in
     /// manual reconciliation.
@@ -225,6 +234,17 @@ impl EffectRunner for PackageEffectRunner {
             .package()
             .get(&request.package)
             .is_some_and(|register| (register.idempotent)())
+    }
+
+    fn executes_while_waiting(&self, package: &str) -> bool {
+        // A `Func` package is the kernel's executing kind. Only a waiting
+        // `Func` package (the subflow) reaches this question: the start
+        // operation runs the effect and leaves the act waiting for the return
+        // that completes it.
+        self.runtime
+            .package()
+            .get(package)
+            .is_some_and(|register| (register.meta)().run_as == ActRunAs::Func)
     }
 }
 

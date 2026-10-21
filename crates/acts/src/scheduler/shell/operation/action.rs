@@ -49,6 +49,19 @@ impl KernelHost {
     ) -> Result<TransitionPlan> {
         match action {
             None => {
+                // A waiting act that ran an effect (the subflow) is not done
+                // when the effect returns: the act waits for the external
+                // answer the effect arranged (`ReturnToParent`). Its commit
+                // just retires the effect operation; the act keeps its
+                // waiting state and nothing propagates yet.
+                let auto = snapshot
+                    .variables
+                    .get(&(task_id.clone(), "auto".to_string()))
+                    .map(String::as_str)
+                    != Some("0");
+                if !auto && effect.is_some() {
+                    return self.waiting_after_effect_plan(snapshot, id, task_id, task, claim);
+                }
                 let propagate_id = OperationId {
                     process_id: id.process_id.clone(),
                     task: id.task.clone(),
@@ -221,6 +234,41 @@ impl KernelHost {
                 Ok(plan)
             }
         }
+    }
+
+    /// The plan of a waiting act whose effect just returned: the act keeps
+    /// waiting for the answer the effect arranged (the subflow's child run),
+    /// so only the effect operation retires. The execution resumes `Running`
+    /// only if the start had to mark it so (a resolution failure deferred to
+    /// the effect), because the waiting state is what tells the return
+    /// operation the parent is ready for its decision.
+    fn waiting_after_effect_plan(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        id: &OperationId,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        task: &TaskSnapshot,
+        claim: &OperationCommit,
+    ) -> Result<TransitionPlan> {
+        let mut plan = self.task_operation_plan(
+            snapshot,
+            id,
+            task_id,
+            Some(task),
+            claim,
+            "waiting",
+            "message.waiting",
+        )?;
+        if task.state == crate::scheduler::core::model::task_graph::TaskState::Running {
+            plan.state_changes.push(StateChange {
+                task: task_id.clone(),
+                expected_revision: task.revision,
+                from: crate::scheduler::core::model::task_graph::TaskState::Running,
+                to: crate::scheduler::core::model::task_graph::TaskState::Waiting,
+            });
+        }
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
     }
 
     /// Whether an execution may not complete yet because a timeout branch it
@@ -1489,7 +1537,13 @@ mod tests {
                 .with_uses("pkg.test", crate::Vars::new())
                 .with_branch(|branch| branch.with_id("b1").with_if("true"))
         });
-        let mut snapshot = from_workflow(&workflow);
+        // A package container self-completes, so its package is a `Func` at
+        // import time (`auto = "1"`).
+        let mut snapshot =
+            ProcessSpec::from_workflow("p", &workflow, &|_| Some(crate::ActRunAs::Func))
+                .unwrap()
+                .seed_snapshot()
+                .unwrap();
         let task_id = task("s1");
         snapstate(&mut snapshot, &task_id, TaskState::Running);
         let id = id("s1", 0);
@@ -1520,6 +1574,56 @@ mod tests {
             plan.outbox
                 .iter()
                 .any(|record| record.topic == "task.completed")
+        );
+    }
+
+    /// A waiting act whose effect ran (the subflow) keeps its `Waiting` state
+    /// and does not propagate; the return operation is what decides it later.
+    #[tokio::test]
+    async fn action_waiting_act_with_an_effect_parks_without_completing() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::scheduler::shell::model::SUBFLOW_PACKAGE,
+                crate::Vars::new(),
+            )
+        });
+        let mut snapshot =
+            ProcessSpec::from_workflow("p", &workflow, &|_| Some(crate::ActRunAs::Func))
+                .unwrap()
+                .seed_snapshot()
+                .unwrap();
+        let task_id = task("s1");
+        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        let id = id("s1", 0);
+        let claim = commit(&id);
+        let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
+        let plan = host
+            .completion_plan(
+                &snapshot,
+                &id,
+                &task_id,
+                snapshot_task,
+                &claim,
+                None,
+                Vec::new(),
+                Some(&EffectOutcome::empty()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            plan.state_changes.is_empty(),
+            "the act stays waiting: {plan:?}"
+        );
+        assert!(
+            plan.operations.is_empty(),
+            "nothing propagates while the child is in flight: {plan:?}"
+        );
+        assert!(
+            plan.outbox
+                .iter()
+                .any(|record| record.topic == "message.waiting"),
+            "the commit is the bare effect remainder: {plan:?}"
         );
     }
 

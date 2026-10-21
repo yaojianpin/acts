@@ -86,6 +86,7 @@ fn the_canonical_bytes_distinguish_every_state_and_kind_tag() {
         OperationKind::AbortTask,
         OperationKind::DispatchTimeout,
         OperationKind::ReenterTask,
+        OperationKind::ReturnToParent,
         OperationKind::DeliverMessage,
         OperationKind::FireTrigger,
         OperationKind::RunPostCommit,

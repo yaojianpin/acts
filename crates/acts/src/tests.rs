@@ -978,6 +978,134 @@ steps:
     engine.close().await;
 }
 
+/// The published `examples/subflow` model: the parent subflow act waits for
+/// the child run, folds the child's outputs into the parent scope, and only
+/// then lets the parent's `final` act run. The observable order is the one a
+/// channel subscriber sees — the engine's own events, not a poll of rows.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn subflow_waits_for_its_child_before_the_parent_continues() {
+    let engine = Engine::builder().start().await.unwrap();
+    let executor = engine.executor(&crate::Principal::unrestricted());
+    for model in [
+        include_str!("../../../examples/subflow/model/main.yml"),
+        include_str!("../../../examples/subflow/model/sub.yml"),
+    ] {
+        let workflow = Workflow::from_yml(model).unwrap();
+        executor.model().deploy(&workflow, None).await.unwrap();
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    engine.channel().on_start({
+        let log = log.clone();
+        move |e| {
+            let log = log.clone();
+            async move {
+                log.lock().push(format!("{}/started", e.mid));
+            }
+        }
+    });
+
+    let (done, sig) = engine.signal(json!(null)).double();
+    engine.channel().on_complete({
+        let log = log.clone();
+        move |e| {
+            let log = log.clone();
+            let done = done.clone();
+            async move {
+                log.lock().push(format!("{}/completed", e.mid));
+                if e.mid == "main" {
+                    done.send(e.outputs.to_value());
+                }
+            }
+        }
+    });
+    engine.channel().on_error(move |e| async move {
+        panic!("the subflow example must not error: {:?}", e.inputs);
+    });
+
+    let ex = executor.clone();
+    engine.channel().on_message({
+        let log = log.clone();
+        move |e| {
+            let log = log.clone();
+            let ex = ex.clone();
+            async move {
+                if !e.is_type("act") || !e.is_state(MessageState::Created) {
+                    return;
+                }
+                log.lock().push(format!("{}/{}", e.mid, e.name));
+                let Some(params) = e.params() else {
+                    return;
+                };
+                let key = params.get::<String>("key").unwrap_or_default();
+                let mut outputs = Vars::new();
+                match key.as_str() {
+                    "init" => outputs.set("v", 10),
+                    "action1" => outputs.set("v", 100),
+                    "action2" => outputs.set(
+                        "v",
+                        params.get::<i64>("v").unwrap_or_default().saturating_mul(2),
+                    ),
+                    _ => return,
+                }
+                ex.act().complete(&e.pid, &e.tid, outputs).await.unwrap();
+            }
+        }
+    });
+
+    executor.proc().start("main", Vars::new()).await.unwrap();
+
+    let outputs = timeout(Duration::from_secs(20), sig.recv())
+        .await
+        .expect("the parent run never completed");
+    assert_eq!(
+        outputs,
+        json!({ "result": 200 }),
+        "the child's v=100 folds into the parent before final doubles it"
+    );
+
+    // The completion event can reach this test before the last act message
+    // callback runs; wait for the log itself before ordering it.
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if seen.lock().iter().any(|entry| entry == "main/completed") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the parent completion was never observed on the channel");
+
+    let log = seen.lock().clone();
+    let pos = |label: &str| {
+        log.iter()
+            .position(|entry| entry == label)
+            .unwrap_or_else(|| panic!("missing '{label}' in {log:?}"))
+    };
+    let order = [
+        "main/started",
+        "main/prepare",
+        "sub/started",
+        "sub/t1",
+        "sub/completed",
+        "main/final",
+        "main/completed",
+    ];
+    let mut previous = pos(order[0]);
+    for label in &order[1..] {
+        let current = pos(label);
+        assert!(
+            current > previous,
+            "'{label}' must follow the previous event: {log:?}"
+        );
+        previous = current;
+    }
+    engine.close().await;
+}
+
 /// A model that declares no `exposes` outputs its own variables (the legacy
 /// fallback), never the engine's durable facts.
 #[serial]

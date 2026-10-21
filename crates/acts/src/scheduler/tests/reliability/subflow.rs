@@ -3,42 +3,34 @@
 //! concurrent starts.
 //!
 //! What the kernel's subflow *is* shapes every assertion here. The subflow step
-//! is one `Func` act: its effect resolves the child model, starts it
-//! (`start_as_owner`, carrying the parent's authority and its
-//! `$parent_pid`/`$parent_tid` inputs) and then completes, so the act and the
-//! child's start are one operation. The child is a process of its own, with its own
-//! aggregate, driven by its own operations.
+//! is a `Func` act imported as non-auto: its effect resolves the child model
+//! and starts it (`start_as_owner`, carrying the parent's authority and its
+//! `$parent_pid`/`$parent_tid` inputs), then the act stays `Waiting`. The
+//! child is a process of its own; when it settles, its aggregate creates the
+//! durable `ReturnToParent` operation, which applies the child's outcome
+//! (outputs, `Completed`/`Errored`/`Aborted`/`Skipped`) to the waiting parent
+//! act. The parent therefore never runs past its subflow step before the child
+//! settles, and the return survives a crash because the operation is part of
+//! the child's durable aggregate.
 //!
-//! The kernel has **no parent↔child hand-back**: `return_to_act` was deleted
-//! with the legacy engine, so nothing delivers a child's completion back to the
-//! parent act and the parent waits for nothing. That is a documented boundary,
-//! not an accident — `KERNEL_CUTOVER_NOTES.md` §“已知边界(本轮新增,未静默降级)”
-//! records it, and the package's own `execute`
-//! (`crates/acts/src/package/core/subflow.rs`) carries the same NOTE: the
-//! subflow act now completes together with its child run, and the parent/child
-//! inputs still reach the child but have no consumer. None of the cells here
-//! therefore require the parent to wait for the child or to be completed by a
-//! hand-back; the legacy hand-back intents are re-stated as the exactly-once
-//! properties the kernel does hold.
-//!
-//! So the cells pin, on the surfaces the kernel has:
+//! The cells pin that contract:
 //!
 //! - a store fault on the child's own start write reaches the subflow effect:
 //!   the parent degrades to a defined terminal error instead of hanging, the
 //!   refused start is atomic (no aggregate, no row, no announcement — no
-//!   half-created child), and a fresh parent run completes exactly once and
-//!   starts exactly one child, which completes exactly once;
+//!   half-created child), and a fresh parent run starts exactly one child,
+//!   waits for it, and completes exactly once after the child does;
 //! - a restart between the child's start and its completion recovers both runs
-//!   exactly once: the parent's subflow act is already terminal with its child
-//!   start, so the recovered parent is *not* re-driven into a second child,
-//!   while the child recovers with its act still waiting and settles exactly
-//!   once on the new engine — exactly one child per subflow act across a crash;
-//! - a duplicated delivery of the handoff act (the completion the handoff
-//!   already applied, and a re-issued child completion) starts exactly one child
-//!   process and completes each run exactly once, never two;
-//! - two subflow acts of one parent start two children concurrently; each starts
-//!   exactly one child, both complete exactly once, and the parent completes
-//!   exactly once.
+//!   exactly once: the parent still waits (its subflow act is not terminal),
+//!   the child recovers as the live run it was, and completing it on the new
+//!   engine returns the outcome to the parent — exactly one child per subflow
+//!   act across a crash;
+//! - a duplicated delivery (the child's completion re-issued after the return,
+//!   and a direct completion of the parent's already-completed subflow act) is
+//!   refused, starts no second child, and completes each run exactly once;
+//! - two subflow acts of one parent start two children concurrently; the
+//!   parent completes only after both children's returns, and each run
+//!   completes exactly once.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -48,7 +40,10 @@ use parking_lot::Mutex;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::scheduler::core::model::task_graph::TaskState;
+use crate::scheduler::core::model::{
+    operation::{OperationKind, OperationState},
+    task_graph::TaskState,
+};
 use crate::store::ScanOperation;
 use crate::utils::consts;
 use crate::{LegacyTaskState, Step};
@@ -59,7 +54,7 @@ use super::*;
 const PARENT: &str = "main";
 /// The child model id — the `to` of every subflow step here.
 const CHILD: &str = "w2";
-/// The parent's subflow step: the node a hand-back would act on.
+/// The parent's subflow step: the node the hand-back acts on.
 const PARENT_NODE: &str = "step1";
 /// The child's single irq step, and the node id its messages name.
 const CHILD_NODE: &str = "s1";
@@ -152,6 +147,24 @@ async fn legacy_task_state(engine: &Engine, pid: &str, node: &str) -> Option<Tas
         .filter(|(id, _)| id.node.as_str() == node)
         .max_by_key(|(id, _)| id.generation)
         .map(|(_, task)| task.state)
+}
+
+/// Wait until the parent subflow act's effect operation has retired: the act
+/// is parked and its child is started, so a restart from here is the cell's
+/// "between the child's start and its completion" window, not the earlier
+/// window where the parent's own effect commit is still in flight.
+async fn wait_parent_effect_retired(engine: &Engine, pid: &str, node: &str) {
+    poll_until("the parent subflow effect to retire", || async {
+        let Some(snapshot) = engine.runtime().kernel().snapshot(pid).await.ok().flatten() else {
+            return false;
+        };
+        snapshot.operations.iter().any(|(id, operation)| {
+            id.task.node.as_str() == node
+                && operation.kind == OperationKind::ApplyAction
+                && matches!(operation.state, OperationState::Completed(_))
+        })
+    })
+    .await;
 }
 
 /// How many live runs of the child model the store holds. A process is one row
@@ -567,11 +580,17 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
         tid_of(&child_pid, CHILD_NODE, 0),
         "the child's act is its step's own instance"
     );
-    wait_completed(&engine, &pid2).await;
-    assert_eq!(
-        legacy_task_state(&engine, &pid2, PARENT_NODE).await,
-        Some(TaskState::Completed),
-        "the healed parent's subflow act completes with the child's start"
+    // The subflow act is not done when the child starts: it waits for the
+    // child's return, and the parent's later steps must not run yet.
+    wait_waiting_task(&engine, &pid2, PARENT_NODE).await;
+    assert!(
+        !engine
+            .runtime()
+            .kernel()
+            .process_completed(&pid2)
+            .await
+            .unwrap_or(false),
+        "the parent must still be waiting for its child"
     );
     assert!(
         poll_until("exactly one child run", || async {
@@ -582,6 +601,12 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
     );
     complete_act(&engine, &child_pid, &tid).await.unwrap();
     wait_completed(&engine, &child_pid).await;
+    wait_completed(&engine, &pid2).await;
+    assert_eq!(
+        legacy_task_state(&engine, &pid2, PARENT_NODE).await,
+        Some(TaskState::Completed),
+        "the healed parent's subflow act completes with the child's return"
+    );
     expect_count(&child_done, 1, "the child completes exactly once").await;
     expect_count(
         &healed_parent,
@@ -607,14 +632,11 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
 // ---------------------------------------------------------------------------
 
 /// A restart between the child's start and its completion must recover both
-/// runs exactly once. The parent's handoff already committed (its subflow act
-/// completed with the child's start), so the recovered parent is *not* re-run:
-/// its effect never starts a second child, and no fresh `Created` is announced.
-/// The child recovers as the live run it was, its act still waiting, and
-/// completing it on the new engine completes it exactly once — the child's
-/// completion is never delivered back to the parent (the kernel's documented
-/// boundary: there is no hand-back channel), so the parent stays the completed
-/// run it was and is never resurrected, duplicated or re-driven.
+/// runs exactly once. The parent's subflow act already started the child and is
+/// waiting, so the recovered parent keeps waiting and is *not* re-driven into
+/// a second child. The child recovers as the live run it was, its act still
+/// waiting, and completing it on the new engine creates the durable return to
+/// the parent — the parent then completes exactly once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_subflow_restart_between_the_child_start_and_its_completion_recovers_both_once() {
@@ -643,9 +665,19 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
         "the child's act is its step's own instance"
     );
 
-    // the handoff is where the parent ends: the child is in flight, waiting
-    wait_completed(&engine, &pid).await;
+    // the child is in flight and the parent is waiting for its return
+    wait_waiting_task(&engine, &pid, PARENT_NODE).await;
     wait_waiting_task(&engine, &child_pid, CHILD_NODE).await;
+    wait_parent_effect_retired(&engine, &pid, PARENT_NODE).await;
+    assert!(
+        !engine
+            .runtime()
+            .kernel()
+            .process_completed(&pid)
+            .await
+            .unwrap_or(false),
+        "the parent is still waiting, not completed, before the restart"
+    );
     assert!(
         poll_until("exactly one child run", || async {
             child_runs(&engine).await == 1
@@ -671,34 +703,36 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
         .await,
         "recovery must not start a second child"
     );
-    // the parent is not re-run: its aggregate still holds the completed
-    // handoff, and the boot never announces a fresh child
+    // the parent is not re-run: its aggregate still waits on the subflow act,
+    // and the boot never announces a fresh child
     assert!(
-        engine
+        !engine
             .runtime()
             .kernel()
             .process_completed(&pid)
             .await
             .unwrap_or(false),
-        "the parent must recover as the completed run it was"
+        "the parent must recover as the waiting run it was"
     );
+    wait_waiting_task(&engine, &pid, PARENT_NODE).await;
     assert_eq!(
         legacy_task_state(&engine, &pid, PARENT_NODE).await,
-        Some(TaskState::Completed),
-        "the recovered parent's subflow act stays the completed handoff"
+        Some(TaskState::Waiting),
+        "the recovered parent's subflow act stays waiting for its child"
     );
     let extra = capture_created(&engine, ACT_KEY);
     assert_no_created(&extra).await;
     expect_count(
         &parent_done,
-        1,
-        "the parent completed exactly once, before the restart",
+        0,
+        "the parent has not completed before the child's return",
     )
     .await;
 
-    // completing the child on the new engine completes it exactly once; the
-    // parent is not driven by it
+    // completing the child on the new engine completes it exactly once, and
+    // its durable return completes the waiting parent exactly once
     let child_done = count_completions_of(&engine, CHILD);
+    let parent_done_after = count_completions_of(&engine, PARENT);
     complete_act(&engine, &child_pid, &tid).await.unwrap();
     wait_completed(&engine, &child_pid).await;
     expect_count(
@@ -707,15 +741,18 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
         "the child completes exactly once across the restart",
     )
     .await;
-    assert!(
-        engine
-            .runtime()
-            .kernel()
-            .process_completed(&pid)
-            .await
-            .unwrap_or(false),
-        "the parent is not resurrected by the child's completion"
+    wait_completed(&engine, &pid).await;
+    assert_eq!(
+        legacy_task_state(&engine, &pid, PARENT_NODE).await,
+        Some(TaskState::Completed),
+        "the child's return completes the parent's subflow act"
     );
+    expect_count(
+        &parent_done_after,
+        1,
+        "the parent completes exactly once, after the child's return",
+    )
+    .await;
     let announced = census.lock().clone();
     assert_eq!(
         announced.len(),
@@ -740,11 +777,10 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
 /// A duplicated delivery must be refused with no second side effect. The child's
 /// first completion is the client's own `Next`; the duplicate of it is refused
 /// by the decision guard (the act is already terminal), and a completion aimed
-/// at the parent's subflow act — the act the handoff already applied, since the
-/// kernel has no hand-back channel to redeliver through — is refused too.
-/// Neither starts a second child: exactly one child process is ever announced,
-/// exactly one child aggregate exists, and the parent completed exactly once
-/// (at the handoff).
+/// at the parent's subflow act — already completed by the child's return — is
+/// refused too. Neither starts a second child: exactly one child process is
+/// ever announced, exactly one child aggregate exists, and each run completes
+/// exactly once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_subflow_duplicate_child_completion_is_refused_and_starts_no_second_child() {
@@ -766,22 +802,24 @@ async fn a_duplicate_child_completion_is_refused_and_starts_no_second_child_inne
     let child_done = count_completions_of(&engine, CHILD);
     let pid = start_run(&engine, &parent_flow(CHILD)).await;
 
-    // the handoff: the parent is done exactly once, the child waits
-    wait_completed(&engine, &pid).await;
+    // the subflow act starts one child and waits for its return
     let (child_pid, tid) = expect_created(&first).await;
     assert_ne!(child_pid, pid, "the child is a run of its own");
+    wait_waiting_task(&engine, &pid, PARENT_NODE).await;
     wait_waiting_task(&engine, &child_pid, CHILD_NODE).await;
     assert!(
         poll_until("exactly one child run", || async {
             child_runs(&engine).await == 1
         })
         .await,
-        "the handoff starts exactly one child"
+        "the subflow act starts exactly one child"
     );
 
-    // the first delivery: the client completes the child
+    // the first delivery: the client completes the child, whose return
+    // completes the parent
     complete_act(&engine, &child_pid, &tid).await.unwrap();
     wait_completed(&engine, &child_pid).await;
+    wait_completed(&engine, &pid).await;
 
     // duplicate #1 — the same child completion re-issued is refused
     let second = complete_act(&engine, &child_pid, &tid).await;
@@ -789,12 +827,12 @@ async fn a_duplicate_child_completion_is_refused_and_starts_no_second_child_inne
         second.is_err(),
         "a duplicate child completion must be refused, got {second:?}"
     );
-    // duplicate #2 — a completion of the parent's subflow act, completed by the
-    // handoff, is refused as well
+    // duplicate #2 — a completion of the parent's subflow act, completed by
+    // the child's return, is refused as well
     let redelivered = complete_act(&engine, &pid, PARENT_NODE).await;
     assert!(
         redelivered.is_err(),
-        "a completion of the handoff act must be refused, got {redelivered:?}"
+        "a completion of the returned act must be refused, got {redelivered:?}"
     );
 
     // exactly once: one child start, one child completion, one parent completion
@@ -831,9 +869,9 @@ async fn a_duplicate_child_completion_is_refused_and_starts_no_second_child_inne
 
 /// Two branches of one parent start two children concurrently: both children
 /// are in flight at once (two child runs, two `Created` announcements of
-/// distinct pids), completing them concurrently completes each exactly once, and
-/// the parent — whose branches joined at the two starts — completes exactly
-/// once.
+/// distinct pids) while the parent waits for both returns. Completing them
+/// concurrently completes each exactly once; the parent then completes exactly
+/// once when the second return joins its branches.
 ///
 /// The container is the kernel's own: a step's model branches
 /// (`Step::with_branch`), each holding a subflow step. The legacy cell used the
@@ -875,7 +913,8 @@ async fn two_subflow_branches_start_two_children_and_the_parent_completes_once_i
         "each child's act is its own step's instance: {started:?}"
     );
 
-    // both children are in flight at the same time, and the parent is done
+    // both children are in flight at the same time; the parent is still
+    // waiting for both subflow acts
     assert!(
         poll_until("both children in flight", || async {
             child_runs(&engine).await == 2
@@ -883,15 +922,24 @@ async fn two_subflow_branches_start_two_children_and_the_parent_completes_once_i
         .await,
         "both children must be live at once"
     );
-    wait_completed(&engine, &pid).await;
+    assert!(
+        !engine
+            .runtime()
+            .kernel()
+            .process_completed(&pid)
+            .await
+            .unwrap_or(false),
+        "the parent cannot complete before its children return"
+    );
     expect_count(
         &parent_done,
-        1,
-        "the parent completes exactly once, after its branches joined",
+        0,
+        "no parent completion while both children are in flight",
     )
     .await;
 
-    // complete both children concurrently
+    // complete both children concurrently; each return completes one branch,
+    // and the join completes the parent
     let (left, right) = (started[0].clone(), started[1].clone());
     let children_done = count_completions_of(&engine, CHILD);
     let (first, second) = tokio::join!(
@@ -903,11 +951,13 @@ async fn two_subflow_branches_start_two_children_and_the_parent_completes_once_i
     wait_completed(&engine, &left.0).await;
     wait_completed(&engine, &right.0).await;
     expect_count(&children_done, 2, "each child completes exactly once").await;
-    assert_eq!(
-        parent_done.load(Ordering::SeqCst),
+    wait_completed(&engine, &pid).await;
+    expect_count(
+        &parent_done,
         1,
-        "the children's completions never re-drive the parent"
-    );
+        "the parent completes exactly once, after both returns joined",
+    )
+    .await;
     assert_no_created(&capture_created(&engine, ACT_KEY)).await;
     let announced = census.lock().clone();
     assert_eq!(
@@ -924,5 +974,186 @@ async fn two_subflow_branches_start_two_children_and_the_parent_completes_once_i
     sweep_until_gone(&engine, &pid).await;
     sweep_until_gone(&engine, &left.0).await;
     sweep_until_gone(&engine, &right.0).await;
+    engine.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// SUBFLOW × 失败 — the child's error is the parent act's error
+// ---------------------------------------------------------------------------
+
+/// A child run that errors returns `Fail` to the waiting parent act: the
+/// subflow step is decided `Failed` with the child's durable
+/// `error.code`/`error.message`, and the parent run ends in the same error
+/// instead of continuing to its later steps.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_subflow_child_error_fails_the_waiting_parent() {
+    bounded(
+        "sch_subflow_child_error_fails_the_waiting_parent",
+        a_child_error_fails_the_waiting_parent_inner(),
+    )
+    .await;
+}
+
+async fn a_child_error_fails_the_waiting_parent_inner() {
+    let kv = SubflowKv::new();
+    let engine = engine_on(kv.store()).await;
+    deploy(&engine, &child_flow()).await;
+
+    let parent_done = count_terminals_of(&engine, PARENT);
+    let child_done = count_terminals_of(&engine, CHILD);
+    let pid = start_run(&engine, &parent_flow(CHILD)).await;
+    let (child_pid, tid) = expect_created(&capture_created(&engine, ACT_KEY)).await;
+    wait_waiting_task(&engine, &pid, PARENT_NODE).await;
+    wait_waiting_task(&engine, &child_pid, CHILD_NODE).await;
+
+    fail_act(&engine, &child_pid, &tid, "E1", "boom")
+        .await
+        .unwrap();
+    wait_completed(&engine, &child_pid).await;
+    wait_completed(&engine, &pid).await;
+
+    assert_eq!(
+        legacy_task_state(&engine, &pid, PARENT_NODE).await,
+        Some(TaskState::Failed),
+        "the child's error fails the parent's subflow act"
+    );
+    let parent = engine
+        .runtime()
+        .kernel()
+        .snapshot(&pid)
+        .await
+        .unwrap()
+        .expect("the parent aggregate is retained until its return settles");
+    let root = parent
+        .tasks
+        .iter()
+        .find(|(id, _)| id.node.as_str() == "$")
+        .map(|(_, task)| task.state);
+    assert_eq!(root, Some(TaskState::Failed), "the parent run errors");
+    let root_id = parent
+        .tasks
+        .iter()
+        .find(|(id, _)| id.node.as_str() == "$")
+        .map(|(id, _)| id.clone())
+        .unwrap();
+    assert_eq!(
+        parent
+            .variables
+            .get(&(root_id, "error.code".to_string()))
+            .map(String::as_str),
+        Some("E1"),
+        "the child's ecode reaches the parent root"
+    );
+    expect_count(&child_done, 1, "the child reports one terminal event").await;
+    expect_count(
+        &parent_done,
+        1,
+        "the parent reports one terminal event, its error",
+    )
+    .await;
+
+    sweep_until_gone(&engine, &child_pid).await;
+    sweep_until_gone(&engine, &pid).await;
+    engine.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// SUBFLOW × 快速子 run — the return never races the parent's effect commit
+// ---------------------------------------------------------------------------
+
+/// A child that settles on its own (no waiting act) can finish before the
+/// parent's subflow effect commit retires. The return must wait for that
+/// operation and then complete the parent; the parent's already-run effect must
+/// never be classified `EffectUnknown`. The child's output is folded before
+/// the parent's next step.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_subflow_fast_child_returns_without_an_effect_unknown_parent() {
+    bounded(
+        "sch_subflow_fast_child_returns_without_an_effect_unknown_parent",
+        a_fast_child_returns_without_an_effect_unknown_parent_inner(),
+    )
+    .await;
+}
+
+fn fast_child_flow() -> Workflow {
+    let mut workflow = Workflow::new().with_id(CHILD);
+    workflow.steps = vec![
+        Step::new()
+            .with_id("s1")
+            .with_uses(crate::utils::test::USES_SET, Vars::new().with("v", 42)),
+    ];
+    workflow
+}
+
+fn fast_parent_flow(mid: &str) -> Workflow {
+    let mut workflow = Workflow::new().with_id(PARENT);
+    workflow.steps = vec![
+        subflow_step(PARENT_NODE, mid),
+        Step::new().with_id("after").with_uses(
+            crate::utils::test::USES_SET,
+            Vars::new().with("seen", "${{ v }}"),
+        ),
+    ];
+    workflow
+}
+
+async fn a_fast_child_returns_without_an_effect_unknown_parent_inner() {
+    let kv = SubflowKv::new();
+    let engine = engine_on(kv.store()).await;
+    deploy(&engine, &fast_child_flow()).await;
+
+    let pid = start_run(&engine, &fast_parent_flow(CHILD)).await;
+    wait_completed(&engine, &pid).await;
+
+    assert_eq!(
+        legacy_task_state(&engine, &pid, PARENT_NODE).await,
+        Some(TaskState::Completed),
+        "the return completes the parent's subflow act"
+    );
+    assert_eq!(
+        legacy_task_state(&engine, &pid, "after").await,
+        Some(TaskState::Completed),
+        "the parent's next step runs only after the return"
+    );
+    let snapshot = engine
+        .runtime()
+        .kernel()
+        .snapshot(&pid)
+        .await
+        .unwrap()
+        .expect("the parent aggregate exists");
+    assert!(
+        snapshot.operations.values().all(|operation| !matches!(
+            operation.state,
+            crate::scheduler::core::model::operation::OperationState::EffectUnknown { .. }
+        )),
+        "a fast child must not race the parent effect into EffectUnknown"
+    );
+    let root = snapshot
+        .tasks
+        .iter()
+        .find(|(id, _)| id.node.as_str() == "$")
+        .map(|(id, _)| id.clone())
+        .unwrap();
+    assert_eq!(
+        snapshot
+            .variables
+            .get(&(root.clone(), "v".to_string()))
+            .map(String::as_str),
+        Some("42"),
+        "the child's output folds into the parent root"
+    );
+    assert_eq!(
+        snapshot
+            .variables
+            .get(&(root.clone(), "seen".to_string()))
+            .map(String::as_str),
+        Some("42"),
+        "the parent's next step reads the folded output"
+    );
+
+    sweep_until_gone(&engine, &pid).await;
     engine.close().await;
 }
