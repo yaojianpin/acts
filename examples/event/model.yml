@@ -19,13 +19,15 @@ on:
     kind: chat
     name: start by chat
 
-  # start every minute by the engine timer (cron: sec min hour day month dow)
+  # start every 2 seconds by the engine timer (cron: sec min hour day month dow).
+  # The row is armed on deploy; the timer fires it with these default params.
   - id: event-schedule
     kind: schedule
     name: start by schedule
-    schedule: "0 * * * * *"
+    schedule: "*/2 * * * * *"
     params:
       result: 0
+      source: schedule
 
 steps:
   - name: step 1
