@@ -1374,7 +1374,50 @@ impl ActOperation for ApplyAction {
                         drop(effect_lease);
                         operation.lane.resume().await;
                         match ran {
-                            Ok(outcome) => Effect::Completed(Some(outcome)),
+                            Ok(outcome) => match outcome.decision {
+                                // A decision the package deferred is the
+                                // durable client decision it names: this
+                                // operation plans and commits it exactly like
+                                // one (`Effect::Decision`), in the same atomic
+                                // transition as its own remainder — issuing it
+                                // as a command would make it a concurrent
+                                // writer this commit deterministically loses
+                                // to (the `EffectUnknown` boundary below).
+                                // Re-running the effect on a recovery re-derives
+                                // the same decision, so the fold is crash-safe.
+                                Some(deferred) => {
+                                    let action = crate::Action::new(
+                                        &snapshot.process_id,
+                                        &task_id.wire(&snapshot.process_id),
+                                        deferred.action,
+                                        deferred.options,
+                                    );
+                                    match crate::scheduler::Runtime::kernel_kind(&action) {
+                                        Ok(kind)
+                                            if crate::scheduler::core::commit::command::action_allowed(
+                                                task.state, &kind,
+                                            ) =>
+                                        {
+                                            Effect::Decision {
+                                                action: kind,
+                                                inputs: crate::scheduler::Runtime::kernel_inputs(
+                                                    &action.options,
+                                                ),
+                                            }
+                                        }
+                                        Ok(kind) => Effect::Failed(crate::ActError::Action(
+                                            format!(
+                                                "action {:?} is not allowed on execution '{}' in state {:?}",
+                                                kind,
+                                                task_id.node.as_str(),
+                                                task.state
+                                            ),
+                                        )),
+                                        Err(error) => Effect::Failed(error),
+                                    }
+                                }
+                                None => Effect::Completed(Some(outcome)),
+                            },
                             // A package error takes the failure path, where a
                             // step declaring `catches` keeps running and
                             // dispatches them (the legacy `Step::on_error`).
@@ -1702,6 +1745,7 @@ mod tests {
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
         let outcome = EffectOutcome {
             outputs: Some(crate::Vars::new().with("answer", 42)),
+            decision: None,
         };
         let plan = host
             .completion_plan(
@@ -1798,7 +1842,10 @@ mod tests {
         let id = id("s1", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let outcome = EffectOutcome { outputs: None };
+        let outcome = EffectOutcome {
+            outputs: None,
+            decision: None,
+        };
         let plan = host
             .completion_plan(
                 &snapshot,

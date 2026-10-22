@@ -615,3 +615,299 @@ async fn sch_act_inputs_carry_the_step_link_and_error_facts() {
     fixture.wait_error().await;
     fixture.close().await;
 }
+
+// ---------------------------------------------------------------------------
+// The act's own tid — the client acts on the act, the owning step follows
+// ---------------------------------------------------------------------------
+//
+// The wire (`Action`) is addressed by `pid` + `tid`, and since C5 the `tid`
+// is one execution instance's wire — a container step's inline acts are
+// executions of their own, each announcing itself with its own `tid`. The
+// cells below serve client actions on the *act's* tid (not the step's) and
+// pin the state the decision produces on the step that owns the act: the
+// container join (or the failure walk) carries it up. A fan-out's items share
+// one model node and take one generation each, so the per-instance tid is
+// the only thing that tells them apart — the step's message cannot address
+// them.
+
+/// The execution of `node` the run holds at `generation`, as its wire tid —
+/// what a client sends as the `Action`'s `tid` (C5).
+fn wire_of(fixture: &FlowFixture, node: &str, generation: u64) -> String {
+    let task_id = crate::scheduler::core::model::task_graph::TaskId::new(node, generation)
+        .expect("a well-formed node id");
+    task_id.wire(fixture.pid())
+}
+
+/// The execution one created message names: the model node it ran on. The
+/// reverse lookup proves the message's `tid` is the act execution's address,
+/// not the owning step's.
+async fn named_execution(fixture: &FlowFixture, tid: &str) -> String {
+    fixture
+        .snapshot()
+        .await
+        .tasks
+        .keys()
+        .find(|id| id.wire(fixture.pid()) == tid)
+        .map(|id| id.node.as_str().to_owned())
+        .unwrap_or_else(|| panic!("no execution for tid {tid}"))
+}
+
+/// An irq act inside a `sequence` block is its own execution: its `Created`
+/// message names the act's tid, the client answers that tid, and the step the
+/// act belongs to completes only through the act's own state.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_irq_act_answers_on_the_acts_tid_and_the_step_follows() {
+    let workflow = block_workflow(
+        "flow-act-tid-irq",
+        vec![Act::irq(|act| {
+            act.with_id("act1")
+                .with_params_vars(|v| v.with("key", "act1"))
+        })],
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("act1").await;
+    assert_eq!(created.nid, "act1");
+    // The addressed execution is the act's, not the owning step's.
+    assert_eq!(
+        named_execution(&fixture, &created.tid).await,
+        "act1",
+        "the act message names the act execution"
+    );
+    assert_ne!(created.tid, wire_of(&fixture, "step1", 0));
+
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+    fixture.wait_message("act1", MessageState::Completed).await;
+    assert_eq!(fixture.state("act1").await, TaskState::Completed);
+    // The act's state is what the owning step joined on.
+    fixture.wait_state("step1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// An `acts.core.action` act decides itself on its own tid: no client message
+/// is served, the deferred decision rides the act's own operation commit, and
+/// the step that owns it follows — and the flow continues past it (a stranded
+/// `EffectUnknown` quarantine would never reach the second act).
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_action_act_decides_itself_on_the_acts_tid() {
+    let workflow = block_workflow(
+        "flow-act-tid-action",
+        vec![
+            Act::action(Vars::new().with("action", "next")).with_id("act2"),
+            Act::irq(|act| {
+                act.with_id("act3")
+                    .with_params_vars(|v| v.with("key", "act3"))
+            }),
+        ],
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    // The action act completed itself; the flow moved on to the irq act.
+    fixture.wait_message("act2", MessageState::Completed).await;
+    assert_eq!(fixture.state("act2").await, TaskState::Completed);
+
+    // The run is live past the self-decided act: answer the irq on its tid.
+    let created = fixture.wait_created("act3").await;
+    assert_eq!(created.nid, "act3");
+    assert_eq!(named_execution(&fixture, &created.tid).await, "act3");
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+
+    fixture.wait_state("act3", TaskState::Completed).await;
+    fixture.wait_state("step1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.wait_settled().await;
+    fixture.close().await;
+}
+
+/// A `block` act nested in a block is a container of its own: the client
+/// answers the nested act's tid and the state climbs two owners — nested
+/// block, then the step.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_block_act_passes_the_nested_acts_state_to_the_step() {
+    let workflow = block_workflow(
+        "flow-act-tid-block",
+        vec![
+            Act::block(Vars::new().with("mode", "sequence").with(
+                "acts",
+                vec![Act::irq(|act| {
+                    act.with_id("act1")
+                        .with_params_vars(|v| v.with("key", "act1"))
+                })],
+            ))
+            .with_id("inner"),
+        ],
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("act1").await;
+    assert_eq!(named_execution(&fixture, &created.tid).await, "act1");
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+
+    fixture.wait_state("act1", TaskState::Completed).await;
+    fixture.wait_state("inner", TaskState::Completed).await;
+    fixture.wait_state("step1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// A `sequence` act runs its template once per `in` item, one item after the
+/// other: each item's act announces itself with its own tid (same node, next
+/// generation), the client answers each in turn, and the step completes when
+/// the last item's act settled.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_sequence_act_answers_each_items_act_on_its_tid() {
+    let workflow = block_workflow(
+        "flow-act-tid-sequence",
+        vec![
+            Act::sequence(serde_json::json!({
+                "in": ["u1", "u2"],
+                "acts": [Act::irq(|act| {
+                    act.with_id("act1")
+                        .with_params_vars(|v| v.with("key", "act1"))
+                })]
+            }))
+            .with_id("seq"),
+        ],
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let first = fixture.wait_created("act1").await;
+    assert_eq!(named_execution(&fixture, &first.tid).await, "act1");
+    fixture.next(&first.pid, &first.tid).await.unwrap();
+    fixture.wait_message("act1", MessageState::Completed).await;
+
+    // The second item's act is a new execution of the same node: its own tid.
+    let second = fixture.wait_created_except("act1", &first.tid).await;
+    assert_eq!(named_execution(&fixture, &second.tid).await, "act1");
+    fixture.next(&second.pid, &second.tid).await.unwrap();
+    fixture.wait_message("act1", MessageState::Completed).await;
+
+    fixture.wait_state("step1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// A `parallel` act admits every item at once: both items' acts wait together,
+/// the client answers each on its own tid, and the step joins when both
+/// settled — either order.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_parallel_act_answers_both_items_acts_on_their_tids() {
+    let workflow = block_workflow(
+        "flow-act-tid-parallel",
+        vec![
+            Act::parallel(serde_json::json!({
+                "in": ["u1", "u2"],
+                "acts": [Act::irq(|act| {
+                    act.with_id("act1")
+                        .with_params_vars(|v| v.with("key", "act1"))
+                })]
+            }))
+            .with_id("par"),
+        ],
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let first = fixture.wait_created("act1").await;
+    let second = fixture.wait_created_except("act1", &first.tid).await;
+    assert_eq!(named_execution(&fixture, &first.tid).await, "act1");
+    assert_eq!(named_execution(&fixture, &second.tid).await, "act1");
+    assert_ne!(first.tid, second.tid);
+
+    fixture.next(&first.pid, &first.tid).await.unwrap();
+    fixture.next(&second.pid, &second.tid).await.unwrap();
+
+    fixture.wait_state("act1", TaskState::Completed).await;
+    fixture.wait_state("step1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// `submit` on the act's tid hands the act's work in: the act is `Submitted`,
+/// and the submitted act is exactly what the owning step joins on — the step
+/// completes and the run ends.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_submit_on_the_acts_tid_joins_the_step() {
+    let workflow = block_workflow(
+        "flow-act-tid-submit",
+        vec![Act::irq(|act| {
+            act.with_id("act1")
+                .with_params_vars(|v| v.with("key", "act1"))
+        })],
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("act1").await;
+    fixture.submit(&created.pid, &created.tid).await.unwrap();
+    fixture.wait_message("act1", MessageState::Submitted).await;
+    assert_eq!(fixture.state("act1").await, TaskState::Submitted);
+    fixture.wait_state("step1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// `skip` on the act's tid drops the act: the skip is terminal for the act,
+/// and the owning step joins past it — the flow continues.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_skip_on_the_acts_tid_joins_the_step() {
+    let workflow = block_workflow(
+        "flow-act-tid-skip",
+        vec![Act::irq(|act| {
+            act.with_id("act1")
+                .with_params_vars(|v| v.with("key", "act1"))
+        })],
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("act1").await;
+    fixture.skip(&created.pid, &created.tid).await.unwrap();
+    fixture.wait_message("act1", MessageState::Skipped).await;
+    assert_eq!(fixture.state("act1").await, TaskState::Skipped);
+    fixture.wait_state("step1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// `error` on the act's tid fails the act: the failure walks up the ownership
+/// chain — the act's step ends `Failed` with the act's facts, and the run
+/// errors (`emit_error` → `parent.set_err`).
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_error_on_the_acts_tid_fails_the_owning_step() {
+    let workflow = block_workflow(
+        "flow-act-tid-error",
+        vec![Act::irq(|act| {
+            act.with_id("act1")
+                .with_params_vars(|v| v.with("key", "act1"))
+        })],
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("act1").await;
+    fixture
+        .fail(&created.pid, &created.tid, "err1", "boom")
+        .await
+        .unwrap();
+
+    let failed = fixture.wait_message("act1", MessageState::Error).await;
+    assert_eq!(failed.nid, "act1");
+    assert_eq!(fixture.state("act1").await, TaskState::Failed);
+    fixture.wait_state("step1", TaskState::Failed).await;
+    fixture.wait_error().await;
+    fixture.close().await;
+}

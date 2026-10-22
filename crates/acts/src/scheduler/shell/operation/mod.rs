@@ -624,7 +624,10 @@ mod tests {
             host.converge_observed_effect(
                 &id,
                 crate::scheduler::shell::effects::EffectObservation::Applied(
-                    crate::scheduler::shell::effects::EffectOutcome { outputs: None },
+                    crate::scheduler::shell::effects::EffectOutcome {
+                        outputs: None,
+                        decision: None,
+                    },
                 ),
             )
             .await

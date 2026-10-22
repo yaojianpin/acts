@@ -673,14 +673,7 @@ impl Runtime {
         action: &Action,
     ) -> Result<()> {
         let kind = Self::kernel_kind(action)?;
-        let inputs: Vec<(String, String)> = action
-            .options
-            .iter()
-            .map(|(key, value)| match value {
-                serde_json::Value::String(text) => (key.clone(), text.clone()),
-                other => (key.clone(), other.to_string()),
-            })
-            .collect();
+        let inputs = Self::kernel_inputs(&action.options);
         host.apply_action(&action.pid, &action.tid, kind, inputs)
             .await
     }
@@ -695,7 +688,9 @@ impl Runtime {
     /// engine. A push's `uses` is the same kind of caller-correctable input:
     /// the legacy `dispatch_act` refused its absence before anything durable
     /// existed.
-    fn kernel_kind(action: &Action) -> Result<crate::scheduler::core::commit::command::ActionKind> {
+    pub(crate) fn kernel_kind(
+        action: &Action,
+    ) -> Result<crate::scheduler::core::commit::command::ActionKind> {
         use crate::event::EventAction as E;
         use crate::scheduler::core::commit::command::ActionKind as K;
         use crate::utils::consts as names;
@@ -731,6 +726,18 @@ impl Runtime {
             E::Remove => K::Remove,
         };
         Ok(kind)
+    }
+
+    /// The wire options as the kernel's decision inputs: text stays text,
+    /// everything else rides its JSON rendering.
+    pub(crate) fn kernel_inputs(options: &Vars) -> Vec<(String, String)> {
+        options
+            .iter()
+            .map(|(key, value)| match value {
+                serde_json::Value::String(text) => (key.clone(), text.clone()),
+                other => (key.clone(), other.to_string()),
+            })
+            .collect()
     }
 
     /// Ack one delivery row (by its delivery id).

@@ -60,6 +60,10 @@ pub(crate) struct EffectOutcome {
     /// The package's returned outputs — the only way a package changes the
     /// run's variables. The host writes them to the acting scope.
     pub(crate) outputs: Option<Vars>,
+    /// The client decision a package deferred to its own operation's commit
+    /// (`Context::defer_action`, the `acts.core.action` effect): the host
+    /// plans it exactly like a durable client decision, in that same commit.
+    pub(crate) decision: Option<super::context::DeferredAction>,
 }
 
 /// What an executor can prove about one effect key (A1c).
@@ -230,8 +234,12 @@ impl EffectRunner for PackageEffectRunner {
         // The write-back: only the outputs the package returned. They fold
         // into the operation's atomic commit, so a crash before the commit
         // re-runs the package with the same pre-state (the legacy `exec` →
-        // persist ordering).
-        Ok(EffectOutcome { outputs })
+        // persist ordering). A decision the package deferred on this context
+        // rides the same commit (see `EffectOutcome::decision`).
+        Ok(EffectOutcome {
+            outputs,
+            decision: ctx.take_deferred_action(),
+        })
     }
 
     fn idempotent(&self, request: &EffectRequest) -> bool {
@@ -265,7 +273,10 @@ impl EffectRunner for PackageEffectRunner {
 
 impl EffectOutcome {
     pub(crate) fn empty() -> Self {
-        Self { outputs: None }
+        Self {
+            outputs: None,
+            decision: None,
+        }
     }
 
     /// A manually reconciled applied effect: the operator proved the external
@@ -274,6 +285,7 @@ impl EffectOutcome {
     pub(crate) fn from_outputs(outputs: Vars) -> Self {
         Self {
             outputs: Some(outputs),
+            decision: None,
         }
     }
 }

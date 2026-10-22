@@ -71,20 +71,23 @@ impl ActPackage for ActionPackage {
                 ))
             })?;
 
-        // The command is issued as an ordinary client action on the execution
-        // this act belongs to (`Runtime::do_action` → the kernel's action
-        // path), so the state it produces is exactly the one a client's
-        // `act:next`/`act:error`/… produces and the rest of the run already
-        // understands. The headless scope names its task by the acting
-        // instance's wire (C5): that is the address `do_action` serves, not
-        // the node id (which no longer names an instance).
+        // The command rides the effect's own operation commit: the acting
+        // execution's decision is planned exactly like a durable client
+        // decision (`Runtime::do_action`'s kernel path) and committed in the
+        // same atomic transition as the effect — issuing it inline would make
+        // it a concurrent writer this operation's commit deterministically
+        // loses to (the `EffectUnknown` boundary). The headless scope names
+        // its task by the acting instance's wire (C5): that is the address
+        // the deferred decision decides, not the node id (which no longer
+        // names an instance).
+        let options = params.options.clone().unwrap_or_default();
+        if ctx.defer_action(params.action.clone(), options.clone()) {
+            return Ok(None);
+        }
+        // No operation behind this context (a context built outside the
+        // effect seam): issue the command directly, as the executor path did.
         let tid = task.id.clone();
-        let action = Action::new(
-            &task.pid,
-            &tid,
-            params.action.clone(),
-            params.options.unwrap_or_default(),
-        );
+        let action = Action::new(&task.pid, &tid, params.action, options);
         ctx.runtime.do_action(&action).await?;
         Ok(None)
     }

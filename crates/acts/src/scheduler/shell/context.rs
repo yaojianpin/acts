@@ -1,5 +1,5 @@
 use crate::{
-    ActError, Executor, MissingParamAction, Result,
+    ActError, Executor, MissingParamAction, Result, Vars,
     scheduler::{
         Runtime,
         shell::{Scope, ScopeTask},
@@ -18,11 +18,28 @@ tokio::task_local! {
     static CONTEXT: Context;
 }
 
+/// The client decision a package deferred to its own operation's commit (the
+/// `acts.core.action` effect): the operation plans it exactly like a durable
+/// client decision, in the same atomic commit — never as a concurrent command
+/// the effect's own commit would lose to.
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredAction {
+    pub(crate) action: crate::event::EventAction,
+    pub(crate) options: Vars,
+}
+
 pub struct Context {
     pub runtime: Arc<Runtime>,
     pub executor: Arc<Executor>,
     pub proc: Arc<Scope>,
     task: RwLock<Arc<ScopeTask>>,
+    /// The decision slot a package defers a client command into. Only a
+    /// headless context (the effect/predicate seams) carries one: there the
+    /// caller is an operation, and a decision issued from inside it must ride
+    /// that operation's commit. `None` for every other context, where
+    /// `defer_action` answers `false` and the package issues the command
+    /// itself.
+    deferral: Option<Arc<RwLock<Option<DeferredAction>>>>,
 }
 
 impl Clone for Context {
@@ -32,6 +49,7 @@ impl Clone for Context {
             executor: self.executor.clone(),
             proc: self.proc.clone(),
             task: RwLock::new(self.task.read().clone()),
+            deferral: self.deferral.clone(),
         }
     }
 }
@@ -59,9 +77,14 @@ impl Context {
     }
 
     /// The headless context: the scope and task the effect/predicate seams
-    /// built from a [`ScopeSpec`](super::scope::ScopeSpec).
+    /// built from a [`ScopeSpec`](super::scope::ScopeSpec). It runs under an
+    /// operation, so a package may defer a client decision to that operation's
+    /// own commit ([`Self::defer_action`]).
     pub(crate) fn headless(runtime: Arc<Runtime>, proc: Arc<Scope>, task: Arc<ScopeTask>) -> Self {
-        Self::from_scope(runtime, proc, task)
+        Self {
+            deferral: Some(Arc::new(RwLock::new(None))),
+            ..Self::from_scope(runtime, proc, task)
+        }
     }
 
     /// The context over already-built carriers.
@@ -75,6 +98,7 @@ impl Context {
             runtime,
             proc,
             task: RwLock::new(task),
+            deferral: None,
         }
     }
 
@@ -114,6 +138,31 @@ impl Context {
     pub fn effect_key(&self) -> Option<String> {
         self.proc
             .with_env(|env| env.get::<String>(consts::EFFECT_KEY))
+    }
+
+    /// Defer a client decision on the acting execution to the effect's own
+    /// operation commit, answering whether the deferral was taken.
+    ///
+    /// A package whose work *is* a client command (`acts.core.action`) calls
+    /// this instead of issuing the command itself: the operation that runs the
+    /// effect plans the decision exactly like a durable client decision and
+    /// commits it in the same atomic transition, so the state the action
+    /// produces is never a concurrent writer the effect's own commit loses to.
+    /// `false` means this context runs outside an operation (no deferral
+    /// slot): the caller issues the command itself.
+    pub fn defer_action(&self, action: crate::event::EventAction, options: Vars) -> bool {
+        match &self.deferral {
+            Some(slot) => {
+                *slot.write() = Some(DeferredAction { action, options });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The decision a package deferred on this effect's context, if any.
+    pub(crate) fn take_deferred_action(&self) -> Option<DeferredAction> {
+        self.deferral.as_ref().and_then(|slot| slot.write().take())
     }
 
     /// The directory this process's filesystem access is confined to
