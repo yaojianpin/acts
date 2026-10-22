@@ -21,6 +21,7 @@
 
 pub(crate) mod act;
 pub(crate) mod branch;
+pub(crate) mod catch;
 pub(crate) mod message;
 pub(crate) mod outputs;
 pub(crate) mod runtime;
