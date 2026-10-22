@@ -2787,11 +2787,14 @@ impl KernelHost {
     }
 
     /// The task-level message payload of one execution *without* a package: the
-    /// fact set the driver's transport maps onto the engine's `Message`. The
-    /// legacy engine announced every task it created, settled or skipped — not
-    /// only the acts (its `on_task` emits each state change that is neither
-    /// `pending` nor `running`) — with `type` = the node kind and `name` the
-    /// node's name.
+    /// fact set the driver's transport maps onto the engine's `Message`. Every
+    /// execution announces its terminal states — skipped, completed, aborted,
+    /// failed and the rest — whatever its level, so a client can rebuild the
+    /// run's flow from the message stream alone: a package-less step and the
+    /// workflow root announce like the legacy `on_task` did, and a branch
+    /// announces too (the legacy tree kept branches silent; the kernel's
+    /// message stream is the trace, so a skipped or completed branch is a
+    /// state the client must see — its `kind` tells the two levels apart).
     fn task_message_payload(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -2804,12 +2807,6 @@ impl KernelHost {
             return Ok(None);
         };
         let facts = node_facts(&model, node);
-        // A branch task emits nothing: the legacy `Branch::init` clears its
-        // emit flag and never re-enables it (only an act's `run` does), so a
-        // branch's own state changes are invisible to clients on both engines.
-        if facts.message_kind == NodeKind::Branch {
-            return Ok(None);
-        }
         let mut inputs = input_vars(snapshot, task_id);
         // The workflow model rides every legacy message; a package-less task
         // carries no params and no `step` link of its own.

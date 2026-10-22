@@ -586,9 +586,10 @@ pub(super) fn message_outputs(
 /// model pins this word, so a `uses` step's row stays `step`
 /// (`projection::project_task`). `message_kind` is the message level C6 fixed:
 /// the same `uses` step is `act` (the act payload path), a plain step is
-/// `step`, the root is `workflow`, and a branch's own messages are suppressed.
-/// The two words deliberately differ for exactly one shape — the row contract
-/// must not be read as a misspelling of the message level (C6, §10).
+/// `step`, the root is `workflow`, and a branch announces its terminal states
+/// as `branch` like any other execution (the message stream is the flow
+/// trace). The two words deliberately differ for exactly one shape — the row
+/// contract must not be read as a misspelling of the message level (C6, §10).
 pub(super) struct NodeFacts {
     pub(super) declared_kind: crate::NodeKind,
     pub(super) message_kind: crate::NodeKind,

@@ -2597,8 +2597,10 @@ mod tests {
         );
     }
 
-    /// A park whose operation node names a branch carries no act message: the
-    /// branch emits nothing, so the planned record keeps its own payload.
+    /// A park announces the answered *act* and nothing else: a package-less
+    /// execution — a branch node, a plain step — is still running, so its
+    /// record carries no payload and its terminal state is announced by the
+    /// join that completes it.
     #[tokio::test]
     async fn a_park_named_by_a_branch_node_has_no_message_payload() {
         let host = host();
@@ -2608,8 +2610,18 @@ mod tests {
                 .with_branch(|branch| branch.with_id("b1").with_if("true"))
         });
         let mut snapshot = from_workflow(&workflow);
-        let task_id = task("s1");
-        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        let task_id = task("b1");
+        snapshot.tasks.insert(
+            task_id.clone(),
+            crate::scheduler::core::commit::aggregate::TaskSnapshot {
+                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("b1")
+                    .unwrap(),
+                parent: Some(task("s1")),
+                predecessors: vec![task("s1")],
+                state: TaskState::Waiting,
+                revision: 0,
+            },
+        );
         let operation_id = id("b1", 0);
         let claim = commit(&operation_id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
@@ -2626,7 +2638,7 @@ mod tests {
         assert_eq!(plan.outbox.len(), 1);
         assert!(
             plan.outbox[0].payload.is_empty(),
-            "a branch node emits no act message"
+            "a package-less execution announces nothing while it parks"
         );
         assert!(
             plan.variable_writes
@@ -2684,10 +2696,12 @@ mod tests {
         assert_eq!(children.len(), 2);
     }
 
-    /// A container plan whose source row carries a package node but whose own
-    /// node is a branch announces nothing: the branch's messages are suppressed.
+    /// A container fan-out announces only a `uses` source's act: a
+    /// package-less source — a branch node here — is still running while its
+    /// children settle, so the fan-out emits no `task.completed` for it (the
+    /// join that completes it announces its terminal state).
     #[tokio::test]
-    async fn a_container_plan_skips_a_suppressed_source_message() {
+    async fn a_container_plan_announces_no_package_less_source_message() {
         use crate::scheduler::core::plan::container::ContainerFanoutCommand;
 
         let host = host();
@@ -2703,7 +2717,8 @@ mod tests {
         snapshot.tasks.insert(
             source.clone(),
             crate::scheduler::core::commit::aggregate::TaskSnapshot {
-                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("s1")
+                // The branch's own node, exactly as the fan-out admits it.
+                model_node: crate::scheduler::core::model::model_graph::NodeId::parse("b1")
                     .unwrap(),
                 parent: Some(task_id.clone()),
                 predecessors: vec![task_id.clone()],
@@ -2726,7 +2741,7 @@ mod tests {
             plan.outbox
                 .iter()
                 .all(|record| record.topic != "task.completed"),
-            "a branch source emits no act message: {:?}",
+            "a package-less source emits no act message: {:?}",
             plan.outbox
         );
     }

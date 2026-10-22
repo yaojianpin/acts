@@ -302,35 +302,50 @@ async fn sch_message_act_messages_carry_the_act_payload() {
     fixture.close().await;
 }
 
-/// A branch announces nothing: its own state changes never reach the channel
-/// (the legacy `sch_message_branch_no_message`).
+/// A branch announces its terminal state like every other execution: a branch
+/// whose `if` is false is one `Skipped` message (`kind: branch`, no `Created`
+/// before it — it is admitted and skipped in one commit), and a selected
+/// branch is one `Completed`. This is the state trail a client rebuilds the
+/// flow from; the legacy `sch_message_branch_no_message` pinned the opposite,
+/// branch-silent behavior, and the kernel's message stream is the trace.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_message_branch_announces_no_message() {
+async fn sch_message_branch_announces_its_terminal_state() {
     let workflow = Workflow::new()
         .with_id("flow-msg-branch")
         .with_step(|step| {
-            step.with_id("s1").with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_if("false")
-                    .with_step(|inner| inner.with_id("i1"))
-            })
+            step.with_id("s1")
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b1")
+                        .with_if("false")
+                        .with_step(|inner| inner.with_id("i1"))
+                })
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b2")
+                        .with_if("true")
+                        .with_step(|inner| inner.with_id("i2"))
+                })
         });
     let mut fixture = FlowFixture::deploy(&workflow).await;
     completed(&fixture.run(Vars::new()).await);
 
-    assert!(
-        fixture.messages_of("b1").is_empty(),
-        "the branch announced: {:?}",
-        fixture.messages_of("b1")
+    let skipped = fixture.wait_message("b1", MessageState::Skipped).await;
+    assert_eq!(skipped.r#type, "branch");
+    assert_eq!(skipped.nid, "b1");
+    assert_eq!(
+        fixture.announced("b1"),
+        vec![MessageState::Skipped],
+        "the skip is the branch's whole announcement — no Created precedes it"
     );
-    assert!(
-        fixture
-            .messages()
-            .iter()
-            .all(|message| message.r#type != "branch")
-    );
+    assert_eq!(fixture.state("b1").await, TaskState::Skipped);
+    // The selection never admitted the branch's step.
+    assert!(fixture.messages_of("i1").is_empty());
+
+    let ran = fixture.wait_message("b2", MessageState::Completed).await;
+    assert_eq!(ran.r#type, "branch");
+    assert_eq!(fixture.state("b2").await, TaskState::Completed);
     fixture.close().await;
 }
 

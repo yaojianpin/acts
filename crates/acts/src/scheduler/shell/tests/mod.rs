@@ -3315,7 +3315,24 @@ async fn kernel_container_messages_are_emitted() {
         tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
             .await
             .expect("the run never finished");
-        settle_outbox(runtime.kernel()).await;
+        // The lifecycle event precedes the outbox delivery (A1b), so a single
+        // settle pass can run while a late record is still being claimed by
+        // the driver. Poll until the records this cell asserts are folded —
+        // the delivery callback runs inside the dispatch, so a folded record
+        // is a delivered one.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            settle_outbox(runtime.kernel()).await;
+            let seen = folded.lock().clone();
+            let has = |entry: &str| seen.iter().any(|seen| seen == entry);
+            if has("b1|completed|false") && has("b2|completed|false") {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         let mut folded = folded.lock().clone();
         folded.sort();
         folded.dedup();
@@ -3336,12 +3353,14 @@ async fn kernel_container_messages_are_emitted() {
             .any(|entry| entry.starts_with("s2|completed") && entry.ends_with("true")),
         "a `uses` container announces its act's completion: {kernel:?}"
     );
-    // A branch task is silent.
+    // A branch announces its terminal state like every other execution.
     assert!(
-        !kernel
-            .iter()
-            .any(|entry| entry.starts_with("b1|") || entry.starts_with("b2|")),
-        "branch tasks announce nothing: {kernel:?}"
+        kernel.iter().any(|entry| entry == "b1|completed|false"),
+        "a branch announces its completion: {kernel:?}"
+    );
+    assert!(
+        kernel.iter().any(|entry| entry == "b2|completed|false"),
+        "a branch announces its completion: {kernel:?}"
     );
 }
 
