@@ -599,6 +599,14 @@ impl Runtime {
         crate::scheduler::shell::load_proc_rows(&self.store(), pid).await
     }
 
+    /// The run's declared model graph (`proc:graph`): every node the run's
+    /// durable (materialized) model holds, executed or not, in declaration
+    /// order. The ids are the ones the run's messages carry as `nid`, so a
+    /// client renders the full flow and folds the message stream onto it.
+    pub(crate) async fn graph(&self, pid: &str) -> Result<crate::ProcessGraph> {
+        self.kernel.graph(pid).await
+    }
+
     /// The on-demand half of the projection protocol (see [`Self::read_proc`]).
     async fn refresh_read_model(&self, pid: &str) {
         let Some(projector) = self.kernel.projector() else {

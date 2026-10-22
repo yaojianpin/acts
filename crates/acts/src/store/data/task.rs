@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::{
-    LegacyTaskState, Result,
+    Result,
+    scheduler::TaskState,
     store::{DbCollectionIden, StoreIden},
 };
 
@@ -62,8 +63,8 @@ impl DbCollectionIden for Task {
 }
 
 impl Task {
-    pub fn set_state(&mut self, state: LegacyTaskState) {
-        self.state = state.into();
+    pub fn set_state(&mut self, state: TaskState) {
+        self.state = state.as_str().to_string();
     }
     pub fn set_start_time(&mut self, time: i64) {
         self.start_time = time;
@@ -160,7 +161,7 @@ mod tests {
         assert_eq!(Task::version(), 0);
 
         let mut row = task();
-        row.set_state(LegacyTaskState::Completed);
+        row.set_state(TaskState::Completed);
         assert_eq!(row.state, "completed");
         row.set_start_time(10);
         row.set_end_time(20);

@@ -38,11 +38,10 @@ use std::sync::Arc;
 
 use serial_test::serial;
 
-use crate::LegacyTaskState;
+use crate::TaskState;
 use crate::scheduler::core::commit::aggregate::ProcessSnapshot;
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
 use crate::scheduler::core::model::operation::OperationState;
-use crate::scheduler::core::model::task_graph::TaskState;
 use crate::scheduler::core::outbox::records::OutboxState;
 
 use super::*;
@@ -451,7 +450,7 @@ async fn drive_to_end(engine: &Engine, pid: &str, tid: &str) {
                     let _ = kernel.tick(SystemClock.now_ms()).await;
                 } else if let Some(proc) = proc_row(engine, pid).await
                     && let Some(task) = proc.task(tid)
-                    && task.state().is_interrupted()
+                    && task.state() == Some(TaskState::Waiting)
                 {
                     let _ = complete_act(engine, pid, tid).await;
                 }
@@ -1241,7 +1240,7 @@ async fn assert_parked(engine: &Engine, pid: &str) {
         .expect("a parked run keeps its row");
     assert_eq!(
         row.state(),
-        LegacyTaskState::None,
+        None,
         "the parked process state, as the legacy row spells it"
     );
 }

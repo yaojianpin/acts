@@ -20,8 +20,7 @@ use std::time::Duration;
 
 use serial_test::serial;
 
-use crate::LegacyTaskState;
-use crate::scheduler::core::model::task_graph::TaskState;
+use crate::TaskState;
 
 use super::*;
 
@@ -91,13 +90,13 @@ async fn a_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once_inn
     wait_completed(&engine, &pid).await;
     let proc = read_proc(&engine, &pid).await;
     assert!(
-        proc.state().is_error(),
-        "the run must settle in the client's error, got {}",
+        proc.state() == Some(TaskState::Failed),
+        "the run must settle in the client's error, got {:?}",
         proc.state()
     );
     assert_eq!(
-        proc.task(&tid).map(|t| t.state()),
-        Some(LegacyTaskState::Error),
+        proc.task(&tid).and_then(|t| t.state()),
+        Some(TaskState::Failed),
         "the act must hold the decision"
     );
     assert_eq!(
@@ -187,7 +186,7 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
             match proc_row(&engine, &pid).await {
                 Some(proc) => proc
                     .task(&tid)
-                    .is_none_or(|t| t.state() != LegacyTaskState::Interrupt),
+                    .is_none_or(|t| t.state() != Some(TaskState::Waiting)),
                 None => true,
             }
         },
@@ -203,7 +202,7 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
         let waiting: Vec<String> = proc
             .tasks()
             .iter()
-            .filter(|t| t.state().is_interrupted())
+            .filter(|t| t.state() == Some(TaskState::Waiting))
             .map(|t| t.tid().to_string())
             .collect();
         assert!(
@@ -248,8 +247,8 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
     let before = read_proc(&engine, &pid).await;
     assert_eq!(tasks_of(&before, "s1").len(), 1, "one task for the act");
     assert_eq!(
-        before.task(&tid).map(|t| t.state()),
-        Some(LegacyTaskState::Error),
+        before.task(&tid).and_then(|t| t.state()),
+        Some(TaskState::Failed),
         "the first delivery leaves the act errored"
     );
 
@@ -269,8 +268,8 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
         "no second task for the act"
     );
     assert_eq!(
-        after.task(&tid).map(|t| t.state()),
-        Some(LegacyTaskState::Error),
+        after.task(&tid).and_then(|t| t.state()),
+        Some(TaskState::Failed),
         "the duplicate may not move the decided act"
     );
     assert_eq!(
@@ -278,7 +277,10 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
         task_snapshot(&before),
         "a refused duplicate must leave the tree untouched"
     );
-    assert!(after.state().is_error(), "the run settles in its error");
+    assert!(
+        after.state() == Some(TaskState::Failed),
+        "the run settles in its error"
+    );
     sweep_until_gone(&engine, &pid).await;
     engine.close().await;
 }
@@ -319,9 +321,12 @@ async fn fail_racing_complete_converges_on_one_terminal_decision_inner() {
 
         wait_completed(&engine, &pid).await;
         let proc = read_proc(&engine, &pid).await;
-        let state = proc.task(&tid).map(|t| t.state()).expect("the act's task");
+        let state = proc
+            .task(&tid)
+            .and_then(|t| t.state())
+            .expect("the act's task");
         assert!(
-            state.is_completed(),
+            state.is_terminal(),
             "round {round}: the act must hold one terminal state, got {state}"
         );
         assert_eq!(
@@ -332,8 +337,14 @@ async fn fail_racing_complete_converges_on_one_terminal_decision_inner() {
         let unfinished: Vec<String> = proc
             .tasks()
             .iter()
-            .filter(|t| !t.state().is_completed())
-            .map(|t| format!("{}:{}", t.tid(), t.state()))
+            .filter(|t| !t.state().is_some_and(TaskState::is_terminal))
+            .map(|t| {
+                format!(
+                    "{}:{}",
+                    t.tid(),
+                    t.state().map_or("none", TaskState::as_str)
+                )
+            })
             .collect();
         assert!(
             unfinished.is_empty(),
@@ -403,13 +414,13 @@ async fn a_restart_does_not_reapply_a_decided_fail_inner() {
     let proc = proc_row(&reloaded, &pid).await;
     if let Some(proc) = &proc {
         assert!(
-            proc.state().is_error(),
-            "the recovered run must hold its error, got {}",
+            proc.state() == Some(TaskState::Failed),
+            "the recovered run must hold its error, got {:?}",
             proc.state()
         );
         assert_eq!(
-            proc.task(&tid).map(|t| t.state()),
-            Some(LegacyTaskState::Error),
+            proc.task(&tid).and_then(|t| t.state()),
+            Some(TaskState::Failed),
             "the recovered act must hold its decision"
         );
     }

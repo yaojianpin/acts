@@ -8,7 +8,7 @@
 //!
 //! The layers are directories, in dependency order:
 //!
-//! - `core/` — the pure deterministic policy: the domain model (the `LegacyTaskState`
+//! - `core/` — the pure deterministic policy: the domain model (the `TaskState`
 //!   vocabulary and the `view` projection model included), the planners (cron
 //!   scheduling included), the commit services, recovery and the outbox. No IO,
 //!   no `tokio`, no storage and no engine vocabulary (`core/architecture.rs`
@@ -40,9 +40,6 @@ mod shell;
 #[cfg(test)]
 pub(crate) mod tests;
 
-#[cfg(test)]
-pub(crate) use self::core::model::task_graph::TaskState;
-
 // The runtime's outward surface: exactly what a consumer outside this module
 // needs — everything else is addressed where it lives, inside the runtime. The
 // layers are private, so this list *is* the contract: a consumer that cannot
@@ -56,7 +53,7 @@ pub(crate) use self::core::decision::run_outcome;
 pub use self::shell::Context;
 
 pub(crate) use self::core::model::{
-    legacy_task_state::LegacyTaskState,
+    task_graph::TaskState,
     view::{NodeContent, NodeData, NodeKind, assign_ids},
 };
 pub(crate) use self::core::plan::cron::Cron;

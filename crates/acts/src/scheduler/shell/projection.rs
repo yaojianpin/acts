@@ -82,7 +82,6 @@ use crate::{
         commit::aggregate::ProcessSnapshot,
         decision::projection_settled,
         model::{
-            legacy_task_state::LegacyTaskState,
             task_graph::{TaskId, TaskState},
             transition_plan::ProcessVersion,
         },
@@ -702,7 +701,7 @@ impl RowProjector {
         let row = data::Proc {
             source_revision: snapshot.version.encode(),
             id: snapshot.process_id.clone(),
-            state: proc_state(state).into(),
+            state: state.proc_state().to_string(),
             mid: model.id.clone(),
             name: model.name.clone(),
             start_time: if state == TaskState::Created {
@@ -830,8 +829,9 @@ impl RowProjector {
         // can never be acked into anything else, and a row left open would
         // keep the whole run (and its directory) out of the sweeper's reach.
         // Deliveries key on the message `tid` — the wire since C5.
-        let was_terminal =
-            existing.is_some_and(|row| LegacyTaskState::from(row.state.as_str()).is_completed());
+        let was_terminal = existing.is_some_and(|row| {
+            TaskState::parse(row.state.as_str()).is_none_or(TaskState::is_terminal)
+        });
         let now = crate::utils::time::time_millis();
         let row = data::Task {
             source_revision: snapshot.version.encode(),
@@ -854,7 +854,7 @@ impl RowProjector {
             next: successors(snapshot, task_id),
             parent: task.parent.as_ref().map(|id| id.node.as_str().to_owned()),
             name: facts.name,
-            state: legacy_task_state(task.state).into(),
+            state: task.state.as_str().to_string(),
             err: error_of(snapshot, task_id),
             start_time: if task.state == TaskState::Created {
                 0
@@ -1001,37 +1001,6 @@ fn error_of(snapshot: &ProcessSnapshot, task: &TaskId) -> Option<String> {
     serde_json::to_string(&err).ok()
 }
 
-/// One execution state as the legacy task state the read model speaks.
-pub(crate) fn legacy_task_state(state: TaskState) -> LegacyTaskState {
-    match state {
-        // A pre-created chain node is the legacy `Pending` task: created, not
-        // yet woken by its predecessor.
-        TaskState::Created => LegacyTaskState::Pending,
-        TaskState::Ready => LegacyTaskState::Ready,
-        TaskState::Running => LegacyTaskState::Running,
-        TaskState::Waiting => LegacyTaskState::Interrupt,
-        TaskState::Completed => LegacyTaskState::Completed,
-        TaskState::Submitted => LegacyTaskState::Submitted,
-        TaskState::Backed => LegacyTaskState::Backed,
-        TaskState::Cancelled => LegacyTaskState::Cancelled,
-        TaskState::Failed => LegacyTaskState::Error,
-        TaskState::Aborted => LegacyTaskState::Aborted,
-        TaskState::Skipped => LegacyTaskState::Skipped,
-        TaskState::Removed => LegacyTaskState::Removed,
-    }
-}
-
-/// The process state of a run whose root is in `state`. The legacy process is
-/// `None` until its root task is created, `Running` while the root lives, and
-/// the root's own terminal state afterwards.
-pub(crate) fn proc_state(state: TaskState) -> LegacyTaskState {
-    match state {
-        TaskState::Created => LegacyTaskState::None,
-        TaskState::Ready | TaskState::Running | TaskState::Waiting => LegacyTaskState::Running,
-        other => legacy_task_state(other),
-    }
-}
-
 /// Keep a durable stamp once it exists, otherwise take `now`.
 fn stamp(existing: Option<i64>, now: i64) -> i64 {
     match existing {
@@ -1045,36 +1014,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_states_map_onto_the_legacy_task_vocabulary() {
-        // The parity folding the migration notes pin: Waiting is the legacy
-        // Interrupt, Failed is Error.
-        assert_eq!(
-            legacy_task_state(TaskState::Waiting),
-            LegacyTaskState::Interrupt
-        );
-        assert_eq!(legacy_task_state(TaskState::Failed), LegacyTaskState::Error);
-        assert_eq!(
-            legacy_task_state(TaskState::Created),
-            LegacyTaskState::Pending
-        );
-        assert_eq!(
-            legacy_task_state(TaskState::Completed),
-            LegacyTaskState::Completed
-        );
-        assert_eq!(
-            legacy_task_state(TaskState::Aborted),
-            LegacyTaskState::Aborted
-        );
+    fn task_states_map_onto_the_wire_vocabulary() {
+        // The words the rows and messages expose: Waiting is `interrupted`
+        // and Failed is `error`, the legacy spellings kept byte-for-byte.
+        assert_eq!(TaskState::Waiting.as_str(), "interrupted");
+        assert_eq!(TaskState::Failed.as_str(), "error");
+        assert_eq!(TaskState::Created.as_str(), "pending");
+        assert_eq!(TaskState::Completed.as_str(), "completed");
+        assert_eq!(TaskState::Aborted.as_str(), "aborted");
+        assert_eq!(TaskState::Waiting.to_string(), "interrupted");
+        // Every word parses back to its state.
+        for state in [
+            TaskState::Created,
+            TaskState::Ready,
+            TaskState::Running,
+            TaskState::Waiting,
+            TaskState::Completed,
+            TaskState::Submitted,
+            TaskState::Backed,
+            TaskState::Cancelled,
+            TaskState::Failed,
+            TaskState::Aborted,
+            TaskState::Skipped,
+            TaskState::Removed,
+        ] {
+            assert_eq!(TaskState::parse(state.as_str()), Some(state));
+        }
+        assert_eq!(TaskState::parse("none"), None);
+        assert_eq!(TaskState::parse("no_such_state"), None);
     }
 
     #[test]
     fn proc_state_tracks_the_root_and_predates_creation() {
-        assert_eq!(proc_state(TaskState::Created), LegacyTaskState::None);
-        assert_eq!(proc_state(TaskState::Running), LegacyTaskState::Running);
-        assert_eq!(proc_state(TaskState::Waiting), LegacyTaskState::Running);
-        assert_eq!(proc_state(TaskState::Completed), LegacyTaskState::Completed);
-        assert_eq!(proc_state(TaskState::Failed), LegacyTaskState::Error);
-        assert_eq!(proc_state(TaskState::Skipped), LegacyTaskState::Skipped);
+        assert_eq!(TaskState::Created.proc_state(), "none");
+        assert_eq!(TaskState::Running.proc_state(), "running");
+        assert_eq!(TaskState::Waiting.proc_state(), "running");
+        assert_eq!(TaskState::Completed.proc_state(), "completed");
+        assert_eq!(TaskState::Failed.proc_state(), "error");
+        assert_eq!(TaskState::Skipped.proc_state(), "skipped");
     }
 }
 
@@ -1111,30 +1088,29 @@ mod coverage_tests {
         TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap()
     }
 
-    /// Both state tables are total: every execution state has one legacy
-    /// task state and one process state.
+    /// The two state tables are total: every execution state has one row word
+    /// and one process word.
     #[test]
-    fn every_execution_state_has_a_legacy_state() {
-        use crate::scheduler::LegacyTaskState as L;
-        for (state, expected) in [
-            (TaskState::Created, L::Pending),
-            (TaskState::Ready, L::Ready),
-            (TaskState::Running, L::Running),
-            (TaskState::Waiting, L::Interrupt),
-            (TaskState::Completed, L::Completed),
-            (TaskState::Submitted, L::Submitted),
-            (TaskState::Backed, L::Backed),
-            (TaskState::Cancelled, L::Cancelled),
-            (TaskState::Failed, L::Error),
-            (TaskState::Aborted, L::Aborted),
-            (TaskState::Skipped, L::Skipped),
-            (TaskState::Removed, L::Removed),
+    fn every_execution_state_has_a_row_word() {
+        for state in [
+            TaskState::Created,
+            TaskState::Ready,
+            TaskState::Running,
+            TaskState::Waiting,
+            TaskState::Completed,
+            TaskState::Submitted,
+            TaskState::Backed,
+            TaskState::Cancelled,
+            TaskState::Failed,
+            TaskState::Aborted,
+            TaskState::Skipped,
+            TaskState::Removed,
         ] {
-            assert_eq!(legacy_task_state(state), expected, "{state:?}");
+            assert_eq!(TaskState::parse(state.as_str()), Some(state), "{state:?}");
         }
-        assert_eq!(proc_state(TaskState::Created), L::None);
-        assert_eq!(proc_state(TaskState::Ready), L::Running);
-        assert_eq!(proc_state(TaskState::Removed), L::Removed);
+        assert_eq!(TaskState::Created.proc_state(), "none");
+        assert_eq!(TaskState::Ready.proc_state(), "running");
+        assert_eq!(TaskState::Removed.proc_state(), "removed");
         assert_eq!(stamp(Some(5), 9), 5);
         assert_eq!(stamp(Some(0), 9), 9);
         assert_eq!(stamp(None, 9), 9);

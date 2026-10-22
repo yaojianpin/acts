@@ -18,7 +18,7 @@
 
 use crate::{
     NodeKind, Result, ScopePolicy, Vars, Workflow,
-    scheduler::{LegacyTaskState, NodeContent, Runtime, shell::Context},
+    scheduler::{NodeContent, Runtime, core::model::task_graph::TaskState, shell::Context},
     utils::{self, consts},
 };
 
@@ -154,7 +154,7 @@ pub struct ScopeTask {
     data: crate::ShareLock<Vars>,
     /// Snapshot data sealed for this evaluation only; never persisted.
     sealed: crate::ShareLock<Vars>,
-    state: LegacyTaskState,
+    state: Option<TaskState>,
     start_time: i64,
     end_time: i64,
     cancel: CancellationToken,
@@ -176,7 +176,7 @@ impl ScopeTask {
             node: Arc::new(node),
             data: Arc::new(RwLock::new(Vars::new())),
             sealed: Arc::new(RwLock::new(Vars::new())),
-            state: LegacyTaskState::None,
+            state: None,
             start_time: 0,
             end_time: 0,
             cancel: runtime.shutdown_token().child_token(),
@@ -265,12 +265,12 @@ impl ScopeTask {
         utils::fill_params(&self.node.content.params(), ctx)
     }
 
-    pub fn state(&self) -> LegacyTaskState {
-        self.state.clone()
+    pub fn state(&self) -> Option<TaskState> {
+        self.state
     }
 
     pub fn cost(&self) -> i64 {
-        if self.state.is_completed() {
+        if self.state.is_some_and(TaskState::is_terminal) {
             return self.end_time - self.start_time;
         }
         utils::time::time_millis() - self.start_time
@@ -532,7 +532,7 @@ mod tests {
         let outputs = task.outputs(&ctx);
         assert_eq!(outputs.get::<i32>("exposed"), Some(9));
         assert_eq!(task.options().get::<i32>("missing"), None);
-        assert_eq!(task.state(), crate::scheduler::LegacyTaskState::None);
+        assert_eq!(task.state(), None);
         assert!(task.cost() >= 0);
         assert!(task.is_kind(NodeKind::Step));
         assert!(!task.is_kind(NodeKind::Act));

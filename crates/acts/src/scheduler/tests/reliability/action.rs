@@ -25,8 +25,7 @@ use serial_test::serial;
 
 use crate::scheduler::core::model::clock::{Clock, SystemClock};
 use crate::scheduler::core::model::operation::OperationState;
-use crate::scheduler::core::model::task_graph::TaskState;
-use crate::{ActError, LegacyTaskState};
+use crate::{ActError, TaskState};
 
 use super::*;
 
@@ -380,7 +379,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
             match proc_row(&engine, &pid).await {
                 Some(proc) => proc
                     .task(&tid)
-                    .is_none_or(|task| task.state() != LegacyTaskState::Interrupt),
+                    .is_none_or(|task| task.state() != Some(TaskState::Waiting)),
                 None => true,
             }
         },
@@ -493,8 +492,14 @@ async fn racing_completes_converge_on_one_decision_and_one_effect_inner() {
             .await
             .tasks()
             .iter()
-            .filter(|task| !task.state().is_completed())
-            .map(|task| format!("{}:{}", task.tid(), task.state()))
+            .filter(|task| !task.state().is_some_and(TaskState::is_terminal))
+            .map(|task| {
+                format!(
+                    "{}:{}",
+                    task.tid(),
+                    task.state().map_or("none", TaskState::as_str)
+                )
+            })
             .collect();
         assert!(
             unfinished.is_empty(),

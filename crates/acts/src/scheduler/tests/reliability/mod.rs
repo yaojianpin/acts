@@ -69,7 +69,7 @@ use parking_lot::Mutex;
 
 use crate::{
     ActError, Action, Config, Engine, KvStore, MemoryStore, MessageState, Result, ScanOptions,
-    Signal, StoreBatchOp, StoreGuard, Vars, Workflow,
+    Signal, StoreBatchOp, StoreGuard, TaskState, Vars, Workflow,
     event::EventAction,
     query::{Expr, Filter, Query},
     scheduler::{ProcRead, TaskRow},
@@ -275,7 +275,7 @@ pub(crate) fn node_of(
 pub(crate) fn waiting_task(proc: &Arc<ProcRead>, nid: &str) -> Option<Arc<TaskRow>> {
     tasks_of(proc, nid)
         .into_iter()
-        .find(|t| t.state().is_interrupted())
+        .find(|t| t.state() == Some(TaskState::Waiting))
 }
 
 /// Poll until the node `nid` is waiting, and return its task.
@@ -309,15 +309,28 @@ pub(crate) async fn read_task(engine: &Engine, pid: &str, nid: &str) -> Arc<Task
 pub(crate) async fn assert_settled(engine: &Engine, pid: &str) {
     let proc = read_proc(engine, pid).await;
     assert!(
-        proc.state().is_biz_success(),
-        "run {pid} must settle in business success, got {}",
+        proc.state().is_some_and(|state| matches!(
+            state,
+            TaskState::Completed
+                | TaskState::Submitted
+                | TaskState::Backed
+                | TaskState::Removed
+                | TaskState::Cancelled
+        )),
+        "run {pid} must settle in business success, got {:?}",
         proc.state()
     );
     let unfinished: Vec<String> = proc
         .tasks()
         .iter()
-        .filter(|t| !t.state().is_completed())
-        .map(|t| format!("{}:{}", t.tid(), t.state()))
+        .filter(|t| !t.state().is_some_and(TaskState::is_terminal))
+        .map(|t| {
+            format!(
+                "{}:{}",
+                t.tid(),
+                t.state().map_or("none", TaskState::as_str)
+            )
+        })
         .collect();
     assert!(
         unfinished.is_empty(),
@@ -331,7 +344,12 @@ pub(crate) fn task_snapshot(proc: &Arc<ProcRead>) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = proc
         .tasks()
         .iter()
-        .map(|t| (t.tid().to_string(), t.state().to_string()))
+        .map(|t| {
+            (
+                t.tid().to_string(),
+                t.state().map_or("none", TaskState::as_str).to_string(),
+            )
+        })
         .collect();
     v.sort();
     v
@@ -389,14 +407,20 @@ pub(crate) async fn dump_state(engine: &Engine, pid: &str) -> String {
     let store = engine.runtime().store();
     let proc = proc_row(engine, pid).await;
     let mut out = match &proc {
-        Some(proc) => format!("proc={} tasks[", proc.state()),
+        Some(proc) => format!("proc={:?} tasks[", proc.state()),
         None => "proc=<no row> tasks[".to_string(),
     };
     if let Some(proc) = &proc {
         let mut tasks: Vec<String> = proc
             .tasks()
             .iter()
-            .map(|t| format!("{}:{}", t.tid(), t.state()))
+            .map(|t| {
+                format!(
+                    "{}:{}",
+                    t.tid(),
+                    t.state().map_or("none", TaskState::as_str)
+                )
+            })
             .collect();
         tasks.sort();
         out.push_str(&tasks.join(","));

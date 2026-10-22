@@ -2,7 +2,6 @@
 
 pub(crate) mod clock;
 pub(crate) mod effect;
-pub(crate) mod legacy_task_state;
 pub(crate) mod model_graph;
 pub(crate) mod operation;
 pub(crate) mod task_graph;

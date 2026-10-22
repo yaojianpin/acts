@@ -810,7 +810,7 @@ async fn a_run_that_cannot_seal_fails_instead_of_waiting() {
     for _ in 0..200 {
         let run = engine.runtime().read_proc(&pid).await.unwrap();
         if let Some(run) = run
-            && run.state().is_error()
+            && run.state() == Some(crate::scheduler::TaskState::Failed)
         {
             settled = true;
             // The failing act carries the refusal, and so does every ancestor

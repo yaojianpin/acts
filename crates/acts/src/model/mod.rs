@@ -11,7 +11,9 @@ mod tests;
 
 pub use act::{Act, Catch, Retry, Timeout, TimeoutLimit};
 pub use branch::Branch;
-pub use info::{EventInfo, MessageInfo, ModelInfo, PackageInfo, ProcInfo, TaskInfo};
+pub use info::{
+    EventInfo, GraphNode, MessageInfo, ModelInfo, PackageInfo, ProcInfo, ProcessGraph, TaskInfo,
+};
 pub use step::Step;
 pub use trigger::{
     TRIGGER_CHAT, TRIGGER_HOOK, TRIGGER_MANUAL, TRIGGER_SCHEDULE, Trigger, TriggerKind,

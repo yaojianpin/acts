@@ -51,7 +51,7 @@ impl fmt::Debug for TaskId {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TaskState {
+pub enum TaskState {
     Created,
     Ready,
     Running,
@@ -79,6 +79,66 @@ impl TaskState {
                 | Self::Skipped
                 | Self::Removed
         )
+    }
+
+    /// The state's word on the wire: the read model's task/proc rows and the
+    /// message payloads speak this vocabulary (the words the legacy engine
+    /// exposed, kept byte-for-byte: `Created` is `pending`, `Waiting` is
+    /// `interrupted`, `Failed` is `error`).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "pending",
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Waiting => "interrupted",
+            Self::Completed => "completed",
+            Self::Submitted => "submitted",
+            Self::Backed => "backed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "error",
+            Self::Aborted => "aborted",
+            Self::Skipped => "skipped",
+            Self::Removed => "removed",
+        }
+    }
+
+    /// Parse a row/wire word. `None` for `"none"` (a run whose root is not
+    /// created yet has no state) and for a word this version does not know —
+    /// an older or newer row reads as "no state" rather than as a wrong one.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "pending" => Self::Created,
+            "ready" => Self::Ready,
+            "running" => Self::Running,
+            "interrupted" => Self::Waiting,
+            "completed" => Self::Completed,
+            "submitted" => Self::Submitted,
+            "backed" => Self::Backed,
+            "cancelled" => Self::Cancelled,
+            "error" => Self::Failed,
+            "aborted" => Self::Aborted,
+            "skipped" => Self::Skipped,
+            "removed" => Self::Removed,
+            _ => return None,
+        })
+    }
+
+    /// The process row's state: a run whose root is not created yet has none
+    /// (`"none"`), a run in flight is `"running"`, and a settled one answers
+    /// its root's own word.
+    pub(crate) fn proc_state(self) -> &'static str {
+        match self {
+            Self::Created => "none",
+            Self::Ready | Self::Running | Self::Waiting => "running",
+            other => other.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for TaskState {
+    /// The wire word (see [`TaskState::as_str`]).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

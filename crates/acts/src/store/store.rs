@@ -9,7 +9,7 @@ use tracing::trace;
 use crate::store::KvStore;
 use crate::{
     ActError, Result, Trigger, Vars, Workflow,
-    scheduler::LegacyTaskState,
+    scheduler::TaskState,
     store::{Model, Package},
     utils,
 };
@@ -487,8 +487,8 @@ impl Store {
         let Ok(proc) = procs.find(pid).await else {
             return Ok(false);
         };
-        let state = LegacyTaskState::from(proc.state.as_str());
-        if !state.is_completed() || proc.removable {
+        let state = TaskState::parse(proc.state.as_str());
+        if state.is_none_or(|state| !state.is_terminal()) || proc.removable {
             return Ok(false);
         }
         if self.has_unsettled_deliveries(pid).await? {
@@ -677,7 +677,9 @@ impl Store {
     async fn task_closed(&self, pid: &str, tid: &str) -> Result<bool> {
         let id = utils::Id::new(pid, tid).id();
         match self.tasks().find(&id).await {
-            Ok(task) => Ok(LegacyTaskState::from(task.state.as_str()).is_completed()),
+            Ok(task) => {
+                Ok(TaskState::parse(task.state.as_str()).is_some_and(TaskState::is_terminal))
+            }
             Err(_) => Ok(false),
         }
     }
@@ -789,21 +791,20 @@ impl Store {
     /// terminal states (`state` is indexed), capped at `limit`.
     pub(crate) async fn terminal_proc_rows(&self, limit: usize) -> Result<Vec<data::Proc>> {
         use super::query::{Expr, Filter, Query};
-        use crate::scheduler::LegacyTaskState;
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let terminal: Vec<String> = [
-            LegacyTaskState::Completed,
-            LegacyTaskState::Cancelled,
-            LegacyTaskState::Submitted,
-            LegacyTaskState::Backed,
-            LegacyTaskState::Error,
-            LegacyTaskState::Skipped,
-            LegacyTaskState::Aborted,
-            LegacyTaskState::Removed,
+            TaskState::Completed,
+            TaskState::Cancelled,
+            TaskState::Submitted,
+            TaskState::Backed,
+            TaskState::Failed,
+            TaskState::Skipped,
+            TaskState::Aborted,
+            TaskState::Removed,
         ]
         .iter()
-        .map(String::from)
+        .map(|state| state.as_str().to_string())
         .collect();
         // one scan over every terminal state (`state` is indexed); the
         // `removable` filter is applied in memory because the flag is not

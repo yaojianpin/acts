@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use crate::{
     ActError, Error, Result, Vars, Workflow,
-    scheduler::{LegacyTaskState, NodeData},
+    scheduler::{NodeData, core::model::task_graph::TaskState},
     store::{
         Store, data,
         query::{Expr, Filter, Query},
@@ -27,7 +27,9 @@ use crate::{
 pub(crate) struct TaskRow {
     row: data::Task,
     node: NodeData,
-    state: LegacyTaskState,
+    /// The row's state; `None` for `"none"`/an unknown word (a row written by
+    /// another version).
+    state: Option<TaskState>,
     err: Option<Error>,
     data: Vars,
 }
@@ -43,8 +45,8 @@ impl TaskRow {
         &self.node
     }
 
-    pub(crate) fn state(&self) -> LegacyTaskState {
-        self.state.clone()
+    pub(crate) fn state(&self) -> Option<TaskState> {
+        self.state
     }
 
     pub(crate) fn err(&self) -> Option<Error> {
@@ -76,8 +78,8 @@ impl ProcRead {
         &self.proc.id
     }
 
-    pub(crate) fn state(&self) -> LegacyTaskState {
-        LegacyTaskState::from(self.proc.state.as_str())
+    pub(crate) fn state(&self) -> Option<TaskState> {
+        TaskState::parse(self.proc.state.as_str())
     }
 
     /// The durable model the rows were projected from.
@@ -149,7 +151,7 @@ pub(crate) async fn load(store: &Store, pid: &str) -> Result<Option<ProcRead>> {
     for row in rows {
         let node: NodeData =
             serde_json::from_str(&row.node_data).map_err(|err| ActError::Store(err.to_string()))?;
-        let state = LegacyTaskState::from(row.state.as_str());
+        let state = TaskState::parse(row.state.as_str());
         let err = match &row.err {
             Some(raw) => Some(
                 serde_json::from_str::<Error>(raw)

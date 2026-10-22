@@ -1,6 +1,5 @@
 mod health;
 mod scheduler_split;
-mod state;
 mod tree;
 
 use super::*;
@@ -1962,7 +1961,7 @@ async fn assert_parked(host: &KernelHost, cache: &Arc<crate::store::Store>, pid:
         .expect("proc row");
     assert_eq!(
         proc_row.state,
-        crate::scheduler::core::model::legacy_task_state::LegacyTaskState::None.to_string(),
+        "none".to_string(),
         "the parked process state, as the legacy row spells it"
     );
     let root_row = store
@@ -1973,7 +1972,7 @@ async fn assert_parked(host: &KernelHost, cache: &Arc<crate::store::Store>, pid:
         .expect("root task row");
     assert_eq!(
         root_row.state,
-        crate::scheduler::core::model::legacy_task_state::LegacyTaskState::Pending.to_string(),
+        "pending".to_string(),
         "the parked root task, as the legacy row spells it"
     );
 }
@@ -8878,7 +8877,7 @@ async fn a_proc_read_reprojects_a_lagging_row() {
         .expect("the proc row");
     assert_eq!(
         live.state(),
-        crate::LegacyTaskState::Completed,
+        Some(crate::TaskState::Completed),
         "the strong read must serve the aggregate's state"
     );
     let restored = runtime

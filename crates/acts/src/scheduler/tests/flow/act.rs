@@ -518,8 +518,12 @@ async fn sch_act_remove_drops_the_added_act() {
         .unwrap();
 
     fixture.wait_state("s1#push1", TaskState::Removed).await;
-    // The wire is at-least-once: a re-delivered record repeats a state, so
-    // the trail is compared after collapsing consecutive duplicates.
+    // The state is the aggregate's; the message follows the outbox delivery.
+    // Wait for it, then compare the trail after collapsing re-deliveries (the
+    // wire is at-least-once).
+    fixture
+        .wait_message("s1#push1", MessageState::Removed)
+        .await;
     let mut trail = fixture.announced("s1#push1");
     trail.dedup();
     assert_eq!(trail, vec![MessageState::Created, MessageState::Removed]);

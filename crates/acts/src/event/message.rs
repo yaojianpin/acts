@@ -1,5 +1,5 @@
 use crate::{
-    LegacyTaskState, Vars, data,
+    Vars, data,
     store::DbCollectionIden,
     utils::{self, consts},
 };
@@ -232,26 +232,6 @@ impl fmt::Display for MessageState {
     }
 }
 
-impl From<LegacyTaskState> for MessageState {
-    fn from(state: LegacyTaskState) -> Self {
-        match state {
-            LegacyTaskState::None => MessageState::None,
-            LegacyTaskState::Ready
-            | LegacyTaskState::Pending
-            | LegacyTaskState::Running
-            | LegacyTaskState::Interrupt => MessageState::Created,
-            LegacyTaskState::Completed => MessageState::Completed,
-            LegacyTaskState::Submitted => MessageState::Submitted,
-            LegacyTaskState::Backed => MessageState::Backed,
-            LegacyTaskState::Cancelled => MessageState::Cancelled,
-            LegacyTaskState::Error => MessageState::Error,
-            LegacyTaskState::Aborted => MessageState::Aborted,
-            LegacyTaskState::Skipped => MessageState::Skipped,
-            LegacyTaskState::Removed => MessageState::Removed,
-        }
-    }
-}
-
 impl From<MessageState> for String {
     fn from(state: MessageState) -> Self {
         state.as_ref().to_string()
@@ -339,27 +319,6 @@ mod tests {
         msg.inputs = Vars::new().with("options", Vars::new().with("tag", "vip"));
         assert!(msg.is_tag("vip"));
         assert!(!msg.is_tag("other"));
-    }
-
-    #[test]
-    fn every_legacy_state_maps_onto_a_message_state() {
-        for (legacy, expected) in [
-            (LegacyTaskState::None, MessageState::None),
-            (LegacyTaskState::Ready, MessageState::Created),
-            (LegacyTaskState::Pending, MessageState::Created),
-            (LegacyTaskState::Running, MessageState::Created),
-            (LegacyTaskState::Interrupt, MessageState::Created),
-            (LegacyTaskState::Completed, MessageState::Completed),
-            (LegacyTaskState::Submitted, MessageState::Submitted),
-            (LegacyTaskState::Backed, MessageState::Backed),
-            (LegacyTaskState::Cancelled, MessageState::Cancelled),
-            (LegacyTaskState::Error, MessageState::Error),
-            (LegacyTaskState::Aborted, MessageState::Aborted),
-            (LegacyTaskState::Skipped, MessageState::Skipped),
-            (LegacyTaskState::Removed, MessageState::Removed),
-        ] {
-            assert_eq!(MessageState::from(legacy), expected);
-        }
     }
 
     #[test]

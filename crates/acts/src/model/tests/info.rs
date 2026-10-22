@@ -2,8 +2,8 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::{
-    ActRunAs, LegacyTaskState, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo, Workflow,
-    data, package::ActPackageCatalog, scheduler::NodeData, utils,
+    ActRunAs, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo, Workflow, data,
+    package::ActPackageCatalog, scheduler::NodeData, utils,
 };
 
 #[test]
@@ -48,7 +48,7 @@ fn model_info_proc() {
         id: utils::shortid(),
         name: "test".to_string(),
         mid: "m1".to_string(),
-        state: LegacyTaskState::None.into(),
+        state: "none".to_string(),
         start_time: 1234,
         end_time: 2345,
         timestamp: 11111,
@@ -86,7 +86,7 @@ fn model_info_task() {
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         node_data: serde_json::to_string(&node_data).unwrap(),
-        state: LegacyTaskState::None.into(),
+        state: "none".to_string(),
         prev: None,
         next: vec![],
         parent: None,
@@ -203,7 +203,7 @@ fn model_info_proc_arr_to_value() {
         id: utils::shortid(),
         name: "test".to_string(),
         mid: "m1".to_string(),
-        state: LegacyTaskState::None.into(),
+        state: "none".to_string(),
         start_time: 1234,
         end_time: 2345,
         timestamp: 11111,
@@ -255,7 +255,7 @@ fn model_info_task_arr_to_value() {
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         node_data: serde_json::to_string(&node_data).unwrap(),
-        state: LegacyTaskState::None.into(),
+        state: "none".to_string(),
         prev: None,
         next: vec![],
         parent: None,

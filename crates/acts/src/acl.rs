@@ -338,9 +338,10 @@ impl ScopePolicy {
 /// An action not named here is `write`: an unknown operation is never a read.
 pub fn action_catalog(action: &str) -> &'static str {
     match action {
-        "model:ls" | "model:get" | "pack:ls" | "pack:get" | "proc:ls" | "proc:get" | "task:ls"
-        | "task:get" | "msg:ls" | "msg:get" | "evt:ls" | "evt:get" | "snap:get" | "snap:ls"
-        | ACTION_WHOAMI | ACTION_GETUSER | ACTION_USERS | ACTION_SUBSCRIBE => "read",
+        "model:ls" | "model:get" | "pack:ls" | "pack:get" | "proc:ls" | "proc:get"
+        | "proc:graph" | "task:ls" | "task:get" | "msg:ls" | "msg:get" | "evt:ls" | "evt:get"
+        | "snap:get" | "snap:ls" | ACTION_WHOAMI | ACTION_GETUSER | ACTION_USERS
+        | ACTION_SUBSCRIBE => "read",
         "model:deploy" | "pack:publish" => "deploy",
         "proc:start"
         | "proc:start_from_model"
@@ -883,6 +884,7 @@ mod tests {
         assert_eq!(action_catalog("model:ls"), "read");
         assert_eq!(action_catalog("msg:sub"), "read");
         assert_eq!(action_catalog("acl:getuser"), "read");
+        assert_eq!(action_catalog("proc:graph"), "read");
         assert_eq!(action_catalog("model:deploy"), "deploy");
         assert_eq!(action_catalog("pack:publish"), "deploy");
         assert_eq!(action_catalog("proc:start"), "execute");

@@ -110,6 +110,7 @@ mod context;
 mod effects;
 mod errors;
 mod facts;
+pub(crate) mod graph;
 pub(crate) mod health;
 mod message;
 mod model;

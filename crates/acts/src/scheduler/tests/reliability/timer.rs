@@ -32,7 +32,7 @@ use crate::data::DeliveryStatus;
 use crate::scheduler::runtime::TEST_TICK_MS;
 use crate::scheduler::shell::health::HealthState;
 use crate::utils::test::USES_SET;
-use crate::{ChannelOptions, Message, Store};
+use crate::{ChannelOptions, Message, Store, TaskState};
 
 use super::*;
 
@@ -759,7 +759,10 @@ async fn a_delivery_stored_after_its_task_closed_is_born_settled_inner() {
         || async {
             proc_row(&engine, &pid)
                 .await
-                .and_then(|proc| proc.task(&tid).map(|t| t.state().is_completed()))
+                .and_then(|proc| {
+                    proc.task(&tid)
+                        .map(|t| t.state().is_some_and(TaskState::is_terminal))
+                })
                 .unwrap_or(false)
         },
         || dump_state(&engine, &pid),

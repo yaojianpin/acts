@@ -40,10 +40,7 @@ use std::time::Duration;
 
 use serial_test::serial;
 
-use crate::scheduler::core::model::task_graph::TaskState;
-use crate::{
-    ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, LegacyTaskState,
-};
+use crate::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, TaskState};
 
 use super::*;
 
@@ -198,7 +195,10 @@ async fn wait_rows_terminal(engine: &Engine, pid: &str) -> Arc<ProcRead> {
             let Some(proc) = proc_row(engine, pid).await else {
                 return false;
             };
-            let terminal = proc.tasks().iter().all(|t| t.state().is_completed());
+            let terminal = proc
+                .tasks()
+                .iter()
+                .all(|t| t.state().is_some_and(TaskState::is_terminal));
             if terminal {
                 *seen.lock().expect("the settled-row slot is never poisoned") = Some(proc);
             }
@@ -337,20 +337,26 @@ async fn an_abort_on_a_waiting_act_decides_the_act_and_the_run_inner() {
     // the read model answers the decision, with nothing left to run
     let proc = wait_rows_terminal(&engine, &pid).await;
     assert!(
-        proc.state().is_abort(),
-        "the run must read aborted, got {}",
+        proc.state() == Some(TaskState::Aborted),
+        "the run must read aborted, got {:?}",
         proc.state()
     );
     assert_eq!(
-        proc.task(&tid).map(|t| t.state()),
-        Some(LegacyTaskState::Aborted),
+        proc.task(&tid).and_then(|t| t.state()),
+        Some(TaskState::Aborted),
         "the act must read its decision"
     );
     let unfinished: Vec<String> = proc
         .tasks()
         .iter()
-        .filter(|t| !t.state().is_completed())
-        .map(|t| format!("{}:{}", t.tid(), t.state()))
+        .filter(|t| !t.state().is_some_and(TaskState::is_terminal))
+        .map(|t| {
+            format!(
+                "{}:{}",
+                t.tid(),
+                t.state().map_or("none", TaskState::as_str)
+            )
+        })
         .collect();
     assert!(
         unfinished.is_empty(),
@@ -403,7 +409,7 @@ async fn a_shutdown_decides_nothing_and_the_run_resumes_undecided_inner() {
     );
     let proc = read_proc(&reloaded, &pid).await;
     let waiting = waiting_task(&proc, "s1").expect("the recovered run still holds the act waiting");
-    assert_eq!(waiting.state(), LegacyTaskState::Interrupt);
+    assert_eq!(waiting.state(), Some(TaskState::Waiting));
 
     // the recovered run is still the client's: the recorded action decides it
     abort_act(&reloaded, &pid, &tid).await.unwrap();
@@ -597,14 +603,14 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
     // the read model answers the decision, not the effect's failure
     let proc = wait_rows_terminal(&engine, &pid).await;
     assert!(
-        proc.state().is_abort(),
-        "the run must read aborted, got {}",
+        proc.state() == Some(TaskState::Aborted),
+        "the run must read aborted, got {:?}",
         proc.state()
     );
     let act = proc
         .task(&tid_of(&pid, "step1", 0))
         .expect("the act's task");
-    assert_eq!(act.state(), LegacyTaskState::Aborted);
+    assert_eq!(act.state(), Some(TaskState::Aborted));
     assert!(
         act.err().is_none(),
         "an overridden act must not carry the effect's error: {:?}",
@@ -727,8 +733,8 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
     let before = wait_rows_terminal(&engine, &pid).await;
     assert_eq!(tasks_of(&before, "step1").len(), 1, "one task for the act");
     assert_eq!(
-        before.task(&tid).map(|t| t.state()),
-        Some(LegacyTaskState::Aborted),
+        before.task(&tid).and_then(|t| t.state()),
+        Some(TaskState::Aborted),
         "the first delivery leaves the act aborted"
     );
 
@@ -747,8 +753,8 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
         "no second task for the act"
     );
     assert_eq!(
-        after.task(&tid).map(|t| t.state()),
-        Some(LegacyTaskState::Aborted),
+        after.task(&tid).and_then(|t| t.state()),
+        Some(TaskState::Aborted),
         "the duplicate may not move the decided act"
     );
     assert_eq!(
@@ -756,7 +762,10 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
         task_snapshot(&before),
         "a refused duplicate must leave the tree untouched"
     );
-    assert!(after.state().is_abort(), "the run keeps its abort");
+    assert!(
+        after.state() == Some(TaskState::Aborted),
+        "the run keeps its abort"
+    );
     assert_eq!(
         act_generations(&engine, &pid, &tid).await,
         vec![TaskState::Aborted],
@@ -802,19 +811,25 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
 
         let proc = wait_rows_terminal(&engine, &pid).await;
         assert!(
-            proc.state().is_abort(),
+            proc.state() == Some(TaskState::Aborted),
             "round {round}: the abort must end the run"
         );
         assert_eq!(
-            proc.task(&tid).map(|t| t.state()),
-            Some(LegacyTaskState::Aborted),
+            proc.task(&tid).and_then(|t| t.state()),
+            Some(TaskState::Aborted),
             "round {round}: the aborted act keeps its decision"
         );
         let unfinished: Vec<String> = proc
             .tasks()
             .iter()
-            .filter(|t| !t.state().is_completed())
-            .map(|t| format!("{}:{}", t.tid(), t.state()))
+            .filter(|t| !t.state().is_some_and(TaskState::is_terminal))
+            .map(|t| {
+                format!(
+                    "{}:{}",
+                    t.tid(),
+                    t.state().map_or("none", TaskState::as_str)
+                )
+            })
             .collect();
         assert!(
             unfinished.is_empty(),
@@ -832,14 +847,20 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
         );
         let rows: Vec<String> = tasks_of(&proc, "step2")
             .iter()
-            .map(|t| format!("{}:{}", t.tid(), t.state()))
+            .map(|t| {
+                format!(
+                    "{}:{}",
+                    t.tid(),
+                    t.state().map_or("none", TaskState::as_str)
+                )
+            })
             .collect();
         assert_eq!(
             rows,
             vec![format!(
                 "{}:{}",
                 tid_of(&pid, "step2", 0),
-                LegacyTaskState::Skipped
+                TaskState::Skipped
             )],
             "round {round}: the downstream row must read the cascade's decision"
         );
@@ -941,7 +962,7 @@ async fn an_abort_racing_a_completion_converges_on_one_terminal_decision_inner()
             );
             let proc = wait_rows_terminal(&engine, &pid).await;
             assert!(
-                proc.state().is_abort(),
+                proc.state() == Some(TaskState::Aborted),
                 "round {round}: the winning abort must terminate the run"
             );
         } else {
@@ -972,8 +993,14 @@ async fn an_abort_racing_a_completion_converges_on_one_terminal_decision_inner()
         let unfinished: Vec<String> = proc
             .tasks()
             .iter()
-            .filter(|t| !t.state().is_completed())
-            .map(|t| format!("{}:{}", t.tid(), t.state()))
+            .filter(|t| !t.state().is_some_and(TaskState::is_terminal))
+            .map(|t| {
+                format!(
+                    "{}:{}",
+                    t.tid(),
+                    t.state().map_or("none", TaskState::as_str)
+                )
+            })
             .collect();
         assert!(
             unfinished.is_empty(),

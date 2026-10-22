@@ -40,13 +40,10 @@ use parking_lot::Mutex;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::scheduler::core::model::{
-    operation::{OperationKind, OperationState},
-    task_graph::TaskState,
-};
+use crate::scheduler::core::model::operation::{OperationKind, OperationState};
 use crate::store::ScanOperation;
 use crate::utils::consts;
-use crate::{LegacyTaskState, Step};
+use crate::{Step, TaskState};
 
 use super::*;
 
@@ -693,7 +690,7 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
     let child = wait_waiting_task(&engine, &child_pid, CHILD_NODE).await;
     assert_eq!(
         child.state(),
-        LegacyTaskState::Interrupt,
+        Some(TaskState::Waiting),
         "the child's act must recover as the waiting act it was"
     );
     assert!(

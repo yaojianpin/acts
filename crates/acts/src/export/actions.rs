@@ -327,6 +327,10 @@ pub async fn apply_as(
             let pid = pop(&mut options, "pid")?;
             value(executor.proc().get(&pid).await)
         }
+        "proc:graph" => {
+            let pid = pop(&mut options, "pid")?;
+            value(executor.proc().graph(&pid).await)
+        }
         // task
         "task:ls" => {
             let query = options
@@ -500,6 +504,7 @@ pub async fn apply_as(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TaskState;
     use crate::utils::consts;
 
     /// An engine with access control explicitly off. These cases exercise the
@@ -1169,7 +1174,11 @@ mod tests {
             .await
             .unwrap()
             .expect("the refused run has rows");
-        assert!(proc.state().is_error(), "state={:?}", proc.state());
+        assert!(
+            proc.state() == Some(TaskState::Failed),
+            "state={:?}",
+            proc.state()
+        );
         let denied = proc.tasks().iter().any(|task| {
             task.err()
                 .is_some_and(|err| err.message.contains("not owned by subject 'u1'"))
@@ -1898,5 +1907,60 @@ mod tests {
                 .unwrap(),
             json!(false)
         );
+    }
+
+    /// `proc:graph` answers the run's declared model over the wire: the model
+    /// id and every node in declaration order, including the nodes no
+    /// execution has reached.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn proc_graph_answers_the_runs_declared_model() {
+        let engine = Engine::builder().start().await.unwrap();
+        // Run data is not the catalogue: `proc:*` reads need a caller with
+        // the grant, exactly like `proc:get`/`proc:ls`.
+        let principal = crate::Principal::unrestricted();
+        let model = "id: graph-model\nver: 0.1.0\nsteps:\n  - name: s1\n    id: s1\n  - name: s2\n    id: s2\n";
+        let started = apply_as(
+            &engine,
+            &principal,
+            "proc:start_from_model",
+            Vars::new().with("fmt", "yaml").with("model", model),
+        )
+        .await
+        .unwrap();
+        let pid = started.as_str().expect("the start answers the pid");
+        let graph = apply_as(
+            &engine,
+            &principal,
+            "proc:graph",
+            Vars::new().with("pid", pid),
+        )
+        .await
+        .unwrap();
+        let graph: crate::ProcessGraph = serde_json::from_value(graph).unwrap();
+        assert_eq!(graph.pid, pid);
+        assert_eq!(graph.mid, "graph-model");
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .map(|node| node.nid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["$", "s1", "s2"]
+        );
+        assert_eq!(graph.nodes[0].kind, "workflow");
+        assert_eq!(graph.nodes[1].kind, "step");
+        assert_eq!(graph.nodes[1].parent.as_deref(), Some("$"));
+        // A missing pid is the same refusal `proc:get` answers.
+        assert!(
+            apply_as(
+                &engine,
+                &principal,
+                "proc:graph",
+                Vars::new().with("pid", "gone")
+            )
+            .await
+            .is_err()
+        );
+        engine.close().await;
     }
 }

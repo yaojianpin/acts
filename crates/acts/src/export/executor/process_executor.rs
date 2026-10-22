@@ -2,7 +2,7 @@ use crate::Workflow;
 use crate::export::RunHandle;
 use crate::utils::consts;
 use crate::{
-    ActError, ModelInfo, Principal, ProcInfo, Result, TaskInfo, Vars, query::Query,
+    ActError, ModelInfo, Principal, ProcInfo, ProcessGraph, Result, TaskInfo, Vars, query::Query,
     scheduler::Runtime, store::PageData,
 };
 use std::sync::Arc;
@@ -12,6 +12,8 @@ use tracing::instrument;
 pub(crate) const LS: &str = "proc:ls";
 /// `proc:get` — read one process row and its in-memory tasks.
 pub(crate) const GET: &str = "proc:get";
+/// `proc:graph` — read the run's declared model graph (executed or not).
+pub(crate) const GRAPH: &str = "proc:graph";
 /// `proc:start` — start a deployed model.
 pub(crate) const START: &str = "proc:start";
 /// `proc:start_from_model` — start a model given inline.
@@ -143,5 +145,16 @@ impl ProcessExecutor {
         }
 
         Ok(info)
+    }
+
+    /// The run's declared model graph (`proc:graph`): every node the run's
+    /// durable (materialized) model holds, executed or not, in declaration
+    /// order. The node ids are the ones the run's messages carry as `nid`, so
+    /// a client renders the full flow (the nodes no execution reached too)
+    /// and folds the message stream onto it.
+    #[instrument(skip(self))]
+    pub async fn graph(&self, pid: &str) -> Result<ProcessGraph> {
+        self.principal.check(GRAPH)?;
+        self.runtime.graph(pid).await
     }
 }

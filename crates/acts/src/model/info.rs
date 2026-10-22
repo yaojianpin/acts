@@ -50,6 +50,117 @@ pub struct TaskInfo {
     pub timestamp: i64,
 }
 
+/// One declared node of a run's model, as `proc:graph` answers it.
+///
+/// `nid` is the model node id — the key a [`crate::Message`] carries as its
+/// `nid` and the read model's rows carry as theirs — so a client renders the
+/// run's full flow from the graph and folds the message stream (and the task
+/// rows) onto it: a node with no execution has no `state`.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GraphNode {
+    /// The model node id (`Message.nid`).
+    pub nid: String,
+    /// The node's display name.
+    pub name: String,
+    /// The node's declared level: `workflow`, `branch` or `step` — the read
+    /// model's own word, the one `Workflow::tree_output` and the task rows
+    /// use. A step carrying `uses` is still a `step` here; its *message* is
+    /// the act payload (`Message.r#type == "act"`). Fold the message stream
+    /// onto the graph by `nid`.
+    pub kind: String,
+    /// The package the node declares (`uses`), when it declares one.
+    pub uses: Option<String>,
+    /// The enclosing node: a branch's step, a step's branch, a handler's
+    /// step, a step's timeout branch. `None` for the workflow root.
+    pub parent: Option<String>,
+    /// Pre-order index: declaration order through the nested model.
+    pub order: usize,
+    /// The step's declared `next`, when it names one. The declaration chain
+    /// itself is the order of a parent's `steps`.
+    pub next: Option<String>,
+    /// The newest execution's state, in the read model's vocabulary
+    /// (`ready|running|interrupted|completed|submitted|backed|cancelled|
+    /// error|aborted|skipped|removed`), or `None` when the flow has not
+    /// reached the node — it has no execution, or its execution is still the
+    /// seeded `Created` one. A fan-out node takes its newest generation; the
+    /// per-instance states stay in the task rows and messages.
+    pub state: Option<String>,
+    /// The generation `state` describes (a fan-out or a `while` turn is one
+    /// generation of the node). `None` while the node has no state.
+    pub generation: Option<u64>,
+}
+
+/// The run's declared model graph (`proc:graph`): every node the durable
+/// (materialized) model holds, in declaration order — the static half of a
+/// flow trace, with each node's newest execution state folded in. The model is
+/// the copy the import seeds, so the container packages' inline acts already
+/// appear as their kernel children (`<step>#acts`, `<step>#item`,
+/// `<step>#act<N>`) and the ids match the messages the run announces.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ProcessGraph {
+    pub pid: String,
+    /// The model the run was started from.
+    pub mid: String,
+    pub nodes: Vec<GraphNode>,
+}
+
+impl ProcessGraph {
+    /// The graph as an indented tree, one node per line, in declaration
+    /// order — `{kind} id:{nid} name={name}  uses={uses} state={state}
+    /// next={next}`, with `nil` for an absent fact. The same shape
+    /// [`Workflow::tree_output`](crate::Workflow::tree_output) renders for a
+    /// declaration, plus each node's newest execution state.
+    pub fn tree_output(&self) -> String {
+        let mut output = String::new();
+        let mut ancestors = Vec::new();
+        for root in self.nodes.iter().filter(|node| node.parent.is_none()) {
+            self.write_node(root, &mut ancestors, true, true, &mut output);
+        }
+        output
+    }
+
+    fn write_node(
+        &self,
+        node: &GraphNode,
+        ancestors: &mut Vec<bool>,
+        is_last: bool,
+        is_root: bool,
+        output: &mut String,
+    ) {
+        if !is_root {
+            for ancestor_is_last in ancestors.iter() {
+                output.push_str(if *ancestor_is_last { "    " } else { "│   " });
+            }
+            output.push_str(if is_last { "└── " } else { "├── " });
+        }
+        let fact = |value: &Option<String>| value.clone().unwrap_or_else(|| "nil".to_string());
+        output.push_str(&format!(
+            "{} id:{} name={}  uses={} state={} next={}\n",
+            node.kind,
+            node.nid,
+            node.name,
+            fact(&node.uses),
+            fact(&node.state),
+            fact(&node.next),
+        ));
+        let children: Vec<&GraphNode> = self
+            .nodes
+            .iter()
+            .filter(|child| child.parent.as_deref() == Some(node.nid.as_str()))
+            .collect();
+        let len = children.len();
+        for (index, child) in children.iter().enumerate() {
+            if !is_root {
+                ancestors.push(is_last);
+            }
+            self.write_node(child, ancestors, index + 1 == len, false, output);
+            if !is_root {
+                ancestors.pop();
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ModelInfo {
     pub id: String,

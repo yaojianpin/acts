@@ -327,9 +327,20 @@ async fn wait_rows_finished(engine: &Engine, pid: &str, nodes: &[&str]) {
                             .map(|task| task.tid().to_string())
                             .collect();
                         tids.sort();
-                        proc.state().is_biz_success()
-                            && tids == expected
-                            && proc.tasks().iter().all(|task| task.state().is_completed())
+                        proc.state().is_some_and(|state| {
+                            matches!(
+                                state,
+                                TaskState::Completed
+                                    | TaskState::Submitted
+                                    | TaskState::Backed
+                                    | TaskState::Removed
+                                    | TaskState::Cancelled
+                            )
+                        }) && tids == expected
+                            && proc
+                                .tasks()
+                                .iter()
+                                .all(|task| task.state().is_some_and(TaskState::is_terminal))
                     }
                 }
             }
@@ -351,8 +362,19 @@ async fn wait_rows_settled(engine: &Engine, pid: &str) {
             match proc_row(engine, pid).await {
                 None => true,
                 Some(proc) => {
-                    proc.state().is_biz_success()
-                        && proc.tasks().iter().all(|task| task.state().is_completed())
+                    proc.state().is_some_and(|state| {
+                        matches!(
+                            state,
+                            TaskState::Completed
+                                | TaskState::Submitted
+                                | TaskState::Backed
+                                | TaskState::Removed
+                                | TaskState::Cancelled
+                        )
+                    }) && proc
+                        .tasks()
+                        .iter()
+                        .all(|task| task.state().is_some_and(TaskState::is_terminal))
                 }
             }
         },

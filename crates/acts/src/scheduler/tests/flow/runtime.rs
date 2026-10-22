@@ -4,10 +4,7 @@
 
 use serial_test::serial;
 
-use crate::{
-    LegacyTaskState, MessageState, Vars, scheduler::core::model::task_graph::TaskState, utils,
-    utils::consts,
-};
+use crate::{MessageState, TaskState, Vars, utils, utils::consts};
 
 use super::{FlowFixture, auto_workflow};
 
@@ -88,30 +85,27 @@ async fn sch_runtime_pid_runs_at_most_once() {
     fixture.close().await;
 }
 
-/// The legacy state vocabulary keeps its strings and predicates (the
-/// `sch_state_*` cells): the kernel stores the same words in its projected
-/// rows.
+/// The wire vocabulary keeps its strings (the `sch_state_*` cells): the kernel
+/// stores the same words in its projected rows, and every word parses back.
 #[test]
 fn sch_runtime_legacy_task_state_vocabulary_is_unchanged() {
-    assert_eq!(LegacyTaskState::Completed.to_string(), "completed");
-    assert_eq!(LegacyTaskState::Interrupt.to_string(), "interrupted");
-    assert_eq!(LegacyTaskState::None.to_string(), "none");
-    assert_eq!(
-        LegacyTaskState::from("interrupted"),
-        LegacyTaskState::Interrupt
-    );
-    assert_eq!(LegacyTaskState::from("error"), LegacyTaskState::Error);
+    assert_eq!(TaskState::Completed.to_string(), "completed");
+    assert_eq!(TaskState::Waiting.to_string(), "interrupted");
+    assert_eq!(TaskState::Created.to_string(), "pending");
+    assert_eq!(TaskState::parse("interrupted"), Some(TaskState::Waiting));
+    assert_eq!(TaskState::parse("error"), Some(TaskState::Failed));
+    assert_eq!(TaskState::parse("none"), None);
 
-    assert!(LegacyTaskState::Completed.is_completed());
-    assert!(LegacyTaskState::Aborted.is_completed());
-    assert!(LegacyTaskState::Error.is_error());
-    assert!(LegacyTaskState::Aborted.is_abort());
-    assert!(LegacyTaskState::Running.is_running());
-    assert!(LegacyTaskState::Pending.is_pending());
-    assert!(LegacyTaskState::Skipped.is_skip());
-    assert!(LegacyTaskState::Interrupt.is_interrupted());
-    assert!(LegacyTaskState::Ready.is_created());
-    assert!(!LegacyTaskState::Running.is_completed());
+    assert!(TaskState::Completed.is_terminal());
+    assert!(TaskState::Aborted.is_terminal());
+    assert!(!TaskState::Running.is_terminal());
+    assert_eq!(TaskState::Failed.as_str(), "error");
+    assert_eq!(TaskState::Aborted.as_str(), "aborted");
+    assert_eq!(TaskState::Running.as_str(), "running");
+    assert_eq!(TaskState::Created.as_str(), "pending");
+    assert_eq!(TaskState::Skipped.as_str(), "skipped");
+    assert_eq!(TaskState::Waiting.as_str(), "interrupted");
+    assert_eq!(TaskState::Ready.as_str(), "ready");
 }
 
 /// `states` reports every node's newest execution and `wait_settled` is the
