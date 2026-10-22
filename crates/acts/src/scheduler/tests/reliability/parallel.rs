@@ -323,7 +323,7 @@ async fn no_created_for(seen: &Arc<Mutex<Vec<(String, String)>>>, tid: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// PARALLEL × DB失败 — a fault under a branch's own projected row
+// PARALLEL × store fault — a fault under a branch's own projected row
 // ---------------------------------------------------------------------------
 
 /// A store fault under a branch row's projection must not refuse, undo or
@@ -464,7 +464,7 @@ async fn a_restart_with_a_branch_in_flight_re_drives_without_re_running_the_sett
 }
 
 // ---------------------------------------------------------------------------
-// PARALLEL × 重复投递 — the duplicate branch completion is refused
+// PARALLEL × duplicate delivery — the duplicate branch completion is refused
 // ---------------------------------------------------------------------------
 
 /// Delivering the same branch completion twice must decide the branch exactly
@@ -549,7 +549,7 @@ async fn a_duplicate_branch_completion_is_refused_without_a_second_generation_in
 }
 
 // ---------------------------------------------------------------------------
-// PARALLEL × 并发 — the two siblings complete at once
+// PARALLEL × concurrency — the two siblings complete at once
 // ---------------------------------------------------------------------------
 
 /// The two siblings completing in the same instant must advance the container
@@ -603,7 +603,7 @@ async fn concurrent_sibling_completions_join_the_container_exactly_once_inner() 
 }
 
 // ---------------------------------------------------------------------------
-// PARALLEL × 容器包 — the packages' inline acts as kernel sub-executions
+// PARALLEL × container packages — the packages' inline acts as kernel sub-executions
 // ---------------------------------------------------------------------------
 
 /// The `acts.core.{parallel,sequence}{ in, acts }` shape: one container step

@@ -125,6 +125,14 @@ pub(crate) trait EffectRunner: Send + Sync {
         false
     }
 
+    /// The package's run-bound kind — the import-time `run_as` decision the
+    /// auto and msg maps were built from. A pushed act is not in those maps
+    /// (the model is immutable), so its push derives the decisions from here
+    /// at push time. `None` for an unregistered package, the `Irq` default.
+    fn run_as(&self, _package: &str) -> Option<crate::ActRunAs> {
+        None
+    }
+
     /// The executor's own observation for `key`. A runner that does not keep
     /// one answers [`EffectObservation::Unknown`], which keeps the operation in
     /// manual reconciliation.
@@ -246,6 +254,13 @@ impl EffectRunner for PackageEffectRunner {
             .get(package)
             .is_some_and(|register| (register.meta)().run_as == ActRunAs::Func)
     }
+
+    fn run_as(&self, package: &str) -> Option<crate::ActRunAs> {
+        self.runtime
+            .package()
+            .get(package)
+            .map(|register| (register.meta)().run_as)
+    }
 }
 
 impl EffectOutcome {
@@ -308,6 +323,7 @@ mod coverage_tests {
                 node: "s1".into(),
                 task_id: TaskId::new("s1", 0).unwrap(),
                 model: Workflow::new().with_step(|step| step.with_id("s1")),
+                pushed: None,
                 vars: Vec::new(),
                 env: Vec::new(),
                 owner: crate::ScopePolicy::deny_all(),

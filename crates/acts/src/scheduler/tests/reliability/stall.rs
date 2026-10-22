@@ -804,7 +804,7 @@ async fn cut_sweep_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// STALL × DB失败 — a stranded operation is re-driven without a restart
+// STALL × store fault — a stranded operation is re-driven without a restart
 // ---------------------------------------------------------------------------
 
 /// A run stranded at its completion's *claim*: the intent is durable and

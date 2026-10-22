@@ -430,40 +430,129 @@ async fn sch_act_irq_waits_for_a_client() {
 }
 
 // ---------------------------------------------------------------------------
-// Unsupported dynamic actions
+// Push and remove — the added and the dropped approver
 // ---------------------------------------------------------------------------
 
-/// `act:push`, `act:remove` and `act:set_process_vars` were the legacy
-/// engine's dynamic surface; the kernel has no wire for them and refuses them
-/// loudly instead of silently downgrading. The waiting act is unaffected.
+/// `Push` adds an act under the waiting execution: the pushed act
+/// announces itself with its own params and waits for its own client, and the
+/// step's own completion waits for it — the added approver must act before
+/// the step completes.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_dynamic_actions_are_refused() {
-    let workflow = irq_workflow("flow-act-unsupported", "s1", "act1");
+async fn sch_act_push_adds_an_act_the_step_waits_for() {
+    let workflow = irq_workflow("flow-act-push", "s1", "act1");
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;
     let created = fixture.wait_created("s1").await;
 
-    for action in [
-        EventAction::Push,
-        EventAction::Remove,
-        EventAction::SetProcessVars,
-    ] {
-        let error = fixture
-            .act(&created.pid, &created.tid, action.clone(), Vars::new())
-            .await
-            .expect_err("the kernel has no dynamic act action");
-        assert!(
-            error
-                .to_string()
-                .contains("not served by the kernel engine"),
-            "{action:?}: {error}"
-        );
-    }
+    fixture
+        .act(
+            &created.pid,
+            &created.tid,
+            EventAction::Push,
+            Vars::new()
+                .with("name", "act 2")
+                .with("uses", crate::utils::test::USES_IRQ)
+                .with("params", Vars::new().with("key", "act2")),
+        )
+        .await
+        .unwrap();
+
+    // The pushed act is a child execution of its own: it announces itself and
+    // waits for its client, exactly like a declared act.
+    let pushed = fixture.wait_created("s1#push1").await;
+    assert_eq!(
+        pushed
+            .params()
+            .expect("the pushed act's resolved params")
+            .get::<String>("key")
+            .as_deref(),
+        Some("act2")
+    );
+    fixture.wait_state("s1#push1", TaskState::Waiting).await;
     assert_eq!(fixture.state("s1").await, TaskState::Waiting);
 
+    // The step's own answer parks it (the legacy `auto_complete` counts every
+    // child task) — it completes only when the pushed act settles.
     fixture.next(&created.pid, &created.tid).await.unwrap();
-    fixture.wait_message("s1", MessageState::Completed).await;
+    fixture.wait_state("s1", TaskState::Running).await;
+    assert_eq!(fixture.state("s1#push1").await, TaskState::Waiting);
+
+    // Answering the pushed act completes the step and the run.
+    fixture.next(&pushed.pid, &pushed.tid).await.unwrap();
+    fixture.wait_state("s1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// `Remove` drops an act: the removed act is decided `Removed` and the
+/// flow continues — a step whose added approver is removed completes once its
+/// own act was answered.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_remove_drops_the_added_act() {
+    let workflow = irq_workflow("flow-act-remove", "s1", "act1");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    fixture
+        .act(
+            &created.pid,
+            &created.tid,
+            EventAction::Push,
+            Vars::new()
+                .with("uses", crate::utils::test::USES_IRQ)
+                .with("params", Vars::new().with("key", "act2")),
+        )
+        .await
+        .unwrap();
+    let pushed = fixture.wait_created("s1#push1").await;
+
+    // Answer the step, then remove the added approver instead of answering it.
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+    fixture.wait_state("s1", TaskState::Running).await;
+    fixture
+        .act(&pushed.pid, &pushed.tid, EventAction::Remove, Vars::new())
+        .await
+        .unwrap();
+
+    fixture.wait_state("s1#push1", TaskState::Removed).await;
+    assert_eq!(
+        fixture.announced("s1#push1"),
+        vec![MessageState::Created, MessageState::Removed]
+    );
+    fixture.wait_state("s1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// A plain `Remove` on a waiting act drops the act itself: the legacy walk
+/// decided the task `Removed` and pushed the flow's next — the run completes
+/// past it. A second remove is refused: the act is settled.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_remove_decides_a_waiting_act_removed_once() {
+    let workflow = irq_workflow("flow-act-remove-self", "s1", "act1");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    fixture
+        .act(&created.pid, &created.tid, EventAction::Remove, Vars::new())
+        .await
+        .unwrap();
+    fixture.wait_state("s1", TaskState::Removed).await;
+    fixture.wait_completed().await;
+
+    let error = fixture
+        .act(&created.pid, &created.tid, EventAction::Remove, Vars::new())
+        .await
+        .expect_err("a settled act takes no further decision");
+    assert!(
+        error.to_string().contains("ActionNotAllowed"),
+        "duplicate remove: {error}"
+    );
     fixture.close().await;
 }
 

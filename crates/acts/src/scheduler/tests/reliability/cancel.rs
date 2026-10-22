@@ -174,7 +174,7 @@ async fn has_pending_operation(engine: &Engine, pid: &str, tid: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// CANCEL × 重复消息 — a duplicate Cancel delivery is refused without a second
+// CANCEL × duplicate delivery — a duplicate Cancel delivery is refused without a second
 // rewind.
 // ---------------------------------------------------------------------------
 
@@ -251,7 +251,7 @@ async fn a_duplicate_cancel_is_refused_and_the_rewind_runs_once_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// CANCEL × DB失败 — a fault the cancel's own durable commit runs into
+// CANCEL × store fault — a fault the cancel's own durable commit runs into
 // ---------------------------------------------------------------------------
 
 /// A store fault under the cancel's own durable commit must reach the client
@@ -336,7 +336,7 @@ async fn a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_on
 }
 
 // ---------------------------------------------------------------------------
-// CANCEL × 并发 — Cancel racing the Next that finishes the same node
+// CANCEL × concurrency — Cancel racing the Next that finishes the same node
 // ---------------------------------------------------------------------------
 
 /// `Cancel` and `Next` fired at the same node in the same instant must

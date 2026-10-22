@@ -290,7 +290,7 @@ async fn a_restart_never_reapplies_a_decided_abort_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// ABORT × 正常 — the act a stop request names is the act that is decided
+// ABORT × normal — the act a stop request names is the act that is decided
 // ---------------------------------------------------------------------------
 
 /// An `Abort` on a waiting act (an irq act is one node that is `Waiting`;
@@ -511,7 +511,7 @@ fn failing_probe_workflow() -> Workflow {
 }
 
 // ---------------------------------------------------------------------------
-// ABORT × 错误 — an effect that fails cannot undo a decision that already landed
+// ABORT × failure — an effect that fails cannot undo a decision that already landed
 // ---------------------------------------------------------------------------
 
 /// An act's own effect, failing after the act was already decided `Aborted`,
@@ -617,7 +617,7 @@ async fn a_failing_effect_cannot_undo_an_abort_decided_while_it_ran_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// ABORT × DB失败 — a fault the abort's own commit runs into
+// ABORT × store fault — a fault the abort's own commit runs into
 // ---------------------------------------------------------------------------
 
 /// A store refused at the moment of the `Abort` action must reach the client
@@ -696,7 +696,7 @@ async fn a_store_fault_at_the_aborts_durable_step_surfaces_and_heals_once_inner(
 }
 
 // ---------------------------------------------------------------------------
-// ABORT × 重复投递 — the duplicate is refused, not re-applied
+// ABORT × duplicate delivery — the duplicate is refused, not re-applied
 // ---------------------------------------------------------------------------
 
 /// Delivering the same `Abort` twice must decide the act exactly once: the
@@ -767,7 +767,7 @@ async fn a_duplicate_abort_delivery_is_refused_without_effect_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// ABORT × 正常 — aborting a waiting act leaves no live downstream work
+// ABORT × normal — aborting a waiting act leaves no live downstream work
 // ---------------------------------------------------------------------------
 
 /// Aborting the waiting act of step1 ends the run: the run reads `aborted`, the
@@ -850,7 +850,7 @@ async fn an_abort_leaves_no_live_downstream_act_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// ABORT × 并发 — abort racing complete on the same act tid converges
+// ABORT × concurrency — abort racing complete on the same act tid converges
 // ---------------------------------------------------------------------------
 
 /// `Next` (complete) and `Abort` fired at the same act in the same instant must

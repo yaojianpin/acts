@@ -123,7 +123,10 @@ impl KernelHost {
         let Some(task) = snapshot.tasks.get(parent) else {
             return Ok(());
         };
-        if self.step_uses(snapshot, &task.model_node)?.is_some() {
+        if self
+            .step_uses(snapshot, parent, &task.model_node)?
+            .is_some()
+        {
             return Ok(());
         }
         if let Some(payload) =

@@ -89,10 +89,13 @@ impl KernelHost {
                 }
                 // A step whose timeout branches are still in flight may not
                 // complete yet: the legacy `auto_complete` counts every child
-                // task, the timeout branches included. The act's own completion
-                // is recorded and the execution waits for them (the container
-                // join finishes it when the last one settles).
-                if self.waits_for_timeouts(snapshot, task_id, task)? {
+                // task, the timeout branches included. A pushed act
+                // under the execution counts the same way. The act's own
+                // completion is recorded and the execution waits for them
+                // (the container join finishes it when the last one settles).
+                if self.waits_for_timeouts(snapshot, task_id, task)?
+                    || self.waits_for_pushed(snapshot, task_id)?
+                {
                     let mut plan =
                         self.park_for_children_plan(snapshot, id, task_id, task, claim, &inputs)?;
                     if let Some(outcome) = effect {
@@ -140,6 +143,15 @@ impl KernelHost {
                 Ok(plan)
             }
             Some(kind) => {
+                // A client `Push` decides nothing on the target: it
+                // creates the pushed act under it. The target's own flow is
+                // untouched — the pushed act announces itself when it starts.
+                if matches!(
+                    kind,
+                    crate::scheduler::core::commit::command::ActionKind::Push
+                ) {
+                    return self.push_plan(snapshot, id, task_id, task, claim, &inputs);
+                }
                 // A client completion of a container dispatches its children
                 // instead of completing it (the legacy `Next` on a running
                 // step) — the step declaring `catches` included: the completion
@@ -154,10 +166,13 @@ impl KernelHost {
                 // A completion of a step whose timeout branches are still in
                 // flight is its *act* completing, not the step: the execution
                 // waits for the branches it fired (see `park_for_children_plan`).
+                // A live pushed act parks it the same way — the added
+                // approver must act before the step completes.
                 if matches!(
                     kind,
                     crate::scheduler::core::commit::command::ActionKind::Complete
-                ) && self.waits_for_timeouts(snapshot, task_id, task)?
+                ) && (self.waits_for_timeouts(snapshot, task_id, task)?
+                    || self.waits_for_pushed(snapshot, task_id)?)
                 {
                     return self
                         .park_for_children_plan(snapshot, id, task_id, task, claim, &inputs);
@@ -319,7 +334,7 @@ impl KernelHost {
             .get(&command.source)
             .map(|task| task.model_node.clone());
         let source_has_package = match &source_node {
-            Some(node) => self.step_uses(snapshot, node)?.is_some(),
+            Some(node) => self.step_uses(snapshot, &command.source, node)?.is_some(),
             None => false,
         };
         if source_has_package
@@ -392,7 +407,9 @@ impl KernelHost {
         // The act did complete: its message rides the record, exactly like a
         // leaf completion's. A package-less execution announces nothing here —
         // it is still running, and only its terminal decision is a message.
-        if self.step_uses(snapshot, &task.model_node)?.is_some()
+        if self
+            .step_uses(snapshot, task_id, &task.model_node)?
+            .is_some()
             && let Some(payload) = self.operation_message_payload(
                 snapshot,
                 task_id,
@@ -406,6 +423,140 @@ impl KernelHost {
         }
         plan.validate().map_err(runtime)?;
         Ok(plan)
+    }
+
+    /// The plan of a client `Push`: a new act under the execution, from
+    /// the act facts the client carried.
+    ///
+    /// The legacy `dispatch_act` grew a dynamic tree node under the acting
+    /// task; the kernel's model is immutable for the life of a run, so the act
+    /// rides the new execution instead — its facts live on the child scope
+    /// ([`crate::scheduler::shell::action::PUSH_ACT_VAR`]) and every model
+    /// lookup for the node falls back to them. The import-time auto/msg maps
+    /// gain the node's entries in the same commit (`auto_decision`/
+    /// `msg_decision` refuse a missing one), and the child is admitted
+    /// `Ready` with its start operation, exactly like a fan-out child.
+    ///
+    /// The target itself is not decided: it stays `Waiting` (or keeps running
+    /// its own act) and parks for the child when its own act is answered —
+    /// the legacy `auto_complete` counted every child task — so the join
+    /// finishes it once the pushed act settles.
+    fn push_plan(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        id: &OperationId,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        task: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
+        claim: &OperationCommit,
+        inputs: &[(String, String)],
+    ) -> Result<TransitionPlan> {
+        let act = crate::scheduler::shell::action::PushedAct::from_inputs(inputs)?;
+        // The pushed node's id: `<target>#push<k>`, unique against every
+        // execution the run ever held, so a replay against the same snapshot
+        // mints the same id (idempotency) and two pushes never collide.
+        let prefix = format!("{}#push", task_id.node.as_str());
+        let nth = snapshot
+            .tasks
+            .keys()
+            .filter(|existing| existing.node.as_str().starts_with(&prefix))
+            .count()
+            + 1;
+        let node = format!("{prefix}{nth}");
+        let child = TaskId::new(&node, 0).map_err(runtime)?;
+
+        // The run-bound decisions the import built for declared nodes: the
+        // pushed package's own `run_as`. An unregistered package is the `Irq`
+        // default — the pushed act waits for its client.
+        let run_as = self
+            .effect
+            .read()
+            .as_ref()
+            .and_then(|runner| runner.run_as(&act.uses));
+        let auto = matches!(run_as, Some(crate::ActRunAs::Func | crate::ActRunAs::Msg));
+        let msg = run_as == Some(crate::ActRunAs::Msg);
+
+        let root = crate::scheduler::core::decision::root_task(snapshot)
+            .ok_or_else(|| ActError::Runtime("the run has no root".to_string()))?;
+        let mut writes = Vec::with_capacity(4);
+        writes.push(VariableWrite {
+            scope: child.clone(),
+            name: crate::scheduler::shell::action::PUSH_ACT_VAR.to_string(),
+            value: act.fact(),
+        });
+        writes.push(VariableWrite {
+            scope: child.clone(),
+            name: "auto".to_string(),
+            value: if auto { "1" } else { "0" }.to_string(),
+        });
+        for (name, map_var) in [
+            (auto, crate::scheduler::shell::model::AUTO_MAP_VAR),
+            (msg, crate::scheduler::shell::model::MSG_MAP_VAR),
+        ] {
+            let mut map: serde_json::Map<String, serde_json::Value> =
+                root_variable(snapshot, map_var)?
+                    .map(|raw| serde_json::from_str(&raw))
+                    .transpose()
+                    .map_err(runtime)?
+                    .unwrap_or_default();
+            map.insert(node.clone(), serde_json::Value::Bool(name));
+            writes.push(VariableWrite {
+                scope: root.clone(),
+                name: map_var.to_string(),
+                value: serde_json::Value::Object(map).to_string(),
+            });
+        }
+
+        let mut plan = self.task_operation_plan(
+            snapshot,
+            id,
+            task_id,
+            Some(task),
+            claim,
+            "pushed",
+            "task.pushed",
+        )?;
+        plan.task_creates
+            .push(crate::scheduler::core::model::transition_plan::TaskCreate {
+                task: child.clone(),
+                model_node: node_id(&node)?,
+                parent: Some(task_id.clone()),
+                predecessors: Vec::new(),
+                initial_state: crate::scheduler::core::model::task_graph::TaskState::Ready,
+            });
+        plan.variable_writes = writes;
+        plan.operations.push(OperationIntent {
+            id: OperationId {
+                process_id: id.process_id.clone(),
+                task: child,
+                sequence: 0,
+            },
+            kind: OperationKind::ExecuteTask,
+            ready_at_ms: None,
+        });
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    /// Whether the execution holds a live child the model does not declare —
+    /// a pushed act still running under it. The legacy `auto_complete`
+    /// counted every child task, so the execution's own completion waits for
+    /// it (the join finishes it once it settles); a declared child — a fanned
+    /// branch, a timeout one — is not: a client completion of a fanned
+    /// container stays the force-finish it always was.
+    fn waits_for_pushed(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    ) -> Result<bool> {
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(false);
+        };
+        let live = snapshot.tasks.iter().any(|(child, task)| {
+            task.parent.as_ref() == Some(task_id)
+                && !task.state.is_terminal()
+                && find_step_in_model(&model, child.node.as_str()).is_none()
+        });
+        Ok(live)
     }
 
     /// Fold one package outcome into the operation's plan: the returned

@@ -20,8 +20,6 @@ pub(crate) const ERROR: &str = "act:error";
 pub(crate) const PUSH: &str = "act:push";
 /// `act:remove` — remove a task from the tree.
 pub(crate) const REMOVE: &str = "act:remove";
-/// `act:set_vars` — write a task's scope vars without changing its state.
-pub(crate) const SET_VARS: &str = "act:set_vars";
 
 #[derive(Clone)]
 pub struct ActExecutor {
@@ -73,11 +71,6 @@ impl ActExecutor {
         self.do_action(pid, tid, EventAction::Remove, options).await
     }
 
-    pub async fn set_process_vars(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::SetProcessVars, options)
-            .await
-    }
-
     /// Run one task action. The action the caller names is the action the
     /// principal is checked against — the wrappers above are spellings of the
     /// same check, never a way around it.
@@ -107,7 +100,6 @@ fn name_of(action: &EventAction) -> &'static str {
         EventAction::Error => ERROR,
         EventAction::Push => PUSH,
         EventAction::Remove => REMOVE,
-        EventAction::SetProcessVars => SET_VARS,
     }
 }
 
@@ -129,7 +121,6 @@ mod tests {
             (EventAction::Error, "act:error"),
             (EventAction::Push, "act:push"),
             (EventAction::Remove, "act:remove"),
-            (EventAction::SetProcessVars, "act:set_vars"),
         ] {
             assert_eq!(name_of(&action), name);
         }

@@ -355,7 +355,7 @@ async fn a_back_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inner(
 }
 
 // ---------------------------------------------------------------------------
-// BACK × DB失败 — the rewind's own durable step breaks once
+// BACK × store fault — the rewind's own durable step breaks once
 // ---------------------------------------------------------------------------
 
 /// A store fault under the back's own durable commit must reach the client
@@ -460,7 +460,7 @@ async fn a_store_fault_at_the_backs_durable_step_surfaces_and_heals_once_inner()
 }
 
 // ---------------------------------------------------------------------------
-// BACK × 重复投递 — the duplicate is refused, not re-applied
+// BACK × duplicate delivery — the duplicate is refused, not re-applied
 // ---------------------------------------------------------------------------
 
 /// Delivering the same `Back` twice must rewind exactly once: the first
@@ -553,7 +553,7 @@ async fn a_duplicate_back_is_refused_without_a_second_rewind_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// BACK × 并发 — Back racing the Next that finishes the same act
+// BACK × concurrency — Back racing the Next that finishes the same act
 // ---------------------------------------------------------------------------
 
 /// `Back` and `Next` fired at the same waiting act in the same instant must

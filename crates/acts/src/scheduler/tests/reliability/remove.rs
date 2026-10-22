@@ -1,39 +1,32 @@
-//! REMOVE reliability cells: the `Remove` client action under a crash and
-//! reload, a store outage, a duplicate delivery, and the sweep of a finished
-//! run's own message and delivery rows.
+//! REMOVE reliability cells: the `Remove` client action under a crash
+//! and reload, a store outage, a duplicate delivery, and the sweep of a
+//! finished run's own message and delivery rows.
 //!
-//! The kernel does not serve `Remove`: `Runtime::kernel_kind` answers `None`
-//! for the wire event, so `do_action` fails the delivery with
-//! `ActError::Action("action Remove is not served by the kernel engine")`
-//! *before* the aggregate is read or written. There is no removal to record,
-//! to replay, or to degrade, and no per-act durable write of one. The three
-//! action cells are therefore stated as the conformance and robustness
-//! properties the kernel does hold, plainly and without weakening:
+//! The kernel serves `Remove` as the legacy engine did: the wire decision is
+//! durable (the `__action` fact and its `ApplyAction` operation commit before
+//! the act is decided), the act is decided `Removed`, its flow continues —
+//! `Removed` schedules the node's successor exactly like the legacy
+//! `push_next` — and the run's rows and aggregate carry the one decision. The
+//! cells pin what a crash, an outage and a redelivery do to that decision:
 //!
-//! - the refusal *is* the delivery's whole effect: it consumes nothing (the
-//!   aggregate's version, executions, operations and outbox identical), so a
-//!   reload has nothing to replay and the run still settles normally;
-//! - the refusal is decided before any store access, so it stays clean while
-//!   the store is refused wholesale — and a *served* action's commit is still
-//!   what surfaces the outage to the client, after which the healed run
-//!   completes exactly once;
-//! - a duplicate delivery of the refusal is indistinguishable from the first:
-//!   both consume nothing, and the run is still fully drivable.
-//!
-//! The fourth legacy cell never sent the action either: it pinned a finished
-//! run's message and delivery rows being swept with its others. The kernel
-//! reaches that same row set through the run's own act messages — the only way
-//! the family exists now — so the cell keeps the legacy mechanism (an ack
-//! channel whose delivery of the act's `Created` must be reclaimed) and the
-//! legacy assertion (the sweep leaves no message and no delivery row).
+//! - a removal survives a crash and reload: the reloaded run still holds the
+//!   removed act, one generation, and the continued flow is drivable once;
+//! - an outage surfaces the store's own failure to the client and decides
+//!   nothing half-way: the healed run is exactly where the wait left it, and
+//!   the retried removal then lands once;
+//! - a duplicate delivery of a decided removal is refused (`ActionNotAllowed`
+//!   on the settled act) and moves nothing;
+//! - a run finished by a removal is swept with its message and delivery rows,
+//!   and no late emission re-creates them.
 
 use std::future::Future;
 use std::time::Instant;
 
 use serial_test::serial;
 
+use crate::ChannelOptions;
+use crate::scheduler::core::model::task_graph::TaskState;
 use crate::store::data::DeliveryStatus;
-use crate::{ActError, ChannelOptions};
 
 use super::*;
 
@@ -62,20 +55,27 @@ async fn waiting_head(engine: &Engine) -> (String, String) {
     (pid, step1)
 }
 
-/// Deliver one `Remove` and assert the kernel's answer to it: the delivery is
-/// refused as an action the kernel does not serve — never a silent `Ok` (a
-/// removal that never happened) and never a store fault (a refusal the client
-/// could retry) — and the answer names that action. Answers the refusal.
-async fn refused_remove(engine: &Engine, pid: &str, tid: &str) -> String {
-    let refusal = match act(engine, pid, tid, EventAction::Remove, Vars::new()).await {
-        Err(ActError::Action(text)) => text,
-        other => panic!("`Remove` must be refused as an unserved action, got {other:?}"),
-    };
-    assert!(
-        refusal.contains("Remove") && refusal.contains("not served by the kernel engine"),
-        "the refusal must name the action the kernel does not serve, got {refusal:?}"
-    );
-    refusal
+/// Deliver one `Remove` and wait until it is decided: the act the delivery
+/// names ends `Removed`, exactly once.
+async fn removed(engine: &Engine, pid: &str, tid: &str) {
+    act(engine, pid, tid, EventAction::Remove, Vars::new())
+        .await
+        .unwrap();
+    let what = format!("{tid} of {pid} to be removed");
+    poll_until(&what, || async {
+        let snapshot = engine
+            .runtime()
+            .kernel()
+            .snapshot(pid)
+            .await
+            .unwrap()
+            .expect("the aggregate of a live run exists");
+        snapshot
+            .tasks
+            .iter()
+            .any(|(id, task)| id.wire(pid) == tid && task.state == TaskState::Removed)
+    })
+    .await;
 }
 
 /// One run's durable decision point, as comparable pieces. A client delivery
@@ -225,95 +225,76 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// REMOVE × 重启 — the legacy cell replayed a pending remove record; the kernel
-// never records one.
+// REMOVE × reload — a decided removal is durable: the reload finds it, once.
 // ---------------------------------------------------------------------------
 
-/// The legacy cell pinned a `Remove` whose action record had landed but whose
-/// effects had not, replayed exactly once by recovery on reload, and pinned the
-/// removal's own durable act row (`Removed`). The kernel does not serve
-/// `Remove`: `kernel_kind` answers `None` and the delivery fails with the
-/// action error before the aggregate is touched, so nothing about it is ever
-/// durable and there is no record for a reload to replay, and the act it would
-/// have decided never leaves `Waiting`.
-///
-/// So the cell pins the conformance half of the legacy intent — the half the
-/// kernel holds — and says plainly what replaced the other: the refusal consumes
-/// nothing (version, executions, operations and outbox identical) and leaves the
-/// run fully drivable, and after a crash and reload over the same store the run
-/// still holds its one waiting generation and settles normally through both
-/// steps. A reload that found (or invented) a removal would show a changed
-/// execution set here — a second generation, or the head act no longer waiting —
-/// and the legacy failure mode (a dropped replay leaving the act stuck) cannot
-/// arise, because there is nothing to replay or drop.
+/// The legacy cell pinned a `Remove` replayed exactly once by recovery on
+/// reload, and the removal's own durable act row (`Removed`). The kernel's
+/// removal is the same durable decision: the wire fact and its operation
+/// commit before the act is decided, so the reloaded run still holds the
+/// removed act — one generation, never re-decided — and the flow the removal
+/// pushed forward (`Removed` schedules the successor, the legacy `push_next`)
+/// is drivable exactly once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_remove_refused_remove_consumes_nothing_and_is_not_replayed_on_reload() {
+async fn sch_remove_removed_act_survives_a_reload_and_runs_forward_once() {
     bounded(
-        "sch_remove_refused_remove_consumes_nothing_and_is_not_replayed_on_reload",
-        a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload_inner(),
+        "sch_remove_removed_act_survives_a_reload_and_runs_forward_once",
+        a_removed_act_survives_a_reload_and_runs_forward_once_inner(),
     )
     .await;
 }
 
-async fn a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload_inner() {
+async fn a_removed_act_survives_a_reload_and_runs_forward_once_inner() {
     let kv = FaultKv::new();
     let store = kv.store();
     let engine = engine_on(store.clone()).await;
+
+    // the propagated act is registered before the removal, so the flow the
+    // removal pushes forward cannot be missed
+    let next = capture_created(&engine, "act2");
     let (pid, step1) = waiting_head(&engine).await;
-    let before = settled_shape(&engine, &pid).await;
 
-    // the delivery the legacy engine recorded and replayed
-    let refusal = refused_remove(&engine, &pid, &step1).await;
-    println!("remove refused: {refusal}");
+    // the removal: the act is decided `Removed`, the flow continues to step2
+    removed(&engine, &pid, &step1).await;
+    let (_, step2) = expect_created(&next).await;
     assert_eq!(
-        kv.fired(),
-        0,
-        "the refusal is decided before the aggregate is touched, so it may not write at all"
+        step2,
+        tid_of(&pid, "step2", 0),
+        "the removed act's flow continues to the next node"
     );
+    wait_waiting_task(&engine, &pid, "step2").await;
+    flush(&engine).await;
 
-    // the refusal consumed nothing: the run's durable shape is exactly what the
-    // waiting act left
-    let after = settled_shape(&engine, &pid).await;
-    assert_eq!(
-        after.version, before.version,
-        "a refused `Remove` must not land a commit"
-    );
-    assert_eq!(
-        after.tasks, before.tasks,
-        "a refused `Remove` must not decide anything, got {}",
-        after.tasks
-    );
-    assert_eq!(
-        after.scheduled, before.scheduled,
-        "a refused `Remove` must not schedule anything, got {}",
-        after.scheduled
-    );
-
-    // the crash and the reload: the refusal was never recorded, so the fresh
-    // boot has nothing to replay
+    // the crash and the reload: the removal is durable — the reloaded run
+    // holds the removed act (one generation) and the waiting successor
     let reloaded = restart(&engine, store.clone()).await;
-    wait_waiting_task(&reloaded, &pid, "step1").await;
+    wait_waiting_task(&reloaded, &pid, "step2").await;
+    let snapshot = reloaded
+        .runtime()
+        .kernel()
+        .snapshot(&pid)
+        .await
+        .unwrap()
+        .expect("the reloaded aggregate exists");
+    assert!(
+        snapshot
+            .tasks
+            .iter()
+            .any(|(id, task)| id.wire(&pid) == step1 && task.state == TaskState::Removed),
+        "the reload must hold the removal it committed: {:?}",
+        snapshot.tasks
+    );
     assert_eq!(
         generations(&reloaded, &pid, &step1).await,
         vec![0],
-        "a reload must not re-decide the refused act (no rewind, no second generation)"
-    );
-    let replayed = settled_shape(&reloaded, &pid).await;
-    assert_eq!(
-        replayed.tasks, before.tasks,
-        "the reloaded run must hold the decisions the refusal left, got {}",
-        replayed.tasks
+        "the reload must not re-decide the removed act (no rewind, no second generation)"
     );
 
-    // still fully drivable to the normal settlement, once
-    drive_to_settled(&reloaded, &pid, &step1).await;
+    // the continued flow finishes once
+    complete_act(&reloaded, &pid, &step2).await.unwrap();
+    wait_completed(&reloaded, &pid).await;
     assert_settled(&reloaded, &pid).await;
-    assert_eq!(
-        generations(&reloaded, &pid, &step1).await,
-        vec![0],
-        "the head act ran once"
-    );
     assert_eq!(
         generations(&reloaded, &pid, "step2").await,
         vec![0],
@@ -324,38 +305,27 @@ async fn a_refused_remove_consumes_nothing_and_is_not_replayed_on_reload_inner()
 }
 
 // ---------------------------------------------------------------------------
-// REMOVE × DB失败 — the legacy cell degraded a failed removal write and healed;
-// the kernel refuses the delivery before the store.
+// REMOVE × store fault — an outage decides nothing half-way; the retry lands once.
 // ---------------------------------------------------------------------------
 
 /// The legacy cell failed the durable write of the removal's state once and
 /// pinned the graceful degradation: the fault surfaced at the durability
-/// barrier, the act still read `Removed` in memory, and the engine's own
-/// follow-up writes re-persisted it exactly once. The kernel does not serve
-/// `Remove`, and its refusal is decided *before* any store access: a store that
-/// is down cannot turn the refusal into a store fault, and there is no removal
-/// state write the outage could land half-way. The nearest property is
-/// therefore the robustness one, and it is stronger, not weaker: the refusal
-/// consumes nothing under the outage, and the outage is still surfaced to the
-/// client by the commit of a *served* action on the same waiting act (the
-/// client is handed the store's own failure, which the kernel wraps in its
-/// runtime error).
-///
-/// The healed run is then driven to its normal settlement with one generation
-/// per node: the outage left no partial decision for recovery to complete later
-/// (which would show as a second generation, or as an act that no longer
-/// waits), so the work happens exactly once.
+/// barrier and the act was not left half-decided. The kernel's removal is a
+/// committed decision, so an outage surfaces the store's own failure to the
+/// client and commits nothing — the healed run is exactly where the wait left
+/// it (the act still waits, no parked intent surfaces), and the retried
+/// removal then lands exactly once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_remove_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once() {
+async fn sch_remove_outage_decides_nothing_half_way_and_the_retry_lands_once() {
     bounded(
-        "sch_remove_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once",
-        a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once_inner(),
+        "sch_remove_outage_decides_nothing_half_way_and_the_retry_lands_once",
+        an_outage_decides_nothing_half_way_and_the_retry_lands_once_inner(),
     )
     .await;
 }
 
-async fn a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_once_inner() {
+async fn an_outage_decides_nothing_half_way_and_the_retry_lands_once_inner() {
     let kv = OutageKv::new();
     let engine = engine_on(kv.store()).await;
     let (pid, step1) = waiting_head(&engine).await;
@@ -364,30 +334,24 @@ async fn a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_on
     // the store goes away
     kv.down();
 
-    // the refusal is decided before any store access, so the outage cannot turn
-    // it into a store fault — the client gets the action error either way
-    let refusal = refused_remove(&engine, &pid, &step1).await;
-    println!("remove refused while the store is down: {refusal}");
-
-    // the outage is still surfaced by the engine, on the path that does need
-    // the store: a served action's commit is the store's to refuse, and the
-    // client is told *that* — the store's own failure, wrapped by the kernel in
-    // its runtime error — rather than a silent success or the action refusal
+    // the removal's commit is the store's to refuse, and the client is told
+    // *that* — the store's own failure, wrapped by the kernel in its runtime
+    // error — rather than a silent success
     let attempts_before = kv.reads() + kv.writes();
-    let failure = match complete_act(&engine, &pid, &step1).await {
+    let failure = match act(&engine, &pid, &step1, EventAction::Remove, Vars::new()).await {
         Err(err) => err.to_string(),
-        Ok(()) => panic!("a store that refuses a served action's commit must not report success"),
+        Ok(()) => panic!("a store that refuses a removal's commit must not report success"),
     };
     assert!(
         failure.contains("store is down"),
-        "the refusal must carry the store's own failure to the client, got {failure:?}"
+        "the failed removal must carry the store's own failure to the client, got {failure:?}"
     );
     assert!(
         kv.reads() + kv.writes() > attempts_before,
-        "the refused commit must have attempted the store"
+        "the removal must have attempted the store"
     );
 
-    // the outage consumed nothing: the healed run is exactly where the refusal
+    // the outage committed nothing: the healed run is exactly where the wait
     // left it, and no parked decision surfaces once the store is back
     kv.heal();
     let after = settled_shape(&engine, &pid).await;
@@ -402,18 +366,28 @@ async fn a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_on
     );
     assert_eq!(
         after.scheduled, before.scheduled,
-        "the refused deliveries must leave nothing scheduled, got {}",
+        "the failed removal must leave nothing scheduled, got {}",
         after.scheduled
     );
 
-    // healed: the same two-step run completes exactly once
-    wait_waiting_task(&engine, &pid, "step1").await;
-    drive_to_settled(&engine, &pid, &step1).await;
+    // healed: the retried removal lands once, the flow continues, and the run
+    // completes exactly once
+    removed(&engine, &pid, &step1).await;
+    let created = capture_created(&engine, "act2");
+    let (_, step2) = expect_created(&created).await;
+    assert_eq!(
+        step2,
+        tid_of(&pid, "step2", 0),
+        "the removed act's flow continues to the next node"
+    );
+    wait_waiting_task(&engine, &pid, "step2").await;
+    complete_act(&engine, &pid, &step2).await.unwrap();
+    wait_completed(&engine, &pid).await;
     assert_settled(&engine, &pid).await;
     assert_eq!(
         generations(&engine, &pid, &step1).await,
         vec![0],
-        "the head act ran once"
+        "the removed act kept its one generation"
     );
     assert_eq!(
         generations(&engine, &pid, "step2").await,
@@ -425,71 +399,55 @@ async fn a_refused_remove_during_an_outage_consumes_nothing_and_still_settles_on
 }
 
 // ---------------------------------------------------------------------------
-// REMOVE × 重复消息 — the duplicate delivery is refused without effect.
+// REMOVE × duplicate delivery — the duplicate delivery of a decided removal is refused.
 // ---------------------------------------------------------------------------
 
 /// The legacy cell delivered `Remove` twice and pinned that the second delivery
-/// decided nothing further (one act removed, no duplicate task, the sibling
-/// untouched). The kernel does not serve `Remove`, but the delivery is still a
-/// decision the kernel refuses: both deliveries get the same verdict, and each
-/// leaves the aggregate exactly as it was — the version, the executions and the
-/// scheduled set after the second delivery are the ones after the first — so the
-/// duplicate is a no-op for a structural reason (the refusal precedes the
-/// aggregate) rather than a guard that happens to hold for the state.
-///
-/// The run is then driven through both steps: a refused duplicate may not have
-/// propagated or scheduled anything, so the normal path still completes once.
+/// decided nothing further: one act removed, no duplicate task, the sibling
+/// untouched. The kernel refuses the duplicate by the state table itself — a
+/// `Removed` execution takes no further decision (`ActionNotAllowed`) — so the
+/// duplicate moves neither the version nor the executions, and the run the
+/// first removal pushed forward still finishes once.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_remove_duplicate_remove_delivery_is_refused_without_effect() {
+async fn sch_remove_duplicate_delivery_is_refused_without_effect() {
     bounded(
-        "sch_remove_duplicate_remove_delivery_is_refused_without_effect",
-        a_duplicate_remove_delivery_is_refused_without_effect_inner(),
+        "sch_remove_duplicate_delivery_is_refused_without_effect",
+        a_duplicate_delivery_is_refused_without_effect_inner(),
     )
     .await;
 }
 
-async fn a_duplicate_remove_delivery_is_refused_without_effect_inner() {
+async fn a_duplicate_delivery_is_refused_without_effect_inner() {
     let engine = engine_on(FaultKv::new().store()).await;
     let (pid, step1) = waiting_head(&engine).await;
-    let before = settled_shape(&engine, &pid).await;
 
-    let first = refused_remove(&engine, &pid, &step1).await;
+    // the first removal decides the act and pushes the flow forward
+    let next = capture_created(&engine, "act2");
+    removed(&engine, &pid, &step1).await;
+    let (_, step2) = expect_created(&next).await;
+    wait_waiting_task(&engine, &pid, "step2").await;
+    flush(&engine).await;
     let after_first = settled_shape(&engine, &pid).await;
-    assert_eq!(
-        after_first.version, before.version,
-        "the first refusal must consume nothing"
-    );
-    assert_eq!(
-        after_first.tasks, before.tasks,
-        "the first refusal must not decide anything, got {}",
-        after_first.tasks
-    );
-    assert_eq!(
-        after_first.scheduled, before.scheduled,
-        "the first refusal must not schedule anything, got {}",
-        after_first.scheduled
-    );
 
-    // the duplicate: the same delivery, on the same waiting act
-    let second = refused_remove(&engine, &pid, &step1).await;
-    println!("remove refused twice: {first} / {second}");
-    assert_eq!(
-        second, first,
-        "the duplicate must be refused with the same verdict"
+    // the duplicate: the same delivery, on the act the first one removed
+    let error = match act(&engine, &pid, &step1, EventAction::Remove, Vars::new()).await {
+        Err(err) => err.to_string(),
+        Ok(()) => panic!("a decided act takes no further removal"),
+    };
+    assert!(
+        error.contains("ActionNotAllowed"),
+        "a decided act takes no further removal, got {error:?}"
     );
+    println!("duplicate remove refused: {error}");
     let after_second = settled_shape(&engine, &pid).await;
-    println!(
-        "the decision point both refusals left: {} | {}",
-        after_second.version, after_second.tasks
-    );
     assert_eq!(
         after_second.version, after_first.version,
-        "the duplicate must not move the version the first refusal left"
+        "the duplicate must not move the version the first removal left"
     );
     assert_eq!(
         after_second.tasks, after_first.tasks,
-        "the duplicate must not move the executions, got {}",
+        "the duplicate must not decide anything further, got {}",
         after_second.tasks
     );
     assert_eq!(
@@ -498,28 +456,29 @@ async fn a_duplicate_remove_delivery_is_refused_without_effect_inner() {
         after_second.scheduled
     );
 
-    // nothing moved in the read model either: the head act still waits, and the
-    // forward act was never dispatched by either refusal
+    // the read model: the removed act kept its row, the sibling was never
+    // duplicated by the redelivery
     let proc = read_proc(&engine, &pid).await;
+    let states: Vec<String> = task_snapshot(&proc)
+        .iter()
+        .map(|(tid, state)| format!("{tid}={state}"))
+        .collect();
     assert!(
-        waiting_task(&proc, "step1").is_some(),
-        "the refusals must leave the head act waiting, got {:?}",
-        task_snapshot(&proc)
+        states
+            .iter()
+            .any(|s| s.contains(&format!("{step1}=removed"))),
+        "the head act must read removed, got {states:?}"
     );
-    assert!(
-        waiting_task(&proc, "step2").is_none(),
-        "a refused `Remove` must not propagate to the sibling, got {:?}",
-        task_snapshot(&proc)
-    );
-
-    // and the run still finishes normally through both steps
-    drive_to_settled(&engine, &pid, &step1).await;
-    assert_settled(&engine, &pid).await;
     assert_eq!(
         generations(&engine, &pid, &step1).await,
         vec![0],
-        "the head act ran once"
+        "the duplicate must not grow a second generation"
     );
+
+    // and the continued flow still finishes once
+    complete_act(&engine, &pid, &step2).await.unwrap();
+    wait_completed(&engine, &pid).await;
+    assert_settled(&engine, &pid).await;
     assert_eq!(
         generations(&engine, &pid, "step2").await,
         vec![0],
@@ -530,26 +489,19 @@ async fn a_duplicate_remove_delivery_is_refused_without_effect_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// REMOVE × 完成清理 — a finished run is swept with its message and delivery
+// REMOVE × sweep — a finished run is swept with its message and delivery
 // rows.
 // ---------------------------------------------------------------------------
 
 /// The legacy cell pinned that a finished process is cleaned up together with
 /// the message and delivery rows its ack channel stored, and that no in-flight
-/// emission re-creates them afterwards. The kernel keeps the same two facts,
-/// reached through the run's own act rather than the action: an ack channel
-/// handed the act's `Created` stores a canonical message row plus that
-/// channel's delivery row, the row stays open while the act runs, and the act's
-/// terminal state *closes* it (`close_deliveries`) — which is what lets the
-/// finished run be marked removable and swept, message and delivery rows
-/// included.
-///
-/// So the cell proves the row set exists first (message and delivery both
-/// present, the delivery still open), then that the sweep leaves neither behind
-/// and that a late emission of the finished run cannot resurrect either. The
-/// legacy cell's terminal-event drain is what this closing rule replaces: a
-/// delivery that reached the store after its task closed is born `Completed`
-/// there, so it can never hold the run out of the sweeper.
+/// emission re-creates them afterwards. The finish it waits for now goes
+/// through the restored action itself: a `Remove` decides the act, the run
+/// completes, and the same two facts hold — an ack channel handed the act's
+/// `Created` stores a canonical message row plus that channel's delivery row,
+/// the row stays open while the act runs, and the act's terminal state
+/// (`Removed` included) *closes* it — which is what lets the finished run be
+/// marked removable and swept, message and delivery rows included.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_remove_completed_run_is_swept_with_its_message_and_delivery_rows() {
@@ -611,9 +563,9 @@ async fn a_completed_run_is_swept_with_its_message_and_delivery_rows_inner() {
         "the delivery must still be open while the act it carries runs: {deliveries:?}"
     );
 
-    // the run finishes through its act: the terminal task closes that delivery,
-    // and the finished run hands every row to the sweeper
-    complete_act(&engine, &pid, &tid).await.unwrap();
+    // the run finishes by removing its act: the terminal task closes that
+    // delivery, and the finished run hands every row to the sweeper
+    removed(&engine, &pid, &tid).await;
     wait_completed(&engine, &pid).await;
     sweep_until_gone(&engine, &pid).await;
 

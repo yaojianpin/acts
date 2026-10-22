@@ -78,9 +78,14 @@ pub(crate) struct Propagate;
 /// The terminal states a join accepts as "this predecessor is done and the
 /// flow may continue". `Skipped` is deliberately absent: a skipped
 /// predecessor means the path is dead (a cancellation cascade flowed through
-/// it), so its successors are skipped too instead of running.
+/// it), so its successors are skipped too instead of running. `Removed` is
+/// present: the legacy `Remove` walk pushed the flow's next exactly like a
+/// completion — a remove drops the act, not the flow.
 fn is_success(state: TaskState) -> bool {
-    matches!(state, TaskState::Completed | TaskState::Submitted)
+    matches!(
+        state,
+        TaskState::Completed | TaskState::Submitted | TaskState::Removed
+    )
 }
 
 mod cascade;

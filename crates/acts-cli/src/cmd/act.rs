@@ -135,7 +135,7 @@ pub async fn process(parent: &mut Command<'_>, command: &ActCommands) -> anyhow:
             vars.push(("to".to_string(), json!(to)));
             send(parent, "act:back", pid, tid, &vars).await
         }
-        ActCommands::Push { pid, tid, vars } => send(parent, "push", pid, tid, vars).await,
+        ActCommands::Push { pid, tid, vars } => send(parent, "act:push", pid, tid, vars).await,
         ActCommands::Remove { pid, tid, vars } => send(parent, "act:remove", pid, tid, vars).await,
     }?;
 

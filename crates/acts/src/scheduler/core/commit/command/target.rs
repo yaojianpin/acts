@@ -22,6 +22,9 @@ pub(super) fn action_target(
         (S::Running | S::Waiting, A::Abort) => Ok(S::Aborted),
         (S::Waiting, A::Back) => Ok(S::Backed),
         (S::Running | S::Waiting, A::Fail { .. }) => Ok(S::Failed),
+        // Remove — a running or waiting act is dropped; the legacy walk decided
+        // the same states (`Removed` on a live task, refused on a settled one).
+        (S::Running | S::Waiting, A::Remove) => Ok(S::Removed),
         (_, action) => Err(CommandError::ActionNotAllowed {
             state: current,
             action: action.clone(),
@@ -32,7 +35,11 @@ pub(super) fn action_target(
 /// Whether `action` is admissible on an execution in `state` — the guard
 /// `action_target` applies, exposed so a recovering operation can tell a *live*
 /// durable decision (which it must replay) from a stale one whose target moved
-/// past it while the intent was in flight.
+/// past it while the intent was in flight. `Push` decides no state: it is
+/// admissible on exactly the states a decision may reach.
 pub(crate) fn action_allowed(current: TaskState, action: &ActionKind) -> bool {
+    if matches!(action, ActionKind::Push) {
+        return matches!(current, TaskState::Running | TaskState::Waiting);
+    }
     action_target(current, action).is_ok()
 }

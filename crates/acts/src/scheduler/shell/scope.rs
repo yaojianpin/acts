@@ -38,6 +38,12 @@ pub(crate) struct ScopeSpec {
     pub(crate) task_id: crate::scheduler::core::model::task_graph::TaskId,
     /// The declaring model, for the headless scope's node.
     pub(crate) model: Workflow,
+    /// The pushed act's synthetic step: the declaring model is
+    /// immutable for the life of a run, so a pushed act's node is not in it —
+    /// the act rides its execution (`__act`), and this is the step the
+    /// headless scope resolves its params and options through. `None` for
+    /// every declared node.
+    pub(crate) pushed: Option<crate::model::Step>,
     /// The acting execution's scope chain (nearest wins) as JSON strings,
     /// seeded into the headless task so `$`-expressions resolve.
     pub(crate) vars: Vec<(String, String)>,
@@ -299,8 +305,14 @@ pub(crate) fn headless_scope(
         env.set(name, value.clone());
     }
 
-    let content = node_content(&spec.model, &spec.node)
-        .ok_or_else(|| crate::ActError::Runtime(format!("model has no node '{}'", spec.node)))?;
+    let content = match node_content(&spec.model, &spec.node) {
+        Some(content) => content,
+        // A pushed act's node exists only as its own fact (see
+        // [`ScopeSpec::pushed`]).
+        None => NodeContent::Step(spec.pushed.clone().ok_or_else(|| {
+            crate::ActError::Runtime(format!("model has no node '{}'", spec.node))
+        })?),
+    };
     let scope = Scope::headless(&spec.process_id, env);
     // The headless task is never durable or projected; its id is the acting
     // instance's wire, so a package that forwards a client command
@@ -432,6 +444,7 @@ mod tests {
             node: node.into(),
             task_id: TaskId::new(node, 0).unwrap(),
             model: model(),
+            pushed: None,
             vars: vec![
                 ("v".into(), "1".into()),
                 ("__private".into(), "2".into()),

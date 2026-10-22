@@ -37,7 +37,8 @@ The client can also use `do_action2` to perform the following operations to affe
 | Skip | `Skip` | Skip current activity |
 | Abort | `Abort` | Abort current activity |
 | Error | `Error` | Mark activity as error |
-| Remove | `Remove` | Remove activity |
+| Push | `Push` | Push a new act under the current activity (add an approver) |
+| Remove | `Remove` | Remove activity (drop an approver) |
 
 ```rust
 // Complete activity

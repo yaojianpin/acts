@@ -36,6 +36,25 @@ impl ActionPlanner {
             .tasks
             .get(&command.task)
             .ok_or_else(|| CommandError::TaskNotFound(command.task.clone()))?;
+        // `Push` decides no state: its preflight is the admissibility guard
+        // alone, and the plan that creates the pushed act is the shell's own
+        // (`KernelHost::push_plan`) — the client inputs describe the new act,
+        // they are not the target's scope writes.
+        if matches!(
+            command.action,
+            crate::scheduler::core::commit::command::ActionKind::Push
+        ) {
+            if !crate::scheduler::core::commit::command::action_allowed(
+                current.state,
+                &command.action,
+            ) {
+                return Err(CommandError::ActionNotAllowed {
+                    state: current.state,
+                    action: command.action.clone(),
+                });
+            }
+            return Self::bare_plan(snapshot, command);
+        }
         let target = action_target(current.state, &command.action)?;
         let writes = variable_writes(command)?;
         let next_sequence = command
@@ -63,30 +82,48 @@ impl ActionPlanner {
                 ready_at_ms: None,
             }]
         };
+        let mut plan = Self::bare_plan(snapshot, command)?;
+        plan.state_changes = vec![StateChange {
+            task: command.task.clone(),
+            expected_revision: current.revision,
+            from: current.state,
+            to: target,
+        }];
+        plan.variable_writes = writes;
+        plan.operations = operations;
+        plan.outbox = vec![OutboxIntent {
+            key: format!(
+                "action:{}:{}:{}:{}",
+                command.process_id,
+                command.task.node.as_str(),
+                command.task.generation,
+                command.source_operation.id.sequence
+            ),
+            topic: format!("task.{}", action_name(&command.action)),
+            payload: format!("{}:{}", command.task.node.as_str(), command.task.generation),
+        }];
+        plan.validate()
+            .map_err(|error| CommandError::InvalidPlan(error.to_string()))?;
+        Ok(plan)
+    }
+
+    /// The envelope every decision plan shares: the version guard and the
+    /// source operation's own commit. A `Push` preflight is exactly this —
+    /// the state table decided nothing and the client inputs belong to the
+    /// pushed act, not to the target's scope.
+    fn bare_plan(
+        snapshot: &ProcessSnapshot,
+        command: &ActionCommand,
+    ) -> Result<TransitionPlan, CommandError> {
         let plan = TransitionPlan {
             process_id: command.process_id.clone(),
             expected: snapshot.version.clone(),
             task_creates: Vec::new(),
-            state_changes: vec![StateChange {
-                task: command.task.clone(),
-                expected_revision: current.revision,
-                from: current.state,
-                to: target,
-            }],
-            variable_writes: writes,
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
             source_operation: Some(command.source_operation.clone()),
-            operations,
-            outbox: vec![OutboxIntent {
-                key: format!(
-                    "action:{}:{}:{}:{}",
-                    command.process_id,
-                    command.task.node.as_str(),
-                    command.task.generation,
-                    command.source_operation.id.sequence
-                ),
-                topic: format!("task.{}", action_name(&command.action)),
-                payload: format!("{}:{}", command.task.node.as_str(), command.task.generation),
-            }],
+            operations: Vec::new(),
+            outbox: Vec::new(),
         };
         plan.validate()
             .map_err(|error| CommandError::InvalidPlan(error.to_string()))?;

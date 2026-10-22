@@ -611,7 +611,7 @@ impl ActsChannel {
         T: Serialize + DeserializeOwned,
     {
         self.send(
-            "act:remove",
+            "act:abort",
             Vars::new().with("pid", pid).with("tid", tid).extend(&data),
         )
         .await

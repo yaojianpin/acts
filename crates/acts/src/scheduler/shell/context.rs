@@ -297,6 +297,7 @@ mod tests {
                     step.with_id("s1")
                         .with_uses("test.irq", Vars::new().with("p", "${{ v }}"))
                 }),
+            pushed: None,
             vars,
             env: vec![("declared".into(), serde_json::json!("from-env"))],
             owner,

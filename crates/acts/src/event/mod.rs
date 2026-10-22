@@ -41,7 +41,6 @@ pub enum EventAction {
     Error,
     Push,
     Remove,
-    SetProcessVars,
 }
 
 impl EventAction {
@@ -96,10 +95,8 @@ mod tests {
     #[test]
     fn parse_accepts_a_wire_name_and_reports_an_unknown_one() {
         assert_eq!(EventAction::parse("next").unwrap(), EventAction::Next);
-        assert_eq!(
-            EventAction::parse("set_process_vars").unwrap(),
-            EventAction::SetProcessVars
-        );
+        assert_eq!(EventAction::parse("push").unwrap(), EventAction::Push);
+        assert_eq!(EventAction::parse("remove").unwrap(), EventAction::Remove);
         let err = EventAction::parse("no_such_action").unwrap_err();
         assert!(
             err.to_string()
@@ -112,7 +109,8 @@ mod tests {
     fn display_matches_the_wire_name() {
         assert_eq!(EventAction::Next.to_string(), "next");
         assert_eq!(EventAction::Submit.to_string(), "submit");
-        assert_eq!(EventAction::SetProcessVars.to_string(), "set_process_vars");
+        assert_eq!(EventAction::Push.to_string(), "push");
+        assert_eq!(EventAction::Remove.to_string(), "remove");
     }
 
     #[test]

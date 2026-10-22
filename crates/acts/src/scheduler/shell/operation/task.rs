@@ -110,7 +110,9 @@ impl ActOperation for ExecuteTask {
         // exists for every package step, with or without a runner attached
         // (the payload then carries the raw declared params).
         let package = match task {
-            Some(task) => host.step_uses(snapshot, &task.model_node)?.is_some(),
+            Some(task) => host
+                .step_uses(snapshot, task_id, &task.model_node)?
+                .is_some(),
             None => false,
         };
         let start = if !package || announced {

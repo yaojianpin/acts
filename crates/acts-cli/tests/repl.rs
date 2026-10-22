@@ -774,9 +774,10 @@ async fn the_message_commands_read_and_settle_deliveries() {
 }
 
 /// Every `act` verb against live irq tasks: the actions the kernel serves move
-/// their own run, and what the server refuses — push/remove, which have no
-/// kernel action, and the legacy rewind guards (a cancel with no forward step,
-/// a back from a running task) — is reported as an error naming the action.
+/// their own run, and what the server refuses — a push without its `uses`, a
+/// removal of a decided act, and the legacy rewind guards (a cancel with no
+/// forward step, a back from a running task) — is reported as an error naming
+/// the action.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_act_commands_drive_live_tasks() {
     common::with_server("acts", true, |_engine, url| async move {
@@ -832,20 +833,24 @@ async fn the_act_commands_drive_live_tasks() {
             "unexpected error: {err:#}"
         );
 
-        // push/remove have no kernel action: the refusal names what was asked
-        for verb in ["push", "remove"] {
-            let err = cli
-                .run(&format!("act {verb} {} {}", pids[1], tids[1]))
-                .await
-                .unwrap_err();
-            let text = format!("{err:#}");
-            // `push` reaches the dispatch table as the bare action it names,
-            // `remove` as `act:remove`; both are refused by the server
-            assert!(
-                text.contains(verb),
-                "unexpected error for act {verb}: {text}"
-            );
-        }
+        // push names the act it creates: without `uses` the server answers the
+        // legacy caller error; a decided act (completed above) takes no removal
+        let err = cli
+            .run(&format!("act push {} {}", pids[1], tids[1]))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("uses"),
+            "unexpected error for act push: {err:#}"
+        );
+        let err = cli
+            .run(&format!("act remove {} {}", pids[1], tids[1]))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("ActionNotAllowed"),
+            "unexpected error for act remove: {err:#}"
+        );
 
         // a run the server never saw is a refusal naming the action
         let err = cli.run("act submit missing missing").await.unwrap_err();

@@ -362,7 +362,7 @@ async fn wait_rows_settled(engine: &Engine, pid: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// NEXT × DB失败 — a fault under the scheduled step's own row
+// NEXT × store fault — a fault under the scheduled step's own row
 // ---------------------------------------------------------------------------
 
 /// A store fault under the *row* of the step a propagation schedules must not
@@ -478,7 +478,7 @@ async fn a_store_fault_under_the_scheduled_steps_row_is_absorbed_and_the_run_fin
 }
 
 // ---------------------------------------------------------------------------
-// NEXT × DB失败 — a fault under the propagation's own durable commit
+// NEXT × store fault — a fault under the propagation's own durable commit
 // ---------------------------------------------------------------------------
 
 /// A store that refuses the run's own durable commit — the only place the kernel
@@ -1064,7 +1064,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
 }
 
 // ---------------------------------------------------------------------------
-// NEXT × 子任务 — a container waits for the last of its children
+// NEXT × children — a container waits for the last of its children
 // ---------------------------------------------------------------------------
 
 /// A container may not finish before the last child it joins on does. The kernel

@@ -1,6 +1,7 @@
 use acts::{Executor, Message, MessageState, Result, Vars};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct User<'a> {
@@ -9,19 +10,24 @@ pub struct User<'a> {
     pub name: &'a str,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default)]
 pub struct Client<'a> {
     users: HashMap<String, Vec<User<'a>>>,
+    /// The `pm_review` act, held so the countersign flow can answer it after
+    /// the added approver is dropped: `pm_review` is pushed an added approver
+    /// on its own `Created`, and only completed once that push is removed.
+    pm_review: Mutex<Option<(String, String)>>,
 }
 
 impl<'a> Client<'a> {
     pub fn new() -> Self {
         Client {
-            users: HashMap::new(),
+            ..Default::default()
         }
     }
 
     pub fn init(&mut self) {
+        // the pm role: John and Rose
         self.add_user(
             User {
                 id: "1",
@@ -36,6 +42,7 @@ impl<'a> Client<'a> {
             },
             "pm",
         );
+        // the gm role: Tom
         self.add_user(
             User {
                 id: "3",
@@ -44,6 +51,7 @@ impl<'a> Client<'a> {
             "gm",
         );
     }
+
     pub fn add_user(&mut self, user: User<'a>, role: &str) {
         self.users
             .entry(role.to_string())
@@ -52,66 +60,96 @@ impl<'a> Client<'a> {
     }
 
     pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
-        // println!("message: {:?}", message);
         if let Some(params) = message.inputs.get::<Vars>("params")
             && let Some(key) = params.get::<String>("key")
         {
-            println!("do work: {key}, state={}", message.state());
-            if key == "init" && message.is_state(MessageState::Created) {
-                // init the workflow
-                let mut options = Vars::new();
-                options.insert("uid".to_string(), json!("u1"));
-
-                executor
-                    .act()
-                    .complete(&message.pid, &message.tid, options)
+            println!(
+                "act: key={key} nid={} state={}",
+                message.nid,
+                message.state()
+            );
+            match key.as_str() {
+                // step 1 · prepare: complete it at once
+                "prepare" if message.is_state(MessageState::Created) => {
+                    self.complete(
+                        executor,
+                        &message.pid,
+                        &message.tid,
+                        &[("uid", json!("u1"))],
+                    )
                     .await?;
-                println!("action state: id={} inputs={}", message.tid, message.inputs,);
-            } else if key == "pm_act" && message.is_state(MessageState::Created) {
-                let mut options = Vars::new();
-                options.insert("uid".to_string(), json!("u1"));
-
-                executor
-                    .act()
-                    .complete(&message.pid, &message.tid, options)
+                }
+                // step 2 · pm approval, the review act: push an added approver
+                // under it (the countersign push) and hold the answer until
+                // that push is dropped again (the countersign removal)
+                "pm_review" if message.is_state(MessageState::Created) => {
+                    *self.pm_review.lock().unwrap() =
+                        Some((message.pid.clone(), message.tid.clone()));
+                    executor
+                        .act()
+                        .push(
+                            &message.pid,
+                            &message.tid,
+                            Vars::new()
+                                .with("name", "added approver")
+                                .with("uses", "acts.core.irq")
+                                .with("params", Vars::new().with("key", "pm_added")),
+                        )
+                        .await?;
+                    println!("pushed an added approver under {}", message.tid);
+                }
+                // step 2 · pm approval, the pushed act: remove it (the
+                // countersign removal), then answer the review act with the
+                // pm user list
+                "pm_added" if message.is_state(MessageState::Created) => {
+                    executor
+                        .act()
+                        .remove(&message.pid, &message.tid, Vars::new())
+                        .await?;
+                    println!("removed the added approver {}", message.tid);
+                    let approval = self.pm_review.lock().unwrap().clone();
+                    if let Some((pid, tid)) = approval {
+                        self.complete(
+                            executor,
+                            &pid,
+                            &tid,
+                            &[("uid", json!("admin")), ("pm", json!(self.role("pm")))],
+                        )
+                        .await?;
+                    }
+                }
+                // step 2 · pm approval, one vote per pm user
+                "pm_vote" if message.is_state(MessageState::Created) => {
+                    self.complete(
+                        executor,
+                        &message.pid,
+                        &message.tid,
+                        &[("uid", json!("u1"))],
+                    )
                     .await?;
-                println!("action state: id={} inputs={}", message.tid, message.inputs,);
-            } else if key == "gm_act" && message.is_state(MessageState::Created) {
-                let mut options = Vars::new();
-                options.insert("uid".to_string(), json!("u2"));
-
-                executor
-                    .act()
-                    .complete(&message.pid, &message.tid, options)
+                }
+                // step 3 · gm approval, the review act: answer with the gm
+                // user list
+                "gm_review" if message.is_state(MessageState::Created) => {
+                    self.complete(
+                        executor,
+                        &message.pid,
+                        &message.tid,
+                        &[("uid", json!("admin")), ("gm", json!(self.role("gm")))],
+                    )
                     .await?;
-                println!("action state: id={} inputs={}", message.tid, message.inputs,);
-            } else if key == "pm" && message.is_state(MessageState::Created) {
-                let params = message.inputs.get::<Vars>("params").unwrap();
-                let mut options = Vars::new();
-                options.insert("uid".into(), "admin".into());
-                options.insert(
-                    "pm".into(),
-                    json!(self.role(&params.get::<String>("role_id").unwrap())),
-                );
-                executor
-                    .act()
-                    .complete(&message.pid, &message.tid, options)
+                }
+                // step 3 · gm approval, the final vote
+                "gm_vote" if message.is_state(MessageState::Created) => {
+                    self.complete(
+                        executor,
+                        &message.pid,
+                        &message.tid,
+                        &[("uid", json!("u2"))],
+                    )
                     .await?;
-                println!("action state: id={} inputs={}", message.tid, message.inputs,);
-            } else if key == "gm" && message.is_state(MessageState::Created) {
-                let mut options = Vars::new();
-                let params = message.inputs.get::<Vars>("params").unwrap();
-                options.insert("uid".into(), "admin".into());
-                options.insert(
-                    "gm".into(),
-                    json!(self.role(&params.get::<String>("role_id").unwrap())),
-                );
-
-                executor
-                    .act()
-                    .complete(&message.pid, &message.tid, options)
-                    .await?;
-                println!("action state: id={}", message.tid);
+                }
+                _ => {}
             }
         }
 
@@ -121,9 +159,26 @@ impl<'a> Client<'a> {
 
         Ok(())
     }
+
+    async fn complete(
+        &self,
+        executor: &Executor,
+        pid: &str,
+        tid: &str,
+        options: &[(&str, serde_json::Value)],
+    ) -> Result<()> {
+        let mut vars = Vars::new();
+        for (name, value) in options {
+            vars.insert(name.to_string(), value.clone());
+        }
+        executor.act().complete(pid, tid, vars).await?;
+        println!("completed id={tid}");
+        Ok(())
+    }
 }
 
 impl Client<'_> {
+    /// The user ids of one role: what a review act's answer carries.
     fn role(&self, name: &str) -> Vec<String> {
         let mut ret = vec![];
         if let Some(users) = self.users.get(name) {

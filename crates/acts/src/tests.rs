@@ -898,7 +898,7 @@ async fn snapshot_manager_remove_requires_registration() {
 }
 
 // ---------------------------------------------------------------------------
-// 运行(消息)语义 — the surface the published example models read
+// Run (message) semantics — the surface the published example models read
 // ---------------------------------------------------------------------------
 
 /// A run completes with exactly its model's `exposes`: the declaration is the
@@ -1290,7 +1290,7 @@ async fn a_recovered_run_carries_no_error_facts_in_its_outputs() {
 }
 
 // ---------------------------------------------------------------------------
-// step 守卫与循环 — `if`/`while` 与 backward `next`
+// Step guards and loops — `if`/`while` and backward `next`
 // ---------------------------------------------------------------------------
 
 /// A `while` step is a bounded loop: the guard is re-read after every

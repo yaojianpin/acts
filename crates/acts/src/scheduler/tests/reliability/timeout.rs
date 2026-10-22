@@ -219,7 +219,7 @@ fn tick_windows(ticks: u64) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// TIMEOUT × DB失败 — a fault on the branch's own durable decision
+// TIMEOUT × store fault — a fault on the branch's own durable decision
 // ---------------------------------------------------------------------------
 
 /// A store fault under the branch's own durable decision must not lose the
@@ -326,7 +326,7 @@ async fn a_store_that_refuses_the_branchs_commit_fires_it_exactly_once_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// TIMEOUT × 并发 — a client completion racing the tick that fires the branch
+// TIMEOUT × concurrency — a client completion racing the tick that fires the branch
 // ---------------------------------------------------------------------------
 
 /// A client completion of the timing-out act and the tick that fires its
@@ -561,7 +561,7 @@ async fn each_timeout_branch_fires_once_across_ticks_and_a_restart_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// TIMEOUT × 重复投递 — a fired branch is never dispatched again
+// TIMEOUT × duplicate delivery — a fired branch is never dispatched again
 // ---------------------------------------------------------------------------
 
 /// A branch that has already fired is never dispatched again by a later tick.

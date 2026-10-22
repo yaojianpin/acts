@@ -33,6 +33,131 @@ pub(super) fn action_fact_var(sequence: u64) -> String {
     format!("__action@{sequence}")
 }
 
+/// The durable spec of a pushed act, on the pushed execution's own
+/// scope. The legacy `dispatch_act` grew a dynamic tree node for the act; the
+/// kernel's model is immutable for the life of a run, so the act rides the
+/// execution instead, and every model lookup for the node falls back to it
+/// (`step_uses`/`step_effect`).
+pub(super) const PUSH_ACT_VAR: &str = "__act";
+
+/// The pushed act one execution was created for: the client inputs a `Push`
+/// carried, reduced to what an act's start and messages read off its model
+/// step.
+#[derive(Clone, Debug)]
+pub(super) struct PushedAct {
+    pub(super) uses: String,
+    pub(super) name: String,
+    pub(super) params: serde_json::Value,
+    pub(super) options: serde_json::Value,
+    pub(super) exposes: Vec<crate::Variant>,
+    pub(super) vars: Vec<crate::Variant>,
+}
+
+impl PushedAct {
+    /// Reduce the push inputs to the act's facts. `uses` is required — the
+    /// wire mapping refuses its absence before anything durable exists, and
+    /// this is the replay-side twin of that guard.
+    pub(super) fn from_inputs(inputs: &[(String, String)]) -> Result<Self> {
+        fn list(name: &str, raw: Option<String>) -> Result<Vec<crate::Variant>> {
+            match raw {
+                Some(raw) => serde_json::from_str(&raw).map_err(|error| {
+                    runtime(format!("push '{name}' is not a variant list: {error}"))
+                }),
+                None => Ok(Vec::new()),
+            }
+        }
+        let get = |name: &str| {
+            inputs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        let uses = get("uses").unwrap_or_default();
+        if uses.trim().is_empty() {
+            return Err(runtime("cannot find 'uses' in act"));
+        }
+        let params = match get("params") {
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|error| runtime(format!("push 'params' is not json: {error}")))?,
+            None => serde_json::Value::Null,
+        };
+        let options = match get("options") {
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|error| runtime(format!("push 'options' is not json: {error}")))?,
+            None => serde_json::Value::Null,
+        };
+        Ok(Self {
+            uses,
+            name: get("name").unwrap_or_default(),
+            params,
+            options,
+            exposes: list("exposes", get("exposes"))?,
+            vars: list("vars", get("vars"))?,
+        })
+    }
+
+    pub(super) fn fact(&self) -> String {
+        serde_json::json!({
+            "uses": self.uses,
+            "name": self.name,
+            "params": self.params,
+            "options": self.options,
+            "exposes": self.exposes,
+            "vars": self.vars,
+        })
+        .to_string()
+    }
+
+    fn decode(text: &str) -> Result<Self> {
+        let fact: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| runtime(format!("corrupt push fact: {error}")))?;
+        let uses = fact["uses"].as_str().unwrap_or_default().to_string();
+        if uses.trim().is_empty() {
+            return Err(runtime("corrupt push fact: no 'uses'"));
+        }
+        let variant_list = |value: &serde_json::Value| {
+            serde_json::from_value::<Vec<crate::Variant>>(value.clone())
+                .map_err(|error| runtime(format!("corrupt push fact: {error}")))
+        };
+        Ok(Self {
+            uses,
+            name: fact["name"].as_str().unwrap_or_default().to_string(),
+            params: fact["params"].clone(),
+            options: fact["options"].clone(),
+            exposes: variant_list(&fact["exposes"])?,
+            vars: variant_list(&fact["vars"])?,
+        })
+    }
+
+    /// The model step the headless scope resolves this act through: the
+    /// kernel's model is immutable, so the pushed act's node is synthesized
+    /// from its own fact wherever the declaring model lacks it.
+    pub(super) fn step(&self, node: &str) -> crate::model::Step {
+        crate::model::Step {
+            id: node.to_string(),
+            name: self.name.clone(),
+            uses: Some(self.uses.clone()),
+            params: self.params.clone(),
+            options: serde_json::from_value(self.options.clone()).unwrap_or_default(),
+            exposes: self.exposes.clone(),
+            vars: self.vars.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The pushed act one execution was created for, if any.
+pub(super) fn pushed_act_of(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+) -> Result<Option<PushedAct>> {
+    snapshot
+        .variables
+        .get(&(task_id.clone(), PUSH_ACT_VAR.to_string()))
+        .map(|raw| PushedAct::decode(raw))
+        .transpose()
+}
+
 /// The action a durable intent carries, as the JSON text its operation replays.
 pub(super) fn action_fact(
     action: &crate::scheduler::core::commit::command::ActionKind,
@@ -51,6 +176,8 @@ pub(super) fn action_fact(
             "code": code,
             "message": message,
         }),
+        A::Push => serde_json::json!({ "action": "push" }),
+        A::Remove => serde_json::json!({ "action": "remove" }),
     };
     serde_json::json!({
         "kind": kind,
@@ -83,6 +210,8 @@ pub(super) fn decode_action_fact(
             code: kind["code"].as_str().unwrap_or_default().to_string(),
             message: kind["message"].as_str().unwrap_or_default().to_string(),
         },
+        "push" => crate::scheduler::core::commit::command::ActionKind::Push,
+        "remove" => crate::scheduler::core::commit::command::ActionKind::Remove,
         other => return Err(runtime(format!("corrupt action fact: action '{other}'"))),
     };
     let inputs = fact["inputs"]

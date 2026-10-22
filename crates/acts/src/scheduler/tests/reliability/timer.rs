@@ -87,7 +87,7 @@ async fn deliveries_of(store: &Store, pid: &str) -> Vec<crate::data::Delivery> {
 }
 
 // ---------------------------------------------------------------------------
-// RETRY × DB失败 — the scan across a store outage
+// RETRY × store fault — the scan across a store outage
 // ---------------------------------------------------------------------------
 
 /// A store outage under the retry timer's scan must degrade the loop rather than
@@ -379,7 +379,7 @@ async fn poll_first_delivery(engine: &Engine, store: &Store, pid: &str) -> crate
 }
 
 // ---------------------------------------------------------------------------
-// RETRY × 未确认 — a bare re-send keeps one delivery
+// RETRY × unacked — a bare re-send keeps one delivery
 // ---------------------------------------------------------------------------
 
 /// An unacknowledged delivery is re-sent with the same delivery id, the
@@ -462,7 +462,7 @@ async fn an_unacked_delivery_is_re_sent_with_its_own_row_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// RETRY × 未确认 — an exhausted budget turns an error and stays dead
+// RETRY × unacked — an exhausted budget turns an error and stays dead
 // ---------------------------------------------------------------------------
 
 /// An unacknowledged delivery exhausts its retries into `Error` and is never
@@ -544,7 +544,7 @@ async fn an_unacked_delivery_exhausts_its_retries_into_error_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// RETRY × 未确认 — the re-send reaches its owning channel only
+// RETRY × unacked — the re-send reaches its owning channel only
 // ---------------------------------------------------------------------------
 
 /// A redelivery reaches its own channel only. Two ack channels share the run's

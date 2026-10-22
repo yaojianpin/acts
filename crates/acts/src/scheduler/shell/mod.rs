@@ -2227,8 +2227,10 @@ impl KernelHost {
                 if task.parent.as_ref() == Some(&current) {
                     continue;
                 }
-                let package_step =
-                    !modelled || self.step_uses(snapshot, &task.model_node)?.is_some();
+                let package_step = !modelled
+                    || self
+                        .step_uses(snapshot, successor, &task.model_node)?
+                        .is_some();
                 if package_step {
                     forward.push(task);
                 }
@@ -2681,13 +2683,20 @@ impl KernelHost {
     fn step_uses(
         &self,
         snapshot: &ProcessSnapshot,
+        task_id: &TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<(String, serde_json::Value, String, String)>> {
         let Some(model) = model_of(snapshot)? else {
             return Ok(None);
         };
         let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
-            return Ok(None);
+            // A pushed act is not in the model: its facts ride the
+            // execution's scope (see `push_plan`).
+            let Some(act) = crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)?
+            else {
+                return Ok(None);
+            };
+            return Ok(Some((act.uses, act.params, act.name, model.id.clone())));
         };
         let Some(uses) = step.uses.clone().filter(|uses| !uses.trim().is_empty()) else {
             return Ok(None);
@@ -2720,7 +2729,7 @@ impl KernelHost {
         error: Option<(&str, &str)>,
     ) -> Result<Option<serde_json::Value>> {
         let node = NodeId::parse(node_id).map_err(runtime)?;
-        let Some((uses, raw_params, name, mid)) = self.step_uses(snapshot, &node)? else {
+        let Some((uses, raw_params, name, mid)) = self.step_uses(snapshot, task_id, &node)? else {
             return Ok(None);
         };
         // The resolved facts when the start operation pinned them, the raw
@@ -2869,11 +2878,20 @@ impl KernelHost {
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model: crate::model::Workflow,
     ) -> Result<scope::ScopeSpec> {
+        // The pushed act's synthetic step, when the acting node is one: the
+        // declaring model has no node for it.
+        let pushed = if find_step_in_model(&model, task_id.node.as_str()).is_none() {
+            crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)?
+                .map(|act| act.step(task_id.node.as_str()))
+        } else {
+            None
+        };
         Ok(scope::ScopeSpec {
             process_id: snapshot.process_id.clone(),
             node: task_id.node.as_str().to_owned(),
             task_id: task_id.clone(),
             model,
+            pushed,
             vars: scope_vars(snapshot, task_id),
             env: projection::env_map(snapshot)?,
             owner: owner_of(snapshot)?,
@@ -2895,7 +2913,19 @@ impl KernelHost {
             return Ok(None);
         };
         let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
-            return Ok(None);
+            // A pushed act is not in the model: its facts ride the
+            // execution's scope (see `push_plan`).
+            let Some(act) = crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)?
+            else {
+                return Ok(None);
+            };
+            return Ok(Some((
+                runner,
+                effects::EffectRequest {
+                    scope: self.scope_spec(snapshot, task_id, model)?,
+                    package: act.uses,
+                },
+            )));
         };
         let Some(package) = step.uses.clone().filter(|uses| !uses.trim().is_empty()) else {
             return Ok(None);

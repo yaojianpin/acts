@@ -297,7 +297,7 @@ fn is_decision_negative(error: &ActError) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// ACTION × DB失败 — a fault under the decided act's own row
+// ACTION × store fault — a fault under the decided act's own row
 // ---------------------------------------------------------------------------
 
 /// A store fault under the projection of the completed act's own row must
@@ -416,7 +416,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
 }
 
 // ---------------------------------------------------------------------------
-// ACTION × 并发 — N racing completions converge on one decision
+// ACTION × concurrency — N racing completions converge on one decision
 // ---------------------------------------------------------------------------
 
 /// N racing `Next` deliveries on the same in-flight act must converge on one
@@ -524,7 +524,7 @@ async fn racing_completes_converge_on_one_decision_and_one_effect_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// ACTION × 重复投递 — the duplicate is refused, not re-applied
+// ACTION × duplicate delivery — the duplicate is refused, not re-applied
 // ---------------------------------------------------------------------------
 
 /// Delivering the same completion twice must decide the act exactly once: the

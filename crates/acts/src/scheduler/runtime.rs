@@ -672,12 +672,7 @@ impl Runtime {
         host: &Arc<crate::scheduler::shell::KernelHost>,
         action: &Action,
     ) -> Result<()> {
-        let Some(kind) = Self::kernel_kind(action)? else {
-            return Err(ActError::Action(format!(
-                "action {:?} is not served by the kernel engine",
-                action.event
-            )));
-        };
+        let kind = Self::kernel_kind(action)?;
         let inputs: Vec<(String, String)> = action
             .options
             .iter()
@@ -691,16 +686,16 @@ impl Runtime {
     }
 
     /// Map a wire event to its kernel action. `Next` is the wire name of
-    /// "complete"; `Push`/`Remove`/`SetProcessVars` have no kernel equivalent
-    /// yet.
+    /// "complete"; `Push` and `Remove` are the countersign pair — a push creates
+    /// a child act under the execution, a remove decides it `Removed`.
     ///
     /// The error action carries the *legacy* input names — `ecode` (required
     /// there, and what `$ecode()` reads from the task's data) and `message` —
     /// so a client's error means the same thing as it did on the legacy
-    /// engine.
-    fn kernel_kind(
-        action: &Action,
-    ) -> Result<Option<crate::scheduler::core::commit::command::ActionKind>> {
+    /// engine. A push's `uses` is the same kind of caller-correctable input:
+    /// the legacy `dispatch_act` refused its absence before anything durable
+    /// existed.
+    fn kernel_kind(action: &Action) -> Result<crate::scheduler::core::commit::command::ActionKind> {
         use crate::event::EventAction as E;
         use crate::scheduler::core::commit::command::ActionKind as K;
         use crate::utils::consts as names;
@@ -726,9 +721,16 @@ impl Runtime {
                         .unwrap_or_default(),
                 }
             }
-            E::Push | E::Remove | E::SetProcessVars => return Ok(None),
+            E::Push => {
+                let uses = action.options.get::<String>("uses");
+                if uses.as_deref().unwrap_or_default().trim().is_empty() {
+                    return Err(ActError::Action("cannot find 'uses' in act".to_string()));
+                }
+                K::Push
+            }
+            E::Remove => K::Remove,
         };
-        Ok(Some(kind))
+        Ok(kind)
     }
 
     /// Ack one delivery row (by its delivery id).
@@ -1312,7 +1314,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
-    async fn an_error_action_requires_its_code_and_unsupported_events_are_refused() {
+    async fn an_error_action_requires_its_code_and_a_push_its_uses() {
         use crate::event::EventAction;
 
         let runtime = runtime();
@@ -1326,21 +1328,13 @@ mod tests {
                 .contains(crate::utils::consts::ACT_ERR_CODE)
         );
 
-        for event in [
-            EventAction::Push,
-            EventAction::Remove,
-            EventAction::SetProcessVars,
-        ] {
-            let error = runtime
-                .do_action(&Action::new("pid", "tid", event, Vars::new()))
-                .await
-                .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("not served by the kernel engine")
-            );
-        }
+        // A push without its act's `uses` is the caller-correctable refusal
+        // the legacy `dispatch_act` answered with.
+        let error = runtime
+            .do_action(&Action::new("pid", "tid", EventAction::Push, Vars::new()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot find 'uses' in act"));
         runtime.close().await;
     }
 
@@ -1515,9 +1509,7 @@ mod wire_tests {
         let options = Vars::new()
             .with(crate::utils::consts::ACT_ERR_CODE, "E1")
             .with(crate::utils::consts::ACT_ERR_MESSAGE, "boom");
-        let kind = Runtime::kernel_kind(&Action::new("p", "t", E::Error, options))
-            .unwrap()
-            .unwrap();
+        let kind = Runtime::kernel_kind(&Action::new("p", "t", E::Error, options)).unwrap();
         assert_eq!(
             kind,
             K::Fail {
@@ -1533,7 +1525,6 @@ mod wire_tests {
             E::Error,
             Vars::new().with(crate::utils::consts::ACT_ERR_CODE, "E2"),
         ))
-        .unwrap()
         .unwrap();
         assert_eq!(
             kind,
@@ -1588,6 +1579,7 @@ mod scope_tests {
             node: "s1".into(),
             task_id: TaskId::new("s1", 0).unwrap(),
             model,
+            pushed: None,
             vars: vec![("known".into(), serde_json::json!("value").to_string())],
             env: Vec::new(),
             owner: crate::ScopePolicy::deny_all(),

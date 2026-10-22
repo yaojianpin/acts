@@ -2,16 +2,34 @@ name: approve
 id: approve
 ver: 0.1.0
 steps:
+  # ---------------------------------------------------------------------------
+  # step 1 · prepare
+  # A plain irq act the client completes at once: it just marks the run as
+  # started.
+  # ---------------------------------------------------------------------------
   - name: prepare
     id: prepare
-    desc: prepare the model and set the initial value
+    desc: mark the run started; the client completes it immediately
     uses: acts.core.irq
     params:
-      key: init
-      
+      key: prepare
+
+  # ---------------------------------------------------------------------------
+  # step 2 · pm approval — countersign (加签/减签)
+  #
+  # `pm_review` collects the pm users (the client answers with the user list,
+  # exposed as the step var `pm`), then the parallel fans one [pm_vote +
+  # pm_notify] pair out per user: every pm user gets an irq act to answer and
+  # a msg act that just announces.
+  #
+  # On `pm_review`'s Created the client also demonstrates the countersign
+  # pair: it pushes an added approver (`pm_added`) under the step, and on the
+  # pushed act's Created removes it again — the step waits for the pushed act
+  # until it is dropped, then continues.
+  # ---------------------------------------------------------------------------
   - name: pm approval
     id: pm_approval
-    desc: move to next step when all of the users in pm role approves the act
+    desc: every pm user approves; the client pushes an added approver and removes it again on this step
     uses: acts.core.block
     vars:
       - name: pm
@@ -19,52 +37,58 @@ steps:
     params:
       mode: sequence
       acts:
+        # collect the pm users, then fan one pair out per user
         - uses: acts.core.irq
           params:
-            key: pm
+            key: pm_review
             role_id: pm
           exposes:
             - name: pm
-        # parse the pm variable from prev act
-        # and parallel run multiple acts
         - uses: acts.core.parallel
           params:
             in: '${{ pm }}'
             acts:
+              # the vote each pm user answers
               - uses: acts.core.irq
                 params:
-                  key: pm_act
+                  key: pm_vote
+              # the announcement each pm user triggers
               - uses: acts.core.msg
                 params:
-                  key: pm_act_msg
-   
+                  key: pm_notify
 
+  # ---------------------------------------------------------------------------
+  # step 3 · gm approval
+  # `gm_review` collects the gm users (exposed as the step var `gm`), the
+  # parallel fans one [gm_notify] announcement out per user, and `gm_vote`
+  # waits for one gm user's answer before the run completes.
+  # ---------------------------------------------------------------------------
   - name: gm approval
     id: gm_approval
-    desc: move to next when any of the users in gm role approves the act
+    desc: the collected gm users are notified and one gm user approves
     uses: acts.core.block
-    vars: 
+    vars:
       - name: gm
         value: []
     params:
       mode: sequence
       acts:
+        # collect the gm users, then fan one announcement out per user
         - uses: acts.core.irq
           params:
-            key: gm
+            key: gm_review
             role_id: gm
-          options:
-            exposes:
-              - name: gm
-        # parallel generate multiple acts
+          exposes:
+            - name: gm
         - uses: acts.core.parallel
           params:
             in: '${{ gm }}'
             acts:
+              # the announcement each gm user triggers
               - uses: acts.core.msg
                 params:
-                  key: gm_act_msg
-        # generate an irq and wait util completed
+                  key: gm_notify
+        # the vote one gm user answers before the run completes
         - uses: acts.core.irq
           params:
-            key: gm_act
+            key: gm_vote

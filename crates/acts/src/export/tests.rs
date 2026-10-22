@@ -1151,11 +1151,6 @@ async fn export_executor_complete_normal() {
     assert!(ret);
 }
 
-/// The client actions the kernel has no wire for are refused loudly, not
-/// silently downgraded: `act:push` (create an act inside a running step),
-/// `act:remove` and `act:set_process_vars` were the legacy engine's dynamic
-/// surface, and the kernel serves only the actions its executions can decide
-/// (`next`/`submit`/`back`/`cancel`/`abort`/`skip`/`error`).
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn export_executor_start_with_outputs_schema_ok() {
@@ -1220,7 +1215,7 @@ async fn export_trigger_hook_start() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn export_executor_agent_actions_are_refused_not_downgraded() {
+async fn export_executor_push_requires_its_uses() {
     let engine = Engine::builder().start().await.unwrap();
     let model = Workflow::new().with_id("agent_actions").with_step(|step| {
         step.with_id("step1")
@@ -1236,38 +1231,17 @@ async fn export_executor_agent_actions_are_refused_not_downgraded() {
         .pid()
         .to_string();
 
-    for (name, result) in [
-        (
-            "push",
-            executor
-                .act()
-                .push(&pid, "step1", Vars::new())
-                .await
-                .map(|_| ()),
-        ),
-        (
-            "remove",
-            executor
-                .act()
-                .remove(&pid, "step1", Vars::new())
-                .await
-                .map(|_| ()),
-        ),
-        (
-            "set_process_vars",
-            executor
-                .act()
-                .set_process_vars(&pid, "step1", Vars::new())
-                .await
-                .map(|_| ()),
-        ),
-    ] {
-        let err = result.expect_err(name);
-        assert!(
-            err.to_string().contains("not served by the kernel engine"),
-            "{name}: {err}"
-        );
-    }
+    // A push names the act it creates; without the `uses` it is the legacy
+    // caller-correctable refusal, never a silent downgrade.
+    let err = executor
+        .act()
+        .push(&pid, "step1", Vars::new())
+        .await
+        .expect_err("push without uses");
+    assert!(
+        err.to_string().contains("cannot find 'uses' in act"),
+        "{err}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

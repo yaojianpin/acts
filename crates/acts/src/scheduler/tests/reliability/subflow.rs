@@ -306,7 +306,7 @@ async fn assert_no_created(sig: &Signal<(String, String)>) {
 }
 
 // ---------------------------------------------------------------------------
-// SUBFLOW × DB失败 — a fault on the child's own start write
+// SUBFLOW × store fault — a fault on the child's own start write
 // ---------------------------------------------------------------------------
 
 /// The store every cell here runs on: a `MemoryStore` that watches the starts
@@ -628,7 +628,7 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
 }
 
 // ---------------------------------------------------------------------------
-// SUBFLOW × 重启 — a restart between the child's start and its completion
+// SUBFLOW × reload — a restart between the child's start and its completion
 // ---------------------------------------------------------------------------
 
 /// A restart between the child's start and its completion must recover both
@@ -771,7 +771,7 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
 }
 
 // ---------------------------------------------------------------------------
-// SUBFLOW × 重复投递 — a duplicated child completion is refused
+// SUBFLOW × duplicate delivery — a duplicated child completion is refused
 // ---------------------------------------------------------------------------
 
 /// A duplicated delivery must be refused with no second side effect. The child's
@@ -864,7 +864,7 @@ async fn a_duplicate_child_completion_is_refused_and_starts_no_second_child_inne
 }
 
 // ---------------------------------------------------------------------------
-// SUBFLOW × 并发 — two branches start two children
+// SUBFLOW × concurrency — two branches start two children
 // ---------------------------------------------------------------------------
 
 /// Two branches of one parent start two children concurrently: both children
@@ -978,7 +978,7 @@ async fn two_subflow_branches_start_two_children_and_the_parent_completes_once_i
 }
 
 // ---------------------------------------------------------------------------
-// SUBFLOW × 失败 — the child's error is the parent act's error
+// SUBFLOW × failure — the child's error is the parent act's error
 // ---------------------------------------------------------------------------
 
 /// A child run that errors returns `Fail` to the waiting parent act: the
@@ -1059,7 +1059,7 @@ async fn a_child_error_fails_the_waiting_parent_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// SUBFLOW × 快速子 run — the return never races the parent's effect commit
+// SUBFLOW × fast child — the return never races the parent's effect commit
 // ---------------------------------------------------------------------------
 
 /// A child that settles on its own (no waiting act) can finish before the

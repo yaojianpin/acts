@@ -47,7 +47,7 @@ async fn waiting_run(engine: &Engine) -> (String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// ERROR × DB失败 — a fault the action's own commit runs into
+// ERROR × store fault — a fault the action's own commit runs into
 // ---------------------------------------------------------------------------
 
 /// A store refused at the moment of the `Fail` action must reach the client
@@ -110,7 +110,7 @@ async fn a_store_that_refuses_the_commit_surfaces_and_the_retry_decides_once_inn
 }
 
 // ---------------------------------------------------------------------------
-// ERROR × DB失败 — a fault under the decided act's own row
+// ERROR × store fault — a fault under the decided act's own row
 // ---------------------------------------------------------------------------
 
 /// A store fault under the projection of the errored act's row must not undo
@@ -215,7 +215,7 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
 }
 
 // ---------------------------------------------------------------------------
-// ERROR × 重复投递 — the duplicate is refused, not re-applied
+// ERROR × duplicate delivery — the duplicate is refused, not re-applied
 // ---------------------------------------------------------------------------
 
 /// Delivering the same `Fail` twice must decide the act exactly once: the
@@ -284,7 +284,7 @@ async fn a_duplicate_fail_delivery_is_refused_without_effect_inner() {
 }
 
 // ---------------------------------------------------------------------------
-// ERROR × 并发 — Fail racing Complete on one act
+// ERROR × concurrency — Fail racing Complete on one act
 // ---------------------------------------------------------------------------
 
 /// `Fail` and `Complete` fired at the same waiting act must converge on one

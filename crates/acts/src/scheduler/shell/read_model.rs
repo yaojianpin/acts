@@ -207,6 +207,7 @@ pub(crate) fn context(
         task_id: crate::scheduler::core::model::task_graph::TaskId::new(consts::TASK_ROOT_TID, 0)
             .map_err(|err| ActError::Runtime(err.to_string()))?,
         model: read.model().clone(),
+        pushed: None,
         vars,
         env,
         owner: read.owner_scope(),
