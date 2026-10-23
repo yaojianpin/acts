@@ -93,7 +93,10 @@ async fn sch_graph_answers_every_declared_node_with_its_state() {
 /// act's own id) with their own states, and every announced node folds onto
 /// the graph by `nid` — its message level is `act` exactly when the node
 /// carries `uses`. That is the join that makes the message stream a trace
-/// over the graph.
+/// over the graph. The materialized container itself is the kernel's own
+/// virtual node (the declaration declares no branch): kind `block` on the
+/// graph and in its messages, and no line of its own in the tree — its acts
+/// fold into the parent step, which is where the declared flow puts them.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
@@ -143,7 +146,9 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
     assert_eq!(step.uses.as_deref(), Some(USES_BLOCK));
     assert_eq!(step.state.as_deref(), Some("running"));
     let branch = node("step1#acts");
-    assert_eq!(branch.kind, "branch");
+    // The kernel's own container: the declaration declares no branch, so it
+    // speaks `block` — not the declared `branch` level.
+    assert_eq!(branch.kind, "block");
     assert_eq!(branch.parent.as_deref(), Some("step1"));
     assert_eq!(branch.state.as_deref(), Some("running"));
     assert_eq!(node("m1").kind, "step");
@@ -176,15 +181,21 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
             .iter()
             .any(|message| message.nid == "step1")
     );
+    // The virtual container announces as `block` — its graph kind.
+    assert!(
+        fixture
+            .messages()
+            .iter()
+            .any(|message| message.nid == "step1#acts" && message.r#type == "block")
+    );
 
     assert_eq!(
         graph.tree_output(),
         concat!(
             "workflow id:$ name=Graph Block  uses=nil state=running next=nil\n",
             "└── step id:step1 name=step1  uses=acts.core.block state=running next=nil\n",
-            "    └── branch id:step1#acts name=  uses=nil state=running next=nil\n",
-            "        ├── step id:m1 name=  uses=acts.core.msg state=completed next=nil\n",
-            "        └── step id:act1 name=  uses=acts.core.irq state=interrupted next=nil\n",
+            "    ├── step id:m1 name=  uses=acts.core.msg state=completed next=nil\n",
+            "    └── step id:act1 name=  uses=acts.core.irq state=interrupted next=nil\n",
         )
     );
     fixture.close().await;

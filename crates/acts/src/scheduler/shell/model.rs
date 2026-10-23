@@ -110,6 +110,10 @@ pub(crate) const SUBFLOW_PACKAGE: &str = "acts.core.subflow";
 ///   how many there are — and the template's acts are materialized in turn by
 ///   the descent below.
 ///
+/// Every branch the pass adds is marked [`crate::model::Branch::r#virtual`] —
+/// the kernel's own container, not a declared node: the graph kinds it `block`
+/// and the graph's tree display folds it into its parent step.
+///
 /// The container step keeps its own package and params: it still announces
 /// itself (the legacy step message) and its params still resolve, so a
 /// schema violation fails the act exactly where it always did.
@@ -221,12 +225,16 @@ fn act_to_step(act: &serde_json::Value) -> Option<crate::model::Step> {
 
 /// An always-selected branch over `steps`. The kernel's branch selection reads
 /// a missing guard as unselected (`PredicateValue::False`), so a materialized
-/// container branch states its selection plainly.
+/// container branch states its selection plainly. The branch is the kernel's
+/// own *virtual* container (`Branch::r#virtual`): the declared flow has no
+/// such node, so the graph kinds it `block` and the graph's tree display
+/// folds it into its parent step.
 fn container_branch(id: String, steps: Vec<crate::model::Step>) -> crate::model::Branch {
     crate::model::Branch {
         id,
         r#if: Some("true".to_string()),
         steps,
+        r#virtual: true,
         ..Default::default()
     }
 }
@@ -1282,6 +1290,7 @@ steps:
         let branch = &block.branches[0];
         assert_eq!(branch.id, "block#acts");
         assert_eq!(branch.r#if.as_deref(), Some("true"));
+        assert!(branch.r#virtual, "the materialized container is virtual");
         assert_eq!(branch.steps.len(), 2);
         assert!(
             branch.steps.iter().all(|step| !step.id.is_empty()),
@@ -1295,6 +1304,7 @@ steps:
         assert_eq!(fan.branches.len(), 1);
         assert_eq!(fan.branches[0].id, "fan#in");
         assert_eq!(fan.branches[0].r#if.as_deref(), Some("true"));
+        assert!(fan.branches[0].r#virtual);
         assert_eq!(fan.branches[0].steps.len(), 1);
         let template = &fan.branches[0].steps[0];
         assert_eq!(template.id, "fan#item");
@@ -1302,6 +1312,7 @@ steps:
         assert_eq!(template.params["mode"], "parallel");
         assert_eq!(template.branches.len(), 1);
         assert_eq!(template.branches[0].id, "fan#item#act0");
+        assert!(template.branches[0].r#virtual);
         assert_eq!(
             template.branches[0].steps[0].uses.as_deref(),
             Some("acts.core.irq")

@@ -10,7 +10,10 @@
 //! newest generation (per-instance detail stays in the rows and messages). The
 //! walk reads the durable model (the copy the import seeds, inline container
 //! acts already materialized as `<step>#acts`/`<step>#item`/`<step>#act<N>`
-//! children), so the ids are the ones the run's messages carry.
+//! children), so the ids are the ones the run's messages carry. The
+//! materialized container is the kernel's own node — the declaration declares
+//! no branch — so it is kinded `block`, and the graph's tree display folds it
+//! into its parent step.
 
 use super::*;
 use crate::scheduler::core::model::task_graph::TaskState;
@@ -104,12 +107,18 @@ fn walk_step(
         generation: generation_of(newest, &step.id),
     });
     // `step_branches` mirrors the tree build: a step declaring an explicit
-    // `next` ignores its branches, so the graph does too.
+    // `next` ignores its branches, so the graph does too. The import's
+    // virtual container is kind `block` — the declaration has no such node.
     for branch in super::model::step_branches(step).unwrap_or_default() {
+        let kind = if branch.r#virtual {
+            crate::NodeKind::Block
+        } else {
+            crate::NodeKind::Branch
+        };
         nodes.push(crate::GraphNode {
             nid: branch.id.clone(),
             name: branch.name.clone(),
-            kind: crate::NodeKind::Branch.to_string(),
+            kind: kind.to_string(),
             uses: None,
             parent: Some(step.id.clone()),
             order: nodes.len(),

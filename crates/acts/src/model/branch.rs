@@ -44,6 +44,15 @@ pub struct Branch {
     /// variables to expose
     #[serde(default)]
     pub exposes: Vec<Variant>,
+
+    /// The kernel's own container for a container package's inline acts
+    /// (`<step>#acts`, `<step>#in`, `<step>#act<N>`), set by the import
+    /// ([`crate::scheduler::shell::model::materialize_container_acts`]) and
+    /// never by a declaration. The graph speaks the branch as kind `block` —
+    /// not a declared level — and the graph's tree display folds it into its
+    /// parent step, which is where the declared flow puts the acts.
+    #[serde(default)]
+    pub r#virtual: bool,
 }
 
 impl ModelBase for Branch {

@@ -584,12 +584,14 @@ pub(super) fn message_outputs(
 ///
 /// `declared_kind` is the node's declaration ([`crate::NodeKind`]): the read
 /// model pins this word, so a `uses` step's row stays `step`
-/// (`projection::project_task`). `message_kind` is the message level C6 fixed:
-/// the same `uses` step is `act` (the act payload path), a plain step is
-/// `step`, the root is `workflow`, and a branch announces its terminal states
-/// as `branch` like any other execution (the message stream is the flow
-/// trace). The two words deliberately differ for exactly one shape — the row
-/// contract must not be read as a misspelling of the message level (C6, §10).
+/// (`projection::project_task`) and the import's virtual container is `block`
+/// — the one word that is not a declaration's. `message_kind` is the message
+/// level C6 fixed: the same `uses` step is `act` (the act payload path), a
+/// plain step is `step`, the root is `workflow`, and a branch announces its
+/// terminal states as `branch` — a virtual container as `block` — like any
+/// other execution (the message stream is the flow trace). The two words
+/// deliberately differ for exactly one shape — the row contract must not be
+/// read as a misspelling of the message level (C6, §10).
 pub(super) struct NodeFacts {
     pub(super) declared_kind: crate::NodeKind,
     pub(super) message_kind: crate::NodeKind,
@@ -610,10 +612,10 @@ pub(super) fn node_facts(model: &crate::model::Workflow, node: &str) -> NodeFact
         };
     }
     for step in &model.steps {
-        if let Some(name) = branch_name(step, node) {
+        if let Some((kind, name)) = branch_facts(step, node) {
             return NodeFacts {
-                declared_kind: NodeKind::Branch,
-                message_kind: NodeKind::Branch,
+                declared_kind: kind.clone(),
+                message_kind: kind,
                 name,
             };
         }
@@ -638,26 +640,38 @@ pub(super) fn node_facts(model: &crate::model::Workflow, node: &str) -> NodeFact
     }
 }
 
-/// The name of the branch with this id anywhere under one step, if any.
-pub(super) fn branch_name(step: &crate::model::Step, target: &str) -> Option<String> {
+/// The kind and name of the branch with this id anywhere under one step, if
+/// any. The import's virtual container (`Branch::r#virtual`) is kind `block`
+/// — the declaration declares no such node — and every declared branch stays
+/// `branch`.
+pub(super) fn branch_facts(
+    step: &crate::model::Step,
+    target: &str,
+) -> Option<(crate::NodeKind, String)> {
+    use crate::NodeKind;
     for branch in model::step_branches(step).unwrap_or_default() {
         if branch.id == target {
-            return Some(branch.name.clone());
+            let kind = if branch.r#virtual {
+                NodeKind::Block
+            } else {
+                NodeKind::Branch
+            };
+            return Some((kind, branch.name.clone()));
         }
         for inner in &branch.steps {
-            if let Some(name) = branch_name(inner, target) {
-                return Some(name);
+            if let Some(facts) = branch_facts(inner, target) {
+                return Some(facts);
             }
         }
     }
     for catch in &step.catches {
-        if let Some(name) = branch_name(catch, target) {
-            return Some(name);
+        if let Some(facts) = branch_facts(catch, target) {
+            return Some(facts);
         }
     }
     for timeout in &step.timeouts {
-        if let Some(name) = branch_name(timeout, target) {
-            return Some(name);
+        if let Some(facts) = branch_facts(timeout, target) {
+            return Some(facts);
         }
     }
     None
@@ -691,6 +705,16 @@ mod tests {
                 step.with_id("branchy")
                     .with_name("Branchy")
                     .with_branch(|branch| branch.with_id("b1").with_name("Branch one"))
+            })
+            .with_step(|step| {
+                step.with_id("blocky")
+                    .with_name("Blocky")
+                    .with_branch(|mut branch| {
+                        branch.id = "blocky#acts".to_string();
+                        branch.name = "Virtual".to_string();
+                        branch.r#virtual = true;
+                        branch
+                    })
             });
 
         let facts = |node| {
@@ -719,6 +743,11 @@ mod tests {
         assert_eq!(
             facts("b1"),
             (NodeKind::Branch, NodeKind::Branch, "Branch one".to_string())
+        );
+        assert_eq!(
+            facts("blocky#acts"),
+            (NodeKind::Block, NodeKind::Block, "Virtual".to_string()),
+            "the import's virtual container speaks `block` in both vocabularies"
         );
         assert_eq!(
             facts("missing"),

@@ -602,7 +602,9 @@ impl Runtime {
     /// The run's declared model graph (`proc:graph`): every node the run's
     /// durable (materialized) model holds, executed or not, in declaration
     /// order. The ids are the ones the run's messages carry as `nid`, so a
-    /// client renders the full flow and folds the message stream onto it.
+    /// client renders the full flow and folds the message stream onto it; the
+    /// import's virtual container is kind `block` (the declaration declares
+    /// no such node), which the tree display folds into its parent step.
     pub(crate) async fn graph(&self, pid: &str) -> Result<crate::ProcessGraph> {
         self.kernel.graph(pid).await
     }

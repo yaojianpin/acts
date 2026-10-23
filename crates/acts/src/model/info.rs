@@ -62,11 +62,15 @@ pub struct GraphNode {
     pub nid: String,
     /// The node's display name.
     pub name: String,
-    /// The node's declared level: `workflow`, `branch` or `step` — the read
-    /// model's own word, the one `Workflow::tree_output` and the task rows
-    /// use. A step carrying `uses` is still a `step` here; its *message* is
-    /// the act payload (`Message.r#type == "act"`). Fold the message stream
-    /// onto the graph by `nid`.
+    /// The node's level: `workflow`, `branch` or `step` — the read model's
+    /// own word, the one `Workflow::tree_output` and the task rows use — plus
+    /// `block`, the kernel's own virtual container for a container package's
+    /// inline acts (`<step>#acts` and friends). A `block` is not a declared
+    /// level — the declaration declares no such node — so the tree display
+    /// folds it into its parent step, while the node itself stays here: the
+    /// messages and rows name it. A step carrying `uses` is still a `step`
+    /// here; its *message* is the act payload (`Message.r#type == "act"`).
+    /// Fold the message stream onto the graph by `nid`.
     pub kind: String,
     /// The package the node declares (`uses`), when it declares one.
     pub uses: Option<String>,
@@ -95,7 +99,9 @@ pub struct GraphNode {
 /// flow trace, with each node's newest execution state folded in. The model is
 /// the copy the import seeds, so the container packages' inline acts already
 /// appear as their kernel children (`<step>#acts`, `<step>#item`,
-/// `<step>#act<N>`) and the ids match the messages the run announces.
+/// `<step>#act<N>`) and the ids match the messages the run announces; the
+/// kernel's own branch for them is kinded `block`, which the tree display
+/// folds into its parent step — the declaration declares no such branch.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProcessGraph {
     pub pid: String,
@@ -109,7 +115,9 @@ impl ProcessGraph {
     /// order — `{kind} id:{nid} name={name}  uses={uses} state={state}
     /// next={next}`, with `nil` for an absent fact. The same shape
     /// [`Workflow::tree_output`](crate::Workflow::tree_output) renders for a
-    /// declaration, plus each node's newest execution state.
+    /// declaration, plus each node's newest execution state — and with the
+    /// declaration's own shape: a container's virtual `block` renders no line
+    /// of its own, its acts fold into its parent step.
     pub fn tree_output(&self) -> String {
         let mut output = String::new();
         let mut ancestors = Vec::new();
@@ -127,22 +135,29 @@ impl ProcessGraph {
         is_root: bool,
         output: &mut String,
     ) {
-        if !is_root {
-            for ancestor_is_last in ancestors.iter() {
-                output.push_str(if *ancestor_is_last { "    " } else { "│   " });
+        // A container's virtual `block` (`NodeKind::Block`) renders no line of
+        // its own — the declaration has no such node — so its children take
+        // its place in the parent's subtree, at exactly the level the block
+        // would have occupied.
+        let block = node.kind == "block";
+        if !block {
+            if !is_root {
+                for ancestor_is_last in ancestors.iter() {
+                    output.push_str(if *ancestor_is_last { "    " } else { "│   " });
+                }
+                output.push_str(if is_last { "└── " } else { "├── " });
             }
-            output.push_str(if is_last { "└── " } else { "├── " });
+            let fact = |value: &Option<String>| value.clone().unwrap_or_else(|| "nil".to_string());
+            output.push_str(&format!(
+                "{} id:{} name={}  uses={} state={} next={}\n",
+                node.kind,
+                node.nid,
+                node.name,
+                fact(&node.uses),
+                fact(&node.state),
+                fact(&node.next),
+            ));
         }
-        let fact = |value: &Option<String>| value.clone().unwrap_or_else(|| "nil".to_string());
-        output.push_str(&format!(
-            "{} id:{} name={}  uses={} state={} next={}\n",
-            node.kind,
-            node.nid,
-            node.name,
-            fact(&node.uses),
-            fact(&node.state),
-            fact(&node.next),
-        ));
         let children: Vec<&GraphNode> = self
             .nodes
             .iter()
@@ -150,11 +165,15 @@ impl ProcessGraph {
             .collect();
         let len = children.len();
         for (index, child) in children.iter().enumerate() {
-            if !is_root {
+            // A rendered node consumes a level: its children indent under it.
+            // A block does not — its children take its own place, so they
+            // keep its ancestors untouched and only split `is_last` among
+            // themselves.
+            if !is_root && !block {
                 ancestors.push(is_last);
             }
             self.write_node(child, ancestors, index + 1 == len, false, output);
-            if !is_root {
+            if !is_root && !block {
                 ancestors.pop();
             }
         }
