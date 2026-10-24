@@ -258,9 +258,10 @@ Grants are the Redis-ACL shape. `allow`/`deny` hold command patterns over
 action names (`model:*`, `proc:start`) and catalog groups — `@read` (the
 catalogue and row reads), `@deploy` (`model:deploy`, `pack:publish`),
 `@execute` (`proc:start`, `evt:start`, every `act:*`, `msg:ack`), `@write`
-(the removals, the snapshot feeds, the user registry) and `@all` (everything,
-also usable in `deny` to refuse everything) — with `deny` winning and the
-default deny: an action nothing claims is `write`. `patterns` are resource-name
+(the removals, the snapshot feeds, the user registry, and `sys:status` —
+a read, but one that echoes the server's own configuration) and `@all`
+(everything, also usable in `deny` to refuse everything) — with `deny`
+winning and the default deny: an action nothing claims is `write`. `patterns` are resource-name
 (`rn`) patterns over the workflow's declared resource (`orders:eu`): a user may
 only deploy and start models whose `rn` it matches, and a model with no `rn`
 claims nothing, so only an unrestricted user may run it. A per-target

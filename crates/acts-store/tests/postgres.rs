@@ -189,3 +189,17 @@ async fn postgres_open_reports_table_setup_failure() {
     .await;
     assert!(error.is_err());
 }
+
+/// `usage` reports `pg_database_size` for the database the store lives in.
+#[tokio::test(flavor = "multi_thread")]
+#[serial(store_tests)]
+async fn postgres_usage_reports_the_database_size() {
+    let store = PostgresStore::open("postgres://postgres:yao@localhost:5433/tests")
+        .await
+        .unwrap();
+    store.put("usage-row", vec![b'x'; 1024]).await.unwrap();
+
+    let usage = store.usage().await.unwrap().unwrap();
+    assert_eq!(usage.kind, "postgres");
+    assert!(usage.used_bytes.unwrap_or_default() > 0);
+}

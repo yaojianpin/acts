@@ -218,3 +218,18 @@ async fn sled_scan_range_lower_outside_prefix_uses_prefix_scan() {
         [format!("{prefix}a"), format!("{prefix}b")]
     );
 }
+
+/// `usage` reports the database directory's on-disk footprint: after a real
+/// write the number is above zero, and the kind names the backend.
+#[tokio::test]
+async fn sled_usage_reports_the_directory_footprint() {
+    let dir = std::env::temp_dir().join(format!("acts-store-usage-sled-{}", std::process::id()));
+    let store = SledStore::open(dir.to_string_lossy().as_ref()).unwrap();
+    store.put("usage-row", vec![b'x'; 1024]).await.unwrap();
+
+    let usage = store.usage().await.unwrap().unwrap();
+    assert_eq!(usage.kind, "sled");
+    assert!(usage.used_bytes.unwrap_or_default() > 0);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}

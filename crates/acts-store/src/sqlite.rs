@@ -1,5 +1,7 @@
 use crate::consts;
-use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard};
+use acts::{
+    ActError, KvStore, Result, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard,
+};
 use std::time::Duration;
 
 use sqlx::Row;
@@ -123,6 +125,26 @@ fn like_pattern(prefix: &str) -> String {
 
 #[async_trait::async_trait]
 impl KvStore for SqliteStore {
+    /// The database file's own size: the page count the database reports
+    /// times its page size — the same arithmetic `PRAGMA page_count` /
+    /// `PRAGMA page_size` document, without reading the file from this side.
+    async fn usage(&self) -> Result<Option<StorageUsage>> {
+        let row = sqlx::query(
+            "SELECT (SELECT page_count FROM pragma_page_count()) * \
+             (SELECT page_size FROM pragma_page_size()) AS bytes",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ActError::Store(e.to_string()))?;
+        let used: i64 = row
+            .try_get("bytes")
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        Ok(Some(StorageUsage {
+            kind: "sqlite".to_string(),
+            used_bytes: Some(used.max(0) as u64),
+        }))
+    }
+
     async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         sqlx::query(&format!(
             "SELECT value FROM {} WHERE key = ?",

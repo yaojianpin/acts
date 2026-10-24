@@ -76,6 +76,10 @@ skip = [
     { crate = "syn@2.0.119", reason = "derive crates (prost-derive, tracing-attributes, rquickjs-macro, sqlx-macros, validator_derive, ...) are still on syn 2" },
     { crate = "webpki-roots@0.26.11", reason = "sqlx-core 0.8 and tokio-websockets 0.10 still use webpki-roots 0.26" },
     { crate = "winnow@0.7.15", reason = "cron 0.17 is on winnow 0.7; the toml 1.1.6-spec parser (toml_edit 0.25) uses 1.0" },
+    { crate = "windows-core@0.61.2", reason = "sysinfo 0.37's own `windows` 0.61 dependency; its `windows-registry` is already on the 0.62 set" },
+    { crate = "windows-link@0.1.3", reason = "the windows 0.61 subtree sysinfo 0.37 pulls beside its windows-registry 0.2 set" },
+    { crate = "windows-result@0.3.4", reason = "the windows 0.61 subtree sysinfo 0.37 pulls beside its windows-registry 0.2 set" },
+    { crate = "windows-strings@0.4.2", reason = "the windows 0.61 subtree sysinfo 0.37 pulls beside its windows-registry 0.2 set" },
 ]
 
 # windows-sys (and the windows-targets/windows_*_msvc crates below it) bumps

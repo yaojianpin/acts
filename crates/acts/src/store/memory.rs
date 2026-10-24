@@ -2,7 +2,7 @@ use crate::Result;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 
-use crate::store::{KvStore, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard};
+use crate::store::{KvStore, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard};
 
 /// Apply every op of a batch to `data`.
 fn apply_ops(data: &mut BTreeMap<String, Vec<u8>>, ops: &[StoreBatchOp]) {
@@ -66,6 +66,22 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 impl KvStore for MemoryStore {
     async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.data.read().get(key).cloned())
+    }
+
+    /// The bytes this store holds: every key's and value's own length. There
+    /// is no other medium — the map is the footprint, and `BTreeMap` overhead
+    /// is ignored as unmeasurable noise.
+    async fn usage(&self) -> Result<Option<StorageUsage>> {
+        let bytes: usize = self
+            .data
+            .read()
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum();
+        Ok(Some(StorageUsage {
+            kind: "memory".to_string(),
+            used_bytes: Some(bytes as u64),
+        }))
     }
 
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
@@ -174,6 +190,24 @@ mod tests {
 
         let keys = scan(&store, "tasks-pid-a-", ScanOperation::Eq, "tasks-pid-").await;
         assert_eq!(keys, ["tasks-pid-a-1", "tasks-pid-a-2", "tasks-pid-a-3"]);
+    }
+
+    /// `usage` is the map's own footprint: every key's and value's length,
+    /// kind `memory` — the number the status action reports.
+    #[tokio::test]
+    async fn usage_reports_the_held_bytes() {
+        let store = MemoryStore::new();
+        let usage = store.usage().await.unwrap().unwrap();
+        assert_eq!(usage.kind, "memory");
+        assert_eq!(usage.used_bytes, Some(0));
+
+        store.put("k1", vec![b'x'; 10]).await.unwrap();
+        store.put("key-number-2", vec![b'y'; 5]).await.unwrap();
+        store.delete("k1").await.unwrap();
+
+        let usage = store.usage().await.unwrap().unwrap();
+        // "key-number-2" (12) + 5 value bytes; the deleted row is gone.
+        assert_eq!(usage.used_bytes, Some(17));
     }
 
     #[test]

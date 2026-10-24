@@ -52,7 +52,7 @@
 //! compare wall-clock deadlines, so the instances sharing a database must
 //! agree on the clock.
 
-use super::{KvStore, ScanOptions, StoreBatchOp, StoreGuard};
+use super::{KvStore, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard};
 use crate::{ActError, Result};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -539,6 +539,10 @@ impl FencedStore {
 impl KvStore for FencedStore {
     async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.inner.one(key).await
+    }
+
+    async fn usage(&self) -> Result<Option<StorageUsage>> {
+        self.inner.usage().await
     }
 
     async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {

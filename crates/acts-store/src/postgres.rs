@@ -1,5 +1,7 @@
 use crate::consts;
-use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard};
+use acts::{
+    ActError, KvStore, Result, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard,
+};
 use sqlx::{Row, postgres::PgPoolOptions};
 use std::time::Duration;
 
@@ -45,6 +47,20 @@ impl PostgresStore {
 
 #[async_trait::async_trait]
 impl KvStore for PostgresStore {
+    /// The whole database's size on the server:
+    /// `pg_database_size(current_database())` — the table plus its indexes
+    /// and every auxiliary relation.
+    async fn usage(&self) -> Result<Option<StorageUsage>> {
+        let row: (i64,) = sqlx::query_as("SELECT pg_database_size(current_database())")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        Ok(Some(StorageUsage {
+            kind: "postgres".to_string(),
+            used_bytes: Some(row.0.max(0) as u64),
+        }))
+    }
+
     async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         sqlx::query(&format!(
             "SELECT value FROM {} WHERE key = $1",

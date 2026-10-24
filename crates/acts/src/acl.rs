@@ -331,13 +331,20 @@ impl ScopePolicy {
 /// - `execute` — running and driving that work: `proc:start`,
 ///   `proc:start_from_model`, `evt:start`, every `act:*`, and `msg:ack`
 /// - `write` — changing or destroying stored state: every `*:rm`,
-///   `msg:redo`/`msg:clear`, the snapshot feeds, and the user management
+///   `msg:redo`/`msg:clear`, the snapshot feeds, and the user management —
+///   plus `sys:status`, a read that is kept here on purpose (it echoes the
+///   server's own configuration, which may carry credentials; see below)
 /// - `all` — every action (`@all` in a list is the unrestricted grant, like
 ///   `*`)
 ///
 /// An action not named here is `write`: an unknown operation is never a read.
+/// `sys:status` is deliberate: it answers nothing of anyone's work, but its
+/// config section echoes the server's own configuration — a `[db]`
+/// `database_url` may carry credentials — so it stays out of `@read` and an
+/// operator grants it (`--allow sys:status`, or `@all`) to whom may see it.
 pub fn action_catalog(action: &str) -> &'static str {
     match action {
+        "sys:status" => "write",
         "model:ls" | "model:get" | "pack:ls" | "pack:get" | "proc:ls" | "proc:get"
         | "proc:graph" | "task:ls" | "task:get" | "msg:ls" | "msg:get" | "evt:ls" | "evt:get"
         | "snap:get" | "snap:ls" | ACTION_WHOAMI | ACTION_GETUSER | ACTION_USERS

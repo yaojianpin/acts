@@ -17,7 +17,7 @@ use acts_channel::{
 };
 use acts_cli::{
     client,
-    cmd::{CommandRunner, evt, model, msg, pack, proc as proc_cmd, snap, task},
+    cmd::{CommandRunner, evt, model, msg, pack, proc as proc_cmd, snap, status, task},
     util,
 };
 use anyhow::Context;
@@ -44,6 +44,46 @@ steps:
     params:
       key: cli-test
 "#;
+
+/// `status` answers the server's vitals over the wire: every section the
+/// engine reports gets its line, on a real server reached the way the REPL
+/// reaches it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_command_answers_the_server_vitals() {
+    common::with_server("status", true, |_engine, url| async move {
+        let mut channel = client::connect(&url, None).await?;
+        let mut cli = CommandRunner::new(&mut channel);
+
+        let out = status::show(&mut cli).await?;
+        let body = body_of(&out);
+        assert!(body.contains("version      "), "unexpected status: {body}");
+        assert!(
+            body.contains("health       healthy"),
+            "unexpected status: {body}"
+        );
+        assert!(
+            body.contains("processes    total "),
+            "unexpected status: {body}"
+        );
+        assert!(
+            body.contains("memory       rss "),
+            "unexpected status: {body}"
+        );
+        assert!(
+            body.contains("cpu          process "),
+            "unexpected status: {body}"
+        );
+        assert!(body.contains("storage      "), "unexpected status: {body}");
+        assert!(
+            body.contains("  loop       trigger "),
+            "unexpected status: {body}"
+        );
+        assert!(body.contains("config       "), "unexpected status: {body}");
+        Ok(())
+    })
+    .await
+    .expect("the status command must answer with the server's vitals");
+}
 
 /// The renderable half of a command's answer: everything before the elapsed
 /// time the CLI appends.

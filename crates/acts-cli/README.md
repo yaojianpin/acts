@@ -126,8 +126,9 @@ not parse prints clap's own usage diagnostic instead.
 | `act`      | send act actions (`submit`, `back`, …)    |
 | `event`    | get / list / start triggers (events)      |
 | `snapshot` | feed and query snapshot data (see below)  |
+| `status`   | the server's status: memory, cpu, storage, process counts, health, config |
 | `auth`     | log in / out, show the identity, manage users |
-| `exit`     | leave the session                         |
+| `exit`     | leave the session |
 
 Every command prints its result and the elapsed time.
 

@@ -45,7 +45,7 @@ mod tests;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-pub use crate::scheduler::Context;
+pub use crate::scheduler::{Context, HealthState, SchedulerHealth};
 pub use acl::{
     ACTION_LOGIN, ACTION_LOGOUT, ACTION_REFRESH, ACTION_SETUSER, ACTION_SUBSCRIBE, ACTION_WHOAMI,
     ANONYMOUS_ALLOW, ANONYMOUS_ROLE, AccessControl, AclError, AnonymousAcl, CATALOG_GROUPS,
@@ -58,7 +58,10 @@ pub use env::ActUserVar;
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};
 pub use export::actions;
-pub use export::{Channel, ChannelOptions, Executor, RunHandle, RunOutcome};
+pub use export::{
+    Channel, ChannelOptions, CpuStatus, Executor, HealthStatus, LoopStatus, MemoryStatus,
+    ProcessCounts, RunHandle, RunOutcome, StorageStatus, SystemStatus,
+};
 pub use model::*;
 pub use package::{
     ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRuntime, ActResource, ActRunAs,

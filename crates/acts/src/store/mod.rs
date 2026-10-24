@@ -239,11 +239,33 @@ impl StoreGuard {
     }
 }
 
+/// A store backend's self-reported footprint (`KvStore::usage`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageUsage {
+    /// The backend's own word for itself: `memory`, `sled`, `sqlite`,
+    /// `postgres` — or whatever a custom store calls itself.
+    pub kind: String,
+    /// The data's size on the backend's medium, in bytes, best effort: a
+    /// walk of the sled directory, the SQLite file's page count times its
+    /// page size, the Postgres database's total size. `None` when this
+    /// cannot be measured (an in-memory store, a backend that failed to
+    /// size itself).
+    pub used_bytes: Option<u64>,
+}
+
 #[async_trait::async_trait]
 pub trait KvStore: Send + Sync {
     /// Read one key. Backends that support a native batch read should override
     /// [`KvStore::many`] for efficiency; the default loops over `one`.
     async fn one(&self, key: &str) -> Result<Option<Vec<u8>>>;
+
+    /// The backend's identity and physical footprint, as `sys:status` reports
+    /// it. `None` — the default — says the backend cannot (or will not)
+    /// measure itself; a monitoring answer then shows the store as unknown
+    /// instead of inventing a number.
+    async fn usage(&self) -> Result<Option<StorageUsage>> {
+        Ok(None)
+    }
 
     /// Read several keys in one logical call. The default preserves
     /// compatibility for stores without a native batch read; backends with a

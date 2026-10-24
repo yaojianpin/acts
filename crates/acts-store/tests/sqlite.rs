@@ -248,3 +248,23 @@ async fn sqlite_maps_failed_statements() {
     let _ = std::fs::remove_file(format!("{path_str}-wal"));
     let _ = std::fs::remove_file(format!("{path_str}-shm"));
 }
+
+/// `usage` reports the database file's page-count times page-size: after a
+/// real write the number is above zero, and the kind names the backend.
+#[tokio::test]
+async fn sqlite_usage_reports_the_database_size() {
+    let path =
+        std::env::temp_dir().join(format!("acts-store-usage-sqlite-{}.db", std::process::id()));
+    let path_str = path.to_string_lossy().into_owned();
+    let store = SqliteStore::open(&path_str).await.unwrap();
+    store.put("usage-row", vec![b'x'; 1024]).await.unwrap();
+
+    let usage = store.usage().await.unwrap().unwrap();
+    assert_eq!(usage.kind, "sqlite");
+    assert!(usage.used_bytes.unwrap_or_default() > 0);
+
+    drop(store);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path_str}-wal"));
+    let _ = std::fs::remove_file(format!("{path_str}-shm"));
+}

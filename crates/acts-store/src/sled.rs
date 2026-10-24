@@ -1,5 +1,8 @@
-use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard};
+use acts::{
+    ActError, KvStore, Result, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard,
+};
 use sled::transaction::{ConflictableTransactionError, TransactionError};
+use std::path::Path;
 
 /// How many times sled may re-run a guarded batch's closure before the batch
 /// is reported as a conflict instead. sled retries on its own whenever a key
@@ -7,14 +10,42 @@ use sled::transaction::{ConflictableTransactionError, TransactionError};
 /// is written continuously — a guard that keeps changing cannot be proven held.
 const BATCH_MAX_ATTEMPTS: usize = 32;
 
+/// Sum every regular file's size under `dir`, recursively. Missing or
+/// unreadable entries are skipped: the answer is the best-effort footprint of
+/// a directory another writer may be compacting meanwhile.
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            total += dir_size(&entry.path());
+        } else if let Ok(meta) = entry.metadata() {
+            total += meta.len();
+        }
+    }
+    total
+}
+
 pub struct SledStore {
     db: sled::Db,
+    /// The directory the database was opened over — what [`KvStore::usage`]
+    /// walks. `None` for the in-memory variant, which has no footprint on
+    /// disk to measure (sled's `Db` does not expose its path itself).
+    path: Option<std::path::PathBuf>,
 }
 
 impl SledStore {
     pub fn open(path: &str) -> Result<Self> {
         let db = sled::open(path).map_err(|e| ActError::Store(e.to_string()))?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            path: Some(std::path::PathBuf::from(path)),
+        })
     }
 
     #[allow(dead_code)]
@@ -23,7 +54,7 @@ impl SledStore {
             .temporary(true)
             .open()
             .map_err(|e| ActError::Store(e.to_string()))?;
-        Ok(Self { db })
+        Ok(Self { db, path: None })
     }
 }
 
@@ -64,6 +95,29 @@ impl KvStore for SledStore {
         .await
         .map_err(|e| ActError::Store(e.to_string()))?
         .map_err(|e| ActError::Store(e.to_string()))
+    }
+
+    /// The bytes the database's directory holds on disk: a walk of the
+    /// directory the store was opened over, summing every file's size (sled's
+    /// log files, compression blobs and the configs it keeps beside them). A
+    /// file that disappears or becomes unreadable between the listing and the
+    /// stat is skipped — the walk is best effort, and a concurrent compaction
+    /// must not fail a status read. The in-memory variant answers `None`: it
+    /// has no footprint on disk to measure.
+    async fn usage(&self) -> Result<Option<StorageUsage>> {
+        let Some(path) = self.path.clone() else {
+            return Ok(Some(StorageUsage {
+                kind: "sled".to_string(),
+                used_bytes: None,
+            }));
+        };
+        let used = tokio::task::spawn_blocking(move || dir_size(&path))
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        Ok(Some(StorageUsage {
+            kind: "sled".to_string(),
+            used_bytes: Some(used),
+        }))
     }
 
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {

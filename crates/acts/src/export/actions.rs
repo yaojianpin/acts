@@ -165,6 +165,9 @@ pub async fn apply_as(
 
     let executor = engine.executor(principal);
     match name {
+        // system — the engine's own status answer. Reads nothing of the
+        // callers' work, so the grant check above is all it needs.
+        "sys:status" => value(crate::export::status::collect(engine).await),
         "act:push" => {
             let pid = pop(&mut options, "pid")?;
             let tid = pop(&mut options, "tid")?;
@@ -551,6 +554,57 @@ mod tests {
         let err = apply(&engine, "no:such", Vars::new()).await.unwrap_err();
         assert!(matches!(err, Error::NotFound(_)));
         assert_eq!(err.to_string(), "not found action 'no:such'");
+    }
+
+    /// `sys:status` answers the engine's own vitals: the version, a healthy
+    /// word for every loop, the memory and cpu of this process, the store's
+    /// self-reported footprint (the default engine runs the in-memory store)
+    /// and the config it was built with. Process counts start at zero — the
+    /// engine here has run nothing.
+    #[tokio::test]
+    async fn sys_status_answers_the_engine_vitals() {
+        let engine = open_engine().await;
+        let status = apply(&engine, "sys:status", Vars::new()).await.unwrap();
+
+        assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["health"]["state"], "healthy");
+        assert_eq!(status["health"]["loops"].as_array().map(Vec::len), Some(7));
+        assert!(
+            status["memory"]["rss_bytes"].as_u64().unwrap_or_default() > 0,
+            "a running process has a resident set: {status}"
+        );
+        assert_eq!(status["storage"]["kind"], "memory");
+        assert!(
+            status["storage"]["used_bytes"].is_u64(),
+            "the in-memory store can always size itself: {status}"
+        );
+        assert_eq!(status["processes"]["total"], 0);
+        assert_eq!(status["processes"]["active"], 0);
+        assert!(
+            status["cpu"]["logical_cores"].as_u64().unwrap_or_default() > 0,
+            "a running process reports its cores: {status}"
+        );
+        // the config the engine parsed — empty for an engine built in code,
+        // but present
+        assert!(status["config"].is_object());
+    }
+
+    /// A tokenless caller is refused: `sys:status` is deliberately not in
+    /// `@read` (its config section echoes the server's configuration), so it
+    /// is beyond the anonymous policy's catalogue reads — the refusal is the
+    /// anonymous one, "needs a credential", not a deny of a named user.
+    #[tokio::test]
+    async fn sys_status_is_beyond_the_anonymous_caller() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let reader = engine.anonymous();
+        let err = apply_as(&engine, &reader, "sys:status", Vars::new())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Unauthenticated(_)),
+            "unexpected: {err:?}"
+        );
+        engine.close().await;
     }
 
     #[tokio::test]

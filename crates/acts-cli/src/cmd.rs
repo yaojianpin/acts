@@ -8,6 +8,7 @@ pub mod msg;
 pub mod pack;
 pub mod proc;
 pub mod snap;
+pub mod status;
 pub mod task;
 
 use crate::client;
@@ -53,6 +54,10 @@ pub enum Commands {
     Event(EventArgs),
     #[command(about = "execute snapshot commands")]
     Snapshot(SnapshotArgs),
+    #[command(
+        about = "show the server's status: memory, cpu, storage, processes, health and config"
+    )]
+    Status(status::StatusArgs),
     #[command(about = "exit the cli")]
     Exit,
 }
@@ -211,6 +216,9 @@ impl<'a> CommandRunner<'a> {
             Commands::Snapshot(args) => {
                 snap::process(self, &args.command).await?;
             }
+            Commands::Status(_) => {
+                status::process(self).await?;
+            }
         };
 
         Ok(false)
@@ -242,6 +250,11 @@ mod tests {
             panic!("a proc line must parse into a proc command");
         };
         assert!(matches!(args.command, proc::ProcCommands::Start { .. }));
+
+        assert!(matches!(
+            parse("status").unwrap().command,
+            Commands::Status(_)
+        ));
 
         assert!(matches!(parse("exit").unwrap().command, Commands::Exit));
     }
