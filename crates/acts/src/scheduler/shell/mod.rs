@@ -1582,8 +1582,7 @@ impl KernelHost {
     /// caller earned (a duplicate delivery, a decision on a settled node)
     /// rather than a missing execution. The legacy engine's per-item act
     /// carried a fresh id, and the kernel's pre-C5 node identity could not
-    /// tell the instances apart — see the registered boundary on
-    /// node-addressed actions in `KERNEL_CUTOVER_NOTES.md`.
+    /// tell the instances apart.
     fn action_target(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         process_id: &str,

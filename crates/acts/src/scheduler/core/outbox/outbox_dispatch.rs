@@ -3,7 +3,7 @@ use crate::scheduler::core::outbox::records::OutboxRecord;
 /// Result of one external delivery attempt. The transport reports facts only;
 /// retry timing and quarantine policy remain application decisions.
 ///
-/// REGISTERED EXCEPTION (KERNEL_CUTOVER_NOTES.md §10, P4a): the attached
+/// REGISTERED EXCEPTION: the attached
 /// transport in production is the message forwarder, which only ever reports
 /// `Delivered`, so `RetryAt`/`OutcomeUnknown`/`Quarantine` are never
 /// constructed in-tree — yet `KernelHost::dispatch_outbox` handles all four
