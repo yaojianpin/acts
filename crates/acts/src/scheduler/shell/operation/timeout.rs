@@ -283,9 +283,9 @@ impl ActOperation for DispatchTimeout {
         Ok(
             match host
                 .timeout_round(
-                    operation.snapshot,
+                    operation.snapshot(),
                     &operation.task_id,
-                    operation.task,
+                    operation.task(),
                     operation.now_ms,
                 )
                 .await?
@@ -305,10 +305,10 @@ impl ActOperation for DispatchTimeout {
         let Outcome::Timeout(round) = outcome else {
             return Err(runtime("the timer operation planned a foreign outcome"));
         };
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         let id = operation.id;
         let task_id = &operation.task_id;
-        let task = operation.task;
+        let task = operation.task();
         let claim = operation.claim;
         Ok(match round {
             // The timer of a timed-out execution: this operation dispatches the due
@@ -388,8 +388,8 @@ mod tests {
             id,
             claim,
             task_id: id.task.clone(),
-            task: snapshot.tasks.get(&id.task),
-            snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 1_000,
             lane,
         }

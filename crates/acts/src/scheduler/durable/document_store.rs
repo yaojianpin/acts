@@ -55,7 +55,11 @@ pub(crate) struct ReplaceWrite {
 /// codec may normalize legacy documents into different bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LoadedProcess {
-    pub(crate) snapshot: ProcessSnapshot,
+    /// The decoded aggregate, shared with every reader of this load. A commit
+    /// takes it mutably through [`Arc::make_mut`]: when a reader still holds
+    /// a clone, the commit pays one copy-on-write instead of a reader paying
+    /// a deep copy.
+    pub(crate) snapshot: std::sync::Arc<ProcessSnapshot>,
     original_document: Vec<u8>,
     original_base: Option<Vec<u8>>,
     /// Log entries keyed by sequence, with the exact bytes they were read as.
@@ -929,7 +933,7 @@ pub(crate) fn install_migration(
 
 pub(crate) fn loaded_after_write(snapshot: &ProcessSnapshot, write: ReplaceWrite) -> LoadedProcess {
     LoadedProcess {
-        snapshot: snapshot.clone(),
+        snapshot: std::sync::Arc::new(snapshot.clone()),
         original_document: write.document,
         original_base: write.base,
         original_log: write
@@ -1101,7 +1105,7 @@ pub(crate) fn decode_loaded_process(
         });
     }
     Ok(LoadedProcess {
-        snapshot,
+        snapshot: std::sync::Arc::new(snapshot),
         original_document,
         original_base: stored_base,
         original_log: stored_log,
@@ -1682,7 +1686,7 @@ mod tests {
         let source = source_snapshot();
         let log_key = process_log_key("process", 0).unwrap();
         let legacy = LoadedProcess {
-            snapshot: source.clone(),
+            snapshot: std::sync::Arc::new(source.clone()),
             original_document: ProcessDocumentCodec::encode(&source).unwrap(),
             original_base: Some(b"stale base".to_vec()),
             original_log: BTreeMap::from([(0, b"stale log".to_vec())]),
@@ -1735,7 +1739,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(loaded.snapshot, source);
+        assert_eq!(loaded.snapshot.as_ref(), &source);
         assert!(!loaded.is_legacy());
         assert_eq!(loaded.original_log().len(), 1);
 

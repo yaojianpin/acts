@@ -31,7 +31,7 @@ impl ActOperation for ReenterTask {
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         let id = operation.id;
         let task_id = operation.task_id.clone();
         let claim = operation.claim;
@@ -93,8 +93,8 @@ mod tests {
             id: &id,
             claim: &claim,
             task_id: task_id.clone(),
-            task: snapshot.tasks.get(&task_id),
-            snapshot: &snapshot,
+            task: snapshot.tasks.get(&task_id).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };

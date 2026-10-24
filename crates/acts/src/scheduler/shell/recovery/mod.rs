@@ -42,8 +42,12 @@ impl KernelHost {
             return Ok(None);
         };
         let model_node = task.model_node.clone();
-        let Some((runner, request)) =
-            self.step_effect(&loaded.snapshot, &observed.operation_id.task, &model_node)?
+        let Some((runner, request)) = self.step_effect(
+            &loaded.snapshot,
+            Some(&loaded.snapshot),
+            &observed.operation_id.task,
+            &model_node,
+        )?
         else {
             return Ok(None);
         };
@@ -455,8 +459,11 @@ impl KernelHost {
                             // The commit turned the operation `EffectUnknown`.
                             // Observe the new state and let Core decide again;
                             // the effect itself is never re-driven here.
-                            observed =
-                                Observed::from_record(&reclaimed, loaded.snapshot.version, now_ms);
+                            observed = Observed::from_record(
+                                &reclaimed,
+                                loaded.snapshot.version.clone(),
+                                now_ms,
+                            );
                         }
                         Err(error) => {
                             tracing::debug!(

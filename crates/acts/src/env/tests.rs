@@ -1,4 +1,8 @@
-use crate::{ActUserVar, Context, Engine, Vars, Workflow, env::Environment, utils::consts};
+use crate::{
+    ActUserVar, Context, Engine, Vars, Workflow,
+    env::Environment,
+    utils::{consts, test::FlowFixture},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serial_test::serial;
@@ -515,4 +519,123 @@ async fn env_eval_scopes_do_not_leak_vars() {
     let w2 = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_e2, c2) = start_completed(&w2, Vars::new()).await;
     Context::scope(&c2, || assert!(env.eval::<i64>("a").is_err()));
+}
+
+/// A headless context whose scope resolves names from the run's shared
+/// aggregate, prepared exactly like an effect. The run itself comes from the
+/// crate-wide [`FlowFixture`].
+async fn shared_context<F>(workflow: &Workflow, node: &str, mutate: F) -> (FlowFixture, Context)
+where
+    F: FnOnce(&mut crate::scheduler::ProcessSnapshot),
+{
+    let mut fixture = FlowFixture::deploy(workflow).await;
+    let pid = fixture
+        .start_with_pid("envshared", Vars::new())
+        .await
+        .unwrap();
+    let runtime = fixture.engine().runtime();
+    let mut snapshot = runtime.kernel().snapshot(&pid).await.unwrap().unwrap();
+    mutate(&mut snapshot);
+    let task_id = snapshot
+        .tasks
+        .keys()
+        .find(|id| id.node.as_str() == node)
+        .cloned()
+        .expect("the acting execution exists");
+    let spec = crate::scheduler::ScopeSpec {
+        process_id: snapshot.process_id.clone(),
+        node: node.to_string(),
+        task_id,
+        model: workflow.clone(),
+        pushed: None,
+        vars: Vec::new(),
+        snapshot: Some(std::sync::Arc::new(snapshot)),
+        env: Vec::new(),
+        owner: crate::ScopePolicy::deny_all(),
+    };
+    let (_scope, _task, ctx) = crate::scheduler::headless_scope(&runtime, &spec).unwrap();
+    ctx.prepare().await.unwrap();
+    (fixture, ctx)
+}
+
+/// `$data` is the local overlay; parent/root values are read from the shared
+/// chain on demand, never copied into the local map.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_data_is_local_and_parent_root_resolve_lazily() {
+    let env = Environment::new();
+    let workflow = Workflow::new()
+        .with_id("env-lazy-vars")
+        .with_var("root", 7)
+        .with_var("shadow", 1)
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_var("shadow", 2)
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "a"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "b"))
+        });
+    let (fixture, ctx) = shared_context(&workflow, "s2", |_| {}).await;
+    Context::scope(&ctx, || {
+        assert!(ctx.task().data().get_value("root").is_none());
+        assert_eq!(env.eval::<i64>("root").unwrap(), 7);
+        assert_eq!(env.eval::<i64>("shadow").unwrap(), 1);
+        assert_eq!(env.eval::<serde_json::Value>("$data()").unwrap(), json!({}));
+    });
+    fixture.close().await;
+}
+
+/// A bare step id and the `$step_*` helpers read a previous execution's data,
+/// and `$inputs` projects predecessor outputs plus the step's own vars without
+/// copying either into the local map.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_step_id_and_inputs_read_previous_execution() {
+    let env = Environment::new();
+    let workflow = Workflow::new()
+        .with_id("env-step-id")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "a"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_var("own", 5)
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "b"))
+        });
+    let (fixture, ctx) = shared_context(&workflow, "s2", |snapshot| {
+        let s1 = snapshot
+            .tasks
+            .keys()
+            .find(|id| id.node.as_str() == "s1")
+            .cloned()
+            .unwrap();
+        snapshot
+            .variables
+            .insert((s1, "a".to_string()), "5".to_string());
+    })
+    .await;
+    Context::scope(&ctx, || {
+        assert!(ctx.task().data().get_value("a").is_none());
+        assert_eq!(env.eval::<i64>("s1.a").unwrap(), 5);
+        assert_eq!(env.eval::<i64>("$step_value('s1', 'a')").unwrap(), 5);
+        assert_eq!(
+            env.eval::<serde_json::Value>("$step_data('s1')").unwrap()["a"],
+            json!(5)
+        );
+        assert_eq!(
+            env.eval::<serde_json::Value>("$step_inputs('s1')").unwrap()["a"],
+            json!(5)
+        );
+        let inputs = env.eval::<serde_json::Value>("$inputs()").unwrap();
+        assert_eq!(inputs["a"], json!(5));
+        assert_eq!(inputs["own"], json!(5));
+        let steps = env.eval::<serde_json::Value>("$steps()").unwrap();
+        let steps = steps.as_array().unwrap();
+        assert!(steps.contains(&json!("s1")));
+        assert!(steps.contains(&json!("s2")));
+    });
+    fixture.close().await;
 }

@@ -511,7 +511,7 @@ impl KernelHost {
         };
         match runner
             .evaluate(predicate::PredicateRequest {
-                scope: self.scope_spec(snapshot, task_id, model)?,
+                scope: self.scope_spec(snapshot, None, task_id, model)?,
                 expr: expr.to_string(),
                 overlay: inputs.to_vec(),
             })
@@ -2137,6 +2137,7 @@ impl KernelHost {
     fn scope_spec(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        shared: Option<&Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model: crate::model::Workflow,
     ) -> Result<scope::ScopeSpec> {
@@ -2148,13 +2149,21 @@ impl KernelHost {
         } else {
             None
         };
+        // An effect scope resolves parent → root names from the shared
+        // aggregate on demand; contexts without a shared handle keep the
+        // eager seed (predicate fallback, read-model contexts, tests).
+        let (vars, shared_snapshot) = match shared {
+            Some(shared) => (Vec::new(), Some(Arc::clone(shared))),
+            None => (scope_vars(snapshot, task_id), None),
+        };
         Ok(scope::ScopeSpec {
             process_id: snapshot.process_id.clone(),
             node: task_id.node.as_str().to_owned(),
             task_id: task_id.clone(),
             model,
             pushed,
-            vars: scope_vars(snapshot, task_id),
+            vars,
+            snapshot: shared_snapshot,
             env: projection::env_map(snapshot)?,
             owner: owner_of(snapshot)?,
         })
@@ -2165,6 +2174,7 @@ impl KernelHost {
     fn step_effect(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        shared: Option<&Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<(Arc<dyn effects::EffectRunner>, effects::EffectRequest)>> {
@@ -2184,7 +2194,7 @@ impl KernelHost {
             return Ok(Some((
                 runner,
                 effects::EffectRequest {
-                    scope: self.scope_spec(snapshot, task_id, model)?,
+                    scope: self.scope_spec(snapshot, shared, task_id, model)?,
                     package: act.uses,
                 },
             )));
@@ -2195,7 +2205,7 @@ impl KernelHost {
         Ok(Some((
             runner,
             effects::EffectRequest {
-                scope: self.scope_spec(snapshot, task_id, model)?,
+                scope: self.scope_spec(snapshot, shared, task_id, model)?,
                 package,
             },
         )))
@@ -2208,10 +2218,12 @@ impl KernelHost {
     fn step_runs_while_waiting(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        shared: Option<&Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<bool> {
-        let Some((runner, request)) = self.step_effect(snapshot, task_id, model_node)? else {
+        let Some((runner, request)) = self.step_effect(snapshot, shared, task_id, model_node)?
+        else {
             return Ok(false);
         };
         Ok(runner.executes_while_waiting(&request.package))
@@ -2223,10 +2235,12 @@ impl KernelHost {
     async fn resolve_step(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        shared: Option<&Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<ActFacts>> {
-        let Some((runner, request)) = self.step_effect(snapshot, task_id, model_node)? else {
+        let Some((runner, request)) = self.step_effect(snapshot, shared, task_id, model_node)?
+        else {
             return Ok(None);
         };
         let resolved = runner.resolve(&request).await?;
@@ -2318,7 +2332,10 @@ impl KernelHost {
         &self,
         process_id: &str,
     ) -> Result<Option<crate::scheduler::core::commit::aggregate::ProcessSnapshot>> {
-        Ok(self.load(process_id).await?.map(|loaded| loaded.snapshot))
+        Ok(self
+            .load(process_id)
+            .await?
+            .map(|loaded| std::sync::Arc::unwrap_or_clone(loaded.snapshot)))
     }
 
     /// Whether the aggregate of `process_id` exists — the durable record of a

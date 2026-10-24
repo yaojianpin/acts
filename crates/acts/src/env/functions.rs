@@ -10,6 +10,7 @@
 use crate::{Context, Result, TimeoutLimit, Vars, utils::consts};
 use acts_expr::{Context as ExprContext, Error as ExprError, Value};
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 
 /// Bind the referenced names the current task can answer.
 ///
@@ -71,13 +72,14 @@ fn task_var(name: &str) -> Option<JsonValue> {
         .flatten()
 }
 
-/// The data of the last task with node id `nid`, which is how a step's own
-/// data is read as a bare step id (`step1.a`).
-///
-/// The kernel's scope carries only the acting execution (no task graph), so a
-/// step id is not a readable scope there: the lookup answers `None`.
-fn step_data(_nid: &str) -> Option<Vars> {
-    None
+/// The data of the newest generation of the task whose node id is `nid`, which
+/// is how a step's own data is read as a bare step id (`step1.a`). A step id
+/// is not part of the local data map: it is looked up in the shared aggregate
+/// only when the expression references it.
+fn step_data(nid: &str) -> Option<Vars> {
+    Context::try_with_current(|ctx| ctx.task().step_data(&ctx.proc, nid))
+        .ok()
+        .flatten()
 }
 
 /// `$env`, `$os` and the functions the engine exposes to an expression.
@@ -111,7 +113,8 @@ fn builtin(name: &str) -> Option<Value> {
         }),
         "$ecode" => Value::function(|args| {
             arity("$ecode", args, 0, 0)?;
-            let ecode = Context::with(|ctx| ctx.task().data().get::<String>(consts::ACT_ERR_CODE));
+            let ecode =
+                Context::with(|ctx| ctx.task().find::<String>(&ctx.proc, consts::ACT_ERR_CODE));
 
             Ok(match ecode {
                 Some(ecode) => Value::from(ecode),
@@ -121,7 +124,9 @@ fn builtin(name: &str) -> Option<Value> {
         "$cost" => Value::function(|args| {
             arity("$cost", args, 0, 0)?;
 
-            Ok(Value::from(Context::with(|ctx| current_cost(&ctx.task()))))
+            Ok(Value::from(Context::with(|ctx| {
+                current_cost(&ctx.task(), &ctx.proc)
+            })))
         }),
         "$cost_in" => Value::function(|args| {
             arity("$cost_in", args, 1, 2)?;
@@ -130,7 +135,7 @@ fn builtin(name: &str) -> Option<Value> {
                 Some(_) => Some(str_arg("$cost_in", args, 1)?),
                 None => None,
             };
-            let cost = Context::with(|ctx| current_cost(&ctx.task()));
+            let cost = Context::with(|ctx| current_cost(&ctx.task(), &ctx.proc));
 
             Ok(Value::Bool(cost_in(cost, &min, max.as_deref())))
         }),
@@ -138,16 +143,14 @@ fn builtin(name: &str) -> Option<Value> {
             arity("$step_value", args, 2, 2)?;
             let nid = str_arg("$step_value", args, 0)?;
             let name = str_arg("$step_value", args, 1)?;
-            let value = Context::with(|ctx| {
-                step_data_of(ctx, &nid).and_then(|data| data.get::<JsonValue>(&name))
-            });
+            let value = step_data(&nid).and_then(|data| data.get::<JsonValue>(&name));
 
             Ok(from_json(value.unwrap_or(JsonValue::Null)))
         }),
         "$step_data" => Value::function(|args| {
             arity("$step_data", args, 1, 1)?;
             let nid = str_arg("$step_data", args, 0)?;
-            let data = Context::with(|ctx| step_data_of(ctx, &nid));
+            let data = step_data(&nid);
 
             Ok(match data {
                 Some(data) => from_json(JsonValue::from(data)),
@@ -156,16 +159,28 @@ fn builtin(name: &str) -> Option<Value> {
         }),
         "$step_inputs" => Value::function(|args| {
             arity("$step_inputs", args, 1, 1)?;
-            let _nid = str_arg("$step_inputs", args, 0)?;
-            // The kernel's scope carries only the acting execution (see
-            // `step_data`), so a step id names no readable scope here.
-            Ok(Value::Null)
+            let nid = str_arg("$step_inputs", args, 0)?;
+            let inputs = Context::try_with_current(|ctx| ctx.task().step_inputs(&ctx.proc, &nid))
+                .ok()
+                .flatten();
+
+            Ok(match inputs {
+                Some(inputs) => from_json(JsonValue::from(inputs)),
+                None => Value::Null,
+            })
         }),
         "$steps" => Value::function(|args| {
             arity("$steps", args, 0, 0)?;
-            // The kernel's scope carries only the acting execution (see
-            // `step_data`), so there is no step list here.
-            Ok(Value::List(Vec::new().into()))
+            let steps =
+                Context::try_with_current(|ctx| ctx.task().steps(&ctx.proc)).unwrap_or_default();
+
+            Ok(Value::List(
+                steps
+                    .into_iter()
+                    .map(Value::from)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ))
         }),
 
         _ => return None,
@@ -214,11 +229,6 @@ fn from_json(value: JsonValue) -> Value {
     Value::from(value)
 }
 
-fn step_data_of(_ctx: &Context, _nid: &str) -> Option<Vars> {
-    // The kernel's scope carries only the acting execution (see `step_data`).
-    None
-}
-
 fn env_map() -> Vars {
     let mut map = Vars::new();
 
@@ -248,20 +258,9 @@ fn env_map() -> Vars {
     map
 }
 
-fn current_cost(task: &crate::scheduler::ScopeTask) -> i64 {
-    if let Some(cost) = task.data().get::<i64>(consts::TASK_COST) {
+fn current_cost(task: &crate::scheduler::ScopeTask, scope: &Arc<crate::scheduler::Scope>) -> i64 {
+    if let Some(cost) = task.find::<i64>(scope, consts::TASK_COST) {
         return cost;
-    }
-    let mut parent = Context::try_with_current(|ctx| ctx.task().parent(&ctx.proc))
-        .ok()
-        .flatten();
-    while let Some(task) = parent {
-        if let Some(cost) = task.data().get::<i64>(consts::TASK_COST) {
-            return cost;
-        }
-        parent = Context::try_with_current(|ctx| task.parent(&ctx.proc))
-            .ok()
-            .flatten();
     }
     task.cost()
 }

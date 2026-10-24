@@ -172,11 +172,11 @@ impl ActOperation for PropagateTask {
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         let id = operation.id;
         let task_id = operation.task_id.clone();
         let claim = operation.claim;
-        let task = operation.task.cloned();
+        let task = operation.task().cloned();
         let plan = {
             // predecessor lists), never the declaring spec.
             let graph = task_graph(snapshot)?;

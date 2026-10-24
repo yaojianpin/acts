@@ -230,7 +230,7 @@ async fn read_stored_snapshot(kv: &MemoryStore, process_id: &str) -> Option<Proc
         ready,
     )
     .ok()
-    .map(|loaded| loaded.snapshot)
+    .map(|loaded| std::sync::Arc::unwrap_or_clone(loaded.snapshot))
 }
 
 struct ConflictKv {

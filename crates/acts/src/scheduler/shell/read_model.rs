@@ -211,6 +211,7 @@ pub(crate) fn context(
         model: read.model().clone(),
         pushed: None,
         vars,
+        snapshot: None,
         env,
         owner: read.owner_scope(),
     };

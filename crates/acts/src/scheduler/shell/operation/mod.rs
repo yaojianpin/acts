@@ -166,11 +166,26 @@ pub(super) struct Claimed {
 
 impl Claimed {
     pub(super) fn snapshot(&self) -> &crate::scheduler::core::commit::aggregate::ProcessSnapshot {
-        &self
-            .loaded
+        self.loaded
             .as_ref()
             .expect("the claimed aggregate is present until dispatch takes it")
             .snapshot
+            .as_ref()
+    }
+
+    /// The claimed aggregate's shared handle. The operation clones the [`Arc`],
+    /// so a reader can hold the exact snapshot it planned against without
+    /// copying its tasks or variables.
+    pub(super) fn snapshot_arc(
+        &self,
+    ) -> std::sync::Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot> {
+        std::sync::Arc::clone(
+            &self
+                .loaded
+                .as_ref()
+                .expect("the claimed aggregate is present until dispatch takes it")
+                .snapshot,
+        )
     }
 
     /// Hand the claimed aggregate to phase 4, which commits the plan against
@@ -189,14 +204,14 @@ impl Claimed {
     /// plus the command lane this operation's effect phase may temporarily
     /// release (A4, [`CommandLane`]).
     pub(super) fn operation<'a>(&'a self, lane: &'a mut CommandLane) -> Operation<'a> {
-        let task_id = self.id.task.clone();
-        let task = self.snapshot().tasks.get(&task_id);
+        let snapshot = self.snapshot_arc();
+        let task = snapshot.tasks.get(&self.id.task).cloned();
         Operation {
             id: &self.id,
             claim: &self.claim,
-            task_id,
+            task_id: self.id.task.clone(),
             task,
-            snapshot: self.snapshot(),
+            snapshot,
             now_ms: self.now_ms,
             lane,
         }
@@ -209,13 +224,32 @@ pub(super) struct Operation<'a> {
     pub(super) id: &'a OperationId,
     pub(super) claim: &'a OperationCommit,
     pub(super) task_id: crate::scheduler::core::model::task_graph::TaskId,
-    pub(super) task: Option<&'a crate::scheduler::core::commit::aggregate::TaskSnapshot>,
-    pub(super) snapshot: &'a crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    /// The execution's own facts at claim time, cloned (it is small) so the
+    /// operation does not borrow from the shared snapshot. `None` when the
+    /// execution no longer exists.
+    pub(super) task: Option<crate::scheduler::core::commit::aggregate::TaskSnapshot>,
+    /// The aggregate the operation planned against. Shared rather than
+    /// borrowed, so a reader can keep the same snapshot after the operation's
+    /// claim is handed to dispatch, without a copy.
+    pub(super) snapshot: std::sync::Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>,
     pub(super) now_ms: i64,
     /// The command lane this operation's pid is decided under (A4). A kind
     /// whose phase 2 crosses the external-effect boundary releases it for the
     /// effect and resumes after; everything else leaves it held.
     pub(super) lane: &'a mut CommandLane,
+}
+
+impl Operation<'_> {
+    /// The authoritative snapshot this operation plans against.
+    pub(super) fn snapshot(&self) -> &crate::scheduler::core::commit::aggregate::ProcessSnapshot {
+        self.snapshot.as_ref()
+    }
+
+    /// The execution this operation names, absent for an operation whose
+    /// execution a decision removed.
+    pub(super) fn task(&self) -> Option<&crate::scheduler::core::commit::aggregate::TaskSnapshot> {
+        self.task.as_ref()
+    }
 }
 
 /// Phase 2's product: what running one operation decided. Each variant is the

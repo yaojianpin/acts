@@ -68,9 +68,9 @@ impl ActOperation for ExecuteTask {
     }
 
     async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         let task_id = &operation.task_id;
-        let task = operation.task;
+        let task = operation.task();
         // A branch whose predicate could not be evaluated fails on its first
         // operation: the fan-out admitted it with the failure pinned (see
         // `fanout_command`), which is the legacy branch task erroring in its
@@ -123,7 +123,15 @@ impl ActOperation for ExecuteTask {
                 announced,
             }
         } else if let Some(task) = task {
-            match host.resolve_step(snapshot, task_id, &task.model_node).await {
+            match host
+                .resolve_step(
+                    snapshot,
+                    Some(&operation.snapshot),
+                    task_id,
+                    &task.model_node,
+                )
+                .await
+            {
                 Ok(facts) => Start::Started {
                     facts,
                     fresh: true,
@@ -166,11 +174,11 @@ impl ActOperation for ExecuteTask {
         let Outcome::Start(start) = outcome else {
             return Err(runtime("the start operation planned a foreign outcome"));
         };
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         let id = operation.id;
         let task_id = operation.task_id.clone();
         let claim = operation.claim;
-        let task = operation.task;
+        let task = operation.task();
         let now_ms = operation.now_ms;
         // The action this start seeds (an auto task's own completion) and
         // whether it is already durable.
@@ -297,9 +305,12 @@ impl ActOperation for ExecuteTask {
                     false
                 } else {
                     match task {
-                        Some(task) => {
-                            host.step_runs_while_waiting(snapshot, &task_id, &task.model_node)?
-                        }
+                        Some(task) => host.step_runs_while_waiting(
+                            snapshot,
+                            Some(&operation.snapshot),
+                            &task_id,
+                            &task.model_node,
+                        )?,
                         None => false,
                     }
                 };
@@ -554,7 +565,7 @@ mod tests {
                 claim: &claim,
                 task_id: id.task.clone(),
                 task: None,
-                snapshot: &snapshot,
+                snapshot: std::sync::Arc::new(snapshot.clone()),
                 now_ms: 0,
                 lane: &mut lane,
             };

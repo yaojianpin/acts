@@ -370,8 +370,13 @@ impl AsyncProcessRepository {
         // it and drops it on failure (the caller reports and recovery
         // re-derives the operation), so the whole-aggregate clone is not needed.
         let entries = recovery_entries(&loaded.snapshot);
-        let operation = advance_operation_event(&mut loaded.snapshot, id, expected_revision, event)
-            .map_err(AsyncRepositoryError::Domain)?;
+        let operation = advance_operation_event(
+            std::sync::Arc::make_mut(&mut loaded.snapshot),
+            id,
+            expected_revision,
+            event,
+        )
+        .map_err(AsyncRepositoryError::Domain)?;
         let ready = self.ready_document(&loaded, now_ms, poll_ms, &HashMap::new())?;
         let changes = LogChanges::operation(id.clone());
         let outcome = self
@@ -446,8 +451,8 @@ impl AsyncProcessRepository {
                     .map(|ready_at| (intent.id.clone(), ready_at))
             })
             .collect::<HashMap<_, _>>();
-        let receipt =
-            advance_transition(&mut loaded.snapshot, plan).map_err(AsyncRepositoryError::Domain)?;
+        let receipt = advance_transition(std::sync::Arc::make_mut(&mut loaded.snapshot), plan)
+            .map_err(AsyncRepositoryError::Domain)?;
         let ready = self.ready_document(&loaded, now_ms, poll_ms, &ready_at)?;
         let changes = LogChanges::from_transition(plan);
         let outcome = self
@@ -796,7 +801,7 @@ impl AsyncProcessRepository {
         entries.truncate(limit);
         let mut processes: HashMap<
             String,
-            crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+            std::sync::Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>,
         > = HashMap::new();
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -882,7 +887,9 @@ impl AsyncProcessRepository {
             .evolve(event)
             .map_err(OutboxRepositoryError::InvalidRecord)?;
         let entries = recovery_entries(&loaded.snapshot);
-        loaded.snapshot.outbox.insert(id.clone(), evolved.clone());
+        std::sync::Arc::make_mut(&mut loaded.snapshot)
+            .outbox
+            .insert(id.clone(), evolved.clone());
         let ready = loaded.original_ready_index().map(ToOwned::to_owned);
         let changes = LogChanges::outbox([id.clone()]);
         match self
@@ -952,8 +959,7 @@ impl AsyncProcessRepository {
             if !applicable {
                 continue;
             }
-            loaded
-                .snapshot
+            std::sync::Arc::make_mut(&mut loaded.snapshot)
                 .outbox
                 .insert(confirmation.id.clone(), evolved.clone());
             previous.push((confirmation.id.clone(), record));
@@ -970,7 +976,7 @@ impl AsyncProcessRepository {
         {
             Ok(write) => write,
             Err(error) => {
-                restore_records(&mut loaded.snapshot, previous);
+                restore_records(std::sync::Arc::make_mut(&mut loaded.snapshot), previous);
                 return Err(OutboxRepositoryError::Unavailable(error.to_string()));
             }
         };
@@ -981,7 +987,7 @@ impl AsyncProcessRepository {
         {
             Ok(applied) => applied,
             Err(error) => {
-                restore_records(&mut loaded.snapshot, previous);
+                restore_records(std::sync::Arc::make_mut(&mut loaded.snapshot), previous);
                 return Err(OutboxRepositoryError::Unavailable(error.to_string()));
             }
         };
@@ -1002,7 +1008,7 @@ impl AsyncProcessRepository {
             self.cache_loaded(loaded);
             Ok(OutboxBatchOutcome { confirmed })
         } else {
-            restore_records(&mut loaded.snapshot, previous);
+            restore_records(std::sync::Arc::make_mut(&mut loaded.snapshot), previous);
             Err(OutboxRepositoryError::ConcurrentProcess(process_id))
         }
     }
@@ -1031,7 +1037,7 @@ impl AsyncProcessRepository {
         }
         let authoritative = self.load(&loaded.snapshot.process_id).await?;
         match authoritative {
-            Some(current) if current.snapshot == *replacement_snapshot => {
+            Some(current) if current.snapshot.as_ref() == replacement_snapshot => {
                 Ok(ReplaceOutcome::AlreadyCommitted(Box::new(current)))
             }
             _ => Ok(ReplaceOutcome::Conflict),
@@ -2050,6 +2056,7 @@ mod tests {
             task.state = TaskState::Running;
         }
         let replacement_document = ProcessDocumentCodec::encode(&replacement).unwrap();
+        let replacement = std::sync::Arc::new(replacement);
         let repository = AsyncProcessRepository::new(Arc::new(RaceOnReclaimStore {
             inner,
             replacement: replacement_document.clone(),
@@ -2061,8 +2068,14 @@ mod tests {
             "the moved aggregate is no longer reclaimable"
         );
         assert_eq!(
-            repository.load("race").await.unwrap().unwrap().snapshot,
-            replacement,
+            repository
+                .load("race")
+                .await
+                .unwrap()
+                .unwrap()
+                .snapshot
+                .as_ref(),
+            replacement.as_ref(),
             "the concurrent commit's aggregate must survive the reclaim attempt"
         );
         assert_ne!(
@@ -2560,7 +2573,7 @@ mod tests {
             let legacy_bytes = kv.one(&process_key(pid).unwrap()).await.unwrap().unwrap();
 
             let loaded = repository.load(pid).await.unwrap().expect("aggregate");
-            assert_eq!(loaded.snapshot, source);
+            assert_eq!(loaded.snapshot.as_ref(), &source);
             assert!(!loaded.is_legacy(), "{pid} must migrate on load");
             let head = kv.one(&process_key(pid).unwrap()).await.unwrap().unwrap();
             assert_ne!(head, legacy_bytes, "{pid}'s head is an L8 document");
@@ -2573,7 +2586,7 @@ mod tests {
             );
 
             let again = repository.load(pid).await.unwrap().expect("aggregate");
-            assert_eq!(again.snapshot, source);
+            assert_eq!(again.snapshot.as_ref(), &source);
             assert_eq!(
                 again.original_document(),
                 head,
@@ -2649,9 +2662,9 @@ mod tests {
             }));
 
             let first = repository.load(pid).await.unwrap().expect("aggregate");
-            assert_eq!(first.snapshot, source);
+            assert_eq!(first.snapshot.as_ref(), &source);
             let second = repository.load(pid).await.unwrap().expect("aggregate");
-            assert_eq!(second.snapshot, source);
+            assert_eq!(second.snapshot.as_ref(), &source);
             assert!(!second.is_legacy(), "{pid} must migrate on the retry");
             assert_ne!(
                 kv.one(&process_key(pid).unwrap()).await.unwrap().unwrap(),
@@ -2677,7 +2690,7 @@ mod tests {
         // Move one task's revision only: the Claimed operation (and therefore
         // the recovery index and its entry) cannot move, and the outbox/ready
         // indexes stay empty.
-        let mut replacement = loaded.snapshot.clone();
+        let mut replacement = (*loaded.snapshot).clone();
         replacement.version.process += 1;
         let task = replacement.tasks.keys().next().unwrap().clone();
         replacement.tasks.get_mut(&task).unwrap().revision += 1;
@@ -2730,7 +2743,7 @@ mod tests {
         let mut log_bytes = 0u64;
 
         for step in 0..MAX_LOG_ENTRIES {
-            let mut replacement = loaded.snapshot.clone();
+            let mut replacement = (*loaded.snapshot).clone();
             replacement.version.process += 1;
             let task = replacement.tasks.keys().next().unwrap().clone();
             replacement.tasks.get_mut(&task).unwrap().revision += 1;
@@ -2791,7 +2804,7 @@ mod tests {
         );
         assert_eq!(kv.one(&base_key).await.unwrap().unwrap(), base_before);
 
-        let mut replacement = loaded.snapshot.clone();
+        let mut replacement = (*loaded.snapshot).clone();
         replacement.version.process += 1;
         let task = replacement.tasks.keys().next().unwrap().clone();
         replacement.tasks.get_mut(&task).unwrap().revision += 1;
@@ -4033,7 +4046,7 @@ mod tests {
                 .is_some()
         );
         let loaded = repository.load(pid).await.unwrap().expect("aggregate");
-        assert_eq!(loaded.snapshot, source);
+        assert_eq!(loaded.snapshot.as_ref(), &source);
         assert!(!loaded.is_legacy());
     }
 

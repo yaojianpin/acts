@@ -9,7 +9,7 @@
 
 use crate::{Context, Engine, Vars, Workflow, model::Step};
 
-pub(crate) use crate::scheduler::tests::flow::FlowFixture;
+pub(crate) use crate::utils::test::FlowFixture;
 
 pub(crate) mod action;
 pub(crate) mod block;

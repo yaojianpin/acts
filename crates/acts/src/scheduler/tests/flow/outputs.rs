@@ -43,6 +43,40 @@ async fn sch_outputs_flow_along_the_declared_next_chain() {
     fixture.close().await;
 }
 
+/// A bare step id reads that step's own durable data: the legacy `step1.a`
+/// expression resolves through the shared aggregate, not through the acting
+/// task's local variable map.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_bare_step_id_reads_a_previous_steps_data() {
+    let workflow = Workflow::new()
+        .with_id("flow-step-data")
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_SET, Vars::new().with("a", 5))
+        })
+        .with_step(|step| {
+            step.with_id("step2").with_uses(
+                USES_IRQ,
+                Vars::new()
+                    .with("key", "act")
+                    .with("seen", "${{ step1.a }}"),
+            )
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("step2").await;
+    assert_eq!(
+        created.params().unwrap().get::<i32>("seen"),
+        Some(5),
+        "step1.a must read the completed step's own data"
+    );
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
 /// A child's outputs flow up to its parent container, and from there to the
 /// next node and the run's outputs (the legacy `branch_outputs` goal).
 #[serial]

@@ -841,6 +841,7 @@ mod scope_tests {
             model,
             pushed: None,
             vars: vec![("known".into(), serde_json::json!("value").to_string())],
+            snapshot: None,
             env: Vec::new(),
             owner: crate::ScopePolicy::deny_all(),
         };

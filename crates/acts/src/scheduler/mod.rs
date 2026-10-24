@@ -53,6 +53,8 @@ pub(crate) use self::core::decision::run_outcome;
 pub use self::core::health::{HealthState, SchedulerHealth};
 pub use self::shell::Context;
 
+#[cfg(test)]
+pub(crate) use self::core::commit::aggregate::ProcessSnapshot;
 pub(crate) use self::core::model::{
     task_graph::TaskState,
     view::{NodeContent, NodeData, NodeKind, assign_ids},

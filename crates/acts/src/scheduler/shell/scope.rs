@@ -44,9 +44,15 @@ pub(crate) struct ScopeSpec {
     /// headless scope resolves its params and options through. `None` for
     /// every declared node.
     pub(crate) pushed: Option<crate::model::Step>,
-    /// The acting execution's scope chain (nearest wins) as JSON strings,
-    /// seeded into the headless task so `$`-expressions resolve.
+    /// Explicit local seed/overlay variables as JSON strings. Production
+    /// effects leave this empty and resolve parent/root values from
+    /// [`Self::snapshot`]; tests, read-model contexts and branch-predicate
+    /// overlays use it as a local override.
     pub(crate) vars: Vec<(String, String)>,
+    /// The shared aggregate the scope resolves parent/root values from on
+    /// demand. `None` keeps the legacy eager `vars` seed for contexts that
+    /// carry no snapshot (read model, unit tests, predicate fallback).
+    pub(crate) snapshot: Option<Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
     /// The run's declared env map (`__env`), seeded into the headless process
     /// env so `$env.X` answers the workflow's `env` entries — read-only state,
     /// shared by every task.
@@ -65,16 +71,100 @@ pub(crate) struct ScopeSpec {
 pub struct Scope {
     id: String,
     env: crate::ShareLock<Vars>,
+    /// The shared aggregate a variable lookup walks (parent → root). `None`
+    /// for a scope seeded with explicit `vars` only.
+    snapshot: Option<Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
 }
 
 impl Scope {
     /// The headless scope: the run id plus the env the seam seeded (owner,
-    /// workdir, durable env map).
-    pub(crate) fn headless(id: &str, env: Vars) -> Arc<Self> {
+    /// workdir, durable env map) and, for an effect scope, the shared
+    /// aggregate its expressions read lazily.
+    pub(crate) fn headless(
+        id: &str,
+        env: Vars,
+        snapshot: Option<Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id: id.to_string(),
             env: Arc::new(RwLock::new(env)),
+            snapshot,
         })
+    }
+
+    /// Resolve one name from the acting execution's shared scope chain,
+    /// nearest scope first. Values are decoded only when a name is read.
+    fn find_in_chain<T>(
+        &self,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        name: &str,
+    ) -> Option<T>
+    where
+        T: DeserializeOwned,
+    {
+        let snapshot = self.snapshot.as_ref()?;
+        let mut cursor = Some(task_id.clone());
+        while let Some(id) = cursor {
+            if let Some(raw) = snapshot.variables.get(&(id.clone(), name.to_string()))
+                && scope_name_visible(name)
+                && let Ok(value) = serde_json::from_str::<T>(raw)
+            {
+                return Some(value);
+            }
+            if let Some(private) = fanout_alias(name)
+                && let Some(raw) = snapshot.variables.get(&(id.clone(), private.to_string()))
+                && let Ok(value) = serde_json::from_str::<T>(raw)
+            {
+                return Some(value);
+            }
+            cursor = snapshot.tasks.get(&id).and_then(|task| task.parent.clone());
+        }
+        None
+    }
+
+    /// One step's own durable data, resolved on demand: the newest generation
+    /// of `nid`, engine facts filtered, no full index built.
+    fn step_data_of(&self, nid: &str) -> Option<Vars> {
+        let snapshot = self.snapshot.as_ref()?;
+        let task = newest_task(snapshot, nid)?;
+        let mut data = Vars::new();
+        for ((scope, name), raw) in &snapshot.variables {
+            if scope == &task
+                && !super::facts::is_engine_fact(name)
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
+            {
+                data.set(name, value);
+            }
+        }
+        Some(data)
+    }
+
+    /// One step's inputs, resolved on demand: predecessor outputs first, the
+    /// step's own durable variables last (the legacy `Task::inputs`).
+    fn step_inputs_of(&self, nid: &str) -> Option<Vars> {
+        let snapshot = self.snapshot.as_ref()?;
+        let task = newest_task(snapshot, nid)?;
+        Some(Vars::from(super::facts::input_vars(snapshot, &task)))
+    }
+
+    /// The instantiated step ids, in deterministic order. Engine facts are
+    /// not models, so the workflow/branch containers stay out.
+    fn step_ids(&self) -> Vec<String> {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(Some(model)) = super::facts::model_of(snapshot) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<String> = snapshot
+            .tasks
+            .keys()
+            .filter(|id| super::planning::find_step_in_model(&model, id.node.as_str()).is_some())
+            .map(|id| id.node.as_str().to_owned())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     pub fn id(&self) -> &str {
@@ -150,6 +240,9 @@ impl ScopeNode {
 pub struct ScopeTask {
     pub pid: String,
     pub id: String,
+    /// The execution's durable identity (node + generation), the anchor of
+    /// the shared parent → root lookup.
+    task_id: crate::scheduler::core::model::task_graph::TaskId,
     node: Arc<ScopeNode>,
     data: crate::ShareLock<Vars>,
     /// Snapshot data sealed for this evaluation only; never persisted.
@@ -167,12 +260,14 @@ impl ScopeTask {
     pub(crate) fn new(
         process_id: &str,
         id: &str,
+        task_id: crate::scheduler::core::model::task_graph::TaskId,
         node: ScopeNode,
         runtime: &Arc<Runtime>,
     ) -> Arc<Self> {
         Arc::new(Self {
             pid: process_id.to_string(),
             id: id.to_string(),
+            task_id,
             node: Arc::new(node),
             data: Arc::new(RwLock::new(Vars::new())),
             sealed: Arc::new(RwLock::new(Vars::new())),
@@ -217,19 +312,65 @@ impl ScopeTask {
         self.sealed.read().get::<Vars>(name)
     }
 
-    pub fn find<T>(&self, _scope: &Arc<Scope>, name: &str) -> Option<T>
+    pub fn find<T>(&self, scope: &Arc<Scope>, name: &str) -> Option<T>
     where
         T: DeserializeOwned + std::fmt::Debug + Clone,
     {
-        self.data().get(name)
+        // The local overlay wins. A name present but not decodable as `T`
+        // keeps the legacy `Task::find` behaviour and falls through to the
+        // ancestor chain.
+        if let Some(value) = self.data.read().get_value(name)
+            && let Ok(value) = serde_json::from_value::<T>(value.clone())
+        {
+            return Some(value);
+        }
+        scope.find_in_chain(&self.task_id, name)
+    }
+
+    /// One step's own data, resolved from the shared aggregate on demand.
+    pub fn step_data(&self, scope: &Arc<Scope>, nid: &str) -> Option<Vars> {
+        scope.step_data_of(nid)
+    }
+
+    /// One step's inputs (predecessor outputs + own durable vars), resolved
+    /// on demand.
+    pub fn step_inputs(&self, scope: &Arc<Scope>, nid: &str) -> Option<Vars> {
+        scope.step_inputs_of(nid)
+    }
+
+    /// The instantiated step ids, resolved on demand.
+    pub fn steps(&self, scope: &Arc<Scope>) -> Vec<String> {
+        scope.step_ids()
     }
 
     pub fn parent(&self, _scope: &Arc<Scope>) -> Option<Arc<ScopeTask>> {
         None
     }
 
-    pub fn inputs(&self, ctx: &Context) -> Vars {
+    /// The acting execution's own declared vars, evaluated against the
+    /// current scope. These are the values `prepare` seeds into the local
+    /// map; inherited parent/root values stay in the shared chain.
+    pub(crate) fn declared_inputs(&self, ctx: &Context) -> Vars {
         utils::fill_inputs(&self.node.content.vars(), ctx)
+    }
+
+    pub fn inputs(&self, ctx: &Context) -> Vars {
+        // The legacy `Task::inputs` projection: the predecessor outputs first,
+        // the step's own declared vars last (so they win on a name collision).
+        // This is a read-only view for `$inputs()`; it is deliberately not
+        // copied into the local map, where it would shadow a newer parent/root
+        // value (a looping step's re-entry reads the previous iteration's
+        // folded state from the chain).
+        let mut inputs = ctx
+            .proc
+            .snapshot
+            .as_ref()
+            .map(|snapshot| Vars::from(super::facts::input_vars(snapshot, &self.task_id)))
+            .unwrap_or_default();
+        for (name, value) in &self.declared_inputs(ctx) {
+            inputs.set(&name, value.clone());
+        }
+        inputs
     }
 
     pub fn outputs(&self, ctx: &Context) -> Vars {
@@ -285,6 +426,35 @@ impl ScopeTask {
     }
 }
 
+/// Whether a durable variable name is part of the expression-visible scope:
+/// the private `__` engine facts stay hidden, except the legacy `__cost`
+/// datum read by `$cost()`/`$cost_in(...)`.
+fn scope_name_visible(name: &str) -> bool {
+    !consts::is_private_key(name) || name == consts::TASK_COST
+}
+
+/// The public name a private fan-out fact answers as inside an item's scope.
+fn fanout_alias(name: &str) -> Option<&'static str> {
+    match name {
+        "index" => Some(consts::FANOUT_INDEX_VAR),
+        "value" => Some(consts::FANOUT_VALUE_VAR),
+        _ => None,
+    }
+}
+
+/// The newest generation of one model node in the shared aggregate.
+fn newest_task(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    nid: &str,
+) -> Option<crate::scheduler::core::model::task_graph::TaskId> {
+    snapshot
+        .tasks
+        .keys()
+        .filter(|id| id.node.as_str() == nid)
+        .max_by_key(|id| id.generation)
+        .cloned()
+}
+
 /// Build the headless scope: the run's env (owner, directory, durable env
 /// map), the acting node's content and the acting execution's variables — no
 /// `Process`, no node tree, no task graph.
@@ -313,7 +483,7 @@ pub(crate) fn headless_scope(
             crate::ActError::Runtime(format!("model has no node '{}'", spec.node))
         })?),
     };
-    let scope = Scope::headless(&spec.process_id, env);
+    let scope = Scope::headless(&spec.process_id, env, spec.snapshot.clone());
     // The headless task is never durable or projected; its id is the acting
     // instance's wire, so a package that forwards a client command
     // (`Runtime::do_action`) addresses exactly the execution the scope was
@@ -322,6 +492,7 @@ pub(crate) fn headless_scope(
     let task = ScopeTask::new(
         &spec.process_id,
         &spec.task_id.wire(&spec.process_id),
+        spec.task_id.clone(),
         node,
         runtime,
     );
@@ -450,6 +621,7 @@ mod tests {
                 ("__private".into(), "2".into()),
                 ("broken".into(), "{not json".into()),
             ],
+            snapshot: None,
             env: vec![("declared".into(), serde_json::json!("from-env"))],
             owner: crate::ScopePolicy::deny_all(),
         }
@@ -464,6 +636,7 @@ mod tests {
                 crate::utils::consts::PROC_OWNER,
                 crate::ScopePolicy::deny_all(),
             ),
+            None,
         );
         assert_eq!(scope.id(), "p");
         assert_eq!(scope.env().get::<String>("k").as_deref(), Some("v"));

@@ -30,11 +30,11 @@ impl ActOperation for SkipTask {
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         let id = operation.id;
         let task_id = operation.task_id.clone();
         let claim = operation.claim;
-        let task = operation.task.cloned();
+        let task = operation.task().cloned();
         let plan = {
             // `Created → Ready`; this operation marks the execution `Skipped`
             // and hands propagation to a `PropagateTask`, whose readiness
@@ -122,11 +122,11 @@ impl ActOperation for AbortTask {
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         let id = operation.id;
         let task_id = operation.task_id.clone();
         let claim = operation.claim;
-        let task = operation.task.cloned();
+        let task = operation.task().cloned();
         let plan = {
             // ancestor walk decides running children `Aborted` (pending
             // ones skip). Same shape as `SkipTask`, terminal `Aborted`.
@@ -239,8 +239,8 @@ mod tests {
             id,
             claim,
             task_id: id.task.clone(),
-            task: snapshot.tasks.get(&id.task),
-            snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane,
         }
@@ -260,7 +260,7 @@ mod tests {
             claim: &claim,
             task_id: id.task.clone(),
             task: None,
-            snapshot: &snapshot,
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };
@@ -397,7 +397,7 @@ mod tests {
             claim: &claim,
             task_id: id.task.clone(),
             task: None,
-            snapshot: &snapshot,
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };

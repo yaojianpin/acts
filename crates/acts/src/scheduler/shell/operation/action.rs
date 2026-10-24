@@ -1292,10 +1292,13 @@ impl ActOperation for ApplyAction {
     }
 
     async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
-        let snapshot = operation.snapshot;
+        // Borrow the snapshot field, not the whole operation: the effect phase
+        // releases the command lane below, which is a second field.
+        let snapshot = operation.snapshot.as_ref();
         let task_id = &operation.task_id;
         let task = operation
-            .task
+            .task()
+            .cloned()
             .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
         // A durable client decision is what this operation replays: the `__action`
         // fact is committed *before* the claim and the effect, so a decision
@@ -1347,7 +1350,12 @@ impl ActOperation for ApplyAction {
                 // dispatched: the legacy act completes (or fails) first, and a
                 // `catches` handler answers the act's failure — never a failure
                 // of the children it already dispatched.
-                match host.step_effect(snapshot, task_id, &task.model_node)? {
+                match host.step_effect(
+                    snapshot,
+                    Some(&operation.snapshot),
+                    task_id,
+                    &task.model_node,
+                )? {
                     Some((runner, request)) => {
                         // The effect's identity is the operation's durable
                         // identity (A1c): every retry, replan and recovery of
@@ -1442,12 +1450,12 @@ impl ActOperation for ApplyAction {
                 "the completion operation planned a foreign outcome",
             ));
         };
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         let id = operation.id;
         let task_id = operation.task_id.clone();
         let claim = operation.claim;
         let task = operation
-            .task
+            .task()
             .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
         match effect {
             // The bare remainder of an operation with nothing to do: its own
@@ -2353,8 +2361,8 @@ mod tests {
             id: &id,
             claim: &claim,
             task_id: id.task.clone(),
-            task: None,
-            snapshot: &snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };
@@ -2397,8 +2405,8 @@ mod tests {
             id: &id,
             claim: &claim,
             task_id: id.task.clone(),
-            task: snapshot.tasks.get(&task_id),
-            snapshot: &snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };
@@ -2425,8 +2433,8 @@ mod tests {
             id: &id,
             claim: &claim,
             task_id: id.task.clone(),
-            task: snapshot.tasks.get(&task_id),
-            snapshot: &snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };
@@ -2439,7 +2447,6 @@ mod tests {
     async fn nothing_plans_the_bare_remainder() {
         let host = host();
         let snapshot = seeded();
-        let task_id = task("a");
         let id = id("a", 0);
         let claim = commit(&id);
         let mut lane = CommandLane::detached(&host);
@@ -2447,8 +2454,8 @@ mod tests {
             id: &id,
             claim: &claim,
             task_id: id.task.clone(),
-            task: snapshot.tasks.get(&task_id),
-            snapshot: &snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };
@@ -2465,7 +2472,6 @@ mod tests {
     async fn a_foreign_outcome_is_an_error() {
         let host = host();
         let snapshot = seeded();
-        let task_id = task("a");
         let id = id("a", 0);
         let claim = commit(&id);
         let mut lane = CommandLane::detached(&host);
@@ -2473,8 +2479,8 @@ mod tests {
             id: &id,
             claim: &claim,
             task_id: id.task.clone(),
-            task: snapshot.tasks.get(&task_id),
-            snapshot: &snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };
@@ -2514,8 +2520,8 @@ mod tests {
             id: &id,
             claim: &claim,
             task_id: id.task.clone(),
-            task: snapshot.tasks.get(&task_id),
-            snapshot: &snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };
@@ -2538,8 +2544,8 @@ mod tests {
             id: &id,
             claim: &claim,
             task_id: id.task.clone(),
-            task: snapshot.tasks.get(&task_id),
-            snapshot: &snapshot,
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
             now_ms: 0,
             lane: &mut lane,
         };

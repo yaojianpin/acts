@@ -189,7 +189,7 @@ impl ActOperation for ReturnToParent {
     }
 
     async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
-        let snapshot = operation.snapshot;
+        let snapshot = operation.snapshot();
         if run_outcome(snapshot).is_none() {
             return Ok(Outcome::Nothing);
         }
@@ -234,10 +234,10 @@ impl ActOperation for ReturnToParent {
         // The operation's own commit: no state change, no propagation. The
         // empty payload keeps the note from becoming an engine message.
         host.task_operation_plan(
-            operation.snapshot,
+            operation.snapshot(),
             operation.id,
             &operation.task_id,
-            operation.task,
+            operation.task(),
             operation.claim,
             "returned",
             "task.completed",
@@ -302,7 +302,7 @@ impl KernelHost {
                     // Re-read and re-check the marker before minting another
                     // sequence.
                     current = match self.load(&current.process_id).await? {
-                        Some(loaded) => loaded.snapshot,
+                        Some(loaded) => std::sync::Arc::unwrap_or_clone(loaded.snapshot),
                         None => return Ok(()),
                     };
                     continue;
@@ -318,7 +318,7 @@ impl KernelHost {
                     // A concurrent commit moved the aggregate: re-read and
                     // re-check the marker before minting another sequence.
                     current = match self.load(&current.process_id).await? {
-                        Some(loaded) => loaded.snapshot,
+                        Some(loaded) => std::sync::Arc::unwrap_or_clone(loaded.snapshot),
                         None => return Ok(()),
                     };
                 }

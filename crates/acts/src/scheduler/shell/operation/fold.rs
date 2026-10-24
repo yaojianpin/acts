@@ -171,8 +171,8 @@ impl KernelHost {
                     id: &id,
                     claim: &claim,
                     task_id: task_id.clone(),
-                    task: scratch.tasks.get(&task_id),
-                    snapshot: &scratch,
+                    task: scratch.tasks.get(&task_id).cloned(),
+                    snapshot: std::sync::Arc::new(scratch.clone()),
                     now_ms,
                     lane: &mut detached,
                 };

@@ -65,7 +65,7 @@ impl std::fmt::Debug for Context {
 
 impl Context {
     fn init_vars(&self, task: &Arc<ScopeTask>) {
-        let inputs = task.inputs(self);
+        let inputs = task.declared_inputs(self);
         debug!(inputs = %inputs, "init vars");
 
         // set the inputs to task's data
@@ -348,6 +348,7 @@ mod tests {
                 }),
             pushed: None,
             vars,
+            snapshot: None,
             env: vec![("declared".into(), serde_json::json!("from-env"))],
             owner,
         }

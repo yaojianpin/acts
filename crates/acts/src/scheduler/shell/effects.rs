@@ -337,6 +337,7 @@ mod coverage_tests {
                 model: Workflow::new().with_step(|step| step.with_id("s1")),
                 pushed: None,
                 vars: Vec::new(),
+                snapshot: None,
                 env: Vec::new(),
                 owner: crate::ScopePolicy::deny_all(),
             },
