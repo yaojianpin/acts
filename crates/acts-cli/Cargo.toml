@@ -15,7 +15,7 @@ acts-channel = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { version = "4.5.21", features = ["derive", "color", "env"] }
-clap-cargo = "0.14.1"
+clap-cargo = "0.19.0"
 comfy-table = "8.0.0"
 owo-colors = "4.1.0"
 serde = { features = ["derive"], workspace = true }
