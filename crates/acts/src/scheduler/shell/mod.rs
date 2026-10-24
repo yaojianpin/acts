@@ -98,7 +98,8 @@ use crate::{
 };
 
 pub(crate) use crate::scheduler::core::health::{
-    KernelSchedule, LoopGuard, LoopHealth, OutboxMetrics, ReadyMetrics, RecoveryMetrics,
+    CleanupMetrics, KernelSchedule, LoopGuard, LoopHealth, OutboxMetrics, ReadyMetrics,
+    RecoveryMetrics, SchedulerHealth, TimerGuards,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -215,7 +216,11 @@ pub(crate) struct KernelHost {
     /// loop ticks them, so ONE background task owns every store-reaching pass.
     /// Attached after construction — the guider needs the runtime handle,
     /// which needs the host.
-    timers: Arc<parking_lot::RwLock<Option<Arc<TimerGuider>>>>,
+    timer_guider: Arc<parking_lot::RwLock<Option<Arc<TimerGuider>>>>,
+    /// The timers' failure state and cleanup counters (see [`TimerGuards`]):
+    /// the host owns them so `scheduler_health` answers every loop — the four
+    /// driver passes and the four timers — from one place.
+    timer_guards: Arc<TimerGuards>,
     /// Which runs were already reported: a start once, a terminal once.
     reported: Arc<parking_lot::Mutex<ReportedRuns>>,
     /// How often one node may run in one run — the legacy
@@ -335,7 +340,8 @@ impl KernelHost {
                 lifecycle: Arc::new(parking_lot::RwLock::new(None)),
                 projection: Arc::new(parking_lot::RwLock::new(None)),
                 predicate: Arc::new(parking_lot::RwLock::new(None)),
-                timers: Arc::new(parking_lot::RwLock::new(None)),
+                timer_guider: Arc::new(parking_lot::RwLock::new(None)),
+                timer_guards: Arc::new(TimerGuards::new()),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
                 max_node_run_times,
                 admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(caps))),
@@ -460,7 +466,32 @@ impl KernelHost {
     /// store-facing timers on their own intervals, so one task owns every
     /// background pass that reaches the store.
     pub(crate) fn attach_timers(&self, timers: Arc<TimerGuider>) {
-        *self.timers.write() = Some(timers);
+        *self.timer_guider.write() = Some(timers);
+    }
+
+    /// The timers' guards and cleanup counters (the guider consults them, the
+    /// health read reports them).
+    pub(crate) fn timer_guards(&self) -> &Arc<TimerGuards> {
+        &self.timer_guards
+    }
+
+    /// Every background loop's failure state: the four driver passes and the
+    /// four store-facing timers, as one answer.
+    pub(crate) fn scheduler_health(&self) -> SchedulerHealth {
+        SchedulerHealth {
+            trigger: self.timer_guards.trigger_health(),
+            retry: self.timer_guards.retry_health(),
+            cleanup: self.timer_guards.cleanup_health(),
+            ready: self.ready_health(),
+            recovery: self.recovery_health(),
+            outbox: self.outbox_health(),
+            projection: self.projection_health(),
+        }
+    }
+
+    /// What the last terminal-cleanup passes observed and reclaimed.
+    pub(crate) fn cleanup_metrics(&self) -> CleanupMetrics {
+        self.timer_guards.cleanup_metrics()
     }
 
     /// Decide one branch `if`: on the engine's environment when a predicate
@@ -1080,25 +1111,25 @@ impl KernelHost {
                     }
                 }
                 _ = trigger_ticker.tick() => {
-                    let timers = self.timers.read().clone();
+                    let timers = self.timer_guider.read().clone();
                     if let Some(timers) = timers {
                         timers.trigger_tick().await;
                     }
                 }
                 _ = retry_ticker.tick() => {
-                    let timers = self.timers.read().clone();
+                    let timers = self.timer_guider.read().clone();
                     if let Some(timers) = timers {
                         timers.retry_tick().await;
                     }
                 }
                 _ = cleanup_ticker.tick() => {
-                    let timers = self.timers.read().clone();
+                    let timers = self.timer_guider.read().clone();
                     if let Some(timers) = timers {
                         timers.cleanup_tick().await;
                     }
                 }
                 _ = snapshot_ticker.tick() => {
-                    let timers = self.timers.read().clone();
+                    let timers = self.timer_guider.read().clone();
                     if let Some(timers) = timers {
                         timers.purge_tick().await;
                     }

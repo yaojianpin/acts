@@ -126,7 +126,7 @@ pub(crate) async fn sweep_removable(runtime: &Arc<Runtime>) -> Result<usize> {
             runtime.router().forget(&pid);
         }
     }
-    runtime.timers().fold_cleanup(&pass);
+    runtime.kernel().timer_guards().fold_cleanup(&pass);
     match failure {
         Some(error) => Err(error),
         None => Ok(removed),

@@ -12,7 +12,7 @@ use crate::{
     env::Environment,
     event::{Emitter, ProcessGate},
     scheduler::{
-        core::health::{CleanupMetrics, SchedulerHealth, TimerGuards},
+        core::health::{CleanupMetrics, SchedulerHealth},
         shell::{
             KernelHost, ProcRead, SnapshotRegistry, TimerGuider, timers as shell_timers,
             validation::SchemaCache,
@@ -45,13 +45,10 @@ pub struct Runtime {
     shutdown: CancellationToken,
     schema_cache: Arc<SchemaCache>,
     pub(crate) snapshots: Arc<SnapshotRegistry>,
-    /// The store-facing timers' guards and the terminal-cleanup counters, as
-    /// one bundle (see [`TimerGuards`]). The kernel host's serve loop ticks
-    /// the timers; the guards' atomics take their health.
-    timers: Arc<TimerGuards>,
     /// The deterministic kernel host: it *is* the engine — it owns every
     /// started process (start, actions, effects, messages) and drives the operations
-    /// over the aggregate documents.
+    /// over the aggregate documents, including the store-facing timers
+    /// (`timer_guider`/`timer_guards`).
     kernel: Arc<KernelHost>,
 }
 
@@ -84,12 +81,6 @@ impl std::fmt::Debug for Runtime {
 impl Runtime {
     pub(crate) fn snapshot_registry(&self) -> Arc<SnapshotRegistry> {
         self.snapshots.clone()
-    }
-
-    /// The store-facing timers' guards (the kernel host's serve loop ticks
-    /// them; these are the states `scheduler_health` reads).
-    pub(crate) fn timers(&self) -> &Arc<TimerGuards> {
-        &self.timers
     }
 
     /// The pid → lane mapping, so the timers' cleanup can release a swept
@@ -168,22 +159,15 @@ impl Runtime {
         self.writer.flush().await
     }
 
-    /// Failure state of the store-facing background timers: consecutive failed
+    /// Failure state of the store-facing background loops: consecutive failed
     /// ticks and the backoff window each is on (see [`SchedulerHealth`]). A
     /// loop whose store keeps failing is reported `Degraded` and skips ticks
     /// instead of polling the store at the full tick rate, so this is where a
     /// host reads *why* scheduled triggers are late or deliveries are not
-    /// being re-sent.
+    /// being re-sent. The kernel host owns every loop's guard — the four
+    /// driver passes and the four timers — so it answers the whole state.
     pub fn scheduler_health(&self) -> SchedulerHealth {
-        SchedulerHealth {
-            trigger: self.timers.trigger_health(),
-            retry: self.timers.retry_health(),
-            cleanup: self.timers.cleanup_health(),
-            ready: self.kernel.ready_health(),
-            recovery: self.kernel.recovery_health(),
-            outbox: self.kernel.outbox_health(),
-            projection: self.kernel.projection_health(),
-        }
+        self.kernel.scheduler_health()
     }
 
     /// The ready/timer pass's backlog and age gauges (A10).
@@ -203,7 +187,7 @@ impl Runtime {
 
     /// The terminal-run cleanup's counters (see [`CleanupMetrics`]).
     pub fn cleanup_metrics(&self) -> CleanupMetrics {
-        self.timers.cleanup_metrics()
+        self.kernel.cleanup_metrics()
     }
 
     /// The read model's counters and repair backlog (A5): rows applied,
@@ -577,7 +561,6 @@ impl Runtime {
             shutdown,
             schema_cache,
             snapshots,
-            timers: Arc::new(TimerGuards::new()),
             kernel,
         });
 
