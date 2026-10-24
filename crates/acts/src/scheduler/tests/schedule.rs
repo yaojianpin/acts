@@ -24,8 +24,8 @@ use serial_test::serial;
 use crate::{
     Engine, EventInfo, MemoryStore, Message, Principal, Trigger, Vars, Workflow,
     query::{Expr, Filter, Query},
+    scheduler::core::health::{DEGRADE_AFTER, HealthState},
     scheduler::runtime::TEST_TICK_MS,
-    scheduler::shell::health::{DEGRADE_AFTER, HealthState},
     utils,
     utils::test::USES_IRQ,
 };

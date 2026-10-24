@@ -45,6 +45,13 @@ fn schedule(
         recovery,
         outbox,
         projection,
+        // The store-facing timers are not this suite's subject: park them on
+        // the same tick so their passes never interleave with the loops under
+        // test.
+        trigger: ready,
+        retry: ready,
+        cleanup: ready,
+        snapshot: ready,
         ready_budget: PAGE_SIZE,
         recovery_budget: PAGE_SIZE,
         outbox_budget: PAGE_SIZE,

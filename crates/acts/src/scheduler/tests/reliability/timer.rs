@@ -29,8 +29,8 @@ use serial_test::serial;
 
 use crate::config::ConfigData;
 use crate::data::DeliveryStatus;
+use crate::scheduler::core::health::HealthState;
 use crate::scheduler::runtime::TEST_TICK_MS;
-use crate::scheduler::shell::health::HealthState;
 use crate::utils::test::USES_SET;
 use crate::{ChannelOptions, Message, Store, TaskState};
 

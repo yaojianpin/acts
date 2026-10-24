@@ -1,5 +1,6 @@
 mod health;
 mod scheduler_split;
+mod timers;
 mod tree;
 
 use super::*;
@@ -14,6 +15,9 @@ use crate::{
     },
     store::MemoryStore,
 };
+use std::time::Duration;
+
+use super::admission::{AdmissionGate, QuotaMetrics};
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -7749,7 +7753,7 @@ async fn a_commit_delivers_its_records_without_waiting_for_a_tick() {
     let driver = tokio::spawn(host.clone().serve(
         wake_rx,
         shutdown.clone(),
-        super::KernelSchedule::uniform(std::time::Duration::from_secs(3600)),
+        super::KernelSchedule::uniform(std::time::Duration::from_secs(3600), PAGE_SIZE),
     ));
     host.start_process(&spec).await.unwrap();
 
@@ -10250,7 +10254,7 @@ async fn the_serve_loop_reports_admission_lag_and_degrades_the_projection_loop()
             host.serve(
                 wake_rx,
                 shutdown,
-                KernelSchedule::uniform(Duration::from_millis(20)),
+                KernelSchedule::uniform(Duration::from_millis(20), PAGE_SIZE),
             )
             .await
         }
@@ -10286,7 +10290,7 @@ async fn the_serve_loop_reports_admission_lag_and_degrades_the_projection_loop()
     );
     assert_eq!(
         host.projection_health().state,
-        crate::scheduler::shell::health::HealthState::Degraded,
+        crate::scheduler::core::health::HealthState::Degraded,
         "a persistently failing projection loop degrades"
     );
 }
@@ -10388,7 +10392,7 @@ async fn a_failing_scan_is_survived_by_the_serve_loop() {
             host.serve(
                 wake_rx,
                 shutdown,
-                KernelSchedule::uniform(Duration::from_millis(20)),
+                KernelSchedule::uniform(Duration::from_millis(20), PAGE_SIZE),
             )
             .await
         }
@@ -10435,7 +10439,7 @@ async fn the_serve_loop_reports_an_observed_effect_application() {
             host.serve(
                 wake_rx,
                 shutdown,
-                KernelSchedule::uniform(Duration::from_millis(20)),
+                KernelSchedule::uniform(Duration::from_millis(20), PAGE_SIZE),
             )
             .await
         }

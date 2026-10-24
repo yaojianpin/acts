@@ -1,12 +1,15 @@
-//! The runtime's store-facing timer loops, as one guider the runtime starts.
+//! The runtime's store-facing timer loops, as one guider the kernel host's
+//! serve loop ticks.
 //!
-//! Each loop is one `impl TimerGuider` block in its own file: the message
-//! retry ([`TimerGuider::retry_timer`]), the terminal-run cleanup
-//! ([`TimerGuider::cleanup_timer`]), the schedule triggers
-//! ([`TimerGuider::trigger_timer`]) and the snapshot TTL purge
-//! ([`TimerGuider::purge_timer`]). The guards and the cleanup counters
-//! they read and write live in [`super::health`] (`guards.rs`) — the state is
-//! health's; this module is only the loops and the cadence math they tick on.
+//! Each loop is one pass (`*_tick`) in its own file: the message retry
+//! ([`TimerGuider::retry_tick`]), the terminal-run cleanup
+//! ([`TimerGuider::cleanup_tick`]), the schedule triggers
+//! ([`TimerGuider::trigger_tick`]) and the snapshot TTL purge
+//! ([`TimerGuider::purge_tick`]). The guards and the cleanup counters
+//! they read and write live in [`crate::scheduler::core::health`] — the state
+//! is health's; this module is only the loops and the cadence math they tick
+//! on. The host's serve loop owns the only task that runs them, so one
+//! background service reaches the store.
 
 mod cleanup;
 mod purge;
@@ -97,6 +100,22 @@ pub(crate) fn kernel_schedule(config: &Config) -> KernelSchedule {
             config.projection_interval_secs(),
             tick,
         ),
+        trigger: loop_interval(
+            config.data.trigger_interval_secs,
+            config.trigger_interval_secs(),
+            tick,
+        ),
+        retry: loop_interval(
+            config.data.retry_interval_secs,
+            config.retry_interval_secs(),
+            tick,
+        ),
+        cleanup: cleanup_interval(config),
+        snapshot: loop_interval(
+            config.data.snapshot_interval_secs,
+            config.snapshot_interval_secs(),
+            tick,
+        ),
         ready_budget: config.ready_batch(),
         recovery_budget: config.recovery_batch(),
         outbox_budget: config.outbox_batch(),
@@ -104,10 +123,26 @@ pub(crate) fn kernel_schedule(config: &Config) -> KernelSchedule {
     }
 }
 
-/// Spawns the runtime's store-facing timer loops: it holds the shared
-/// [`TimerGuards`] and the runtime handle the loops serve. The runtime starts
-/// each loop through one of the `impl TimerGuider` blocks in this directory
-/// and never runs timer loop code of its own.
+/// The terminal-cleanup loop's own interval: the configured cleanup interval.
+/// It never shares the driver's tick or the retry timer's schedule (A10 keeps
+/// the loops separate; A11 gives cleanup its own).
+pub(crate) fn cleanup_interval(config: &Config) -> Duration {
+    #[cfg(test)]
+    {
+        let _ = config;
+        Duration::from_millis(TEST_TICK_MS)
+    }
+    #[cfg(not(test))]
+    {
+        Duration::from_millis((config.cleanup_interval_secs() * 1000) as u64)
+    }
+}
+
+/// The runtime's store-facing timers, attached to the kernel host: the host's
+/// serve loop ticks each timer on its own interval (`*_tick`), so ONE
+/// background task owns every pass that reaches the store. The guider holds
+/// the shared [`TimerGuards`] — the failure state `scheduler_health` reads —
+/// and the runtime handle the passes serve.
 pub(crate) struct TimerGuider {
     runtime: Arc<Runtime>,
     timers: Arc<TimerGuards>,

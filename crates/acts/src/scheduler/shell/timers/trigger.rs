@@ -1,15 +1,15 @@
-//! The schedule-trigger timer: periodically fires every due `schedule`
-//! trigger row and rolls its `next_run` forward. Deployed rows arm with their
-//! next cron fire; a changed schedule re-arms the same way.
+//! The schedule-trigger timer: fires every due `schedule` trigger row and
+//! rolls its `next_run` forward. Deployed rows arm with their next cron fire;
+//! a changed schedule re-arms the same way. The loop itself is the kernel
+//! host's serve tick ([`TimerGuider::trigger_tick`]); this file holds the
+//! cadence-independent pass and the fire primitive.
 
-use std::time::Duration;
+use std::sync::Arc;
 
-use tokio::time;
 use tracing::error;
 
 use super::TimerGuider;
 use crate::scheduler::Runtime;
-use std::sync::Arc;
 
 use crate::{ActError, Result, Vars, data};
 
@@ -44,75 +44,47 @@ pub(crate) async fn fire_schedule(runtime: &Arc<Runtime>, event: &data::Event) -
 }
 
 impl TimerGuider {
-    /// Schedule-trigger timer — fires every due `schedule` trigger row. The
-    /// due query is the loop's one store round trip and the only failure that
+    /// One schedule-trigger pass: fires every due `schedule` trigger row. The
+    /// due query is the pass's one store round trip and the only failure that
     /// counts against its health: a trigger whose own fire failed is that
     /// row's problem, and it repeats only when the row itself is unusable
     /// (its model is gone, its payload does not parse) — one such row must
     /// not throttle the schedules that are fine. What the health is about is
     /// reaching the store, and that is what this query decides.
-    pub(crate) fn trigger_timer(&self) {
-        let config = self.runtime.config();
-        let interval_ms = super::loop_interval(
-            config.data.trigger_interval_secs,
-            config.trigger_interval_secs(),
-            super::tick_interval(config),
-        )
-        .as_millis() as u64;
-
+    pub(crate) async fn trigger_tick(&self) {
+        // A degraded loop sits this tick out: the store has failed every
+        // recent attempt, so another query now would fail too (and log
+        // again) — the guard decides when the next attempt is worth making.
+        if !self.timers.trigger().attempt() {
+            return;
+        }
         let store = self.runtime.store();
-        let shutdown = self.runtime.shutdown_token();
-        let rt = self.runtime.clone();
-        let timers = self.timers.clone();
-        tokio::spawn(async move {
-            let mut intv = time::interval(Duration::from_millis(interval_ms));
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    _ = intv.tick() => {}
-                }
-                // A degraded loop sits this tick out: the store has failed
-                // every recent attempt, so another query now would fail too
-                // (and log again) — the guard decides when the next attempt is
-                // worth making.
-                if !timers.trigger().attempt() {
-                    continue;
-                }
-                let now = crate::utils::time::time_millis();
-                // The due query is the loop's one store round trip and the only
-                // failure that counts against its health: a trigger whose own
-                // fire failed is that row's problem, and it repeats only when
-                // the row itself is unusable (its model is gone, its payload
-                // does not parse) — one such row must not throttle the
-                // schedules that are fine. What the health is about is reaching
-                // the store, and that is what this query decides.
-                let due = match store
-                    .events()
-                    .query(
-                        &crate::query::Query::new().limit(1000).filter(
-                            crate::query::Filter::and()
-                                .expr(crate::query::Expr::eq("kind", "schedule"))
-                                .expr(crate::query::Expr::le("next_run", now)),
-                        ),
-                    )
-                    .await
-                {
-                    Ok(rows) => {
-                        timers.trigger().recovered();
-                        rows.rows
-                    }
-                    Err(err) => {
-                        error!(error = %err, "schedule query failed");
-                        timers.trigger().failed(&err);
-                        continue;
-                    }
-                };
-                for event in due {
-                    if let Err(err) = fire_schedule(&rt, &event).await {
-                        error!(event = %event.id, error = %err, "schedule trigger failed");
-                    }
-                }
+        let now = crate::utils::time::time_millis();
+        let due = match store
+            .events()
+            .query(
+                &crate::query::Query::new().limit(1000).filter(
+                    crate::query::Filter::and()
+                        .expr(crate::query::Expr::eq("kind", "schedule"))
+                        .expr(crate::query::Expr::le("next_run", now)),
+                ),
+            )
+            .await
+        {
+            Ok(rows) => {
+                self.timers.trigger().recovered();
+                rows.rows
             }
-        });
+            Err(err) => {
+                error!(error = %err, "schedule query failed");
+                self.timers.trigger().failed(&err);
+                return;
+            }
+        };
+        for event in due {
+            if let Err(err) = fire_schedule(&self.runtime, &event).await {
+                error!(event = %event.id, error = %err, "schedule trigger failed");
+            }
+        }
     }
 }

@@ -97,21 +97,25 @@ use crate::{
     store::KvStore,
 };
 
-use self::health::{LoopGuard, LoopHealth};
+pub(crate) use crate::scheduler::core::health::{
+    KernelSchedule, LoopGuard, LoopHealth, OutboxMetrics, ReadyMetrics, RecoveryMetrics,
+};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 // The shell's parts are its own submodules: they see this module's scope and
 // its private items, and this module re-exports the ones the runtime names
 // through it.
 mod action;
+pub(crate) mod admission;
 mod context;
+pub(crate) mod delivery;
 mod effects;
 mod errors;
 mod facts;
 pub(crate) mod graph;
-pub(crate) mod health;
+pub(crate) mod lifecycle;
+mod liveness;
 mod message;
 mod model;
 mod operation;
@@ -119,13 +123,20 @@ mod planning;
 mod predicate;
 mod projection;
 mod read_model;
-mod scope;
+pub(crate) mod recovery;
+pub(crate) mod scope;
+pub(crate) mod snapshot;
+pub(crate) mod timers;
 pub(crate) mod validation;
 
 use self::model::task_graph;
 use self::{action::*, errors::*, facts::*, planning::*};
+pub(crate) use admission::{AdmissionCaps, Admissions};
 pub use context::Context;
+pub(crate) use delivery::ShadowTransport;
 pub(crate) use effects::PackageEffectRunner;
+pub(crate) use lifecycle::ReportedRuns;
+pub(crate) use lifecycle::{LifecycleSink, ProcessEvent};
 pub(crate) use message::MessageForwarder;
 pub(crate) use model::ProcessSpec;
 pub(crate) use predicate::EnginePredicateRunner;
@@ -136,6 +147,8 @@ pub(crate) use read_model::{TaskRow, context as read_context};
 pub(crate) use scope::{Scope, ScopeTask};
 #[cfg(test)]
 pub(crate) use scope::{ScopeSpec, headless_scope};
+pub(crate) use snapshot::SnapshotRegistry;
+pub(crate) use timers::TimerGuider;
 
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;
@@ -148,183 +161,6 @@ const LEASE_MS: i64 = 60_000;
 const ACTION_ATTEMPTS: usize = 8;
 const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
-
-/// The executor's proof about one `EffectUnknown` operation (A1c): the fact
-/// Core's recovery decision reads, plus the payload only the shell can hand to
-/// the normal effect planner when the decision says `ReplayEffect`.
-struct ObservedEffect {
-    receipt: EffectReceipt,
-    observation: Option<effects::EffectObservation>,
-}
-
-/// The fence one delivery attempt uses. The normal path applies it only in
-/// memory before its batch confirmation; the retry pass persists it first, so
-/// a concurrent worker cannot deliver the same record under the same fence.
-fn delivery_claim(record: &OutboxRecord, now: i64) -> DeliveryClaim {
-    DeliveryClaim {
-        owner: OWNER.into(),
-        fence: record.last_fence + 1,
-        lease_until_ms: now + DELIVERY_LEASE_MS,
-        heartbeat_revision: 0,
-    }
-}
-
-/// The state-machine event one transport outcome becomes. `Quarantine` is
-/// valid from `Pending` directly; every other outcome needs the claim first.
-fn outcome_event(claim: &DeliveryClaim, outcome: DeliveryOutcome, now: i64) -> OutboxEvent {
-    match outcome {
-        DeliveryOutcome::Delivered { receipt } => OutboxEvent::ConfirmDelivered {
-            claim: claim.clone(),
-            receipt,
-            now_ms: now,
-        },
-        DeliveryOutcome::RetryAt {
-            available_at_ms,
-            error,
-        } => OutboxEvent::Reschedule {
-            claim: claim.clone(),
-            available_at_ms,
-            error,
-            now_ms: now,
-        },
-        DeliveryOutcome::OutcomeUnknown { reason } => OutboxEvent::MarkDeliveryUnknown {
-            claim: claim.clone(),
-            reason,
-            now_ms: now,
-        },
-        DeliveryOutcome::Quarantine { reason } => OutboxEvent::Quarantine { reason },
-    }
-}
-
-/// The in-memory event sequence a normal-path delivery applies before the one
-/// batch commit: claim, then the transport's outcome.
-fn delivery_events(claim: &DeliveryClaim, outcome: DeliveryOutcome, now: i64) -> Vec<OutboxEvent> {
-    let event = outcome_event(claim, outcome, now);
-    match event {
-        OutboxEvent::Quarantine { .. } => vec![event],
-        _ => vec![
-            OutboxEvent::Claim {
-                claim: claim.clone(),
-                now_ms: now,
-            },
-            event,
-        ],
-    }
-}
-
-/// Best-effort wake delivery into the host's queue. Losing a wake is safe:
-/// the operation also owns a durable ready record, and the driver's due pass
-/// picks it up. A failed send is counted and wakes the due-pass notification.
-#[derive(Clone)]
-struct QueueWake {
-    tx: Sender<OperationId>,
-}
-
-impl QueueWake {
-    fn wake(&self, operation: &OperationId) -> bool {
-        self.tx.try_send(operation.clone()).is_ok()
-    }
-}
-
-/// What the driver's ready-queue passes observed. A gauge, not a history: the
-/// last pass wins for backlog/age; the counters accumulate for the host's
-/// lifetime.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ReadyMetrics {
-    /// Ready records the last pass observed (due or not).
-    pub backlog: usize,
-    /// Operations the last page found due.
-    pub due: usize,
-    /// Age of the oldest observed ready record, in milliseconds.
-    pub oldest_ready_age_ms: Option<i64>,
-    /// Passes run over the host's lifetime.
-    pub passes: u64,
-    /// Index entries walked over the host's lifetime.
-    pub scanned: u64,
-    /// Operations deferred to a later poll (parked runs, idle timers).
-    pub deferred: u64,
-    /// Wakes that did not fit the in-memory channel.
-    pub wake_failures: u64,
-    /// Missing ready records repaired by the boot pass.
-    pub repaired: u64,
-}
-
-/// What the outbox retry pass observed and did (A10). `backlog` and
-/// `oldest_due_age_ms` are gauges of the last pass; the counters accumulate for
-/// the host's lifetime.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct OutboxMetrics {
-    /// Due records the last pass saw in the index.
-    pub backlog: usize,
-    /// Age of the oldest due record, in milliseconds.
-    pub oldest_due_age_ms: Option<i64>,
-    /// Index entries the last pass walked (due or not).
-    pub observed: usize,
-    /// Retry passes run.
-    pub passes: u64,
-    /// Records delivered by a retry pass.
-    pub delivered: u64,
-    /// Records left for a later pass because their run's rows were behind.
-    pub deferred: u64,
-}
-
-/// What the recovery scanner observed and did (A10). `scanned` is the backlog
-/// examined by the last pass (every exceptional row is scanned by a pass);
-/// the counters accumulate for the host's lifetime.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RecoveryMetrics {
-    /// Exceptional operations the last pass examined.
-    pub scanned: usize,
-    /// Operations left after the last pass's budget (the scan resumes there).
-    pub more_pending: bool,
-    pub passes: u64,
-    /// Expired claims reclaimed into the ready queue.
-    pub reclaimed: u64,
-    /// Missing ready records repaired.
-    pub ready_repaired: u64,
-    /// Commit-prepared operations finalized.
-    pub finalized: u64,
-    /// Operations needing manual reconciliation, as of the last pass.
-    pub reconciliation_required: usize,
-    pub effect_applied: u64,
-    pub effect_retried: u64,
-}
-
-/// The independent cadences and per-round budgets of the kernel host (A10).
-///
-/// Each loop owns one interval: the ready/timer pass (normal liveness), the
-/// recovery scanner (exceptional work), the outbox retry pass and the
-/// projection repair pass. A slow or failing loop cannot delay another, and a
-/// shorter loop never multiplies another's scans.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct KernelSchedule {
-    pub(crate) ready: Duration,
-    pub(crate) recovery: Duration,
-    pub(crate) outbox: Duration,
-    pub(crate) projection: Duration,
-    pub(crate) ready_budget: usize,
-    pub(crate) recovery_budget: usize,
-    pub(crate) outbox_budget: usize,
-    pub(crate) projection_budget: usize,
-}
-
-impl KernelSchedule {
-    /// The pre-A10 cadence: every loop on the driver tick, with the historical
-    /// page budgets. Used by hosts that do not configure the split.
-    #[cfg(test)]
-    pub(crate) fn uniform(tick: Duration) -> Self {
-        Self {
-            ready: tick,
-            recovery: tick,
-            outbox: tick,
-            projection: tick,
-            ready_budget: PAGE_SIZE,
-            recovery_budget: PAGE_SIZE,
-            outbox_budget: PAGE_SIZE,
-            projection_budget: 32,
-        }
-    }
-}
 
 /// What one quiescence pass did.
 #[cfg(test)]
@@ -374,6 +210,12 @@ pub(crate) struct KernelHost {
     /// headless task, exactly like the legacy branch task; without one the
     /// built-in subset evaluator decides (see `predicate`).
     predicate: Arc<parking_lot::RwLock<Option<Arc<dyn predicate::PredicateRunner>>>>,
+    /// The runtime's store-facing timers (schedule triggers, delivery retries,
+    /// terminal cleanup, snapshot purge), once attached: the driver's serve
+    /// loop ticks them, so ONE background task owns every store-reaching pass.
+    /// Attached after construction — the guider needs the runtime handle,
+    /// which needs the host.
+    timers: Arc<parking_lot::RwLock<Option<Arc<TimerGuider>>>>,
     /// Which runs were already reported: a start once, a terminal once.
     reported: Arc<parking_lot::Mutex<ReportedRuns>>,
     /// How often one node may run in one run — the legacy
@@ -449,455 +291,6 @@ pub(crate) struct KernelHost {
     settled: Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>>,
 }
 
-/// Which engine event a run's lifecycle report is: the driver's mirror of the
-/// legacy `on_proc` emission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProcessEvent {
-    Started,
-    Completed,
-    Errored,
-}
-
-/// The process-lifecycle sink: the engine routes it onto its channel events
-/// (`on_start`/`on_complete`/`on_error`).
-pub(crate) type LifecycleSink = Box<dyn Fn(&crate::Message, ProcessEvent) + Send + Sync>;
-
-/// Which runs were already reported: a start once, a terminal once.
-///
-/// `started_at` is the fallback wall-clock anchor for a host with no read
-/// model (the kernel's own tests): the projected proc row is the primary
-/// source of a run's window, but a lifecycle message must still carry a start
-/// and an end when there is no row to read.
-#[derive(Default)]
-struct ReportedRuns {
-    started: std::collections::HashSet<String>,
-    finished: std::collections::HashSet<String>,
-    started_at: std::collections::HashMap<String, i64>,
-}
-
-impl ReportedRuns {
-    /// The start instant of `pid`: the projected proc row when it has one,
-    /// otherwise the instant this host first reported the run (a host without
-    /// a read model), otherwise now. Remembered for the terminal event, whose
-    /// message must span the same window.
-    fn stamp_start(&mut self, pid: &str, times: Option<(i64, i64)>) -> i64 {
-        let now = crate::utils::time::time_millis();
-        let start = times
-            .map(|(start, _)| start)
-            .filter(|start| *start > 0)
-            .or_else(|| self.started_at.get(pid).copied())
-            .unwrap_or(now);
-        self.started_at.insert(pid.to_string(), start);
-        start
-    }
-
-    /// Stamp a terminal lifecycle message with the run's window. The projected
-    /// proc row is authoritative; without one the host's recorded start and
-    /// its own clock close the window, so `Message::cost()` is never the
-    /// meaningless `0 - 0`.
-    fn stamp_terminal(&mut self, message: &mut crate::Message, times: Option<(i64, i64)>) {
-        let now = crate::utils::time::time_millis();
-        let start = times
-            .map(|(start, _)| start)
-            .filter(|start| *start > 0)
-            .or_else(|| self.started_at.remove(&message.pid))
-            .unwrap_or(now);
-        let end = times
-            .map(|(_, end)| end)
-            .filter(|end| *end > 0)
-            .unwrap_or(now);
-        message.start_time = start;
-        message.end_time = end.max(start);
-    }
-}
-
-/// The configured bounds of the five admission categories (A8). Execution
-/// bounds normal runs in flight; the other four bound their own work and never
-/// consume another category's budget.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct AdmissionCaps {
-    pub(crate) execution: usize,
-    pub(crate) effect: usize,
-    pub(crate) recovery: usize,
-    pub(crate) reconciliation: usize,
-    pub(crate) projection: usize,
-}
-
-impl AdmissionCaps {
-    /// The caps a host without an explicit admission configuration uses: the
-    /// execution bound it was given and the process defaults for the rest.
-    #[cfg(test)]
-    fn new(execution: usize) -> Self {
-        Self {
-            execution,
-            effect: crate::config::DEFAULT_EFFECT_CONCURRENCY,
-            recovery: crate::config::DEFAULT_CONTROL_CONCURRENCY,
-            reconciliation: crate::config::DEFAULT_CONTROL_CONCURRENCY,
-            projection: crate::config::DEFAULT_CONTROL_CONCURRENCY,
-        }
-    }
-
-    fn from_config(config: &crate::Config) -> Self {
-        Self {
-            execution: config.cache_cap() as usize,
-            effect: config.effect_concurrency(),
-            recovery: config.recovery_concurrency(),
-            reconciliation: config.reconciliation_concurrency(),
-            projection: config.projection_concurrency(),
-        }
-    }
-}
-
-/// One auxiliary quota's counter and waiters. The rule is
-/// [`decision::quota`]; this type is only the in-memory half the shell owns.
-#[derive(Debug, Default)]
-struct AdmissionGate {
-    cap: usize,
-    active: std::sync::atomic::AtomicUsize,
-    admitted: std::sync::atomic::AtomicU64,
-    waiters: tokio::sync::Notify,
-}
-
-impl AdmissionGate {
-    fn new(cap: usize) -> Arc<Self> {
-        Arc::new(Self {
-            cap,
-            active: std::sync::atomic::AtomicUsize::new(0),
-            admitted: std::sync::atomic::AtomicU64::new(0),
-            waiters: tokio::sync::Notify::new(),
-        })
-    }
-
-    /// Take one permit, waiting while the category is saturated. The waiter
-    /// is registered before the counter is read, so a permit released in
-    /// between is never lost.
-    async fn enter(self: &Arc<Self>) -> AdmissionLease {
-        use std::sync::atomic::Ordering::SeqCst;
-        loop {
-            let notified = self.waiters.notified();
-            let active = self.active.load(SeqCst);
-            if decision::quota(self.cap, active) == QuotaDirective::Wait {
-                notified.await;
-                continue;
-            }
-            if self
-                .active
-                .compare_exchange(active, active.saturating_add(1), SeqCst, SeqCst)
-                .is_ok()
-            {
-                self.admitted.fetch_add(1, SeqCst);
-                return AdmissionLease { gate: self.clone() };
-            }
-            // Another entrant took the permit between the read and the CAS.
-            // Re-check immediately: with a cap above one a free permit may
-            // still exist, and waiting here could strand it.
-        }
-    }
-
-    fn metrics(&self) -> QuotaMetrics {
-        QuotaMetrics {
-            cap: self.cap,
-            active: self.active.load(std::sync::atomic::Ordering::SeqCst),
-            admitted: self.admitted.load(std::sync::atomic::Ordering::SeqCst),
-        }
-    }
-}
-
-/// One held auxiliary permit; dropping it wakes one waiter.
-struct AdmissionLease {
-    gate: Arc<AdmissionGate>,
-}
-
-impl Drop for AdmissionLease {
-    fn drop(&mut self) {
-        self.gate
-            .active
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        self.gate.waiters.notify_one();
-    }
-}
-
-/// One auxiliary quota's gauge: the configured cap, holders now, and how many
-/// holders it admitted over the host's lifetime.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct QuotaMetrics {
-    pub(crate) cap: usize,
-    pub(crate) active: usize,
-    pub(crate) admitted: u64,
-}
-
-/// Every category's gauge (A8). Execution reports its slot set and parked
-/// queue; each auxiliary quota reports its own counter.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct AdmissionMetrics {
-    pub(crate) execution: QuotaMetrics,
-    pub(crate) parked: usize,
-    pub(crate) effect: QuotaMetrics,
-    pub(crate) recovery: QuotaMetrics,
-    pub(crate) reconciliation: QuotaMetrics,
-    pub(crate) projection: QuotaMetrics,
-    /// Runs the last decisions observed waiting on manual reconciliation.
-    pub(crate) quarantined_runs: usize,
-}
-
-/// The driver's slot bookkeeping: which runs hold one of the execution slots,
-/// which wait for one, and the four auxiliary quotas (A8).
-///
-/// The configured number used to bound the legacy engine's *resident object
-/// set*; the kernel holds no resident objects, so the same number is redefined
-/// as the bound on runs that are in flight at once (see
-/// [`concurrency`](crate::scheduler::core::plan::concurrency) for the rule).
-/// A run that cannot take a slot *parks*: a start seeds it with its root still
-/// `Created` — the read model's `None` process state, exactly the legacy parked
-/// row — and leaves that root's operation undriven, while a run that was
-/// already in flight keeps the row it had (the legacy boot-resume overflow's
-/// shape). Either way the run takes no operation, and the oldest parked run
-/// (`__created` ascending, the legacy row's `timestamp` order) is what a freed
-/// slot admits.
-///
-/// The execution slot is *not* a lease on a run forever: a run that settles,
-/// or one whose only remaining route is manual reconciliation, releases it in
-/// the decision that observed that fact. Effects, recovery, human
-/// reconciliation and projections have their own gates, so a saturated
-/// category never holds another category's work.
-///
-/// The legacy resident set answered the same question through `Cache`; here
-/// the only writers are [`KernelHost::start_process`] (which reserves) and the
-/// driver's operations (which settle), so this set is the single answer to "may
-/// this run operation". Like that set it is in-memory: a restart starts it
-/// empty, and the runs still in flight take their slots again through
-/// [`KernelHost::place_run`] when the ready queue hands them their first turn.
-/// The first `cap` of them are admitted in the order the ready index returns
-/// them rather than by `__created` (the store keeps no boot index to sort by),
-/// while every later admission is by stamp, exactly like the legacy parked
-/// queue.
-#[derive(Default)]
-struct Admissions {
-    /// The bound on runs in flight at once.
-    cap: usize,
-    /// Runs holding an execution slot: admitted here and not yet settled or
-    /// quarantined.
-    active: std::collections::HashSet<String>,
-    /// Execution slots granted over the host's lifetime (a metric).
-    admitted: u64,
-    /// Parked runs, oldest first, with the operation that admits each: the
-    /// seeded root `ExecuteTask` whose operation starts the parked root. The key is
-    /// the run's `__created` stamp; two runs seeded in the same millisecond
-    /// are ordered by pid, so no run can hide behind an equal key.
-    parked: std::collections::BTreeMap<(i64, String), OperationId>,
-    /// Concurrent external effects.
-    effect: Arc<AdmissionGate>,
-    /// Recovery scans and their exceptional commands.
-    recovery: Arc<AdmissionGate>,
-    /// Human reconciliation of `EffectUnknown`/`Quarantined` operations.
-    reconciliation: Arc<AdmissionGate>,
-    /// Row projections and their repair work.
-    projection: Arc<AdmissionGate>,
-    /// Runs whose remaining route is manual reconciliation, as the last
-    /// decision observed them. A gauge for operators; the admission rule reads
-    /// the aggregate, never this set.
-    quarantined: std::collections::HashSet<String>,
-}
-
-impl Admissions {
-    fn new(caps: AdmissionCaps) -> Self {
-        Self {
-            cap: caps.execution,
-            effect: AdmissionGate::new(caps.effect),
-            recovery: AdmissionGate::new(caps.recovery),
-            reconciliation: AdmissionGate::new(caps.reconciliation),
-            projection: AdmissionGate::new(caps.projection),
-            ..Self::default()
-        }
-    }
-
-    /// The gate for an auxiliary category. Execution has no auxiliary gate:
-    /// its set is the ledger itself and its rule is [`decision::place`].
-    fn gate(&self, category: AdmissionCategory) -> Option<Arc<AdmissionGate>> {
-        match category {
-            AdmissionCategory::Execution => None,
-            AdmissionCategory::Effect => Some(self.effect.clone()),
-            AdmissionCategory::Recovery => Some(self.recovery.clone()),
-            AdmissionCategory::Reconciliation => Some(self.reconciliation.clone()),
-            AdmissionCategory::Projection => Some(self.projection.clone()),
-        }
-    }
-
-    fn metrics(&self) -> AdmissionMetrics {
-        AdmissionMetrics {
-            execution: QuotaMetrics {
-                cap: self.cap,
-                active: self.active.len(),
-                admitted: self.admitted,
-            },
-            parked: self.parked.len(),
-            effect: self.effect.metrics(),
-            recovery: self.recovery.metrics(),
-            reconciliation: self.reconciliation.metrics(),
-            projection: self.projection.metrics(),
-            quarantined_runs: self.quarantined.len(),
-        }
-    }
-
-    /// Record the last decision's view of a run's reconciliation hold. The
-    /// admission rule itself reads the aggregate; this set is the operator
-    /// gauge.
-    fn note_quarantined(&mut self, process_id: &str, quarantined: bool) {
-        if quarantined {
-            self.quarantined.insert(process_id.to_string());
-        } else {
-            self.quarantined.remove(process_id);
-        }
-    }
-
-    /// The pure rule against the set it bounds.
-    fn decide(&self, state: crate::scheduler::core::model::task_graph::TaskState) -> Admission {
-        infallible(Admit::plan((), &(self.cap, self.active.len(), state)))
-    }
-
-    /// Reserve a slot for a fresh run — its root is seeded `Ready`, which is
-    /// the state the rule is asked about — or decide that it parks. The
-    /// reservation and the decision are one step, so concurrent starts cannot
-    /// both take the last slot.
-    fn reserve(&mut self, process_id: &str) -> Admission {
-        let admission = self.decide(crate::scheduler::core::model::task_graph::TaskState::Ready);
-        if admission == Admission::Admit {
-            self.activate(process_id);
-        }
-        admission
-    }
-
-    fn is_parked(&self, process_id: &str) -> bool {
-        self.parked.keys().any(|(_, parked)| parked == process_id)
-    }
-
-    /// Whether the run holds a slot.
-    fn holds(&self, process_id: &str) -> bool {
-        self.active.contains(process_id)
-    }
-
-    fn activate(&mut self, process_id: &str) {
-        if self.active.insert(process_id.to_string()) {
-            self.admitted = self.admitted.saturating_add(1);
-        }
-    }
-
-    fn park(&mut self, created_ms: i64, process_id: &str, admission: &OperationId) {
-        self.parked
-            .insert((created_ms, process_id.to_string()), admission.clone());
-    }
-
-    /// Forget a reservation whose run never became durable (its creation
-    /// failed): the slot must not stay taken — and the pid must not stay
-    /// parked — by a run that does not exist.
-    fn abandon(&mut self, process_id: &str) {
-        self.active.remove(process_id);
-        self.parked.retain(|(_, parked), _| parked != process_id);
-        self.quarantined.remove(process_id);
-    }
-
-    /// Take a free slot for a parked run — the check a start makes after it
-    /// parked, because a slot can free while its aggregate is being written
-    /// and nothing else would come back for that run.
-    fn take_free_slot(&mut self, created_ms: i64, process_id: &str) -> bool {
-        if self.active.len() >= self.cap
-            || self
-                .parked
-                .remove(&(created_ms, process_id.to_string()))
-                .is_none()
-        {
-            return false;
-        }
-        self.activate(process_id);
-        true
-    }
-
-    /// A run that no longer needs an execution slot frees it; returns the
-    /// operation that admits the parked run taking it, if there is one. The
-    /// caller wakes that operation immediately — the tick is only a fallback.
-    fn release(&mut self, process_id: &str) -> Option<OperationId> {
-        if !self.active.remove(process_id) {
-            return None;
-        }
-        if self.active.len() >= self.cap {
-            return None;
-        }
-        let ((_, process_id), admission) = self.parked.pop_first()?;
-        self.active.insert(process_id);
-        Some(admission)
-    }
-
-    /// The core admission policy over this in-memory set (A6/A8): the shell
-    /// owns the set, [`crate::scheduler::core::decision::place`] owns the rule.
-    fn directive(&self, snapshot: &ProcessSnapshot) -> AdmissionDirective {
-        let standing = if self.is_parked(&snapshot.process_id) {
-            SlotStanding::Parked
-        } else if self.holds(&snapshot.process_id) {
-            SlotStanding::Holding
-        } else {
-            SlotStanding::Unplaced
-        };
-        decision::place(
-            SlotObservation {
-                standing,
-                cap: self.cap,
-                active: self.active.len(),
-            },
-            RunFacts::of(snapshot),
-        )
-    }
-
-    /// Execute one admission directive against the set. Returns the operation
-    /// that admits the parked run taking a freed slot, if any.
-    fn apply(
-        &mut self,
-        snapshot: &ProcessSnapshot,
-        directive: AdmissionDirective,
-    ) -> Option<OperationId> {
-        match directive {
-            AdmissionDirective::Park => {
-                if !self.is_parked(&snapshot.process_id) {
-                    self.park(
-                        created_stamp(snapshot),
-                        &snapshot.process_id,
-                        &decision::resume_operation(snapshot),
-                    );
-                }
-                None
-            }
-            AdmissionDirective::Drive(SlotDirective::Release) => self.release(&snapshot.process_id),
-            AdmissionDirective::Drive(SlotDirective::Take) => {
-                self.activate(&snapshot.process_id);
-                None
-            }
-            AdmissionDirective::Drive(SlotDirective::Keep | SlotDirective::NoSlot) => None,
-        }
-    }
-}
-
-/// The default outbox transport: it logs each record and confirms it — what a
-/// host with nothing attached (the kernel's own tests, and any embedder that
-/// only wants the durable aggregate) does. The serving host replaces it with
-/// [`message::MessageForwarder`] so records reach the engine channel.
-struct ShadowTransport;
-
-impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for ShadowTransport {
-    fn deliver(
-        &mut self,
-        record: &crate::scheduler::core::outbox::records::OutboxRecord,
-    ) -> crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome {
-        tracing::debug!(
-            pid = %record.id.process_id,
-            key = %record.id.key,
-            topic = %record.topic,
-            "kernel outbox delivered (shadow)"
-        );
-        crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Delivered {
-            receipt: "shadow".into(),
-        }
-    }
-}
-
 impl KernelHost {
     /// A host over the engine's key-value store, plus the wake receiver its
     /// driver task must own. `cache_cap` bounds the runs that may be in flight
@@ -942,6 +335,7 @@ impl KernelHost {
                 lifecycle: Arc::new(parking_lot::RwLock::new(None)),
                 projection: Arc::new(parking_lot::RwLock::new(None)),
                 predicate: Arc::new(parking_lot::RwLock::new(None)),
+                timers: Arc::new(parking_lot::RwLock::new(None)),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
                 max_node_run_times,
                 admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(caps))),
@@ -968,33 +362,6 @@ impl KernelHost {
             }),
             wake_rx,
         )
-    }
-
-    /// The caps a [`Config`](crate::Config) names (A8). Public entry points
-    /// that build a host without one use [`AdmissionCaps::new`]'s defaults.
-    pub(crate) fn caps_from_config(config: &crate::Config) -> AdmissionCaps {
-        AdmissionCaps::from_config(config)
-    }
-
-    /// Take one permit of an auxiliary admission category. Execution has no
-    /// auxiliary gate — its set is the ledger and [`Self::place_run`] is its
-    /// admission path.
-    async fn enter_admission(&self, category: AdmissionCategory) -> AdmissionLease {
-        assert!(
-            category != AdmissionCategory::Execution,
-            "execution admission is the slot ledger, not a gate"
-        );
-        let gate = self
-            .admissions
-            .lock()
-            .gate(category)
-            .expect("execution admission is the slot ledger, not a gate");
-        gate.enter().await
-    }
-
-    /// Every admission category's gauge (A8).
-    pub(crate) fn admission_metrics(&self) -> AdmissionMetrics {
-        self.admissions.lock().metrics()
     }
 
     /// The ready/timer pass's failure state (A10).
@@ -1087,6 +454,13 @@ impl KernelHost {
     /// driving operations.
     pub(crate) fn attach_predicate_runner(&self, runner: Arc<dyn predicate::PredicateRunner>) {
         *self.predicate.write() = Some(runner);
+    }
+
+    /// Attach the runtime's timer guider: the serve loop then ticks the four
+    /// store-facing timers on their own intervals, so one task owns every
+    /// background pass that reaches the store.
+    pub(crate) fn attach_timers(&self, timers: Arc<TimerGuider>) {
+        *self.timers.write() = Some(timers);
     }
 
     /// Decide one branch `if`: on the engine's environment when a predicate
@@ -1384,24 +758,6 @@ impl KernelHost {
         true
     }
 
-    /// Serialize a start and the cleanup of the same pid (see
-    /// [`Self::lifecycle_locks`]). A start holds it from the
-    /// aggregate-existence check through creation; cleanup holds it from the
-    /// authoritative batch through the row/workdir removal.
-    pub(crate) async fn lock_lifecycle(
-        &self,
-        process_id: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.lifecycle_locks.lock();
-            locks
-                .entry(process_id.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        lock.lock_owned().await
-    }
-
     /// Take the pid's command lane (A4, see [`Self::command_lanes`]): the
     /// single-writer turn every state-deciding command of one process holds
     /// while it claims, plans and commits. The lane is per pid — distinct
@@ -1430,29 +786,6 @@ impl KernelHost {
     pub(crate) fn action_replans(&self) -> u64 {
         self.action_replans
             .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Mark that a pid's aggregate was deleted and its residue is still being
-    /// removed; a start refuses the pid until [`Self::finish_reclaim`].
-    pub(crate) fn begin_reclaim(&self, process_id: &str) {
-        self.reclaiming.lock().insert(process_id.to_string());
-    }
-
-    /// The residue is gone (or the run turned out not to be reclaimable).
-    pub(crate) fn finish_reclaim(&self, process_id: &str) {
-        self.reclaiming.lock().remove(process_id);
-    }
-
-    /// Whether a cleanup of this pid started and has not finished. A start
-    /// checks this under the lifecycle lock.
-    pub(crate) fn is_reclaiming(&self, process_id: &str) -> bool {
-        self.reclaiming.lock().contains(process_id)
-    }
-
-    /// The pids whose residue removal is still pending, for the cleanup pass
-    /// to clear after a failure whose rows turned out to be gone.
-    pub(crate) fn reclaiming_pids(&self) -> Vec<String> {
-        self.reclaiming.lock().iter().cloned().collect()
     }
 
     /// Wait for and hold the pid's projection lock, when a read model is
@@ -1512,103 +845,19 @@ impl KernelHost {
         }
     }
 
-    /// Report one run's lifecycle from a fresh snapshot, at most once per
-    /// phase. Mirrors the legacy `on_proc`: a start while the run is alive
-    /// (running or pending); otherwise — every execution terminal — an error
-    /// for a failed root, a completion for any other terminal, with the
-    /// model's `exposes` validated against the run's outputs (a validation
-    /// failure is reported as an error, exactly like the legacy handler).
-    ///
-    /// The root is announced twice on purpose: this sink is the legacy
-    /// `on_proc`, while the root's own outbox records (`message.created` with
-    /// `kind=workflow`, then its terminal topics) are the legacy `on_task`.
-    /// The legacy engine emitted both, so both paths stay — neither replaces
-    /// the other, and they carry different fact sets (`process_message` here,
-    /// the task payload there).
-    async fn report_lifecycle(
-        &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-    ) {
-        let directive = decision::lifecycle(snapshot);
-        let times = match directive {
-            Some(_) => self.proc_times(&snapshot.process_id).await,
-            None => None,
-        };
-        self.report_lifecycle_decision(snapshot, directive.as_ref(), times);
-    }
-
-    /// The run's projected `(start_time, end_time)` when a read model is
-    /// attached. The projection has already run for this commit (A5/A6), so
-    /// the proc row is current; `None` means no projector, or a row that does
-    /// not exist yet (a lifecycle message then falls back to the host's own
-    /// clock).
-    async fn proc_times(&self, process_id: &str) -> Option<(i64, i64)> {
-        let projector = self.projection.read().clone()?;
-        projector.proc_times(process_id).await.ok().flatten()
-    }
-
-    /// Execute the lifecycle directive Core already decided. The shell owns
-    /// only the message shape, the sink and the once-per-phase bookkeeping;
-    /// *whether* the run is alive or settled (and whether a terminal root is an
-    /// error) is [`crate::scheduler::core::decision::lifecycle`].
-    ///
-    /// `times` is the run's projected window. A projected row is the same
-    /// wall-clock fact a `proc:get` reader sees, so `Message::cost()` on the
-    /// completion event is the run's real cost; when no row exists (a host
-    /// without a read model) the host's own clock supplies the window.
-    fn report_lifecycle_decision(
-        &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-        directive: Option<&LifecycleDirective>,
-        times: Option<(i64, i64)>,
-    ) {
-        let lifecycle = self.lifecycle.read();
-        let Some(sink) = lifecycle.as_ref() else {
-            return;
-        };
-        let Some(root) = root_task(snapshot) else {
-            return;
-        };
-        let Some(directive) = directive else {
-            return;
-        };
-        let mut reported = self.reported.lock();
-        match directive {
-            LifecycleDirective::Started => {
-                if reported.started.insert(snapshot.process_id.clone()) {
-                    let mut message = process_message(snapshot, &root);
-                    let start = reported.stamp_start(&message.pid, times);
-                    message.start_time = start;
-                    message.end_time = 0;
-                    sink(&message, ProcessEvent::Started);
-                }
-            }
-            LifecycleDirective::Completed => {
-                if !reported.finished.insert(snapshot.process_id.clone()) {
-                    return;
-                }
-                let mut message = process_message(snapshot, &root);
-                reported.stamp_terminal(&mut message, times);
-                // The legacy `on_proc` handler validates the model's
-                // `exposes` against the completed outputs; a mismatch is
-                // reported as an error on the same completion event.
-                match exposes_error(snapshot, &message) {
-                    Some(error) => {
-                        message.set_err("", &error);
-                        sink(&message, ProcessEvent::Errored);
-                    }
-                    None => sink(&message, ProcessEvent::Completed),
-                }
-            }
-            LifecycleDirective::Errored { code, message } => {
-                if !reported.finished.insert(snapshot.process_id.clone()) {
-                    return;
-                }
-                let mut payload = process_message(snapshot, &root);
-                reported.stamp_terminal(&mut payload, times);
-                payload.set_err(code, message);
-                sink(&payload, ProcessEvent::Errored);
-            }
+    /// The read model's boot catch-up: rows carry their source aggregate
+    /// revision, so this projects every aggregate once and writes only the
+    /// rows that lag. Owned by the projection loop; a per-pid failure is
+    /// queued there, and a scan that could not list the aggregates is retried
+    /// on its next pass.
+    pub(crate) async fn ensure_projection_boot(&self) {
+        if !self
+            .projection_booted
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && self.catch_up_projections().await
+        {
+            self.projection_booted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1617,7 +866,10 @@ impl KernelHost {
     /// [`KernelSchedule::ready`] for the durable ready queue and timers,
     /// [`KernelSchedule::recovery`] for the exceptional scan,
     /// [`KernelSchedule::outbox`] for delivery retries, and
-    /// [`KernelSchedule::projection`] for row repair. Notifications still
+    /// [`KernelSchedule::projection`] for row repair — plus the runtime's
+    /// store-facing timers (schedule triggers, delivery retries, terminal
+    /// cleanup, snapshot purge) once attached, on their own intervals. One
+    /// task, one store-touching background service. Notifications still
     /// accelerate the ready and outbox passes; a lost wake is only latency,
     /// never lost work. Exits when `shutdown` fires.
     pub(crate) async fn serve(
@@ -1636,11 +888,19 @@ impl KernelHost {
         let mut recovery_ticker = tokio::time::interval(schedule.recovery);
         let mut outbox_ticker = tokio::time::interval(schedule.outbox);
         let mut projection_ticker = tokio::time::interval(schedule.projection);
+        let mut trigger_ticker = tokio::time::interval(schedule.trigger);
+        let mut retry_ticker = tokio::time::interval(schedule.retry);
+        let mut cleanup_ticker = tokio::time::interval(schedule.cleanup);
+        let mut snapshot_ticker = tokio::time::interval(schedule.snapshot);
         for ticker in [
             &mut ready_ticker,
             &mut recovery_ticker,
             &mut outbox_ticker,
             &mut projection_ticker,
+            &mut trigger_ticker,
+            &mut retry_ticker,
+            &mut cleanup_ticker,
+            &mut snapshot_ticker,
         ] {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         }
@@ -1817,6 +1077,30 @@ impl KernelHost {
                             repaired = metrics.repaired,
                             "kernel projection repair"
                         );
+                    }
+                }
+                _ = trigger_ticker.tick() => {
+                    let timers = self.timers.read().clone();
+                    if let Some(timers) = timers {
+                        timers.trigger_tick().await;
+                    }
+                }
+                _ = retry_ticker.tick() => {
+                    let timers = self.timers.read().clone();
+                    if let Some(timers) = timers {
+                        timers.retry_tick().await;
+                    }
+                }
+                _ = cleanup_ticker.tick() => {
+                    let timers = self.timers.read().clone();
+                    if let Some(timers) = timers {
+                        timers.cleanup_tick().await;
+                    }
+                }
+                _ = snapshot_ticker.tick() => {
+                    let timers = self.timers.read().clone();
+                    if let Some(timers) = timers {
+                        timers.purge_tick().await;
                     }
                 }
                 id = wake_rx.recv() => {
@@ -2015,59 +1299,8 @@ impl KernelHost {
         Ok(spec.process_id.clone())
     }
 
-    /// Wake one operation. A wake is an optimization over the durable ready
-    /// index: a full queue drops it, the ready record remains, and the due pass
-    /// is notified to pick it up before the next tick.
-    fn wake(&self, operation: &OperationId) -> bool {
-        let sent = QueueWake {
-            tx: self.wake_tx.clone(),
-        }
-        .wake(operation);
-        if !sent {
-            self.ready_metrics.lock().wake_failures += 1;
-            self.ready.notify_one();
-        }
-        sent
-    }
-
     pub(crate) fn ready_metrics(&self) -> ReadyMetrics {
         *self.ready_metrics.lock()
-    }
-
-    /// The slot bookkeeping for one run, from a fresh snapshot of it. Returns
-    /// whether the operation that asked may run.
-    ///
-    /// - a run this driver admitted and whose executions all settled frees its
-    ///   slot, and the parked run that takes it is returned for admission;
-    /// - a parked run keeps waiting: its operations stay pending and undriven
-    ///   until a slot frees;
-    /// - a run this driver never admitted — one already in flight when it
-    ///   booted, since every start reserves through [`Self::start_process`] —
-    ///   takes a slot here, or parks exactly like a start that found every
-    ///   slot taken. This is the boot pass: the ready queue hands every
-    ///   unfinished run its first turn, and this is where the cap meets it.
-    fn place_run(
-        &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-    ) -> (bool, Option<OperationId>) {
-        let mut admissions = self.admissions.lock();
-        // The rule is core's (`decision::place`); this set is only the state
-        // it reads and the mutations it names.
-        let directive = admissions.directive(snapshot);
-        let freed = admissions.apply(snapshot, directive);
-        (directive.drives(), freed)
-    }
-
-    /// Make a parked run's ready record due now, then wake it. Used when a
-    /// freed slot admits it: its record was deferred while it waited, and the
-    /// wake is only the accelerator over that durable record.
-    async fn admit_run(&self, operation: &OperationId) -> Result<()> {
-        self.processes
-            .set_ready_at(operation, SystemClock.now_ms())
-            .await
-            .map_err(runtime)?;
-        self.wake(operation);
-        Ok(())
     }
 
     /// Drive woken operations until the queue drains or `max_steps` operations ran.
@@ -3066,58 +2299,6 @@ impl KernelHost {
         Ok(self.load(process_id).await?.is_some())
     }
 
-    /// Reclaim one finished run's durable state: the aggregate and its
-    /// recovery/outbox/ready index documents are deleted in one guarded batch
-    /// (see [`AsyncProcessRepository::reclaim`]). The caller is responsible for
-    /// the preconditions that live outside the aggregate (channel delivery
-    /// rows); this method decides only what the aggregate itself says.
-    ///
-    /// On a successful reclaim (or an aggregate that is already gone) the
-    /// host forgets its in-process bookkeeping for the pid — reported
-    /// lifecycle phases, admission slots and projection version claims — so a
-    /// later start under the same pid is a fresh run. `Retained` leaves every
-    /// fact exactly as it was.
-    pub(crate) async fn reclaim_process(&self, process_id: &str) -> Result<ReclaimOutcome> {
-        let outcome = self
-            .processes
-            .reclaim(process_id)
-            .await
-            .map_err(repository_error)?;
-        if !matches!(outcome, ReclaimOutcome::Retained) {
-            self.forget_process(process_id);
-        }
-        Ok(outcome)
-    }
-
-    /// Drop the pid-keyed in-process state of a reclaimed run. Called only
-    /// once the durable aggregate is gone (or was already gone): the pid is a
-    /// new identity from here on, and the next start must not inherit a
-    /// reported lifecycle phase, a slot or a projection claim.
-    fn forget_process(&self, process_id: &str) {
-        self.admissions.lock().abandon(process_id);
-        {
-            let mut reported = self.reported.lock();
-            reported.started.remove(process_id);
-            reported.finished.remove(process_id);
-        }
-        // A handle still waiting on the reclaimed run must not wait forever:
-        // its re-read finds no aggregate and reports the PID as gone.
-        self.notify_settled(process_id);
-        let projector = self.projection.read().clone();
-        if let Some(projector) = projector {
-            projector.forget_process(process_id);
-        }
-    }
-
-    /// Clear a reclaimed run's projection tombstone before a new run takes the
-    /// pid (see [`projection::RowProjector::forget_process`]).
-    fn resume_process(&self, process_id: &str) {
-        let projector = self.projection.read().clone();
-        if let Some(projector) = projector {
-            projector.resume(process_id);
-        }
-    }
-
     /// Whether every execution of the process reached a terminal state.
     #[cfg(test)]
     pub(crate) async fn process_completed(&self, process_id: &str) -> Result<bool> {
@@ -3125,867 +2306,6 @@ impl KernelHost {
             .snapshot(process_id)
             .await?
             .is_some_and(|snapshot| decision::run_settled(&snapshot)))
-    }
-
-    /// The wakeup a durable run handle registers before re-reading the
-    /// aggregate (see [`crate::RunHandle::wait`]).
-    ///
-    /// The entry is per pid and taken by [`Self::notify_settled`], so a waiter
-    /// that arrives after the settle gets a fresh entry and sees the terminal
-    /// aggregate on its own re-read: the notification only ever shortens the
-    /// wait, it never carries the outcome.
-    pub(crate) fn run_waiter(&self, process_id: &str) -> Arc<tokio::sync::Notify> {
-        self.settled
-            .lock()
-            .entry(process_id.to_string())
-            .or_default()
-            .clone()
-    }
-
-    /// Wake every handle waiting on `process_id`: the run's commit settled it
-    /// (its aggregate is durable and readable) or its durable record was
-    /// reclaimed. Taking the entry keeps the map bounded by pids actually
-    /// being waited on.
-    fn notify_settled(&self, process_id: &str) {
-        let waiter = self.settled.lock().remove(process_id);
-        if let Some(waiter) = waiter {
-            waiter.notify_waiters();
-        }
-    }
-
-    /// Ask the executor for its proof about one `EffectUnknown` operation
-    /// (A1c).
-    ///
-    /// This is the observation half of recovery: it performs the executor IO
-    /// by the operation's stable effect key and converts the answer into the
-    /// fact Core's `RecoverOperation` reads. It never decides what the answer
-    /// means — replay, retry and manual are [`recover_operation`]'s call.
-    async fn observe_effect(&self, observed: &Observed) -> Result<Option<ObservedEffect>> {
-        if observed.kind != OperationKind::ApplyAction
-            || !matches!(
-                observed.persisted_phase,
-                OperationState::EffectUnknown { .. }
-            )
-        {
-            return Ok(None);
-        }
-        let Some(loaded) = self.load(&observed.operation_id.process_id).await? else {
-            return Ok(None);
-        };
-        let Some(task) = loaded.snapshot.tasks.get(&observed.operation_id.task) else {
-            return Ok(None);
-        };
-        let model_node = task.model_node.clone();
-        let Some((runner, request)) =
-            self.step_effect(&loaded.snapshot, &observed.operation_id.task, &model_node)?
-        else {
-            return Ok(None);
-        };
-        let key = EffectKey::of(&observed.operation_id);
-        let observation = match runner.observe(&key).await {
-            Ok(observation) => observation,
-            Err(error) => {
-                tracing::warn!(
-                    operation = ?observed.operation_id,
-                    error = %error,
-                    "querying the effect observation failed; manual reconciliation still owns the operation"
-                );
-                return Ok(Some(ObservedEffect {
-                    receipt: EffectReceipt::Unknown,
-                    observation: None,
-                }));
-            }
-        };
-        let receipt = match &observation {
-            effects::EffectObservation::Applied(_) => EffectReceipt::Applied,
-            effects::EffectObservation::Failed(_) => EffectReceipt::Failed,
-            // Re-running can only be safe when the effect itself is provably
-            // idempotent; the executor keeps the same key, so a duplicate
-            // delivery is deduplicated on its side.
-            effects::EffectObservation::NotApplied => EffectReceipt::NotApplied {
-                idempotent: runner.idempotent(&request),
-            },
-            effects::EffectObservation::Unknown => EffectReceipt::Unknown,
-        };
-        let observation = matches!(receipt, EffectReceipt::Applied | EffectReceipt::Failed)
-            .then_some(observation);
-        Ok(Some(ObservedEffect {
-            receipt,
-            observation,
-        }))
-    }
-
-    /// The unknown effects of one run, in operation order (A1c).
-    pub(crate) async fn effect_unknowns(
-        &self,
-        process_id: &str,
-    ) -> Result<Vec<crate::engine::EffectUnknown>> {
-        let Some(snapshot) = self.snapshot(process_id).await? else {
-            return Ok(Vec::new());
-        };
-        let mut unknowns = snapshot
-            .operations
-            .values()
-            .filter_map(|record| match record.state {
-                OperationState::EffectUnknown { attempt } => Some(crate::engine::EffectUnknown {
-                    pid: process_id.to_string(),
-                    tid: record.id.task.wire(process_id),
-                    sequence: record.id.sequence,
-                    key: EffectKey::of(&record.id).wire(),
-                    attempt,
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        unknowns.sort_by(|left, right| {
-            left.sequence
-                .cmp(&right.sequence)
-                .then_with(|| left.tid.cmp(&right.tid))
-        });
-        Ok(unknowns)
-    }
-
-    /// Resolve one unknown effect by its stable key (A1c).
-    pub(crate) async fn resolve_effect_by_key(
-        &self,
-        process_id: &str,
-        key: &str,
-        resolution: crate::engine::EffectResolution,
-    ) -> Result<()> {
-        let snapshot = self
-            .snapshot(process_id)
-            .await?
-            .ok_or_else(|| ActError::Runtime(format!("aggregate {process_id} not found")))?;
-        let operation = snapshot
-            .operations
-            .values()
-            .find(|record| EffectKey::of(&record.id).wire() == key)
-            .map(|record| record.id.clone())
-            .ok_or_else(|| {
-                ActError::Runtime(format!(
-                    "no operation with effect key {key:?} in run {process_id}"
-                ))
-            })?;
-        self.resolve_effect(&operation, resolution).await
-    }
-
-    /// The operator's durable decision for one `EffectUnknown` operation
-    /// (A1c): replay it as applied (with the outputs the operator captured),
-    /// or prove it never ran so it may be retried.
-    pub(crate) async fn resolve_effect(
-        &self,
-        id: &OperationId,
-        resolution: crate::engine::EffectResolution,
-    ) -> Result<()> {
-        // A8: a human decision is control-plane work with its own budget. It
-        // never asks for an execution slot, so a full run quota cannot park it
-        // and it cannot park a new run.
-        let _reconciliation = self
-            .enter_admission(AdmissionCategory::Reconciliation)
-            .await;
-        let Some(loaded) = self.load(&id.process_id).await? else {
-            return Err(ActError::Runtime(format!(
-                "aggregate {} not found",
-                id.process_id
-            )));
-        };
-        let record = loaded
-            .snapshot
-            .operations
-            .get(id)
-            .cloned()
-            .ok_or_else(|| ActError::Runtime(format!("operation {id:?} not found")))?;
-        if !matches!(record.state, OperationState::EffectUnknown { .. }) {
-            return Err(ActError::Runtime(format!(
-                "operation {id:?} is {:?}, not an unknown effect",
-                record.state
-            )));
-        }
-        match resolution {
-            crate::engine::EffectResolution::Applied { outputs } => {
-                let applied = self
-                    .converge_observed_effect(
-                        id,
-                        effects::EffectObservation::Applied(effects::EffectOutcome::from_outputs(
-                            outputs,
-                        )),
-                    )
-                    .await?;
-                if !applied {
-                    return Err(ActError::Runtime(format!(
-                        "operation {id:?} is no longer reconcilable"
-                    )));
-                }
-                Ok(())
-            }
-            crate::engine::EffectResolution::NotApplied => {
-                if !self.retry_unknown_effect(&record).await? {
-                    return Err(ActError::Runtime(format!(
-                        "operation {id:?} is no longer reconcilable"
-                    )));
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// One driver tick for the test suites. The production driver runs the
-    /// same four passes on independent intervals (A10); this helper runs them
-    /// once, in order, so a test that calls it observes every loop.
-    #[cfg(test)]
-    pub(crate) async fn tick(&self, now_ms: i64) -> Result<RecoveryReport> {
-        self.drive_ready(now_ms, PAGE_SIZE).await?;
-        let report = self.recover(now_ms).await?;
-        self.repair_projections().await;
-        Ok(report)
-    }
-
-    /// Re-derive exceptional work from the recovery index.
-    ///
-    /// This method is only the IO shell around
-    /// [`recover_operation`](crate::scheduler::core::recovery::planner::recover_operation)
-    /// (A7): the paging walk, one [`Observed`] per row, and the directive the
-    /// pure decision names. Normal `Pending`/`RetryScheduled` operations are
-    /// not woken here: they own a durable ready record and the driver's due
-    /// pass is their liveness source. Recovery handles what that path cannot:
-    /// an expired claim is reclaimed, a committed-but-unfinalized operation is
-    /// completed through the normal post-commit program, effect-unknown and
-    /// quarantined operations follow the executor's proof or go to a human,
-    /// and a missing ready record (an older database, a damaged index) is
-    /// repaired.
-    #[cfg(test)]
-    pub(crate) async fn recover(&self, now_ms: i64) -> Result<RecoveryReport> {
-        self.recover_with_budget(now_ms, PAGE_SIZE).await
-    }
-
-    /// The recovery scanner's own pass (A10). The scan resumes at the last
-    /// examined index entry when `budget` is reached, so a large exceptional
-    /// backlog is bounded work per round; an in-memory cursor is only a
-    /// scheduling hint and restarts from the beginning after a restart.
-    ///
-    /// Projection repair is **not** part of this pass: it has its own loop
-    /// ([`Self::repair_projections_batch`]) and its own interval, so changing
-    /// the recovery cadence cannot change projection lag and vice versa.
-    pub(crate) async fn recover_with_budget(
-        &self,
-        now_ms: i64,
-        budget: usize,
-    ) -> Result<RecoveryReport> {
-        self.ensure_boot(now_ms).await?;
-        let budget = budget.max(1);
-        let _recovery = self.enter_admission(AdmissionCategory::Recovery).await;
-        let mut report = RecoveryReport::default();
-        let mut cursor = self.recovery_cursor.lock().clone();
-        let mut more_pending = false;
-        loop {
-            let page = self
-                .recovery
-                .recoverable_page(cursor.as_ref(), PAGE_SIZE.min(budget))
-                .await
-                .map_err(runtime)?;
-            if page.operations.is_empty() && page.next.is_none() {
-                cursor = None;
-                break;
-            }
-            for candidate in page.operations {
-                if report.scanned >= budget {
-                    more_pending = true;
-                    break;
-                }
-                let id = candidate.operation.id.clone();
-                let process_key = id.process_id.clone();
-                report.scanned += 1;
-                self.recover_observed(candidate, now_ms, &mut report).await;
-                cursor = Some(RecoveryCursor {
-                    process_key,
-                    operation: Some(id),
-                });
-            }
-            if more_pending {
-                break;
-            }
-            match page.next {
-                Some(next) => {
-                    if report.scanned >= budget {
-                        cursor = Some(next);
-                        more_pending = true;
-                        break;
-                    }
-                    cursor = Some(next);
-                }
-                None => {
-                    cursor = None;
-                    break;
-                }
-            }
-        }
-        *self.recovery_cursor.lock() = if more_pending { cursor } else { None };
-        {
-            let mut metrics = self.recovery_metrics.lock();
-            metrics.scanned = report.scanned;
-            metrics.more_pending = more_pending;
-            metrics.passes += 1;
-            metrics.reclaimed += report.reclaimed.len() as u64;
-            metrics.ready_repaired += report.ready_repaired.len() as u64;
-            metrics.finalized += report.finalized.len() as u64;
-            metrics.effect_applied += report.effect_applied.len() as u64;
-            metrics.effect_retried += report.effect_retried.len() as u64;
-            metrics.reconciliation_required = report.reconciliation_required.len();
-        }
-        Ok(report)
-    }
-
-    /// The one-time boot passes: rebuild the derived indexes and catch the
-    /// read model up from the aggregates. Both are idempotent and independent
-    /// of the periodic loop that notices they are still pending (A10).
-    pub(crate) async fn ensure_boot(&self, now_ms: i64) -> Result<()> {
-        self.ensure_ready_boot(now_ms).await?;
-        self.ensure_projection_boot().await;
-        Ok(())
-    }
-
-    /// Rebuild the derived ready/recovery indexes from the authoritative
-    /// aggregates once per host (A2's cold-start repair). Owned by the
-    /// ready/timer loop: a recovery cadence cannot delay it and its failure is
-    /// retried by the next ready pass.
-    pub(crate) async fn ensure_ready_boot(&self, now_ms: i64) -> Result<()> {
-        if self
-            .boot_reconciled
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Ok(());
-        }
-        let repaired = self
-            .processes
-            .repair_all_ready(now_ms, self.timer_poll_ms)
-            .await
-            .map_err(runtime)?;
-        self.boot_reconciled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        if repaired > 0 {
-            self.ready_metrics.lock().repaired += repaired as u64;
-            self.ready.notify_one();
-        }
-        Ok(())
-    }
-
-    /// The read model's boot catch-up: rows carry their source aggregate
-    /// revision, so this projects every aggregate once and writes only the
-    /// rows that lag. Owned by the projection loop; a per-pid failure is
-    /// queued there, and a scan that could not list the aggregates is retried
-    /// on its next pass.
-    pub(crate) async fn ensure_projection_boot(&self) {
-        if !self
-            .projection_booted
-            .load(std::sync::atomic::Ordering::SeqCst)
-            && self.catch_up_projections().await
-        {
-            self.projection_booted
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    /// One observed operation, from the observation to the executed decision.
-    ///
-    /// This is the IO half of [`recover_operation`]. It collects the
-    /// executor's proof when the decision asks for one, commits the command
-    /// Core names under the pid's command lane (the same lane and the same
-    /// revision fence a normal operation uses), and runs the directive. No
-    /// branch here decides what a phase means: `ReclaimReady` versus
-    /// `ReclaimUnknown`, replay versus retry, and finalize are Core's answers.
-    ///
-    /// A command that loses its guard is left to the next scan — the state it
-    /// was formed from moved on, so the new state will be observed afresh.
-    async fn recover_observed(
-        &self,
-        candidate: RecoveryCandidate,
-        now_ms: i64,
-        report: &mut RecoveryReport,
-    ) {
-        let mut observed = Observed::from_record(&candidate.operation, candidate.version, now_ms);
-        // The payload of an `Applied`/`Failed` observation, kept for the
-        // `ReplayEffect` directive. Core sees only the receipt.
-        let mut effect = None;
-        loop {
-            let decision = recover_operation(&observed);
-            match decision.directive {
-                RecoveryDirective::AwaitOwner => {
-                    report.awaiting_owner.push(observed.operation_id);
-                    return;
-                }
-                RecoveryDirective::IgnoreTerminal => return,
-                RecoveryDirective::RepairReady => {
-                    match self
-                        .processes
-                        .repair_ready(
-                            &observed.operation_id.process_id,
-                            now_ms,
-                            self.timer_poll_ms,
-                        )
-                        .await
-                    {
-                        Ok(true) => {
-                            self.ready_metrics.lock().repaired += 1;
-                            report.ready_repaired.push(observed.operation_id);
-                            self.ready.notify_one();
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                operation = ?observed.operation_id,
-                                error = %error,
-                                "repairing the ready record failed; next scan retries"
-                            );
-                        }
-                    }
-                    return;
-                }
-                RecoveryDirective::ReclaimReady => {
-                    let Some(command) = decision.command else {
-                        tracing::debug!(
-                            operation = ?observed.operation_id,
-                            "reclaim decision carried no command"
-                        );
-                        return;
-                    };
-                    // A4: the reclaim is a command of the same pid — it takes
-                    // the lane for the event alone. The revision guard the
-                    // event carries stays the fence against a claim that moved
-                    // since the scan.
-                    let reclaimed = {
-                        let _lane = self
-                            .lock_command_lane(&observed.operation_id.process_id)
-                            .await;
-                        self.operation_event(
-                            &observed.operation_id,
-                            command.expected_revision,
-                            command.event,
-                        )
-                        .await
-                    };
-                    match reclaimed {
-                        Ok((reclaimed, _)) => {
-                            report.reclaimed.push(reclaimed.id.clone());
-                            // The event's own commit wrote the ready record;
-                            // the wake is that record's accelerator, not a
-                            // second business decision.
-                            self.wake(&reclaimed.id);
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                operation = ?observed.operation_id,
-                                error = %error,
-                                "reclaim lost; next scan retries"
-                            );
-                        }
-                    }
-                    return;
-                }
-                RecoveryDirective::ReclaimUnknown => {
-                    let Some(command) = decision.command else {
-                        tracing::debug!(
-                            operation = ?observed.operation_id,
-                            "reclaim decision carried no command"
-                        );
-                        return;
-                    };
-                    let reclaimed = {
-                        let _lane = self
-                            .lock_command_lane(&observed.operation_id.process_id)
-                            .await;
-                        self.operation_event(
-                            &observed.operation_id,
-                            command.expected_revision,
-                            command.event,
-                        )
-                        .await
-                    };
-                    match reclaimed {
-                        Ok((reclaimed, loaded)) => {
-                            // The commit turned the operation `EffectUnknown`.
-                            // Observe the new state and let Core decide again;
-                            // the effect itself is never re-driven here.
-                            observed =
-                                Observed::from_record(&reclaimed, loaded.snapshot.version, now_ms);
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                operation = ?observed.operation_id,
-                                error = %error,
-                                "reclaim lost; next scan retries"
-                            );
-                            return;
-                        }
-                    }
-                }
-                RecoveryDirective::FinalizeCommit => {
-                    let Some(command) = decision.command else {
-                        tracing::debug!(
-                            operation = ?observed.operation_id,
-                            "finalize decision carried no command"
-                        );
-                        return;
-                    };
-                    // A4: the close is a command of the same pid, fenced by
-                    // the operation revision. The lane is dropped before the
-                    // post-commit program, which may report lifecycle and
-                    // deliver records.
-                    let finalized = {
-                        let _lane = self
-                            .lock_command_lane(&observed.operation_id.process_id)
-                            .await;
-                        self.operation_event(
-                            &observed.operation_id,
-                            command.expected_revision,
-                            command.event,
-                        )
-                        .await
-                    };
-                    match finalized {
-                        Ok((finalized, mut loaded)) => {
-                            // A6/A7: the same post-commit program a normal
-                            // `dispatch` runs on the snapshot its commit
-                            // returned — rows current, then lifecycle, outbox
-                            // (nothing new here), then admission.
-                            let admission = self.admissions.lock().directive(&loaded.snapshot);
-                            let decision = Decision::recovered(&loaded.snapshot, admission);
-                            if let Err(error) = self
-                                .execute_decision(
-                                    &mut loaded,
-                                    &decision,
-                                    operation::Projection::Touched,
-                                    &[],
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    operation = ?finalized.id,
-                                    error = %error,
-                                    "executing a finalize commit's decision failed; the recovery pass retries the rest"
-                                );
-                            }
-                            report.finalized.push(finalized.id);
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                operation = ?observed.operation_id,
-                                error = %error,
-                                "finalize lost; next scan retries"
-                            );
-                        }
-                    }
-                    return;
-                }
-                RecoveryDirective::ObserveEffect => match self.observe_effect(&observed).await {
-                    Ok(Some(proof)) => {
-                        effect = proof.observation;
-                        observed = observed.with_effect_receipt(proof.receipt);
-                    }
-                    Ok(None) => {
-                        report.reconciliation_required.push(observed.operation_id);
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::debug!(
-                            operation = ?observed.operation_id,
-                            error = %error,
-                            "effect observation failed; next scan retries"
-                        );
-                        report.reconciliation_required.push(observed.operation_id);
-                        return;
-                    }
-                },
-                RecoveryDirective::ReplayEffect => {
-                    let Some(observation) = effect.take() else {
-                        report.reconciliation_required.push(observed.operation_id);
-                        return;
-                    };
-                    match self
-                        .converge_observed_effect(&observed.operation_id, observation)
-                        .await
-                    {
-                        Ok(true) => report.effect_applied.push(observed.operation_id),
-                        Ok(false) => report.reconciliation_required.push(observed.operation_id),
-                        Err(error) => {
-                            tracing::warn!(
-                                operation = ?observed.operation_id,
-                                error = %error,
-                                "replaying an observed effect failed; the operation stays unknown"
-                            );
-                            report.reconciliation_required.push(observed.operation_id);
-                        }
-                    }
-                    return;
-                }
-                RecoveryDirective::RetryEffect => {
-                    match self.retry_unknown_effect(&observed.record()).await {
-                        Ok(true) => report.effect_retried.push(observed.operation_id),
-                        Ok(false) => report.reconciliation_required.push(observed.operation_id),
-                        Err(error) => {
-                            tracing::warn!(
-                                operation = ?observed.operation_id,
-                                error = %error,
-                                "re-queuing an idempotent effect failed; the next scan retries"
-                            );
-                            report.reconciliation_required.push(observed.operation_id);
-                        }
-                    }
-                    return;
-                }
-                RecoveryDirective::Manual => {
-                    report.reconciliation_required.push(observed.operation_id);
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Deliver the records one operation just committed and persist every
-    /// outcome in **one** follow-up aggregate commit. This is the normal path
-    /// (A1b): the plan commit wrote the records `Pending`, the read model was
-    /// projected from that commit, and only now does the transport see them.
-    /// The confirmation batch is one guarded replace — never one claim and one
-    /// confirm per record — so a many-record operation still pays one extra
-    /// commit.
-    ///
-    /// A lost guard applies nothing: the records stay `Pending`, the outbox
-    /// pass redelivers them (at-least-once), and the run stays unreclaimable
-    /// until every record is `Delivered`.
-    async fn deliver_committed_outbox(
-        &self,
-        loaded: &mut crate::scheduler::durable::document_store::LoadedProcess,
-        ids: &[crate::scheduler::core::outbox::records::OutboxId],
-    ) {
-        if ids.is_empty() {
-            return;
-        }
-        let process_id = loaded.snapshot.process_id.clone();
-        let snapshot = &loaded.snapshot;
-        let now = SystemClock.now_ms();
-        let mut confirmations = Vec::with_capacity(ids.len());
-        {
-            let mut transport = self.transport.write();
-            for id in ids {
-                let Some(record) = snapshot.outbox.get(id) else {
-                    continue;
-                };
-                // Only a record this operation left `Pending` is ours to
-                // deliver. A concurrent pass may have claimed or settled it
-                // between the commit and this pass; that worker owns it now.
-                if !matches!(
-                    record.state,
-                    crate::scheduler::core::outbox::records::OutboxState::Pending { .. }
-                ) {
-                    continue;
-                }
-                let outcome = transport.deliver(record);
-                let claim = delivery_claim(record, now);
-                confirmations.push(
-                    crate::scheduler::core::outbox::outbox_repository::OutboxConfirmation {
-                        id: id.clone(),
-                        expected_revision: record.revision,
-                        events: delivery_events(&claim, outcome, now),
-                    },
-                );
-            }
-        }
-        if confirmations.is_empty() {
-            return;
-        }
-        match self
-            .processes
-            .confirm_outbox_batch(loaded, &confirmations)
-            .await
-        {
-            Ok(outcome) => {
-                // A rescheduled record whose retry is due now must not wait for
-                // the tick; the pass is the retry net, not the normal path.
-                let due_now = outcome.confirmed.iter().any(|record| {
-                    matches!(
-                        record.state,
-                        crate::scheduler::core::outbox::records::OutboxState::Pending {
-                            available_at_ms
-                        } if available_at_ms <= now
-                    )
-                });
-                if due_now {
-                    self.deliver.notify_one();
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    pid = %process_id,
-                    error = %error,
-                    "outbox confirmation lost; the retry pass will redeliver"
-                );
-                self.deliver.notify_one();
-            }
-        }
-    }
-
-    /// Deliver one already-loaded record: claim it with a fenced claim, hand
-    /// it to the transport, then persist the reported outcome. After the
-    /// transport ran, only its explicit `RetryAt` proves no external effect —
-    /// everything else the transport cannot classify stays `DeliveryUnknown`.
-    /// The transport lock is taken only for the synchronous `deliver` call,
-    /// never across an await.
-    ///
-    /// `Ok(true)` means the transport confirmed delivery; `Ok(false)` means the
-    /// claim was lost or the record was no longer dispatchable.
-    async fn dispatch_outbox_record(&self, record: OutboxRecord, now: i64) -> Result<bool> {
-        let claim = delivery_claim(&record, now);
-        // A4: the claim and the outcome are two guarded aggregate writes of
-        // this record's pid, so each takes the command lane — never across the
-        // transport's synchronous call, exactly like an effect. The record's
-        // revision stays the fence against a writer the lane cannot see.
-        let lane = self.lock_command_lane(&record.id.process_id).await;
-        let claimed = match self
-            .processes
-            .evolve_outbox(
-                &record.id,
-                record.revision,
-                OutboxEvent::Claim {
-                    claim: claim.clone(),
-                    now_ms: now,
-                },
-            )
-            .await
-        {
-            Ok(claimed) => claimed,
-            Err(error) => {
-                // A concurrent worker claimed it first; skip without failing
-                // the pass.
-                tracing::debug!(record = ?record.id, error = %error, "delivery claim lost");
-                return Ok(false);
-            }
-        };
-        drop(lane);
-        let event = {
-            let outcome = self.transport.write().deliver(&claimed);
-            outcome_event(&claim, outcome, now)
-        };
-        let delivered = matches!(&event, OutboxEvent::ConfirmDelivered { .. });
-        // A4: the outcome write is a second command of the same pid — the
-        // lane is retaken for it, after the transport's synchronous call.
-        let _lane = self.lock_command_lane(&record.id.process_id).await;
-        self.processes
-            .evolve_outbox(&record.id, claimed.revision, event)
-            .await
-            .map_err(runtime)?;
-        Ok(delivered)
-    }
-
-    /// One outbox delivery pass over the attached transport: claim every due
-    /// record with a fenced claim, hand it to the transport, then persist the
-    /// reported outcome.
-    #[cfg(test)]
-    pub(crate) async fn dispatch_outbox(&self) -> Result<usize> {
-        self.dispatch_outbox_batch(PAGE_SIZE).await
-    }
-
-    /// The bounded outbox retry pass (A10). At most `budget` records are
-    /// delivered per round; a larger backlog resumes at the next record on the
-    /// loop's next interval. The cursor is in-memory scheduling state only —
-    /// records remain `Pending` in the aggregate, so losing it (restart) just
-    /// restarts the pass.
-    pub(crate) async fn dispatch_outbox_batch(&self, budget: usize) -> Result<usize> {
-        let now = SystemClock.now_ms();
-        let budget = budget.max(1);
-        let mut delivered = 0usize;
-        let mut processed = 0usize;
-        let mut deferred_records = 0u64;
-        let mut settled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        // Pids whose rows this pass verified current. The normal path already
-        // projected before it delivered; this pass also serves records a
-        // failed/withheld projection left `Pending` (and records another
-        // instance committed), so it re-projects the run before any external
-        // consumer can see the message.
-        let mut projected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        // Pids whose projection failed in this pass: their records stay
-        // `Pending`, and retrying the projection for every record of the run
-        // would only multiply a store outage.
-        let mut deferred: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut cursor = self.outbox_cursor.lock().clone();
-        let mut last_processed = cursor.clone();
-        let mut first_page = true;
-        let mut wrapped = false;
-        'pass: loop {
-            let remaining = budget.saturating_sub(processed).max(1);
-            let page = self
-                .processes
-                .dispatchable_outbox_page(now, cursor.as_ref(), PAGE_SIZE.min(remaining))
-                .await
-                .map_err(runtime)?;
-            if first_page {
-                first_page = false;
-                let mut metrics = self.outbox_metrics.lock();
-                metrics.observed = page.observed;
-                metrics.backlog = page.due;
-                metrics.oldest_due_age_ms = page
-                    .oldest_due_at_ms
-                    .map(|at| now.saturating_sub(at).max(0));
-                metrics.passes += 1;
-            }
-            if page.records.is_empty() {
-                // A cursor past the last due record only means the pass
-                // wrapped around: start once from the beginning before
-                // deciding the backlog is empty.
-                if cursor.is_some() && !wrapped {
-                    cursor = None;
-                    last_processed = None;
-                    wrapped = true;
-                    continue;
-                }
-                cursor = None;
-                break;
-            }
-            for record in page.records {
-                if processed >= budget {
-                    cursor = last_processed.clone();
-                    break 'pass;
-                }
-                last_processed = Some(OutboxCursor(record.id.clone()));
-                let process_id = record.id.process_id.clone();
-                if deferred.contains(&process_id) {
-                    processed += 1;
-                    deferred_records += 1;
-                    continue;
-                }
-                if !projected.contains(&process_id) {
-                    if !self.repair_projection(&process_id).await {
-                        // The rows are still behind; leave every record of
-                        // this run `Pending` for the next pass.
-                        deferred.insert(process_id.clone());
-                        processed += 1;
-                        deferred_records += 1;
-                        continue;
-                    }
-                    projected.insert(process_id.clone());
-                }
-                processed += 1;
-                if self.dispatch_outbox_record(record, now).await? {
-                    delivered += 1;
-                    settled.insert(process_id);
-                }
-            }
-            cursor = page.next;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        *self.outbox_cursor.lock() = cursor;
-        {
-            let mut metrics = self.outbox_metrics.lock();
-            metrics.delivered += delivered as u64;
-            metrics.deferred += deferred_records;
-        }
-        // The deliveries that settled decide the read model's `removable`
-        // flag: a run that finished before its records were delivered only
-        // hands its rows (and directory) to the sweeper once they are.
-        for process_id in &settled {
-            self.refresh_proc_row(process_id).await;
-        }
-        Ok(delivered)
     }
 }
 

@@ -50,8 +50,8 @@ pub(crate) mod tests;
 
 pub use self::core::decision::RunOutcome;
 pub(crate) use self::core::decision::run_outcome;
+pub use self::core::health::{HealthState, SchedulerHealth};
 pub use self::shell::Context;
-pub use self::shell::health::{HealthState, SchedulerHealth};
 
 pub(crate) use self::core::model::{
     task_graph::TaskState,

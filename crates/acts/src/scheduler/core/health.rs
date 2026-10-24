@@ -324,8 +324,10 @@ pub(crate) struct CleanupPass {
 /// The independent cadences and per-round budgets of the kernel host (A10).
 ///
 /// Each loop owns one interval: the ready/timer pass (normal liveness), the
-/// recovery scanner (exceptional work), the outbox retry pass and the
-/// projection repair pass. A slow or failing loop cannot delay another, and a
+/// recovery scanner (exceptional work), the outbox retry pass, the projection
+/// repair pass — and the runtime's four store-facing timers (schedule
+/// triggers, delivery retries, terminal cleanup, snapshot purge), which the
+/// same driver loop ticks. A slow or failing loop cannot delay another, and a
 /// shorter loop never multiplies another's scans.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct KernelSchedule {
@@ -333,6 +335,14 @@ pub(crate) struct KernelSchedule {
     pub(crate) recovery: Duration,
     pub(crate) outbox: Duration,
     pub(crate) projection: Duration,
+    /// The schedule-trigger timer (due `schedule` rows).
+    pub(crate) trigger: Duration,
+    /// The message-retry timer (unacked deliveries).
+    pub(crate) retry: Duration,
+    /// The terminal-run cleanup loop.
+    pub(crate) cleanup: Duration,
+    /// The snapshot-cache TTL sweep.
+    pub(crate) snapshot: Duration,
     pub(crate) ready_budget: usize,
     pub(crate) recovery_budget: usize,
     pub(crate) outbox_budget: usize,
@@ -349,6 +359,10 @@ impl KernelSchedule {
             recovery: tick,
             outbox: tick,
             projection: tick,
+            trigger: tick,
+            retry: tick,
+            cleanup: tick,
+            snapshot: tick,
             ready_budget: page_size,
             recovery_budget: page_size,
             outbox_budget: page_size,

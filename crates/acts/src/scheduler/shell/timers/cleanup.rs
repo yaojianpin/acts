@@ -1,97 +1,61 @@
-//! The terminal-run cleanup timer: its own loop, interval, batch budget and
-//! health. It never shares the operation driver's ready/recovery pass or the
+//! The terminal-run cleanup timer: its own interval, batch budget and health.
+//! It never shares the operation driver's ready/recovery pass or the
 //! message-retry loop, so a slow or failing cleanup cannot delay normal
-//! operations or recovery.
+//! operations or recovery. The loop itself is the kernel host's serve tick
+//! ([`TimerGuider::cleanup_tick`]); this file holds the pass.
 
-#[cfg(not(test))]
-use tokio::time;
 #[cfg(not(test))]
 use tracing::error;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::TimerGuider;
 use crate::scheduler::Runtime;
 use crate::scheduler::core::health::CleanupPass;
 use crate::store::writebehind;
-use crate::{ActError, Config, Result};
-
-#[cfg(test)]
-use crate::scheduler::runtime::TEST_TICK_MS;
-
-/// The cleanup loop's own interval: the configured cleanup interval, or
-/// `TEST_TICK_MS` under test. It never shares the driver's tick or the
-/// retry timer's schedule (A10 keeps the loops separate; A11 gives cleanup
-/// its own).
-fn cleanup_interval(config: &Config) -> Duration {
-    #[cfg(test)]
-    {
-        let _ = config;
-        Duration::from_millis(TEST_TICK_MS)
-    }
-    #[cfg(not(test))]
-    {
-        Duration::from_millis((config.cleanup_interval_secs() * 1000) as u64)
-    }
-}
+use crate::{ActError, Result};
 
 impl TimerGuider {
-    /// Terminal-run cleanup timer: reclaims finished runs' aggregates, rows
-    /// and work directories on the cleanup cadence. Under test the loop is
-    /// not spawned — reclamation is driven explicitly by `sweep_removable`
-    /// there — but the interval contract stays the one the production build
-    /// runs.
-    pub(crate) fn cleanup_timer(&self) {
+    /// One terminal-run cleanup pass: reclaims finished runs' aggregates,
+    /// rows and work directories. Under test this is a no-op — the
+    /// reliability cells drive `sweep_removable` explicitly there, because
+    /// they read a settled run's aggregate as its durable decision after the
+    /// run ends.
+    pub(crate) async fn cleanup_tick(&self) {
         #[cfg(test)]
         {
-            // The test build (and the reliability matrix built on it) reads a
-            // settled run's aggregate as its durable decision after the run
-            // ends, and A11 deletes it. Reclamation is therefore driven
-            // explicitly by `sweep_removable` in those cells; the timer's
-            // loop is the same code the production build runs.
-            let _ = cleanup_interval(self.runtime.config());
             let _ = self;
         }
         #[cfg(not(test))]
         {
-            let interval = cleanup_interval(self.runtime.config());
-            let shutdown = self.runtime.shutdown_token();
-            let timers = self.timers.clone();
-            let sweeper = self.runtime.clone();
-            tokio::spawn(async move {
-                let mut intv = time::interval(interval);
-                loop {
-                    tokio::select! {
-                        _ = shutdown.cancelled() => break,
-                        _ = intv.tick() => {}
-                    }
-                    if !timers.cleanup().attempt() {
-                        continue;
-                    }
-                    match sweep_removable(&sweeper).await {
-                        Ok(_) => {
-                            timers.cleanup().recovered();
-                            let metrics = sweeper.cleanup_metrics();
-                            if metrics.backlog > 0 {
-                                tracing::debug!(
-                                    backlog = metrics.backlog,
-                                    oldest_removable_age_ms = metrics.oldest_removable_age_ms,
-                                    reclaimed = metrics.reclaimed,
-                                    document_bytes_deleted = metrics.document_bytes_deleted,
-                                    delete_failures = metrics.delete_failures,
-                                    orphan_indexes_removed = metrics.orphan_indexes_removed,
-                                    "terminal cleanup"
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            error!(error = %err, "terminal cleanup pass failed");
-                            timers.cleanup().failed(&err);
-                        }
+            // A degraded loop sits this tick out: the store has failed every
+            // recent attempt, so another pass now would fail too (and log
+            // again) — the guard decides when the next attempt is worth
+            // making.
+            if !self.timers.cleanup().attempt() {
+                return;
+            }
+            match sweep_removable(&self.runtime).await {
+                Ok(_) => {
+                    self.timers.cleanup().recovered();
+                    let metrics = self.runtime.cleanup_metrics();
+                    if metrics.backlog > 0 {
+                        tracing::debug!(
+                            backlog = metrics.backlog,
+                            oldest_removable_age_ms = metrics.oldest_removable_age_ms,
+                            reclaimed = metrics.reclaimed,
+                            document_bytes_deleted = metrics.document_bytes_deleted,
+                            delete_failures = metrics.delete_failures,
+                            orphan_indexes_removed = metrics.orphan_indexes_removed,
+                            "terminal cleanup"
+                        );
                     }
                 }
-            });
+                Err(err) => {
+                    error!(error = %err, "terminal cleanup pass failed");
+                    self.timers.cleanup().failed(&err);
+                }
+            }
         }
     }
 }

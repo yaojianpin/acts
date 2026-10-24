@@ -1,15 +1,19 @@
-//! The store-facing timer loops' behavioral tests: schedule triggers, the
-//! message-retry timer and the snapshot TTL sweep, each driven through the
-//! runtime the same way the production build drives them.
+//! The store-facing timers' behavioral tests: schedule triggers, the
+//! message-retry timer and the snapshot TTL sweep, each pass driven the same
+//! way the kernel host's serve loop drives it — one tick, one pass.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::scheduler::Runtime;
+use crate::scheduler::shell::timers::{TimerGuider, fire_schedule};
 use crate::{Config, Vars, Workflow};
 
 fn runtime() -> Arc<Runtime> {
     Runtime::new(&Config::default(), None).unwrap()
+}
+
+fn guider(runtime: &Arc<Runtime>) -> Arc<TimerGuider> {
+    Arc::new(TimerGuider::new(runtime))
 }
 
 async fn insert_model(runtime: &Runtime, workflow: &Workflow) {
@@ -60,9 +64,7 @@ async fn sch_timers_trigger_without_a_schedule_rolls_forward_to_zero() {
     insert_model(&runtime, &workflow).await;
     let event = event(&workflow.id, None);
     runtime.store().events().create(&event).await.unwrap();
-    crate::scheduler::shell::timers::fire_schedule(&runtime, &event)
-        .await
-        .unwrap();
+    fire_schedule(&runtime, &event).await.unwrap();
     let stored = runtime.store().events().find(&event.id).await.unwrap();
     assert_eq!(stored.next_run, 0, "no cron expression means not armed");
     assert!(stored.last_run > 0);
@@ -79,9 +81,7 @@ async fn sch_timers_trigger_with_a_schedule_arms_its_next_fire() {
     insert_model(&runtime, &workflow).await;
     let event = event(&workflow.id, Some("* * * * * *"));
     runtime.store().events().create(&event).await.unwrap();
-    crate::scheduler::shell::timers::fire_schedule(&runtime, &event)
-        .await
-        .unwrap();
+    fire_schedule(&runtime, &event).await.unwrap();
     let stored = runtime.store().events().find(&event.id).await.unwrap();
     assert!(stored.next_run > stored.last_run);
     runtime.close().await;
@@ -89,16 +89,16 @@ async fn sch_timers_trigger_with_a_schedule_arms_its_next_fire() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
-async fn sch_timers_trigger_logs_a_failing_fire_and_keeps_ticking() {
+async fn sch_timers_trigger_pass_survives_a_failing_fire() {
     let runtime = runtime();
     // A due schedule row whose model does not exist: `fire_schedule` fails
-    // and the timer loop logs it instead of dying.
+    // and the pass logs it instead of failing the loop's health.
     let event = event("missing-model", Some("* * * * * *"));
     runtime.store().events().create(&event).await.unwrap();
-    runtime.init_trigger_timer();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    guider(&runtime).trigger_tick().await;
     // The failing row is still due (the start never rolled it), so it is
-    // retried; the loop survived and health saw the store succeed.
+    // retried on the next tick; the pass survived and health saw the store
+    // succeed.
     assert!(runtime.scheduler_health().trigger.consecutive_failures == 0);
     runtime.close().await;
 }
@@ -130,25 +130,17 @@ async fn sch_timers_retry_drops_a_delivery_without_a_canonical_message() {
         .create(&delivery)
         .await
         .unwrap();
-    runtime.init_retry_timer().unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if runtime
+    guider(&runtime).retry_tick().await;
+    assert!(
+        runtime
             .store()
             .deliveries()
             .find_opt(&delivery.id)
             .await
             .unwrap()
-            .is_none()
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the orphan delivery was never dropped"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+            .is_none(),
+        "the orphan delivery is dropped in the same pass that notices it"
+    );
     runtime.close().await;
 }
 
@@ -162,17 +154,10 @@ async fn sch_timers_snapshot_purges_expired_entries() {
         crate::snapshot::SnapshotOptions::default().with_ttl(0),
     );
     store.upsert("scope", 1, Vars::new().with("a", 1));
-    runtime.init_snapshot_timer();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if store.list().is_empty() {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the expired snapshot entry was never purged"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    guider(&runtime).purge_tick().await;
+    assert!(
+        store.list().is_empty(),
+        "the expired snapshot entry is purged in the same pass"
+    );
     runtime.close().await;
 }

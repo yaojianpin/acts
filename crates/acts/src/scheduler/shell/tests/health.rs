@@ -11,7 +11,7 @@
 
 use crate::{
     ActError,
-    scheduler::shell::health::{DEGRADE_AFTER, HealthState, LoopGuard, MAX_BACKOFF_TICKS},
+    scheduler::core::health::{DEGRADE_AFTER, HealthState, LoopGuard, MAX_BACKOFF_TICKS},
 };
 
 /// The guard's contract: nothing changes below the threshold, the streak that
@@ -100,7 +100,7 @@ fn a_short_streak_recovers_quietly() {
     guard.recovered();
     assert_eq!(
         guard.snapshot(),
-        crate::scheduler::shell::health::LoopHealth {
+        crate::scheduler::core::health::LoopHealth {
             state: HealthState::Healthy,
             consecutive_failures: 0,
             backoff_ticks: 0,

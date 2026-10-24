@@ -8,24 +8,24 @@
 //! re-exported from `mod.rs`.
 
 use crate::{
-    ActError, Action, Config, Package, Result, ShareLock, Vars, Workflow, data,
+    ActError, Action, Config, Package, Result, Vars, Workflow, data,
     env::Environment,
     event::{Emitter, ProcessGate},
-    scheduler::shell::{
-        KernelSchedule, ProcRead,
-        health::{LoopGuard, SchedulerHealth},
-        validation::SchemaCache,
+    scheduler::{
+        core::health::{CleanupMetrics, SchedulerHealth, TimerGuards},
+        shell::{
+            KernelHost, ProcRead, SnapshotRegistry, TimerGuider, timers as shell_timers,
+            validation::SchemaCache,
+        },
     },
     snapshot::{SnapshotOptions, SnapshotStore},
     store::{KvStore, Store, writebehind},
     utils::{self, LaneRouter, consts},
 };
 
-use parking_lot::RwLock;
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{runtime::Handle, time};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -45,18 +45,14 @@ pub struct Runtime {
     shutdown: CancellationToken,
     schema_cache: Arc<SchemaCache>,
     pub(crate) snapshots: Arc<SnapshotRegistry>,
-    /// Failure state of the schedule-trigger timer (see [`SchedulerHealth`]).
-    trigger_health: Arc<LoopGuard>,
-    /// Failure state of the message-retry timer (see [`SchedulerHealth`]).
-    retry_health: Arc<LoopGuard>,
-    /// Failure state of the cleanup timer (see [`SchedulerHealth`]).
-    cleanup_health: Arc<LoopGuard>,
-    /// What the last cleanup passes did (see [`Runtime::cleanup_metrics`]).
-    cleanup_metrics: Arc<parking_lot::Mutex<CleanupMetrics>>,
+    /// The store-facing timers' guards and the terminal-cleanup counters, as
+    /// one bundle (see [`TimerGuards`]). The kernel host's serve loop ticks
+    /// the timers; the guards' atomics take their health.
+    timers: Arc<TimerGuards>,
     /// The deterministic kernel host: it *is* the engine — it owns every
     /// started process (start, actions, effects, messages) and drives the operations
     /// over the aggregate documents.
-    kernel: Arc<crate::scheduler::shell::KernelHost>,
+    kernel: Arc<KernelHost>,
 }
 
 /// Tick the periodic timers run on under test — short enough that a test can
@@ -64,86 +60,6 @@ pub struct Runtime {
 /// ticks.
 #[cfg(test)]
 pub(crate) const TEST_TICK_MS: u64 = 800;
-
-/// What the terminal-run cleanup observed and reclaimed.
-///
-/// `backlog` and `oldest_removable_age_ms` are gauges of the last pass;
-/// `reclaimed`, `document_bytes_deleted`, `delete_failures` and
-/// `orphan_indexes_removed` accumulate for the runtime's lifetime.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CleanupMetrics {
-    /// Terminal proc rows the last pass selected (capped by the cleanup
-    /// batch).
-    pub backlog: usize,
-    /// Age in milliseconds of the oldest finished run whose row is marked
-    /// `removable`; `None` when nothing is waiting.
-    pub oldest_removable_age_ms: Option<i64>,
-    /// Runs whose durable aggregate was reclaimed (or whose aggregate was
-    /// already gone and whose marked rows were removed).
-    pub reclaimed: u64,
-    /// Bytes of aggregate/index documents deleted.
-    pub document_bytes_deleted: u64,
-    /// Cleanup attempts that failed and are retried on the next pass.
-    pub delete_failures: u64,
-    /// Index documents removed for an aggregate that was already gone, or
-    /// stale recovery-entry documents removed with a reclaimed aggregate.
-    pub orphan_indexes_removed: u64,
-}
-
-/// One cleanup pass's local counters, folded into [`CleanupMetrics`].
-#[derive(Default)]
-struct CleanupPass {
-    backlog: usize,
-    oldest_removable_age_ms: Option<i64>,
-    reclaimed: u64,
-    document_bytes: u64,
-    delete_failures: u64,
-    orphan_indexes: u64,
-}
-
-/// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
-pub(crate) struct SnapshotRegistry {
-    stores: ShareLock<HashMap<String, Arc<SnapshotStore>>>,
-}
-
-impl SnapshotRegistry {
-    fn new() -> Self {
-        Self {
-            stores: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.stores.read().len()
-    }
-
-    /// Register (or replace) a snapshot target. Replacing a name drops its
-    /// cached values.
-    pub(crate) fn register(&self, name: &str, options: SnapshotOptions) -> Arc<SnapshotStore> {
-        let store = Arc::new(SnapshotStore::new(options));
-        self.stores.write().insert(name.to_string(), store.clone());
-        store
-    }
-
-    pub(crate) fn store(&self, name: &str) -> Option<Arc<SnapshotStore>> {
-        self.stores.read().get(name).cloned()
-    }
-
-    pub(crate) fn list(&self) -> Vec<(String, Arc<SnapshotStore>)> {
-        self.stores
-            .read()
-            .iter()
-            .map(|(name, store)| (name.clone(), store.clone()))
-            .collect()
-    }
-    /// Drop expired entries of every registered store (TTL sweep).
-    pub(crate) fn purge_expired(&self) -> usize {
-        self.list()
-            .into_iter()
-            .map(|(_, store)| store.purge_expired())
-            .sum()
-    }
-}
 
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -168,6 +84,23 @@ impl std::fmt::Debug for Runtime {
 impl Runtime {
     pub(crate) fn snapshot_registry(&self) -> Arc<SnapshotRegistry> {
         self.snapshots.clone()
+    }
+
+    /// The store-facing timers' guards (the kernel host's serve loop ticks
+    /// them; these are the states `scheduler_health` reads).
+    pub(crate) fn timers(&self) -> &Arc<TimerGuards> {
+        &self.timers
+    }
+
+    /// The pid → lane mapping, so the timers' cleanup can release a swept
+    /// run's assignment.
+    pub(crate) fn router(&self) -> &Arc<LaneRouter> {
+        &self.router
+    }
+
+    /// The write-behind queue, for the timers' barriered removals.
+    pub(crate) fn writer(&self) -> &writebehind::StoreWriter {
+        &self.writer
     }
 
     pub fn new(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Self>> {
@@ -228,178 +161,6 @@ impl Runtime {
         writebehind::store_delivery(&self.writer, message, delivery).await
     }
 
-    /// One terminal-run cleanup pass: reclaim the durable state of finished
-    /// runs and then delete their rows and workdirs.
-    ///
-    /// A settled run's `removable` mark is re-derived first. The mark is
-    /// written by the projection of the run's own commits, and a settled run
-    /// has none left: its last commit can predate the delivery that settled
-    /// its outbox records (the delivery pass refreshes the row only for the
-    /// runs it delivered for, and nothing repairs a settled run's row), so a
-    /// terminal row that still reads not-removable would otherwise keep the
-    /// run's rows — and the directory swept with them — forever.
-    ///
-    /// The authoritative cut is the aggregate deletion (one guarded batch:
-    /// aggregate + recovery + outbox + ready indexes). Rows and the workdir
-    /// are then removed idempotently. A delivery row still open, a
-    /// non-retired operation, an undelivered/unclassified outbox record, or
-    /// `EffectUnknown`/`Quarantined` keeps the aggregate and every row: the
-    /// pid is not reusable. An aggregate already gone (an interrupted
-    /// cleanup) lets the retry remove only its marked rows.
-    pub(crate) async fn sweep_removable(&self) -> Result<usize> {
-        let limit = self.config().cleanup_batch();
-        for pid in self.store.unmarked_settled_procs(limit).await? {
-            self.kernel.refresh_projection(&pid).await;
-        }
-        let rows = self.store.terminal_proc_rows(limit).await?;
-        let now = crate::utils::time::time_millis();
-        let mut pass = CleanupPass {
-            backlog: rows.len(),
-            oldest_removable_age_ms: rows
-                .iter()
-                .filter(|row| row.removable && row.end_time > 0)
-                .map(|row| now.saturating_sub(row.end_time))
-                .max(),
-            ..CleanupPass::default()
-        };
-        let mut removed = 0usize;
-        let mut failure: Option<ActError> = None;
-        for row in rows {
-            match self
-                .cleanup_process(&row.id, row.removable, &mut pass)
-                .await
-            {
-                Ok(remove) => {
-                    if remove {
-                        removed += 1;
-                    }
-                }
-                Err(error) => {
-                    // One run's failure must not stop the pass: every other
-                    // run's cleanup is independent, and this run is retried
-                    // on the next tick.
-                    pass.delete_failures += 1;
-                    tracing::warn!(
-                        pid = %row.id,
-                        error = %error,
-                        "terminal cleanup failed for one process; the next pass retries"
-                    );
-                    failure.get_or_insert(error);
-                }
-            }
-        }
-        // A failed pass leaves a pid marked until its residue is gone. If the
-        // rows disappeared anyway (the batch applied, an operator cleaned up),
-        // clear the mark so the pid is not blocked forever.
-        for pid in self.kernel.reclaiming_pids() {
-            if let Ok(None) = self.store.procs().find_opt(&pid).await {
-                self.kernel.finish_reclaim(&pid);
-                self.router.forget(&pid);
-            }
-        }
-        {
-            let mut metrics = self.cleanup_metrics.lock();
-            metrics.backlog = pass.backlog;
-            metrics.oldest_removable_age_ms = pass.oldest_removable_age_ms;
-            metrics.reclaimed += pass.reclaimed;
-            metrics.document_bytes_deleted += pass.document_bytes;
-            metrics.delete_failures += pass.delete_failures;
-            metrics.orphan_indexes_removed += pass.orphan_indexes;
-        }
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(removed),
-        }
-    }
-
-    /// Reclaim one process's aggregate and indexes, then report whether its
-    /// rows may be removed.
-    ///
-    /// The writer's pid shard is barriered first: a delivery row the transport
-    /// queued this instant must be visible to the `removable` decision, or the
-    /// rows would be deleted behind a still-open delivery.
-    async fn cleanup_process(
-        &self,
-        pid: &str,
-        marked: bool,
-        pass: &mut CleanupPass,
-    ) -> Result<bool> {
-        // A start and this cleanup are serialized per pid. The lifecycle lock
-        // is held from the aggregate decision through the row/workdir
-        // removal: `Runtime::start` checks the aggregate under the same lock,
-        // so it can never observe "aggregate gone, rows still there" and
-        // create a new run whose rows the old cleanup would then delete.
-        let _lifecycle = self.kernel.lock_lifecycle(pid).await;
-        // Projection and cleanup are ordered per pid: an in-flight projection
-        // of the old run finishes before the aggregate is judged (its rows
-        // cannot be written behind the removal), and the tombstone the
-        // reclamation leaves blocks every later one.
-        let _projection = self.kernel.lock_projection(pid).await;
-        self.writer.flush_pid(pid).await?;
-        if self.store.has_unsettled_deliveries(pid).await? {
-            return Ok(false);
-        }
-        if !marked {
-            // The design's step 1: the mark is written before the authoritative
-            // batch. It is also what makes an interrupted cleanup retryable —
-            // if the aggregate is gone and only rows remain, the mark is the
-            // durable evidence that the run was settled when it was cut.
-            return Ok(false);
-        }
-        // Set before the batch: if the batch succeeds and the row removal
-        // fails, a start must keep refusing the pid until a later pass
-        // finishes the residue. Cleared only after the rows are gone.
-        self.kernel.begin_reclaim(pid);
-        let outcome = self.kernel.reclaim_process(pid).await;
-        let (document_bytes, orphan_indexes) = match outcome {
-            Ok(crate::scheduler::durable::async_document_store::ReclaimOutcome::Reclaimed {
-                document_bytes,
-                orphan_indexes,
-            })
-            | Ok(crate::scheduler::durable::async_document_store::ReclaimOutcome::Absent {
-                document_bytes,
-                orphan_indexes,
-            }) => (document_bytes, orphan_indexes),
-            Ok(crate::scheduler::durable::async_document_store::ReclaimOutcome::Retained) => {
-                self.kernel.finish_reclaim(pid);
-                tracing::debug!(
-                    pid,
-                    "terminal cleanup retained a run for recovery/reconciliation"
-                );
-                return Ok(false);
-            }
-            // Leave the mark set: a batch that did land may have left rows.
-            Err(error) => return Err(error),
-        };
-        pass.reclaimed += 1;
-        pass.document_bytes += document_bytes;
-        pass.orphan_indexes += orphan_indexes as u64;
-
-        // Rows and workdir go while the lifecycle lock is still held; the
-        // flush makes the removal durable before a new start can take the pid.
-        let removal = match writebehind::queue_removal(&self.store, &self.writer, pid).await {
-            Ok(()) => self.writer.flush_pid(pid).await,
-            Err(error) => Err(error),
-        };
-        if let Err(error) = removal {
-            // The `RemoveProc` batch may have applied even though the flush
-            // reported a failure. The proc row is deleted atomically with every
-            // other row of the process, so its absence proves the removal;
-            // keep the mark only when residue may still be there.
-            match self.store.procs().find_opt(pid).await {
-                Ok(None) => {
-                    self.kernel.finish_reclaim(pid);
-                    self.router.forget(pid);
-                    return Ok(true);
-                }
-                _ => return Err(error),
-            }
-        }
-        self.router.forget(pid);
-        self.kernel.finish_reclaim(pid);
-        Ok(true)
-    }
-
     /// Global write-behind barrier — test visibility (a test that asserted on
     /// projected rows must see every queued write applied first).
     #[cfg(test)]
@@ -415,9 +176,9 @@ impl Runtime {
     /// being re-sent.
     pub fn scheduler_health(&self) -> SchedulerHealth {
         SchedulerHealth {
-            trigger: self.trigger_health.snapshot(),
-            retry: self.retry_health.snapshot(),
-            cleanup: self.cleanup_health.snapshot(),
+            trigger: self.timers.trigger_health(),
+            retry: self.timers.retry_health(),
+            cleanup: self.timers.cleanup_health(),
             ready: self.kernel.ready_health(),
             recovery: self.kernel.recovery_health(),
             outbox: self.kernel.outbox_health(),
@@ -442,7 +203,7 @@ impl Runtime {
 
     /// The terminal-run cleanup's counters (see [`CleanupMetrics`]).
     pub fn cleanup_metrics(&self) -> CleanupMetrics {
-        *self.cleanup_metrics.lock()
+        self.timers.cleanup_metrics()
     }
 
     /// The read model's counters and repair backlog (A5): rows applied,
@@ -783,11 +544,13 @@ impl Runtime {
         // The deterministic kernel host — the engine. It owns its own driver
         // task over the same key-value store, woken per operation, ticked for
         // recovery and outbox delivery, and it serves (starts, actions,
-        // effects, messages).
-        let schedule = Self::kernel_schedule(config);
-        let (kernel, wake_rx) = crate::scheduler::shell::KernelHost::new_with_caps(
+        // effects, messages). Its serve loop also ticks the runtime's
+        // store-facing timers once the guider is attached below, so ONE
+        // background task owns every store-reaching pass.
+        let schedule = shell_timers::kernel_schedule(config);
+        let (kernel, wake_rx) = KernelHost::new_with_caps(
             store.kv(),
-            crate::scheduler::shell::KernelHost::caps_from_config(config),
+            KernelHost::caps_from_config(config),
             config.max_node_run_times() as u64,
             // A timer's idle round is deferred by the ready/timer interval,
             // not by the recovery or outbox cadence (A10).
@@ -814,10 +577,7 @@ impl Runtime {
             shutdown,
             schema_cache,
             snapshots,
-            trigger_health: LoopGuard::new("schedule-trigger"),
-            retry_health: LoopGuard::new("message-retry"),
-            cleanup_health: LoopGuard::new("terminal-cleanup"),
-            cleanup_metrics: Arc::new(parking_lot::Mutex::new(CleanupMetrics::default())),
+            timers: Arc::new(TimerGuards::new()),
             kernel,
         });
 
@@ -855,362 +615,20 @@ impl Runtime {
         host.attach_predicate_runner(Arc::new(
             crate::scheduler::shell::EnginePredicateRunner::new(runtime.clone()),
         ));
+        // The store-facing timers ride the host's serve loop: the guider's
+        // four passes are ticks of the ONE background task that reaches the
+        // store, not separate spawned loops.
+        host.attach_timers(Arc::new(TimerGuider::new(&runtime)));
         Ok(runtime)
     }
 
-    /// The default interval every unset loop follows: the configured tick, or
-    /// the engine's default of 15s, and [`TEST_TICK_MS`] under test (A10).
-    fn tick_interval(config: &Config) -> Duration {
-        #[cfg(test)]
-        {
-            let _ = config;
-            Duration::from_millis(TEST_TICK_MS)
-        }
-        #[cfg(not(test))]
-        {
-            let secs = config.tick_interval_secs();
-            let secs = if secs > 0 { secs } else { 15 };
-            Duration::from_millis((secs * 1000) as u64)
-        }
-    }
-
-    /// One loop's own interval: an explicitly configured value wins; an unset
-    /// one follows `fallback` (the tick). Under test an unset value keeps the
-    /// historical [`TEST_TICK_MS`] cadence, while an explicit value is honored
-    /// so a test can move one loop without moving the others.
-    fn loop_interval(explicit: Option<i64>, configured_secs: i64, fallback: Duration) -> Duration {
-        #[cfg(test)]
-        {
-            let _ = configured_secs;
-            explicit.map_or(fallback, |secs| {
-                Duration::from_millis((secs.max(1) * 1000) as u64)
-            })
-        }
-        #[cfg(not(test))]
-        {
-            let _ = explicit;
-            let _ = fallback;
-            Duration::from_millis((configured_secs.max(1) * 1000) as u64)
-        }
-    }
-
-    /// The independent cadences and budgets of the kernel host (A10).
-    ///
-    /// Every interval defaults to the tick, so the default configuration keeps
-    /// the pre-A10 rhythm; setting one only moves that loop.
-    fn kernel_schedule(config: &Config) -> KernelSchedule {
-        let tick = Self::tick_interval(config);
-        KernelSchedule {
-            ready: Self::loop_interval(
-                config.data.ready_interval_secs,
-                config.ready_interval_secs(),
-                tick,
-            ),
-            recovery: Self::loop_interval(
-                config.data.recovery_interval_secs,
-                config.recovery_interval_secs(),
-                tick,
-            ),
-            outbox: Self::loop_interval(
-                config.data.outbox_interval_secs,
-                config.outbox_interval_secs(),
-                tick,
-            ),
-            projection: Self::loop_interval(
-                config.data.projection_interval_secs,
-                config.projection_interval_secs(),
-                tick,
-            ),
-            ready_budget: config.ready_batch(),
-            recovery_budget: config.recovery_batch(),
-            outbox_budget: config.outbox_batch(),
-            projection_budget: config.projection_batch(),
-        }
-    }
-
-    /// The cleanup loop's own interval: the configured cleanup interval, or
-    /// [`TEST_TICK_MS`] under test. It never shares the driver's tick or the
-    /// retry timer's schedule (A10 keeps the loops separate; A11 gives cleanup
-    /// its own).
-    fn cleanup_interval(config: &Config) -> Duration {
-        #[cfg(test)]
-        {
-            let _ = config;
-            Duration::from_millis(TEST_TICK_MS)
-        }
-        #[cfg(not(test))]
-        {
-            Duration::from_millis((config.cleanup_interval_secs() * 1000) as u64)
-        }
-    }
-
-    /// Message-retry timer — periodically re-sends unacknowledged messages.
-    ///
-    /// The delivery rows are written through the channel path (which the
-    /// kernel's outbox transport feeds) and the rows themselves are the
-    /// kernel's projection, so this store-facing loop runs here rather than
-    /// inside the driver — it is not part of the operation protocol and must
-    /// not delay it. Terminal-run cleanup is a separate loop
-    /// ([`Self::init_cleanup_timer`]) with its own budget and health.
-    pub fn init_retry_timer(self: &Arc<Self>) -> crate::Result<()> {
-        let max_message_retry_times = self.config().max_message_retry_times();
-        // A10: the delivery retry cadence is its own; moving it never moves
-        // the trigger, snapshot or driver loops.
-        let config = self.config();
-        let interval_ms = Self::loop_interval(
-            config.data.retry_interval_secs,
-            config.retry_interval_secs(),
-            Self::tick_interval(config),
-        )
-        .as_millis() as u64;
-
-        let evt = self.emitter().clone();
-        let store = self.store.clone();
-        let shutdown = self.shutdown.clone();
-        let health = self.retry_health.clone();
-        Handle::current().spawn(async move {
-            let mut intv = time::interval(Duration::from_millis(interval_ms));
-            loop {
-                tokio::select! {
-                    _= shutdown.cancelled() => break,
-                    _ = intv.tick() => {}
-                }
-                // A degraded loop sits this tick out: the store has failed
-                // every recent attempt, so another query now would fail too
-                // (and log again) — the guard decides when the next attempt is
-                // worth making.
-                if !health.attempt() {
-                    continue;
-                }
-                // One tick is one attempt: every store call below runs, and the
-                // tick counts as failed if any of them did — a store that
-                // cannot serve one of them cannot serve the next tick either.
-                let mut failure: Option<ActError> = None;
-
-                // each not-yet-acked delivery row is re-sent to the channel it
-                // belongs to only
-                match store
-                    .with_no_response_deliveries(interval_ms as i64, max_message_retry_times)
-                    .await
-                {
-                    Ok(rearmed) => {
-                        for d in rearmed {
-                            let store = store.clone();
-                            match store.messages().find(&d.msg_id).await {
-                                Ok(message) => {
-                                    let emitter = evt.clone();
-                                    let mut msg: crate::event::Message = message.into();
-                                    msg.delivery_id = Some(d.id.clone());
-                                    emitter.emit_delivery(&d.chan_id, &msg);
-                                }
-                                Err(err) => {
-                                    // orphan delivery: its canonical message
-                                    // is gone, it can never be re-sent — drop it
-                                    error!(delivery_id = %d.id, msg_id = %d.msg_id, error = %err, "delivery without canonical message dropped");
-                                    if let Err(e) = store.deliveries().delete(&d.id).await {
-                                        error!(error = %e, "orphan delivery delete failed");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        error!(error = %err, "no-response deliveries query failed");
-                        failure = Some(err);
-                    }
-                }
-
-                match failure {
-                    Some(err) => health.failed(&err),
-                    None => health.recovered(),
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    /// Terminal-run cleanup timer: its own loop, interval, batch budget and
-    /// health. It never shares the operation driver's ready/recovery pass or
-    /// the message-retry loop, so a slow or failing cleanup cannot delay
-    /// normal operations or recovery.
-    pub fn init_cleanup_timer(self: &Arc<Self>) {
-        #[cfg(test)]
-        {
-            // The test build (and the reliability matrix built on it) reads a
-            // settled run's aggregate as its durable decision after the run
-            // ends, and A11 deletes it. Reclamation is therefore driven
-            // explicitly by `Runtime::sweep_removable` in those cells; the
-            // timer's loop is the same code the production build runs.
-            let _ = Self::cleanup_interval(self.config());
-            let _ = self;
-        }
-        #[cfg(not(test))]
-        {
-            let interval = Self::cleanup_interval(self.config());
-            let shutdown = self.shutdown.clone();
-            let health = self.cleanup_health.clone();
-            let sweeper = self.clone();
-            tokio::spawn(async move {
-                let mut intv = time::interval(interval);
-                loop {
-                    tokio::select! {
-                        _ = shutdown.cancelled() => break,
-                        _ = intv.tick() => {}
-                    }
-                    if !health.attempt() {
-                        continue;
-                    }
-                    match sweeper.sweep_removable().await {
-                        Ok(_) => {
-                            health.recovered();
-                            let metrics = sweeper.cleanup_metrics();
-                            if metrics.backlog > 0 {
-                                tracing::debug!(
-                                    backlog = metrics.backlog,
-                                    oldest_removable_age_ms = metrics.oldest_removable_age_ms,
-                                    reclaimed = metrics.reclaimed,
-                                    document_bytes_deleted = metrics.document_bytes_deleted,
-                                    delete_failures = metrics.delete_failures,
-                                    orphan_indexes_removed = metrics.orphan_indexes_removed,
-                                    "terminal cleanup"
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            error!(error = %err, "terminal cleanup pass failed");
-                            health.failed(&err);
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    /// Schedule-trigger timer — periodically fires every due `schedule`
-    /// trigger row and rolls its `next_run` forward. Deployed rows arm with
-    /// their next cron fire; a changed schedule re-arms the same way.
-    pub fn init_trigger_timer(self: &Arc<Self>) {
-        let config = self.config();
-        let interval_ms = Self::loop_interval(
-            config.data.trigger_interval_secs,
-            config.trigger_interval_secs(),
-            Self::tick_interval(config),
-        )
-        .as_millis() as u64;
-
-        let store = self.store();
-        let shutdown = self.shutdown.clone();
-        let rt = self.clone();
-        let health = self.trigger_health.clone();
-        tokio::spawn(async move {
-            let mut intv = time::interval(Duration::from_millis(interval_ms));
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    _ = intv.tick() => {}
-                }
-                // A degraded loop sits this tick out: the store has failed
-                // every recent attempt, so another query now would fail too
-                // (and log again) — the guard decides when the next attempt is
-                // worth making.
-                if !health.attempt() {
-                    continue;
-                }
-                let now = crate::utils::time::time_millis();
-                // The due query is the loop's one store round trip and the only
-                // failure that counts against its health: a trigger whose own
-                // fire failed is that row's problem, and it repeats only when
-                // the row itself is unusable (its model is gone, its payload
-                // does not parse) — one such row must not throttle the
-                // schedules that are fine. What the health is about is reaching
-                // the store, and that is what this query decides.
-                let due = match store
-                    .events()
-                    .query(
-                        &crate::query::Query::new().limit(1000).filter(
-                            crate::query::Filter::and()
-                                .expr(crate::query::Expr::eq("kind", "schedule"))
-                                .expr(crate::query::Expr::le("next_run", now)),
-                        ),
-                    )
-                    .await
-                {
-                    Ok(rows) => {
-                        health.recovered();
-                        rows.rows
-                    }
-                    Err(err) => {
-                        error!(error = %err, "schedule query failed");
-                        health.failed(&err);
-                        continue;
-                    }
-                };
-                for event in due {
-                    if let Err(err) = rt.fire_schedule(&event).await {
-                        error!(event = %event.id, error = %err, "schedule trigger failed");
-                    }
-                }
-            }
-        });
-    }
-
-    /// Snapshot TTL sweep — periodically drops expired cache entries so
-    /// never-read, never-tombstoned scopes cannot grow the cache forever.
-    pub fn init_snapshot_timer(self: &Arc<Self>) {
-        let config = self.config();
-        let interval_ms = Self::loop_interval(
-            config.data.snapshot_interval_secs,
-            config.snapshot_interval_secs(),
-            Self::tick_interval(config),
-        )
-        .as_millis() as u64;
-
-        let registry = self.snapshot_registry();
-        let shutdown = self.shutdown.clone();
-        tokio::spawn(async move {
-            let mut intv = time::interval(Duration::from_millis(interval_ms));
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    _ = intv.tick() => {}
-                }
-                let removed = registry.purge_expired();
-                if removed > 0 {
-                    debug!(removed, "expired snapshot entries purged");
-                }
-            }
-        });
-    }
-
-    /// fire one due schedule trigger: start the workflow with the trigger's
-    /// default params and roll `last_run`/`next_run` forward. The row state
-    /// is persisted after the start, so a crash between start and state roll
-    /// may re-fire the trigger on recovery (at-least-once).
-    async fn fire_schedule(self: &Arc<Self>, event: &data::Event) -> Result<()> {
-        let model = self.store.models().find(&event.mid).await?;
-        let model: crate::ModelInfo = model.into();
-        let workflow = model.workflow()?;
-
-        let payload = event.default_params();
-        let inputs = match payload {
-            serde_json::Value::Null => Vars::new(),
-            value => serde_json::from_value::<Vars>(value)
-                .map_err(|e| ActError::Convert(format!("invalid trigger payload: {e}")))?,
-        };
-        let started = self.start(&workflow, inputs).await;
-
-        // roll the schedule forward even when the start failed, so a failing
-        // trigger does not hot-loop on every tick; the error is logged by the
-        // caller (at-least-once delivery)
-        let mut event = event.clone();
-        event.last_run = crate::utils::time::time_millis();
-        event.next_run = match event.schedule.as_deref() {
-            Some(schedule) => crate::scheduler::core::plan::cron::Cron::next_fire_millis(schedule),
-            None => 0,
-        };
-        self.store.events().update(&event).await?;
-        started.map(|_| ())
+    /// One terminal-run cleanup pass: reclaim the durable state of finished
+    /// runs, then delete their rows and workdirs. The pass itself lives with
+    /// the timers ([`shell_timers`]) and runs on the host's serve loop; this
+    /// entry is the test suites' explicit reclamation seam.
+    #[cfg(test)]
+    pub(crate) async fn sweep_removable(self: &Arc<Self>) -> Result<usize> {
+        shell_timers::sweep_removable(self).await
     }
 }
 
@@ -1352,164 +770,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("cannot find 'uses' in act"));
-        runtime.close().await;
-    }
-
-    async fn insert_model(runtime: &Runtime, workflow: &Workflow) {
-        runtime
-            .store()
-            .models()
-            .create(&crate::store::data::Model {
-                id: workflow.id.clone(),
-                name: workflow.name.clone(),
-                desc: String::new(),
-                ver: "0.1.0".into(),
-                size: 0,
-                create_time: 0,
-                update_time: 0,
-                data: serde_json::to_string(workflow).unwrap(),
-                view: None,
-                timestamp: 0,
-                v: 0,
-            })
-            .await
-            .unwrap();
-    }
-
-    fn event(mid: &str, schedule: Option<&str>) -> crate::store::data::Event {
-        crate::store::data::Event {
-            id: format!("event-{}", crate::utils::longid()),
-            name: String::new(),
-            mid: mid.into(),
-            ver: "0.1.0".into(),
-            kind: "schedule".into(),
-            params: "null".into(),
-            schedule: schedule.map(str::to_string),
-            last_run: 0,
-            next_run: 0,
-            create_time: 0,
-            timestamp: 0,
-            v: 1,
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial_test::serial]
-    async fn a_trigger_without_a_schedule_rolls_forward_to_zero() {
-        let runtime = runtime();
-        let workflow = Workflow::new()
-            .with_id("wf-trigger-none")
-            .with_step(|step| step.with_id("s1"));
-        insert_model(&runtime, &workflow).await;
-        let event = event(&workflow.id, None);
-        runtime.store().events().create(&event).await.unwrap();
-        runtime.fire_schedule(&event).await.unwrap();
-        let stored = runtime.store().events().find(&event.id).await.unwrap();
-        assert_eq!(stored.next_run, 0, "no cron expression means not armed");
-        assert!(stored.last_run > 0);
-        runtime.close().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial_test::serial]
-    async fn a_trigger_with_a_schedule_arms_its_next_fire() {
-        let runtime = runtime();
-        let workflow = Workflow::new()
-            .with_id("wf-trigger-cron")
-            .with_step(|step| step.with_id("s1"));
-        insert_model(&runtime, &workflow).await;
-        let event = event(&workflow.id, Some("* * * * * *"));
-        runtime.store().events().create(&event).await.unwrap();
-        runtime.fire_schedule(&event).await.unwrap();
-        let stored = runtime.store().events().find(&event.id).await.unwrap();
-        assert!(stored.next_run > stored.last_run);
-        runtime.close().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial_test::serial]
-    async fn the_trigger_timer_logs_a_failing_fire_and_keeps_ticking() {
-        let runtime = runtime();
-        // A due schedule row whose model does not exist: `fire_schedule` fails
-        // and the timer loop logs it instead of dying.
-        let event = event("missing-model", Some("* * * * * *"));
-        runtime.store().events().create(&event).await.unwrap();
-        runtime.init_trigger_timer();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        // The failing row is still due (the start never rolled it), so it is
-        // retried; the loop survived and health saw the store succeed.
-        assert!(runtime.scheduler_health().trigger.consecutive_failures == 0);
-        runtime.close().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial_test::serial]
-    async fn the_retry_timer_drops_a_delivery_without_a_canonical_message() {
-        use crate::store::data::{Delivery, DeliveryStatus};
-
-        let runtime = runtime();
-        let now = crate::utils::time::time_millis();
-        let delivery = Delivery {
-            id: format!("orphan-{}", crate::utils::longid()),
-            msg_id: format!("missing-{}", crate::utils::longid()),
-            pid: "p".into(),
-            tid: "t".into(),
-            chan_id: "chan".into(),
-            chan_pattern: "*".into(),
-            status: DeliveryStatus::Created,
-            retry_times: 0,
-            create_time: 0,
-            update_time: 0,
-            timestamp: now,
-            v: 1,
-        };
-        runtime
-            .store()
-            .deliveries()
-            .create(&delivery)
-            .await
-            .unwrap();
-        runtime.init_retry_timer().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if runtime
-                .store()
-                .deliveries()
-                .find_opt(&delivery.id)
-                .await
-                .unwrap()
-                .is_none()
-            {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the orphan delivery was never dropped"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        runtime.close().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial_test::serial]
-    async fn the_snapshot_timer_purges_expired_entries() {
-        let runtime = runtime();
-        let registry = runtime.snapshot_registry();
-        let store = registry.register("ttl", SnapshotOptions::default().with_ttl(0));
-        store.upsert("scope", 1, Vars::new().with("a", 1));
-        runtime.init_snapshot_timer();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if store.list().is_empty() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the expired snapshot entry was never purged"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
         runtime.close().await;
     }
 }
