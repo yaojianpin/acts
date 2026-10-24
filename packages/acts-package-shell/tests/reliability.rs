@@ -243,24 +243,44 @@ async fn a_failed_task_state_write_degrades_without_losing_the_run() {
         "the store fault must not surface as an error of the run"
     );
 
-    // the durable state agrees with the event: the process row reads
-    // completed and no task of the run is left running. Read through the
-    // plain row APIs — `proc().get` would first flush the pid's writer shard
-    // and re-report the latched barrier failure of the injected fault, which
-    // the engine surfaces by design on read-after-write
-    let procs = executor.proc().list(&Query::new()).await.unwrap().rows;
-    assert_eq!(procs.len(), 1, "exactly one process row for the run");
-    assert_eq!(procs[0].id, pid);
-    assert_eq!(
-        procs[0].state, "completed",
-        "the durable process must agree with the completion event"
+    // A finished run's rows are not durable evidence for long: the terminal
+    // sweeper reclaims them (and the run's directory) once the run is
+    // settled, which a completed run with every delivery acknowledged is. So
+    // the durable state is read in either of two shapes, and both agree with
+    // the completion event: the rows are already gone because the sweep took
+    // them, or they are still there and read completed with no task left
+    // running. A row that never leaves `running` is the defect this cell
+    // refuses. Read through the plain list APIs — `proc().get` would first
+    // flush the pid's writer shard and re-report the latched barrier failure
+    // of the injected fault, which the engine surfaces by design on
+    // read-after-write.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut observed = String::new();
+    let settled = loop {
+        let procs = executor.proc().list(&Query::new()).await.unwrap().rows;
+        let tasks = executor.task().list(&by_pid).await.unwrap().rows;
+        let running = tasks.iter().filter(|task| task.state == "running").count();
+        match procs.iter().find(|proc| proc.id == pid) {
+            // no row: the sweep removes a settled run's rows together, so its
+            // absence (with no task row left behind) agrees with the event
+            None if tasks.is_empty() => break true,
+            None => {
+                observed = format!("{} task row(s) left without a process row", tasks.len());
+            }
+            Some(proc) if proc.state == "completed" && running == 0 => break true,
+            Some(proc) => {
+                observed = format!("process {}, {} task(s) running", proc.state, running);
+            }
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        settled,
+        "the durable run must settle after the refused task-state write: {observed}"
     );
-    for task in executor.task().list(&by_pid).await.unwrap().rows {
-        assert_ne!(
-            task.state, "running",
-            "no task of a completed run may stay running"
-        );
-    }
 
     // the fault is over, and the engine is not: an ordinary act runs to
     // completion on the same worker that just carried the fault
