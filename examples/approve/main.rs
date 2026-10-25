@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let run_executor = executor.clone();
+    let complete_executor = executor.clone();
     engine.channel().on_message(move |e| {
         let client = client.clone();
         let executor = executor.clone();
@@ -34,9 +35,9 @@ async fn main() -> Result<()> {
             }
         }
     });
-
     engine.channel().on_complete(move |e| {
         let s = s.clone();
+        let complete_executor = complete_executor.clone();
         async move {
             println!(
                 "on_workflow_complete: pid={} cost={}ms outputs={:?}",
@@ -44,6 +45,10 @@ async fn main() -> Result<()> {
                 e.cost(),
                 e.outputs
             );
+            match complete_executor.proc().graph(&e.pid).await {
+                Ok(graph) => println!("{}", graph.tree_output()),
+                Err(err) => eprintln!("cannot read the finished run's graph: {err}"),
+            }
             s.close();
         }
     });
