@@ -61,6 +61,9 @@ pub(crate) use self::core::model::{
 };
 pub(crate) use self::core::plan::cron::Cron;
 pub(crate) use self::runtime::Runtime;
+/// The container package ids the model layer's rule validation reads (the
+/// shell owns the import; the model only needs the names).
+pub(crate) use self::shell::model::{BLOCK_PACKAGE, PARALLEL_PACKAGE, SEQUENCE_PACKAGE};
 #[cfg(test)]
 pub(crate) use self::shell::{ProcRead, ScopeSpec, TaskRow, headless_scope, read_context};
 pub(crate) use self::shell::{Scope, ScopeTask};

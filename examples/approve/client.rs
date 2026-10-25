@@ -42,11 +42,19 @@ impl<'a> Client<'a> {
             },
             "pm",
         );
-        // the gm role: Tom
+        // the gm role: Tom and Amy — `join: any` passes on the first vote,
+        // so asking both demonstrates the early decision
         self.add_user(
             User {
                 id: "3",
                 name: "Tom",
+            },
+            "gm",
+        );
+        self.add_user(
+            User {
+                id: "4",
+                name: "Amy",
             },
             "gm",
         );
@@ -60,6 +68,42 @@ impl<'a> Client<'a> {
     }
 
     pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
+        // The delegated join request (`join: { action, … }`): the engine asks
+        // the client to decide the step, one request per vote that lands. The
+        // board countersign passes as soon as the chair approved; until
+        // then the request is skipped — deferred — and the
+        // engine asks again when the next vote arrives.
+        if message.is_uses("acts.core.join") && message.is_state(MessageState::Created) {
+            let params = message.inputs.get::<Vars>("params").unwrap_or_default();
+            if params.get::<String>("action").as_deref() == Some("board_decision") {
+                let outcomes = params
+                    .get::<serde_json::Value>("outcomes")
+                    .unwrap_or_default();
+                let chair_passed = outcomes.as_array().is_some_and(|outcomes| {
+                    outcomes.iter().any(|outcome| {
+                        outcome["outputs"]["role"] == json!("chair")
+                            && outcome["state"] == json!("completed")
+                    })
+                });
+                let verdict = if chair_passed {
+                    self.complete(executor, &message.pid, &message.tid, &[])
+                        .await
+                } else {
+                    executor
+                        .act()
+                        .skip(&message.pid, &message.tid, Vars::new())
+                        .await
+                };
+                if let Err(err) = verdict {
+                    // A racing verdict already decided the step: the other
+                    // requests were withdrawn.
+                    println!("join request ignored: {err}");
+                }
+                return Ok(());
+            }
+            return Ok(());
+        }
+
         if let Some(params) = message.inputs.get::<Vars>("params")
             && let Some(key) = params.get::<String>("key")
         {
@@ -139,15 +183,46 @@ impl<'a> Client<'a> {
                     )
                     .await?;
                 }
-                // step 3 · gm approval, the final vote
+                // step 3 · gm approval, one vote per gm user: the first
+                // answer passes the step (`join: any`); the rest of the
+                // users' votes were withdrawn by then, so a refused answer
+                // is expected and ignored
                 "gm_vote" if message.is_state(MessageState::Created) => {
-                    self.complete(
+                    self.try_complete(
                         executor,
                         &message.pid,
                         &message.tid,
                         &[("uid", json!("u2"))],
                     )
-                    .await?;
+                    .await;
+                }
+                // step 4 · board countersign, the chair: approve, and say who
+                // voted — the join handler reads the role from the outputs
+                "board_chair" if message.is_state(MessageState::Created) => {
+                    self.try_complete(
+                        executor,
+                        &message.pid,
+                        &message.tid,
+                        &[("role", json!("chair"))],
+                    )
+                    .await;
+                }
+                // step 4 · board countersign, the deputy: reject — the chair's
+                // approval still passes the step (the delegated join decides)
+                "board_deputy" if message.is_state(MessageState::Created) => {
+                    if let Err(err) = executor
+                        .act()
+                        .fail(
+                            &message.pid,
+                            &message.tid,
+                            Vars::new()
+                                .with("ecode", "rejected")
+                                .with("message", "the deputy rejected"),
+                        )
+                        .await
+                    {
+                        println!("deputy vote ignored: {err}");
+                    }
                 }
                 _ => {}
             }
@@ -174,6 +249,22 @@ impl<'a> Client<'a> {
         executor.act().complete(pid, tid, vars).await?;
         println!("completed id={tid}");
         Ok(())
+    }
+
+    /// Complete an act the join may already have withdrawn: a racing answer
+    /// is refused by the engine and is not an error for this demo. A `join:
+    /// any` step passes on the first vote, so the other voters' answers are
+    /// refused exactly that way.
+    async fn try_complete(
+        &self,
+        executor: &Executor,
+        pid: &str,
+        tid: &str,
+        options: &[(&str, serde_json::Value)],
+    ) {
+        if let Err(err) = self.complete(executor, pid, tid, options).await {
+            println!("vote ignored: {err}");
+        }
     }
 }
 

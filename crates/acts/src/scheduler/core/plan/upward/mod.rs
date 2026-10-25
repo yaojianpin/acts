@@ -33,6 +33,12 @@ pub(crate) struct UpwardCommand {
     /// The decision spreading upward: `Aborted` (the abort walk) or
     /// `Failed` (the error walk).
     pub(crate) to: TaskState,
+    /// The ancestor the walk stops below, exclusive — the nearest ancestor
+    /// that keeps the death from climbing further. The error walk stops at a
+    /// join-rule container that tolerates failure: the failure lands on it as
+    /// one non-completion in its rule's census, not as its own death. The
+    /// abort walk never stops.
+    pub(crate) stop: Option<TaskId>,
 }
 
 pub(crate) struct Upward;
@@ -71,6 +77,11 @@ impl crate::scheduler::core::plan::ActPlan for Upward {
         let mut operations = Vec::new();
         let mut cursor = source.parent.clone();
         while let Some(ancestor) = cursor {
+            if Some(&ancestor) == command.stop.as_ref() {
+                // The bound ancestor absorbs the death (its rule reads it as a
+                // non-completion); nothing above it learns of the failure.
+                break;
+            }
             let task = snapshot
                 .tasks
                 .get(&ancestor)

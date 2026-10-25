@@ -13,6 +13,94 @@ pub(super) fn model_of(
         .map_err(runtime)
 }
 
+/// The join rule of one container execution, from the durable model: the
+/// rule the container's step carries (`Step::join`, set by the declaration
+/// or by the import from the package's `params.join`). `None` for a node the
+/// model does not declare as a step — a branch, the root — and for a run
+/// without a model; both join by the original every-child-settles shape.
+pub(super) fn container_join(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+) -> Result<Option<crate::JoinRule>> {
+    let Some(model) = model_of(snapshot)? else {
+        return Ok(None);
+    };
+    Ok(
+        match crate::scheduler::shell::scope::node_content(&model, task_id.node.as_str()) {
+            Some(crate::scheduler::NodeContent::Step(step)) => step.join.clone(),
+            _ => None,
+        },
+    )
+}
+
+/// The input validations of one step node, from the durable model
+/// (`Step::rules`). Empty for a node the model does not declare as a step —
+/// a pushed act, a join-decision request — which declares nothing.
+pub(super) fn step_rules(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    model_node: &crate::scheduler::core::model::model_graph::NodeId,
+) -> Result<Vec<crate::ValidationRule>> {
+    let Some(model) = model_of(snapshot)? else {
+        return Ok(Vec::new());
+    };
+    Ok(
+        match crate::scheduler::shell::scope::node_content(&model, model_node.as_str()) {
+            Some(crate::scheduler::NodeContent::Step(step)) => step.rules.clone(),
+            _ => Vec::new(),
+        },
+    )
+}
+
+/// The step's input validations, decided at act start: every rule's
+/// expression must hold against the step's scope with the resolved params on
+/// top (what a `rules:` entry calls the act's parameters). `Some` is the
+/// failure the start commits — code `validation_failed` and the rule's own
+/// message — before the act ever reaches a client.
+pub(super) fn input_rule_failure(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    model_node: &crate::scheduler::core::model::model_graph::NodeId,
+    params: &serde_json::Value,
+) -> Result<Option<Failure>> {
+    let rules = step_rules(snapshot, model_node)?;
+    if rules.is_empty() {
+        return Ok(None);
+    }
+    // The resolved params are the act's parameters: their entries answer by
+    // name, winning over same-named scope variables (the action-inputs
+    // overlay convention).
+    let overlay: Vec<(String, String)> = params
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .map(|(name, value)| (name.clone(), value.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    for rule in &rules {
+        match evaluate_predicate(snapshot, task_id, &rule.r#if, &overlay) {
+            crate::scheduler::core::plan::branch::PredicateValue::True => {}
+            crate::scheduler::core::plan::branch::PredicateValue::Invalid { message } => {
+                return Ok(Some(Failure::new(
+                    "validation_failed",
+                    format!(
+                        "validation '{}' could not be evaluated: {message}",
+                        rule.r#if
+                    ),
+                )));
+            }
+            _ => {
+                return Ok(Some(Failure::new(
+                    "validation_failed",
+                    rule.failure_message(),
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// The root execution of an aggregate — the core decision's single
 /// derivation (see [`crate::scheduler::core::decision::root_task`]).
 pub(super) fn root_task(
@@ -209,9 +297,14 @@ pub(super) fn root_variables(
         if scope != root || is_engine_fact(name) || !keep(name) {
             continue;
         }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-            vars.set(name, value);
-        }
+        // The aggregate's text is JSON for everything the engine writes, but a
+        // client's completion stores a string input as bare text
+        // (`kernel_inputs` keeps a string as-is). Decode the way the engine
+        // reads such facts — JSON when it parses, the literal text otherwise —
+        // instead of dropping the value.
+        let value = serde_json::from_str::<serde_json::Value>(raw)
+            .unwrap_or_else(|_| serde_json::Value::String(raw.clone()));
+        vars.set(name, value);
     }
     vars
 }

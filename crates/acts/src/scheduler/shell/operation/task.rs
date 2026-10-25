@@ -132,12 +132,28 @@ impl ActOperation for ExecuteTask {
                 )
                 .await
             {
-                Ok(facts) => Start::Started {
-                    facts,
-                    fresh: true,
-                    package,
-                    announced,
-                },
+                Ok(facts) => {
+                    // The step's input validations: every `rules:` expression
+                    // must hold against the scope and the resolved params
+                    // before the act announces itself — the legacy act's
+                    // `run()` gate, one assertion richer.
+                    let params = facts
+                        .as_ref()
+                        .map(|facts| &facts.params)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    if let Some(failure) =
+                        input_rule_failure(snapshot, task_id, &task.model_node, &params)?
+                    {
+                        return Ok(Outcome::Start(Start::Failed(failure)));
+                    }
+                    Start::Started {
+                        facts,
+                        fresh: true,
+                        package,
+                        announced,
+                    }
+                }
                 Err(error) => {
                     // The act cannot start with these params (the legacy act's
                     // `run()` fails it before it waits or executes). The state

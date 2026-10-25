@@ -118,7 +118,7 @@ pub(crate) mod graph;
 pub(crate) mod lifecycle;
 mod liveness;
 mod message;
-mod model;
+pub(crate) mod model;
 mod operation;
 mod planning;
 mod predicate;

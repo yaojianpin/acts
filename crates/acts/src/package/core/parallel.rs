@@ -11,6 +11,11 @@ pub struct ParallelPackage;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct ParallelPackageParams {
     r#in: Vec<JsonValue>,
+    /// The join rule over the items: `all` (default), `any`,
+    /// `partial(n)`/`partial(n%)`, or an `{ action, params }` object the
+    /// client answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    join: Option<crate::JoinRule>,
     steps: Vec<Step>,
 }
 
@@ -38,6 +43,11 @@ impl ActPackage for ParallelPackage {
                         "title": "Actions",
                         "items": { "type": "object" },
                         "description": "The steps to run in parallel"
+                    },
+                    "join": {
+                        "type": ["string", "object"],
+                        "title": "Rule",
+                        "description": "How many items must complete before the step continues: 'all' (default), 'any', 'partial(n)', 'partial(n%)', or {action, params} to let the client decide"
                     }
                 },
                 "required": ["in", "steps"]

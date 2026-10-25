@@ -113,7 +113,7 @@ impl KernelHost {
     /// announced an act keeps both). A `uses` step's act announced itself at
     /// the fan-out, so the join adds nothing for it: the legacy step's own
     /// messages are suppressed once it carries an act.
-    fn attach_join_message(
+    pub(super) fn attach_join_message(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         plan: &mut TransitionPlan,
@@ -235,6 +235,32 @@ impl ActOperation for PropagateTask {
                 }
                 _ => None,
             };
+            // The error walk stops at the nearest join-rule container that
+            // tolerates failure: the failure lands on it as one
+            // non-completion in its rule's census, not as its own death. The
+            // walk still decides everything below that container (a failed
+            // vote fails its own branch), and the legacy walk keeps its shape
+            // wherever no tolerant rule absorbs the death. The abort walk
+            // never stops.
+            let mut walk_stop = None;
+            if upward_to == Some(crate::scheduler::core::model::task_graph::TaskState::Failed) {
+                let mut cursor = task.as_ref().and_then(|e| e.parent.clone());
+                while let Some(ancestor) = cursor {
+                    let Some(ancestor_task) = snapshot.tasks.get(&ancestor) else {
+                        break;
+                    };
+                    let tolerant = crate::scheduler::core::plan::container::parked_for_children(
+                        snapshot, &ancestor,
+                    ) && container_join(snapshot, &ancestor)?
+                        .as_ref()
+                        .is_some_and(crate::JoinRule::tolerates_failure);
+                    if tolerant {
+                        walk_stop = Some(ancestor);
+                        break;
+                    }
+                    cursor = ancestor_task.parent.clone();
+                }
+            }
             // The container join: a parent parked by a fan-out completes
             // in the same atomic commit that settles its last child; a
             // failed step's CATCH child runs the catch join instead, which
@@ -242,8 +268,13 @@ impl ActOperation for PropagateTask {
             // already decides the parent itself (legacy calls
             // `parent.set_err` before the auto-complete pass sees the
             // children settled), so both yield to it — the same change
-            // twice is not a plan.
-            if upward_to.is_none()
+            // twice is not a plan. The one exception is the death a
+            // tolerant rule absorbed: the walk stopped below the parent
+            // (it is the walk's bound), and the parent decides by its rule.
+            let rule_arm = walk_stop
+                .as_ref()
+                .is_some_and(|stop| Some(stop) == task.as_ref().and_then(|e| e.parent.as_ref()));
+            if (upward_to.is_none() || rule_arm)
                 && let Some(parent) = task.as_ref().and_then(|e| e.parent.clone())
                 // An operation that re-enters one of this parent's nodes (a
                 // backward `next`, a `while` turn) is *not* the end of the
@@ -319,21 +350,81 @@ impl ActOperation for PropagateTask {
                         plan.operations.push(operation);
                     }
                     None => {
-                        let join = crate::scheduler::core::plan::container::ContainerJoinCommand {
-                            process_id: id.process_id.clone(),
-                            parent,
+                        // The parent's join rule, when the parent is a
+                        // container parked for its children: it decides the
+                        // join, and a delegated rule turns the settlement
+                        // into a decision request instead of a count.
+                        let join = if crate::scheduler::core::plan::container::parked_for_children(
+                            snapshot, &parent,
+                        ) {
+                            container_join(snapshot, &parent)?
+                        } else {
+                            None
                         };
-                        if let Some((change, operation)) =
-                            Join::plan((&graph, snapshot), &join).map_err(runtime)?
-                        {
-                            host.attach_join_message(
-                                snapshot,
-                                &mut plan,
-                                &join.parent,
-                                &operation,
+                        if let Some(delegated @ crate::JoinRule::Action { .. }) = join.as_ref() {
+                            host.join_settlement(
+                                snapshot, &mut plan, &parent, &task_id, delegated,
                             )?;
-                            plan.state_changes.push(change);
-                            plan.operations.push(operation);
+                        }
+                        let command =
+                            crate::scheduler::core::plan::container::ContainerJoinCommand {
+                                process_id: id.process_id.clone(),
+                                parent: parent.clone(),
+                                join,
+                            };
+                        if let Some(outcome) =
+                            Join::plan((&graph, snapshot), &command).map_err(runtime)?
+                        {
+                            if let Some((code, text)) = &outcome.failure {
+                                // The rule's failure is the container's own:
+                                // the error variables a catch predicate reads
+                                // (`$ecode()`/`message` and the kernel's own
+                                // pair), and the step's task event.
+                                for (name, value) in [
+                                    ("error.code", code.as_str()),
+                                    ("error.message", text.as_str()),
+                                    ("ecode", code.as_str()),
+                                    ("message", text.as_str()),
+                                ] {
+                                    plan.variable_writes.push(VariableWrite {
+                                        scope: parent.clone(),
+                                        name: name.to_string(),
+                                        value: json_var(value),
+                                    });
+                                }
+                                if let Some(payload) = host.operation_message_payload(
+                                    snapshot,
+                                    &parent,
+                                    parent.node.as_str(),
+                                    act_facts(snapshot, &parent).as_ref(),
+                                    None,
+                                    Some((code.as_str(), text.as_str())),
+                                )? {
+                                    plan.outbox.push(
+                                        crate::scheduler::core::model::transition_plan::OutboxIntent {
+                                            key: format!(
+                                                "failed:{}:{}:{}:{}",
+                                                snapshot.process_id,
+                                                parent.node.as_str(),
+                                                parent.generation,
+                                                outcome.operation.id.sequence
+                                            ),
+                                            topic: "task.failed".into(),
+                                            payload: payload.to_string(),
+                                        },
+                                    );
+                                }
+                            } else {
+                                host.attach_join_message(
+                                    snapshot,
+                                    &mut plan,
+                                    &command.parent,
+                                    &outcome.operation,
+                                )?;
+                            }
+                            plan.state_changes.push(outcome.change);
+                            plan.operations.push(outcome.operation);
+                            plan.operations.extend(outcome.cancels);
                         }
                     }
                 }
@@ -345,6 +436,7 @@ impl ActOperation for PropagateTask {
                         process_id: id.process_id.clone(),
                         source: task_id.clone(),
                         to,
+                        stop: walk_stop,
                     },
                 )
                 .map_err(runtime)?;

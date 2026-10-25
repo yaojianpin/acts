@@ -15,12 +15,15 @@ steps:
       key: prepare
 
   # ---------------------------------------------------------------------------
-  # step 2 · pm approval — countersign (加签/减签)
+  # step 2 · pm approval — countersign with join: all
   #
   # `pm_review` collects the pm users (the client answers with the user list,
   # exposed as the step var `pm`), then the parallel fans one [pm_vote +
   # pm_notify] pair out per user: every pm user gets an irq act to answer and
   # a msg act that just announces.
+  #
+  # `join: all` is the default spelled out: every user's pair must complete
+  # before the step continues, and a failed vote fails the step.
   #
   # On `pm_review`'s Created the client also demonstrates the countersign
   # pair: it pushes an added approver (`pm_added`) under the step, and on the
@@ -29,7 +32,7 @@ steps:
   # ---------------------------------------------------------------------------
   - name: pm approval
     id: pm_approval
-    desc: every pm user approves; the client pushes an added approver and removes it again on this step
+    desc: every pm user approves (join all); the client pushes an added approver and removes it again on this step
     uses: acts.core.block
     vars:
       - name: pm
@@ -47,6 +50,7 @@ steps:
         - uses: acts.core.parallel
           params:
             in: '${{ pm }}'
+            join: all
             steps:
               # the vote each pm user answers
               - uses: acts.core.irq
@@ -58,14 +62,16 @@ steps:
                   key: pm_notify
 
   # ---------------------------------------------------------------------------
-  # step 3 · gm approval
-  # `gm_review` collects the gm users (exposed as the step var `gm`), the
-  # parallel fans one [gm_notify] announcement out per user, and `gm_vote`
-  # waits for one gm user's answer before the run completes.
+  # step 3 · gm approval — join: any
+  #
+  # `gm_review` collects the gm users, then the parallel fans one [gm_notify +
+  # gm_vote] pair out per gm user with `join: any`: the first gm user's vote
+  # completes the step, and the other users' still-pending votes are withdrawn
+  # (the client's later vote answers are refused — the step already passed).
   # ---------------------------------------------------------------------------
   - name: gm approval
     id: gm_approval
-    desc: the collected gm users are notified and one gm user approves
+    desc: any one gm user's vote passes the step (join any)
     uses: acts.core.block
     vars:
       - name: gm
@@ -73,7 +79,7 @@ steps:
     params:
       mode: sequence
       steps:
-        # collect the gm users, then fan one announcement out per user
+        # collect the gm users, then fan one [notify + vote] pair out per user
         - uses: acts.core.irq
           params:
             key: gm_review
@@ -83,12 +89,43 @@ steps:
         - uses: acts.core.parallel
           params:
             in: '${{ gm }}'
+            join: any
             steps:
               # the announcement each gm user triggers
               - uses: acts.core.msg
                 params:
                   key: gm_notify
-        # the vote one gm user answers before the run completes
+              # the vote each gm user may answer; the first one decides
+              - uses: acts.core.irq
+                params:
+                  key: gm_vote
+
+  # ---------------------------------------------------------------------------
+  # step 4 · board countersign — join: action
+  #
+  # The delegated join: the chair and the deputy vote, and the
+  # engine asks the client to decide — one `acts.core.join` request per vote
+  # that lands, carrying every vote's state and outputs. The client's
+  # `board_decision` handler passes the step when the chair approved,
+  # whatever the deputy answered.
+  # ---------------------------------------------------------------------------
+  - name: board countersign
+    id: board_countersign
+    desc: the client decides the delegated join; the chair's approval passes the step
+    uses: acts.core.block
+    params:
+      mode: parallel
+      join:
+        action: board_decision
+        params:
+          chair: chair
+          deputy: deputy
+      steps:
         - uses: acts.core.irq
           params:
-            key: gm_vote
+            key: board_chair
+          exposes:
+            - name: role
+        - uses: acts.core.irq
+          params:
+            key: board_deputy

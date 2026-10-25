@@ -318,6 +318,11 @@ impl KernelHost {
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         command: &crate::scheduler::core::plan::container::ContainerFanoutCommand,
     ) -> Result<TransitionPlan> {
+        // A rule whose threshold cannot be met over these children fails the
+        // container here, before anything parks.
+        if let Some(plan) = self.join_fanout_failure_plan(snapshot, command)? {
+            return Ok(plan);
+        }
         let mut plan = Fanout::plan(snapshot, command).map_err(runtime)?;
         // A container without children completes in this very operation: it never
         // parks, so it carries no mark.
@@ -1258,6 +1263,116 @@ impl KernelHost {
             // `Running` here, exactly like the legacy step's `next`.
             source_park: crate::scheduler::core::model::task_graph::TaskState::Running,
         }))
+    }
+
+    /// A join rule whose threshold can never be met over the children the
+    /// container actually fans out is a declaration error: the fan-out knows
+    /// the real children (the dynamic `in` items included), so the container
+    /// fails loudly here — the standard failure shape, error variables and
+    /// message included — instead of parking for a threshold nothing can
+    /// reach. An unselected branch is not in the vote, exactly as the join
+    /// reads it. `None` when the rule is fine.
+    fn join_fanout_failure_plan(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        command: &ContainerFanoutCommand,
+    ) -> Result<Option<TransitionPlan>> {
+        let Some(join) = container_join(snapshot, &command.source)? else {
+            return Ok(None);
+        };
+        if matches!(join, crate::JoinRule::All | crate::JoinRule::Action { .. }) {
+            return Ok(None);
+        }
+        let counted = command
+            .children
+            .iter()
+            .filter(|child| child.plan != ContainerChildPlan::Skip)
+            .count();
+        let threshold = join.threshold(counted);
+        if threshold <= counted {
+            return Ok(None);
+        }
+        let message = format!(
+            "join '{join}' on '{}' needs {threshold} completions but only {counted} children run",
+            command.source.node.as_str()
+        );
+        let source = snapshot
+            .tasks
+            .get(&command.source)
+            .ok_or_else(|| runtime(format!("execution {:?} not found", command.source)))?;
+        let sequence = snapshot
+            .operations
+            .keys()
+            .filter(|id| id.process_id == snapshot.process_id && id.task == command.source)
+            .map(|id| id.sequence)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| runtime("operation sequence overflow".to_string()))?;
+        let mut plan = TransitionPlan {
+            process_id: snapshot.process_id.clone(),
+            expected: snapshot.version.clone(),
+            task_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: Some(command.source_operation.clone()),
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        };
+        plan.state_changes.push(StateChange {
+            task: command.source.clone(),
+            expected_revision: source.revision,
+            from: source.state,
+            to: crate::scheduler::core::model::task_graph::TaskState::Failed,
+        });
+        for (name, value) in [
+            ("error.code", "join_failed"),
+            ("error.message", message.as_str()),
+            ("ecode", "join_failed"),
+            ("message", message.as_str()),
+        ] {
+            plan.variable_writes.push(VariableWrite {
+                scope: command.source.clone(),
+                name: name.to_string(),
+                value: json_var(value),
+            });
+        }
+        if let Some(payload) = self.operation_message_payload(
+            snapshot,
+            &command.source,
+            command.source.node.as_str(),
+            act_facts(snapshot, &command.source).as_ref(),
+            None,
+            Some(("join_failed", message.as_str())),
+        )? {
+            plan.outbox.push(
+                crate::scheduler::core::model::transition_plan::OutboxIntent {
+                    key: format!(
+                        "failed:{}:{}:{}:{}",
+                        snapshot.process_id,
+                        command.source.node.as_str(),
+                        command.source.generation,
+                        sequence
+                    ),
+                    topic: "task.failed".into(),
+                    payload: payload.to_string(),
+                },
+            );
+        }
+        let propagate_id = OperationId {
+            process_id: snapshot.process_id.clone(),
+            task: command.source.clone(),
+            sequence,
+        };
+        if !snapshot.operations.contains_key(&propagate_id) {
+            plan.operations.push(OperationIntent {
+                id: propagate_id,
+                kind: OperationKind::PropagateTask,
+                ready_at_ms: None,
+            });
+        }
+        plan.validate().map_err(runtime)?;
+        Ok(Some(plan))
     }
 }
 

@@ -1,3 +1,5 @@
+use crate::JoinRule;
+use crate::ValidationRule;
 use crate::Variant;
 use crate::{ModelBase, Vars, model::Branch};
 use serde::{Deserialize, Serialize};
@@ -31,6 +33,14 @@ pub struct Step {
     #[serde(default)]
     pub next: Option<String>,
 
+    /// The join rule of this step's parallel container: how many of the
+    /// branches (or the `acts.core.parallel`/`acts.core.block{ mode: parallel
+    /// }` acts it fans out) must complete before the step continues. Absent
+    /// (and `all`) means every branch must complete, the engine's original
+    /// shape.
+    #[serde(default)]
+    pub join: Option<JoinRule>,
+
     // to use a package, such as 'acts.transform.set'
     #[serde(default)]
     pub uses: Option<String>,
@@ -48,6 +58,13 @@ pub struct Step {
     /// extra options to send to client
     #[serde(default)]
     pub options: Vars,
+
+    /// Custom input validations: expressions that must hold against the
+    /// step's scope and its resolved params when the act starts. A rule that
+    /// does not hold fails the step with the `validation_failed` error and
+    /// the rule's message, before the act ever reaches a client.
+    #[serde(default)]
+    pub rules: Vec<ValidationRule>,
 
     /// metadata to store some extra value for UI styles
     /// don't send to client
@@ -108,6 +125,18 @@ impl Step {
 
     pub fn with_while(mut self, r#while: &str) -> Self {
         self.r#while = Some(r#while.to_string());
+        self
+    }
+
+    /// Set the step's join rule (see [`Step::join`]).
+    pub fn with_join(mut self, rule: JoinRule) -> Self {
+        self.join = Some(rule);
+        self
+    }
+
+    /// Add one input validation (see [`Step::rules`]).
+    pub fn with_validation(mut self, rule: ValidationRule) -> Self {
+        self.rules.push(rule);
         self
     }
 

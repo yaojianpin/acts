@@ -65,8 +65,13 @@ fn join_completes_the_parent_when_every_child_is_terminal() {
     let command = ContainerJoinCommand {
         process_id: "p1".into(),
         parent: id("step1", 0),
+        join: None,
     };
-    let (change, operation) = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
+    let outcome = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
+    let change = outcome.change;
+    let operation = outcome.operation;
+    assert!(outcome.cancels.is_empty());
+    assert!(outcome.failure.is_none());
     assert_eq!(change.task, id("step1", 0));
     assert_eq!(change.from, TaskState::Running);
     assert_eq!(change.to, TaskState::Completed);
@@ -97,6 +102,7 @@ fn join_waits_for_running_children_and_never_fires_on_an_aborted_one() {
     let command = ContainerJoinCommand {
         process_id: "p1".into(),
         parent: id("step1", 0),
+        join: None,
     };
     // The parent is a running container carrying the park mark: that is
     // the state a child's settlement decides.
@@ -194,6 +200,7 @@ fn join_refuses_a_foreign_process_or_stale_graph() {
     let command = ContainerJoinCommand {
         process_id: "other".into(),
         parent: id("step1", 0),
+        join: None,
     };
     let graph = {
         let mut b =
@@ -222,6 +229,7 @@ fn join_refuses_a_foreign_process_or_stale_graph() {
             &ContainerJoinCommand {
                 process_id: "p1".into(),
                 parent: id("step1", 0),
+                join: None,
             },
         ),
         Err(ContainerError::GraphVersionConflict {
@@ -254,9 +262,192 @@ fn a_container_without_children_never_joins() {
             &ContainerJoinCommand {
                 process_id: "p1".into(),
                 parent: id("step1", 0),
+                join: None,
             }
         )
         .unwrap()
         .is_none()
     );
+}
+
+/// A parked container over `children` — `(node, state)` pairs — with the
+/// rule the join decides by.
+fn join_container(
+    join: Option<crate::JoinRule>,
+    children: &[(&str, TaskState)],
+) -> (
+    crate::scheduler::core::model::task_graph::TaskGraph,
+    ProcessSnapshot,
+    ContainerJoinCommand,
+) {
+    let mut b = crate::scheduler::core::model::task_graph::TaskGraphBuilder::new("p1", 1).unwrap();
+    b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+        id: id("step1", 0),
+        model_node: node("step1"),
+        state: TaskState::Running,
+        revision: 2,
+    })
+    .unwrap();
+    let mut tasks = vec![task("step1", 0, TaskState::Running)];
+    for (name, state) in children {
+        b.add_node(crate::scheduler::core::model::task_graph::TaskNode {
+            id: id(name, 0),
+            model_node: node(name),
+            state: TaskState::Ready,
+            revision: 2,
+        })
+        .unwrap();
+        b.add_child(id("step1", 0), id(name, 0)).unwrap();
+        tasks.push(task(name, 0, *state));
+    }
+    b.set_root(id("step1", 0)).unwrap();
+    let graph = b.build().unwrap();
+    let mut snapshot = snapshot(tasks);
+    mark_parked(&mut snapshot, "step1");
+    let command = ContainerJoinCommand {
+        process_id: "p1".into(),
+        parent: id("step1", 0),
+        join,
+    };
+    (graph, snapshot, command)
+}
+
+#[test]
+fn any_rule_completes_on_the_first_completion_and_withdraws_the_stragglers() {
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Any),
+        &[
+            ("b1", TaskState::Completed),
+            ("b2", TaskState::Running),
+            ("b3", TaskState::Waiting),
+        ],
+    );
+    let outcome = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
+    assert_eq!(outcome.change.to, TaskState::Completed);
+    assert_eq!(outcome.cancels.len(), 2, "both in-flight votes withdraw");
+    assert!(
+        outcome
+            .cancels
+            .iter()
+            .all(|intent| intent.kind == OperationKind::SkipTask)
+    );
+    assert!(outcome.failure.is_none());
+}
+
+#[test]
+fn any_rule_waits_while_a_completion_is_still_possible() {
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Any),
+        &[("b1", TaskState::Failed), ("b2", TaskState::Running)],
+    );
+    assert!(Join::plan((&graph, &snapshot), &command).unwrap().is_none());
+}
+
+#[test]
+fn any_rule_fails_when_every_child_settled_without_a_completion() {
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Any),
+        &[("b1", TaskState::Failed), ("b2", TaskState::Failed)],
+    );
+    let outcome = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
+    assert_eq!(outcome.change.to, TaskState::Failed);
+    let (code, message) = outcome.failure.expect("the failure names the rule");
+    assert_eq!(code, "join_failed");
+    assert!(message.contains("any"), "{message}");
+    // A failed container's propagation is a dead-source cascade: the
+    // stragglers are its business, not the join's.
+    assert!(outcome.cancels.is_empty());
+}
+
+#[test]
+fn partial_count_completes_on_the_threshold_and_fails_beyond_reach() {
+    // one completion of the two the rule needs: the join waits
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Partial(crate::PartialThreshold::Count(2))),
+        &[
+            ("b1", TaskState::Completed),
+            ("b2", TaskState::Running),
+            ("b3", TaskState::Running),
+        ],
+    );
+    assert!(Join::plan((&graph, &snapshot), &command).unwrap().is_none());
+
+    // the second completion meets the threshold: the container completes and
+    // the last vote is withdrawn
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Partial(crate::PartialThreshold::Count(2))),
+        &[
+            ("b1", TaskState::Completed),
+            ("b2", TaskState::Completed),
+            ("b3", TaskState::Running),
+        ],
+    );
+    let outcome = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
+    assert_eq!(outcome.change.to, TaskState::Completed);
+    assert_eq!(outcome.cancels.len(), 1);
+
+    // one child left can reach one completion of the two the rule needs
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Partial(crate::PartialThreshold::Count(2))),
+        &[
+            ("b1", TaskState::Failed),
+            ("b2", TaskState::Failed),
+            ("b3", TaskState::Running),
+        ],
+    );
+    let outcome = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
+    assert_eq!(outcome.change.to, TaskState::Failed);
+}
+
+#[test]
+fn partial_percent_counts_only_the_children_in_the_vote() {
+    // 50% of four is two
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Partial(crate::PartialThreshold::Percent(
+            50,
+        ))),
+        &[
+            ("b1", TaskState::Completed),
+            ("b2", TaskState::Completed),
+            ("b3", TaskState::Running),
+            ("b4", TaskState::Running),
+        ],
+    );
+    let outcome = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
+    assert_eq!(outcome.change.to, TaskState::Completed);
+    assert_eq!(outcome.cancels.len(), 2);
+
+    // a branch its own guard skipped was never in the vote: 40% of one
+    // counted child is one completion
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Partial(crate::PartialThreshold::Percent(
+            40,
+        ))),
+        &[("b1", TaskState::Skipped), ("b2", TaskState::Completed)],
+    );
+    let outcome = Join::plan((&graph, &snapshot), &command).unwrap().unwrap();
+    assert_eq!(outcome.change.to, TaskState::Completed);
+    assert!(outcome.cancels.is_empty());
+}
+
+#[test]
+fn an_aborted_child_still_yields_the_rule_join_to_the_abort_walk() {
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Any),
+        &[("b1", TaskState::Completed), ("b2", TaskState::Aborted)],
+    );
+    assert!(Join::plan((&graph, &snapshot), &command).unwrap().is_none());
+}
+
+#[test]
+fn a_delegated_rule_never_decides_by_count() {
+    let (graph, snapshot, command) = join_container(
+        Some(crate::JoinRule::Action {
+            action: "sign".into(),
+            params: serde_json::Value::Null,
+        }),
+        &[("b1", TaskState::Completed), ("b2", TaskState::Completed)],
+    );
+    // the verdicts decide it, in the shell
+    assert!(Join::plan((&graph, &snapshot), &command).unwrap().is_none());
 }

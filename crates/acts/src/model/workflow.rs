@@ -1,6 +1,8 @@
 use crate::{
-    ActError, ActSchema, Branch, ModelBase, Result, Step, Trigger, Variant, Vars,
-    scheduler::{NodeContent, NodeData, assign_ids},
+    ActError, ActSchema, Branch, JoinRule, ModelBase, Result, Step, Trigger, Variant, Vars,
+    scheduler::{
+        BLOCK_PACKAGE, NodeContent, NodeData, PARALLEL_PACKAGE, SEQUENCE_PACKAGE, assign_ids,
+    },
     utils::consts,
 };
 use serde::{Deserialize, Serialize};
@@ -437,6 +439,7 @@ fn validate_step(step: &Step, built: &mut HashSet<String>) -> Result<()> {
             step.id
         )));
     }
+    validate_join(step)?;
     if !built.insert(step.id.clone()) {
         return Err(ActError::Model(format!("dup node id with '{}'", step.id)));
     }
@@ -468,6 +471,62 @@ fn validate_step(step: &Step, built: &mut HashSet<String>) -> Result<()> {
     }
     for timeout in &step.timeouts {
         validate_step(timeout, built)?;
+    }
+    Ok(())
+}
+
+/// The join rule only means something on a parallel container: a step whose
+/// branches run together, or a `acts.core.block{ mode: parallel }` /
+/// `acts.core.parallel` step whose children are the acts (or the per-item
+/// templates) it fans out. Everywhere else it is refused — a rule on a
+/// sequential shape would silently never fire.
+///
+/// The container packages carry the rule in their `params` (it lands on the
+/// step when the import materializes their inline acts), so a malformed one is
+/// parsed here and fails the start instead of the first join.
+fn validate_join(step: &Step) -> Result<()> {
+    let uses = step.uses.as_deref();
+    let mode = step.params.get("mode").and_then(|mode| mode.as_str());
+    let sequence_shape =
+        uses == Some(SEQUENCE_PACKAGE) || (uses == Some(BLOCK_PACKAGE) && mode == Some("sequence"));
+    let parallel_shape =
+        (uses == Some(BLOCK_PACKAGE) && mode == Some("parallel")) || uses == Some(PARALLEL_PACKAGE);
+    let declared_join = step.params.get("join").is_some_and(|join| !join.is_null());
+    if declared_join {
+        if sequence_shape {
+            return Err(ActError::Model(format!(
+                "step '{}' declares a join on a sequential container: its children run one after another, there is nothing to join",
+                step.id
+            )));
+        }
+        if parallel_shape {
+            serde_json::from_value::<JoinRule>(step.params["join"].clone()).map_err(|error| {
+                ActError::Model(format!("invalid join on step '{}': {error}", step.id))
+            })?;
+        }
+    }
+    let Some(join) = step.join.as_ref() else {
+        return Ok(());
+    };
+    for validation in &step.rules {
+        if validation.r#if.trim().is_empty() {
+            return Err(ActError::Model(format!(
+                "step '{}' declares a validation rule with an empty expression",
+                step.id
+            )));
+        }
+    }
+    if step.next.is_some() {
+        return Err(ActError::Model(format!(
+            "step '{}' declares join '{join}' with an explicit 'next': the branches it would join are ignored by 'next'",
+            step.id
+        )));
+    }
+    if step.branches.is_empty() && !parallel_shape {
+        return Err(ActError::Model(format!(
+            "step '{}' declares join '{join}' but runs nothing in parallel: a join joins a container's branches",
+            step.id
+        )));
     }
     Ok(())
 }

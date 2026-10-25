@@ -42,7 +42,7 @@ cargo fmt
 
 Run the same per-crate suites CI runs (`.github/workflows/test.yml`) — every
 `-p` invocation below must pass before delivery; do not substitute a single
-`--workspace` run:
+`--workspace` run; if you encounter resource failure issues, add the parameter `-j 2 `to rerun:
 
 ```sh
 cargo test -p acts

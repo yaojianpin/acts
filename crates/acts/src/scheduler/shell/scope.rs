@@ -516,7 +516,7 @@ pub(crate) fn headless_scope(
 /// the build would enter (only when its step declares no `next`, the legacy
 /// rule). The durable model is the imported one, whose ids and constraints
 /// the import already assigned/checked.
-fn node_content(model: &Workflow, target: &str) -> Option<NodeContent> {
+pub(super) fn node_content(model: &Workflow, target: &str) -> Option<NodeContent> {
     if model.id == target {
         return Some(NodeContent::Workflow(Arc::new(model.clone())));
     }

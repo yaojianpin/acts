@@ -45,6 +45,7 @@ fn abort_command(source: TaskId) -> UpwardCommand {
         process_id: "p1".into(),
         source,
         to: TaskState::Aborted,
+        stop: None,
     }
 }
 
@@ -103,6 +104,7 @@ fn the_error_walk_rides_a_failed_source_upward() {
         process_id: "p1".into(),
         source: id("step1", 0),
         to: TaskState::Failed,
+        stop: None,
     };
     let (changes, operations) = Upward::plan(&snapshot, &command).unwrap();
     assert_eq!(changes.len(), 1);
@@ -121,6 +123,7 @@ fn only_abort_and_fail_walk_upward() {
             process_id: "p1".into(),
             source: id("step1", 0),
             to: TaskState::Skipped,
+            stop: None,
         },
     )
     .unwrap_err();
@@ -136,6 +139,7 @@ fn the_command_must_address_the_snapshot_process() {
             process_id: "other".into(),
             source: id("step1", 0),
             to: TaskState::Aborted,
+            stop: None,
         },
     )
     .unwrap_err();

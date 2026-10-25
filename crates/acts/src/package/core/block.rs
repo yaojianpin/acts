@@ -32,6 +32,12 @@ pub struct BlockPackage;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BlockPackageParams {
     pub mode: RunningMode,
+    /// The join rule of the parallel mode: `all` (default), `any`,
+    /// `partial(n)`/`partial(n%)`, or an `{ action, params }` object the
+    /// client answers. Sequence mode has no join, so a rule there is refused
+    /// by the model validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<crate::JoinRule>,
     pub steps: Vec<Step>,
 }
 
@@ -60,6 +66,11 @@ impl ActPackage for BlockPackage {
                         "title": "Steps",
                         "items": { "type": "object" },
                         "description": "The steps to run in the block"
+                    },
+                    "join": {
+                        "type": ["string", "object"],
+                        "title": "Rule",
+                        "description": "How many parallel steps must complete before the block continues: 'all' (default), 'any', 'partial(n)', 'partial(n%)', or {action, params} to let the client decide"
                     }
                 },
                 "required": ["steps"]

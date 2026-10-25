@@ -84,6 +84,10 @@ pub(crate) const SEQUENCE_PACKAGE: &str = "acts.core.sequence";
 /// The subflow package: its acts run an effect (they start the child run) and
 /// then wait for that run's outcome before the act completes.
 pub(crate) const SUBFLOW_PACKAGE: &str = "acts.core.subflow";
+/// The join-decision request package: the act a delegated container rule
+/// (`rule: { action, params }`) creates per child settlement, which the
+/// client answers complete/fail/skip to decide the container.
+pub(crate) const JOIN_PACKAGE: &str = "acts.core.join";
 
 /// Materialize the inline acts of the container packages into the model's own
 /// shape, so the kernel's fan-out machinery drives them.
@@ -166,6 +170,19 @@ fn materialize_one(step: &mut crate::model::Step) {
         return;
     };
     let id = step.id.clone();
+    // The rule travels with the params onto the container step itself: the
+    // join reads the model node's own rule, and the step is the container for
+    // both shapes (a parallel block's step-branches and a `parallel` step's
+    // per-item templates). The model validation already parsed a declared
+    // rule, so a parse failure here keeps the declaration untouched (the run
+    // is refused before it ever imports).
+    if step.join.is_none()
+        && let Some(raw) = object.get("join")
+        && !raw.is_null()
+        && let Ok(rule) = serde_json::from_value::<crate::JoinRule>(raw.clone())
+    {
+        step.join = Some(rule);
+    }
     let branches = match uses.as_str() {
         BLOCK_PACKAGE => {
             let parallel = object.get("mode").and_then(|mode| mode.as_str()) == Some("parallel");
