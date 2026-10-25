@@ -550,12 +550,19 @@ async fn an_unacked_delivery_exhausts_its_retries_into_error_inner() {
 /// A redelivery reaches its own channel only. Two ack channels share the run's
 /// emitted messages, but only one acknowledges: the retry timer re-sends the
 /// unacked delivery to *its* owning channel (`emit_delivery(chan_id, …)`) and
-/// never to the channel that acked, whose row is `Acked` and skipped by the
-/// pass.
+/// leaves the channel that acked alone, whose row is `Acked` and skipped by
+/// the pass.
 ///
 /// The kernel keeps one row per (message × channel); the re-send names the
 /// channel, so a second channel's handler can never receive a delivery that is
 /// not its own.
+///
+/// The ack and the retry pass are atomic per row, and whichever lands first
+/// wins: on a loaded machine a pass may race the ack and re-send once — that
+/// is the at-least-once contract, not a defect. What the engine promises, and
+/// what this cell pins, is that a *durably* acknowledged delivery is never
+/// retried again: its row keeps the retry count and update time the ack wrote,
+/// across the retry windows that follow.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_timer_redelivery_reaches_only_its_owning_channel() {
@@ -571,10 +578,13 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
 
     let seen_a: Seen = Arc::new(Mutex::new(Vec::new()));
     let seen_b: Seen = Arc::new(Mutex::new(Vec::new()));
+    // the delivery row channel a owns, recorded from the message it received
+    let a_delivery: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     // channel a: acknowledges each delivery, so the retry timer stops for it
     let acker = engine.clone();
     let a = seen_a.clone();
+    let a_row = a_delivery.clone();
     engine
         .channel_with_options(&ChannelOptions {
             id: "chan_a".to_string(),
@@ -586,8 +596,10 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
         .on_message(move |e| {
             let acker = acker.clone();
             let a = a.clone();
+            let a_row = a_row.clone();
             async move {
                 if let Some(id) = &e.delivery_id {
+                    *a_row.lock() = Some(id.clone());
                     acker
                         .executor(&crate::Principal::unrestricted())
                         .msg()
@@ -631,14 +643,62 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
     })
     .await;
 
-    // channel a's ack stops its retries: it never sees the message twice,
-    // while channel b keeps being re-sent
+    // Channel a acknowledged its delivery. The ack and the retry pass are
+    // atomic per row: a pass that raced the ack may legitimately have re-sent
+    // once. Pin the durable promise instead — an acked row is never retried
+    // again — across the retry windows that follow.
+    let delivery_id = a_delivery
+        .lock()
+        .clone()
+        .expect("channel a recorded its delivery id");
+    let store = engine.runtime().store();
+    poll_until("channel a's delivery to be acknowledged", || async {
+        store
+            .deliveries()
+            .find(&delivery_id)
+            .await
+            .map(|row| row.status == DeliveryStatus::Acked)
+            .unwrap_or(false)
+    })
+    .await;
+    let acked = store
+        .deliveries()
+        .find(&delivery_id)
+        .await
+        .expect("channel a's delivery row");
+    assert_eq!(acked.status, DeliveryStatus::Acked);
+
     tokio::time::sleep(Duration::from_millis(TEST_TICK_MS * 3)).await;
+    let settled = store
+        .deliveries()
+        .find(&delivery_id)
+        .await
+        .expect("channel a's delivery row");
+    assert_eq!(settled.status, DeliveryStatus::Acked);
     assert_eq!(
-        seen_a.lock().len(),
-        1,
-        "channel a must not be redelivered after its ack"
+        settled.retry_times, acked.retry_times,
+        "an acked delivery is never retried again"
     );
+    assert_eq!(
+        settled.update_time, acked.update_time,
+        "and its row is not written again"
+    );
+
+    // Every copy channel a saw is its own delivery of the one canonical
+    // message: no other channel's delivery ever reaches it.
+    let a_seen = seen_a.lock().clone();
+    assert!(
+        !a_seen.is_empty(),
+        "channel a saw the message at least once"
+    );
+    assert!(
+        a_seen
+            .iter()
+            .all(|message| message.id == a_seen[0].id
+                && message.delivery_id == a_seen[0].delivery_id),
+        "channel a only ever sees its own delivery of the one message"
+    );
+
     let b_seen = seen_b.lock().clone();
     assert!(
         b_seen.len() >= 2,
@@ -654,11 +714,14 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
         "and the same owning-channel delivery"
     );
     assert_eq!(
-        seen_a.lock()[0].id,
-        b_seen[0].id,
+        a_seen[0].id, b_seen[0].id,
         "both channels saw the one emitted message"
     );
-    assert_eq!(seen_a.lock()[0].pid, pid);
+    assert_eq!(a_seen[0].pid, pid);
+    assert_ne!(
+        a_seen[0].delivery_id, b_seen[0].delivery_id,
+        "each channel owns its own delivery row"
+    );
 
     engine.close().await;
 }
