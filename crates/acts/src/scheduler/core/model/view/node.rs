@@ -1,4 +1,4 @@
-use crate::{Act, ActError, Branch, Result, Step, Variant, Vars, Workflow};
+use crate::{ActError, Branch, Result, Step, Variant, Vars, Workflow};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -7,7 +7,6 @@ pub enum NodeContent {
     Workflow(Arc<Workflow>),
     Branch(Branch),
     Step(Step),
-    Act(Act),
 }
 
 /// The word a node speaks where a kind is asked for. `workflow|branch|step`
@@ -52,7 +51,6 @@ impl NodeContent {
             NodeContent::Workflow(data) => data.id.clone(),
             NodeContent::Branch(data) => data.id.clone(),
             NodeContent::Step(data) => data.id.clone(),
-            NodeContent::Act(data) => data.id.to_string(),
         }
     }
 
@@ -61,7 +59,6 @@ impl NodeContent {
             NodeContent::Workflow(data) => data.name.clone(),
             NodeContent::Branch(data) => data.name.clone(),
             NodeContent::Step(data) => data.name.clone(),
-            NodeContent::Act(data) => data.name.to_string(),
         }
     }
 
@@ -70,7 +67,6 @@ impl NodeContent {
             NodeContent::Workflow(_) => NodeKind::Workflow,
             NodeContent::Branch(_) => NodeKind::Branch,
             NodeContent::Step(_) => NodeKind::Step,
-            NodeContent::Act(_) => NodeKind::Act,
         }
     }
 
@@ -79,7 +75,6 @@ impl NodeContent {
             NodeContent::Workflow(data) => data.vars(),
             NodeContent::Branch(data) => data.vars(),
             NodeContent::Step(data) => data.vars(),
-            NodeContent::Act(data) => data.vars(),
         }
     }
 
@@ -88,7 +83,6 @@ impl NodeContent {
             NodeContent::Workflow(node) => node.options.clone(),
             NodeContent::Branch(node) => node.options.clone(),
             NodeContent::Step(node) => node.options.clone(),
-            NodeContent::Act(node) => node.options.clone(),
         }
     }
 
@@ -97,14 +91,12 @@ impl NodeContent {
             NodeContent::Workflow(node) => &node.exposes,
             NodeContent::Branch(node) => &node.exposes,
             NodeContent::Step(node) => &node.exposes,
-            NodeContent::Act(node) => &node.exposes,
         }
     }
 
     pub fn params(&self) -> serde_json::Value {
         match self {
             NodeContent::Step(node) => node.params.clone(),
-            NodeContent::Act(node) => node.params.clone(),
             _ => serde_json::Value::Null,
         }
     }
@@ -184,12 +176,11 @@ mod tests {
             NodeContent::Workflow(Arc::new(workflow())),
             NodeContent::Branch(Branch::new().with_id("br").with_name("Br")),
             NodeContent::Step(Step::new().with_id("st").with_name("St")),
-            NodeContent::Act(Act::new().with_id("ac").with_name("Ac")),
         ]
     }
 
     /// Every content variant answers the same question from its own fields;
-    /// the branch/step/act arms are exercised so a variant cannot inherit the
+    /// the branch/step arms are exercised so a variant cannot inherit the
     /// wrong id/kind by accident.
     #[test]
     fn content_accessors_read_the_declaring_node() {
@@ -197,26 +188,22 @@ mod tests {
         assert_eq!(contents[0].id(), "wf");
         assert_eq!(contents[1].id(), "br");
         assert_eq!(contents[2].id(), "st");
-        assert_eq!(contents[3].id(), "ac");
         assert_eq!(contents[0].name(), "Wf");
         assert_eq!(contents[1].name(), "Br");
         assert_eq!(contents[2].name(), "St");
-        assert_eq!(contents[3].name(), "Ac");
         assert_eq!(contents[0].kind(), NodeKind::Workflow);
         assert_eq!(contents[1].kind(), NodeKind::Branch);
         assert_eq!(contents[2].kind(), NodeKind::Step);
-        assert_eq!(contents[3].kind(), NodeKind::Act);
 
         for content in &contents {
             assert!(content.vars().is_empty());
             assert!(content.options().is_empty());
             assert!(content.exposes().is_empty());
         }
-        // Only a step and an act declare params; a container has none.
+        // Only a step declares params; a container has none.
         assert_eq!(contents[0].params(), serde_json::Value::Null);
         assert_eq!(contents[1].params(), serde_json::Value::Null);
         assert_eq!(contents[2].params(), serde_json::Value::Null);
-        assert_eq!(contents[3].params(), serde_json::Value::Null);
     }
 
     #[test]

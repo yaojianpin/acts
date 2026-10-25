@@ -125,7 +125,7 @@ impl Channel {
     ///
     /// Example
     /// ```rust,no_run
-    /// use acts::{Engine, Act, Principal, Workflow, Vars, Message};
+    /// use acts::{Engine, Principal, Workflow, Vars, Message};
     ///
     /// #[tokio::main]
     /// async fn main() {

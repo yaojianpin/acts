@@ -4,20 +4,26 @@
 use serde_json::json;
 use serial_test::serial;
 
-use crate::{Act, MessageState, Vars};
+use crate::{MessageState, Step, Vars};
 
-use super::{FlowFixture, USES_SEQUENCE, one_step};
+use super::{FlowFixture, USES_IRQ, USES_SEQUENCE, one_step};
 
 fn sequence_workflow(id: &str) -> crate::model::Workflow {
     one_step(
         id,
         USES_SEQUENCE,
         Vars::new().with("in", json!(["u1", "u2"])).with(
-            "acts",
-            vec![Act::irq(|act| {
-                act.with_id("act1")
-                    .with_params_vars(|vars| vars.with("key", "act1").with("value", "${{ value }}"))
-            })],
+            "steps",
+            vec![
+                Step::new()
+                    .with_uses(
+                        USES_IRQ,
+                        Vars::new()
+                            .with("key", "act1")
+                            .with("value", "${{ value }}"),
+                    )
+                    .with_id("act1"),
+            ],
         ),
     )
 }

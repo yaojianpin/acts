@@ -226,7 +226,6 @@ impl ScopeNode {
             NodeContent::Workflow(_) => NodeKind::Workflow,
             NodeContent::Branch(_) => NodeKind::Branch,
             NodeContent::Step(_) => NodeKind::Step,
-            NodeContent::Act(_) => NodeKind::Act,
         }
     }
 }
@@ -666,10 +665,6 @@ mod tests {
         assert_eq!(node_content(&model(), "c1").unwrap().kind(), NodeKind::Step);
         assert_eq!(node_content(&model(), "t1").unwrap().kind(), NodeKind::Step);
         assert!(node_content(&model(), "missing").is_none());
-
-        let node = ScopeNode::new("a", NodeContent::Act(crate::Act::default()));
-        assert_eq!(node.id(), "a");
-        assert_eq!(node.kind(), NodeKind::Act);
     }
 
     /// The headless task answers inputs, outputs, params, data, sealed data

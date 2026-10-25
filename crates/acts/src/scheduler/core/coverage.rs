@@ -35,7 +35,7 @@ fn model_and_task_graph_read_surfaces_are_exercised() {
     model
         .add_node(NodeDefinition {
             id: child.clone(),
-            kind: NodeKind::Act,
+            kind: NodeKind::Step,
             name: "child".into(),
         })
         .unwrap();
@@ -61,7 +61,7 @@ fn model_and_task_graph_read_surfaces_are_exercised() {
     another
         .add_node(NodeDefinition {
             id: timeout.clone(),
-            kind: NodeKind::Act,
+            kind: NodeKind::Step,
             name: "timeout".into(),
         })
         .unwrap();

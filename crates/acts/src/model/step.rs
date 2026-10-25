@@ -1,6 +1,5 @@
 use crate::Variant;
-#[allow(unused_imports)]
-use crate::{Act, Catch, ModelBase, Timeout, Vars, model::Branch};
+use crate::{ModelBase, Vars, model::Branch};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 

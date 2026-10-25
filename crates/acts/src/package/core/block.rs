@@ -1,5 +1,5 @@
 use crate::{
-    Act, ActError, Context, Result, Vars,
+    ActError, Context, Result, Step, Vars,
     package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs},
 };
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ pub struct BlockPackage;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BlockPackageParams {
     pub mode: RunningMode,
-    pub acts: Vec<Act>,
+    pub steps: Vec<Step>,
 }
 
 #[async_trait::async_trait]
@@ -41,7 +41,7 @@ impl ActPackage for BlockPackage {
         ActPackageDefinition {
             id: "acts.core.block",
             name: "Block",
-            desc: "run block acts in paralle or sequence",
+            desc: "run block steps in parallel or sequence",
             version: "0.1.0",
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-grid2x2-icon lucide-grid-2x2"><path d="M12 3v18"/><path d="M3 12h18"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>"#,
             doc: "",
@@ -55,24 +55,24 @@ impl ActPackage for BlockPackage {
                         "default": RunningMode::Sequence.as_ref(),
                         "description": "The running mode of the block"
                     },
-                    "acts": {
+                    "steps": {
                         "type": "array",
-                        "title": "Actions",
+                        "title": "Steps",
                         "items": { "type": "object" },
-                        "description": "The acts to run in the block"
+                        "description": "The steps to run in the block"
                     }
                 },
-                "required": ["acts"]
+                "required": ["steps"]
             }),
             options: Some(json!({
-                "ui:order": ["mode", "acts"],
+                "ui:order": ["mode", "steps"],
                 "mode": {
                     "ui:widget": "select",
                     "ui:options": {
                         "placeholder": "Select a mode"
                     }
                 },
-                "acts": {
+                "steps": {
                     "ui:widget": "actions",
                 }
             })),
@@ -115,7 +115,7 @@ mod tests {
     fn pack_block_sequence_parse() {
         let params = r#"
         mode: sequence
-        acts:
+        steps:
             - uses: acts.core.msg
               key: msg1
         "#;
@@ -130,7 +130,7 @@ mod tests {
     fn pack_block_parallel_parse() {
         let params = r#"
         mode: parallel
-        acts:
+        steps:
             - uses: acts.core.msg
               key: msg1
         "#;
@@ -147,7 +147,7 @@ mod tests {
     async fn pack_block_execute_rejects_malformed_acts() {
         let ctx = crate::package::tests::completed_context().await;
         let err = super::BlockPackage
-            .execute(&ctx, &serde_json::json!({"acts": [{"id": 1}]}))
+            .execute(&ctx, &serde_json::json!({"steps": [{"id": 1}]}))
             .await
             .unwrap_err();
         assert!(

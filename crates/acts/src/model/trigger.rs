@@ -48,9 +48,8 @@ impl TriggerKind {
 
 /// A trigger declaration: who may start the flow, when, and with what input.
 ///
-/// Replaces the previous `Act`-based `on` entries. A trigger only declares
-/// the start surface of the workflow — it is never executed inside a process
-/// like a step `Act`.
+/// A trigger only declares the start surface of the workflow — it is never
+/// executed inside a process like a step.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Trigger {
     #[serde(default)]

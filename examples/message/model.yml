@@ -18,7 +18,7 @@ steps:
     uses: acts.core.block
     params:
       mode: sequence
-      acts:
+      steps:
         - uses: acts.core.msg
           params:
             key: msg1

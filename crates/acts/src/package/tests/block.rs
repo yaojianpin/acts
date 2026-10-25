@@ -3,16 +3,15 @@
 
 use serial_test::serial;
 
-use crate::{Act, MessageState, Vars, scheduler::TaskState};
+use crate::{MessageState, Step, Vars, scheduler::TaskState};
 
-use super::{FlowFixture, USES_BLOCK, one_step};
+use super::{FlowFixture, USES_BLOCK, USES_IRQ, USES_MSG, one_step};
 
-fn msg_act(id: &str) -> Act {
+fn msg_act(id: &str) -> Step {
     let id = id.to_string();
-    Act::msg(move |act| {
-        act.with_id(&id)
-            .with_params_vars(|vars| vars.with("key", id.clone()))
-    })
+    Step::new()
+        .with_uses(USES_MSG, Vars::new().with("key", id.clone()))
+        .with_id(&id)
 }
 
 /// `mode: sequence` runs the inline acts in declaration order.
@@ -24,7 +23,7 @@ async fn pack_block_sequence_runs_its_acts_in_order() {
         USES_BLOCK,
         Vars::new()
             .with("mode", "sequence")
-            .with("acts", vec![msg_act("m1"), msg_act("m2")]),
+            .with("steps", vec![msg_act("m1"), msg_act("m2")]),
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.run(Vars::new()).await;
@@ -52,10 +51,14 @@ async fn pack_block_parallel_admits_every_act() {
         "pack-block-parallel",
         USES_BLOCK,
         Vars::new().with("mode", "parallel").with(
-            "acts",
+            "steps",
             vec![
-                Act::irq(|act| act.with_id("a1").with_params_vars(|v| v.with("key", "a1"))),
-                Act::irq(|act| act.with_id("a2").with_params_vars(|v| v.with("key", "a2"))),
+                Step::new()
+                    .with_uses(USES_IRQ, Vars::new().with("key", "a1"))
+                    .with_id("a1"),
+                Step::new()
+                    .with_uses(USES_IRQ, Vars::new().with("key", "a2"))
+                    .with_id("a2"),
             ],
         ),
     );

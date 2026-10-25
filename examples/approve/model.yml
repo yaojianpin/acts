@@ -36,7 +36,7 @@ steps:
         value: []
     params:
       mode: sequence
-      acts:
+      steps:
         # collect the pm users, then fan one pair out per user
         - uses: acts.core.irq
           params:
@@ -47,7 +47,7 @@ steps:
         - uses: acts.core.parallel
           params:
             in: '${{ pm }}'
-            acts:
+            steps:
               # the vote each pm user answers
               - uses: acts.core.irq
                 params:
@@ -72,7 +72,7 @@ steps:
         value: []
     params:
       mode: sequence
-      acts:
+      steps:
         # collect the gm users, then fan one announcement out per user
         - uses: acts.core.irq
           params:
@@ -83,7 +83,7 @@ steps:
         - uses: acts.core.parallel
           params:
             in: '${{ gm }}'
-            acts:
+            steps:
               # the announcement each gm user triggers
               - uses: acts.core.msg
                 params:

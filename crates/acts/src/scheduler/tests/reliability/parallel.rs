@@ -47,9 +47,9 @@ use parking_lot::Mutex;
 use serde_json::json;
 use serial_test::serial;
 
+use crate::Step;
 use crate::scheduler::core::commit::aggregate::ProcessSnapshot;
 use crate::scheduler::core::model::task_graph::TaskState;
-use crate::{Act, Step};
 
 use super::*;
 
@@ -621,11 +621,11 @@ fn package_items_workflow(package: &str) -> Workflow {
     step.uses = Some(package.to_string());
     step.params = json!({
         "in": "${{ items }}",
-        "acts": [Act::msg(|act| act.with_params_vars(|v| v
+        "steps": [Step::new().with_uses(crate::utils::test::USES_MSG, crate::Vars::new()
             .with("key", "act1")
             .with("value", "${{ value }}")
             .with("index", "${{ index }}")
-        ))]
+        )]
     });
     let mut workflow = workflow_with(step);
     workflow
@@ -656,9 +656,9 @@ fn package_block_workflow(mode: &str) -> Workflow {
     step.uses = Some("acts.core.block".to_string());
     step.params = json!({
         "mode": mode,
-        "acts": [
-            Act::msg(|act| act.with_params_vars(|v| v.with("key", "block1"))),
-            Act::msg(|act| act.with_params_vars(|v| v.with("key", "block2"))),
+        "steps": [
+            Step::new().with_uses(crate::utils::test::USES_MSG, crate::Vars::new().with("key", "block1")),
+            Step::new().with_uses(crate::utils::test::USES_MSG, crate::Vars::new().with("key", "block2")),
         ]
     });
     workflow_with(step)
@@ -956,7 +956,7 @@ fn package_recovery_workflow() -> Workflow {
     step.uses = Some("acts.core.sequence".to_string());
     step.params = json!({
         "in": ["u1", "u2"],
-        "acts": [{
+        "steps": [{
             "id": "item_act",
             "uses": "acts.core.irq",
             "params": {

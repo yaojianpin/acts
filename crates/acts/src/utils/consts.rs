@@ -40,9 +40,6 @@ pub const TASK_ROOT_TID: &str = "$";
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
 
-pub const ACT_RUN_AS_IRQ: &str = "acts.core.irq";
-pub const ACT_RUN_AS_MSG: &str = "acts.core.msg";
-
 /// Process env key holding the owner's [`crate::acl::ScopePolicy`] as json.
 /// Private (see [`is_private_key`]): `$env` never exposes it, so a workflow
 /// cannot read or forge its own scope authority.

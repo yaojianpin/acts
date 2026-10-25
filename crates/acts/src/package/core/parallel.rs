@@ -1,5 +1,5 @@
 use crate::{
-    Act, ActError, Context, Result, Vars,
+    ActError, Context, Result, Step, Vars,
     package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs},
 };
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ pub struct ParallelPackage;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct ParallelPackageParams {
     r#in: Vec<JsonValue>,
-    acts: Vec<Act>,
+    steps: Vec<Step>,
 }
 
 #[async_trait::async_trait]
@@ -20,7 +20,7 @@ impl ActPackage for ParallelPackage {
         ActPackageDefinition {
             id: "acts.core.parallel",
             name: "Parallel",
-            desc: "create acts based on an array and run them in parallel",
+            desc: "create steps based on an array and run them in parallel",
             version: "0.1.0",
             icon: r#"<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M822.656 649.344l128 128v45.312l-128 128-45.312-45.312L850.752 832H250.496a96 96 0 1 1 0-64h600.256l-73.408-73.344z m0-640l-45.312 45.312L850.752 128H250.496a96 96 0 1 0 0 64h600.256l-73.408 73.344 45.312 45.312 128-128v-45.312z m-45.312 365.312L850.752 448H250.496a96 96 0 1 0 0 64h600.256l-73.408 73.344 45.312 45.312 128-128v-45.312l-128-128z" fill="currentColor"></path></svg>"#,
             doc: "",
@@ -31,22 +31,22 @@ impl ActPackage for ParallelPackage {
                         "type": "array",
                         "title": "In",
                         "items": { "type": "string" },
-                        "description": "The input array to create acts"
+                        "description": "The input array to create steps"
                     },
-                    "acts": {
+                    "steps": {
                         "type": "array",
                         "title": "Actions",
                         "items": { "type": "object" },
-                        "description": "The acts to run in parallel"
+                        "description": "The steps to run in parallel"
                     }
                 },
-                "required": ["in", "acts"]
+                "required": ["in", "steps"]
             }),
             options: Some(json!({
                 "in": {
                     "ui:widget": "in",
                 },
-                "acts": {
+                "steps": {
                     "ui:widget": "actions",
                     "ui:options": {
                         "label": false,
@@ -92,7 +92,7 @@ mod tests {
     fn pack_parallel_parse() {
         let params = r#"
             in: ["u1", "u2"]
-            acts:
+            steps:
                 - uses: acts.core.irq
                   params:
                     a: 1
@@ -106,13 +106,13 @@ mod tests {
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
-    /// An act the parallel params cannot deserialize is the package's input
+    /// An entry the parallel params cannot deserialize is the package's input
     /// error, reported with its package id.
     #[tokio::test]
-    async fn pack_parallel_execute_rejects_malformed_acts() {
+    async fn pack_parallel_execute_rejects_malformed_steps() {
         let ctx = crate::package::tests::completed_context().await;
         let err = super::ParallelPackage
-            .execute(&ctx, &serde_json::json!({"in": [], "acts": [{"id": 1}]}))
+            .execute(&ctx, &serde_json::json!({"in": [], "steps": [{"id": 1}]}))
             .await
             .unwrap_err();
         assert!(

@@ -4,20 +4,24 @@
 use serde_json::json;
 use serial_test::serial;
 
-use crate::{Act, MessageState, Vars, Workflow, model::Step};
+use crate::{MessageState, Vars, Workflow, model::Step};
 
 use super::{FlowFixture, USES_IRQ, USES_PARALLEL, one_step};
 
 fn parallel_params(items: serde_json::Value) -> Vars {
     Vars::new().with("in", items).with(
-        "acts",
-        vec![Act::irq(|act| {
-            act.with_id("act1").with_params_vars(|vars| {
-                vars.with("key", "act1")
-                    .with("value", "${{ value }}")
-                    .with("index", "${{ index }}")
-            })
-        })],
+        "steps",
+        vec![
+            Step::new()
+                .with_uses(
+                    USES_IRQ,
+                    Vars::new()
+                        .with("key", "act1")
+                        .with("value", "${{ value }}")
+                        .with("index", "${{ index }}"),
+                )
+                .with_id("act1"),
+        ],
     )
 }
 

@@ -1,6 +1,6 @@
 use crate::{
     Step, TimeoutLimit, Variant, Vars, Workflow,
-    model::act::TimeoutUnit,
+    model::timeout::TimeoutUnit,
     utils::test::{USES_IRQ, USES_MSG},
 };
 use serde_json::json;

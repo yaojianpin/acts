@@ -9,7 +9,10 @@
 
 use serial_test::serial;
 
-use crate::{Act, MessageState, Vars, Workflow, utils::test::USES_IRQ};
+use crate::{
+    MessageState, Step, Vars, Workflow,
+    utils::test::{USES_IRQ, USES_MSG},
+};
 
 use super::FlowFixture;
 
@@ -110,13 +113,12 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
         params: Vars::new()
             .with("mode", "sequence")
             .with(
-                "acts",
+                "steps",
                 vec![
-                    Act::msg(|act| act.with_id("m1")),
-                    Act::irq(|act| {
-                        act.with_id("act1")
-                            .with_params_vars(|v| v.with("key", "act1"))
-                    }),
+                    Step::new().with_uses(USES_MSG, Vars::new()).with_id("m1"),
+                    Step::new()
+                        .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                        .with_id("act1"),
                 ],
             )
             .to_value(),

@@ -514,7 +514,6 @@ fn children_of(position: &Position) -> [Vec<String>; 3] {
             Vec::new(),
             Vec::new(),
         ],
-        NodeContent::Act(_) => [Vec::new(), Vec::new(), Vec::new()],
     }
 }
 
@@ -579,22 +578,6 @@ fn write_tree_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Act;
-
-    #[test]
-    fn children_of_act_node_is_empty() {
-        let position = Position {
-            content: NodeContent::Act(Act::new()),
-            level: 0,
-            parent_id: None,
-            prev_id: None,
-            next_id: None,
-        };
-        assert_eq!(
-            children_of(&position),
-            [Vec::<String>::new(), Vec::new(), Vec::new()]
-        );
-    }
 
     #[test]
     fn write_tree_output_returns_for_unknown_and_visited_ids() {

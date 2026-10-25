@@ -8,7 +8,7 @@ Acts is a fast, lightweight, extensiable workflow engine that executes workflows
 
 Unlike traditional workflow engines (such as BPMN). Acts uses a message-driven architecture to execute and distribute messages. 
 
-Acts uses Step, Branch, Act to build the workflow. Step and Branch are the workflow stucture to run in sequence or to step into different branch by condition. Act is responsible for the action execution.
+Acts uses Step and Branch to build the workflow. Step and Branch are the workflow stucture to run in sequence or to step into different branch by condition. A step that declares a package (`uses`) is responsible for the action execution.
 
 ## Architecture
 
@@ -463,7 +463,7 @@ acts:
 
 - runtime
 
-  - [x] model (Workflow, Branch, Step, Act)
+  - [x] model (Workflow, Branch, Step)
   - [x] kernel scheduler (durable aggregates, outbox, recovery, row projection)
   - [x] javascript runner
   - [x] in-flight run cap (`cache_cap`)

@@ -14,20 +14,22 @@
 //! below so nobody mistakes the legacy expectations for kernel behavior.
 
 use crate::{
-    Act, MessageState, Vars, Workflow,
+    MessageState, Step, Vars, Workflow,
     event::EventAction,
     scheduler::{
         core::model::task_graph::TaskState,
         tests::flow::{FlowFixture, Terminal, irq_workflow},
     },
-    utils::{consts, test::USES_IRQ},
+    utils::{
+        consts,
+        test::{
+            USES_ACTION, USES_BLOCK, USES_IRQ, USES_MSG, USES_PARALLEL, USES_SEQUENCE, USES_SET,
+        },
+    },
 };
 use serde_json::json;
 
 use serial_test::serial;
-
-/// The container package whose inline `acts` the kernel materializes.
-const USES_BLOCK: &str = "acts.core.block";
 
 fn assert_completed(terminal: Terminal) {
     match terminal {
@@ -51,7 +53,7 @@ fn assert_errored(terminal: Terminal) {
 }
 
 /// One top-level block step over `acts`, mode `sequence`.
-fn block_workflow(id: &str, acts: Vec<Act>) -> Workflow {
+fn block_workflow(id: &str, acts: Vec<Step>) -> Workflow {
     let mut workflow = Workflow::new().with_id(id);
     workflow.steps.push(crate::model::Step {
         id: "step1".to_string(),
@@ -59,7 +61,7 @@ fn block_workflow(id: &str, acts: Vec<Act>) -> Workflow {
         uses: Some(USES_BLOCK.to_string()),
         params: Vars::new()
             .with("mode", "sequence")
-            .with("acts", acts)
+            .with("steps", acts)
             .to_value(),
         ..Default::default()
     });
@@ -79,8 +81,11 @@ async fn sch_act_if_true_runs_the_inline_act() {
     let workflow = block_workflow(
         "flow-act-if-true",
         vec![
-            Act::set(Vars::new().with("a", 10)),
-            Act::msg(|act| act.with_id("msg1").with_if("true")),
+            Step::new().with_uses(USES_SET, Vars::new().with("a", 10)),
+            Step::new()
+                .with_uses(USES_MSG, Vars::new())
+                .with_id("msg1")
+                .with_if("true"),
         ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
@@ -107,8 +112,11 @@ async fn sch_act_if_false_skips_the_inline_act() {
     let workflow = block_workflow(
         "flow-act-if-false",
         vec![
-            Act::set(Vars::new().with("a", 10)),
-            Act::msg(|act| act.with_id("msg1").with_if("false")),
+            Step::new().with_uses(USES_SET, Vars::new().with("a", 10)),
+            Step::new()
+                .with_uses(USES_MSG, Vars::new())
+                .with_id("msg1")
+                .with_if("false"),
         ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
@@ -129,8 +137,11 @@ async fn sch_act_if_null_fails_the_inline_act() {
     let workflow = block_workflow(
         "flow-act-if-null",
         vec![
-            Act::set(Vars::new().with("a", 10)),
-            Act::msg(|act| act.with_id("msg1").with_if("null")),
+            Step::new().with_uses(USES_SET, Vars::new().with("a", 10)),
+            Step::new()
+                .with_uses(USES_MSG, Vars::new())
+                .with_id("msg1")
+                .with_if("null"),
         ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
@@ -665,10 +676,11 @@ async fn named_execution(fixture: &FlowFixture, tid: &str) -> String {
 async fn sch_act_irq_act_answers_on_the_acts_tid_and_the_step_follows() {
     let workflow = block_workflow(
         "flow-act-tid-irq",
-        vec![Act::irq(|act| {
-            act.with_id("act1")
-                .with_params_vars(|v| v.with("key", "act1"))
-        })],
+        vec![
+            Step::new()
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                .with_id("act1"),
+        ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;
@@ -702,11 +714,12 @@ async fn sch_act_action_act_decides_itself_on_the_acts_tid() {
     let workflow = block_workflow(
         "flow-act-tid-action",
         vec![
-            Act::action(Vars::new().with("action", "next")).with_id("act2"),
-            Act::irq(|act| {
-                act.with_id("act3")
-                    .with_params_vars(|v| v.with("key", "act3"))
-            }),
+            Step::new()
+                .with_uses(USES_ACTION, Vars::new().with("action", "next"))
+                .with_id("act2"),
+            Step::new()
+                .with_uses(USES_IRQ, Vars::new().with("key", "act3"))
+                .with_id("act3"),
         ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
@@ -738,14 +751,19 @@ async fn sch_act_block_act_passes_the_nested_acts_state_to_the_step() {
     let workflow = block_workflow(
         "flow-act-tid-block",
         vec![
-            Act::block(Vars::new().with("mode", "sequence").with(
-                "acts",
-                vec![Act::irq(|act| {
-                    act.with_id("act1")
-                        .with_params_vars(|v| v.with("key", "act1"))
-                })],
-            ))
-            .with_id("inner"),
+            Step::new()
+                .with_uses(
+                    USES_BLOCK,
+                    Vars::new().with("mode", "sequence").with(
+                        "steps",
+                        vec![
+                            Step::new()
+                                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                                .with_id("act1"),
+                        ],
+                    ),
+                )
+                .with_id("inner"),
         ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
@@ -772,14 +790,19 @@ async fn sch_act_sequence_act_answers_each_items_act_on_its_tid() {
     let workflow = block_workflow(
         "flow-act-tid-sequence",
         vec![
-            Act::sequence(serde_json::json!({
-                "in": ["u1", "u2"],
-                "acts": [Act::irq(|act| {
-                    act.with_id("act1")
-                        .with_params_vars(|v| v.with("key", "act1"))
-                })]
-            }))
-            .with_id("seq"),
+            Step::new()
+                .with_uses(
+                    USES_SEQUENCE,
+                    Vars::new().with("in", ["u1", "u2"]).with(
+                        "steps",
+                        vec![
+                            Step::new()
+                                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                                .with_id("act1"),
+                        ],
+                    ),
+                )
+                .with_id("seq"),
         ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
@@ -810,14 +833,19 @@ async fn sch_act_parallel_act_answers_both_items_acts_on_their_tids() {
     let workflow = block_workflow(
         "flow-act-tid-parallel",
         vec![
-            Act::parallel(serde_json::json!({
-                "in": ["u1", "u2"],
-                "acts": [Act::irq(|act| {
-                    act.with_id("act1")
-                        .with_params_vars(|v| v.with("key", "act1"))
-                })]
-            }))
-            .with_id("par"),
+            Step::new()
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new().with("in", ["u1", "u2"]).with(
+                        "steps",
+                        vec![
+                            Step::new()
+                                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                                .with_id("act1"),
+                        ],
+                    ),
+                )
+                .with_id("par"),
         ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
@@ -846,10 +874,11 @@ async fn sch_act_parallel_act_answers_both_items_acts_on_their_tids() {
 async fn sch_act_submit_on_the_acts_tid_joins_the_step() {
     let workflow = block_workflow(
         "flow-act-tid-submit",
-        vec![Act::irq(|act| {
-            act.with_id("act1")
-                .with_params_vars(|v| v.with("key", "act1"))
-        })],
+        vec![
+            Step::new()
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                .with_id("act1"),
+        ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;
@@ -870,10 +899,11 @@ async fn sch_act_submit_on_the_acts_tid_joins_the_step() {
 async fn sch_act_skip_on_the_acts_tid_joins_the_step() {
     let workflow = block_workflow(
         "flow-act-tid-skip",
-        vec![Act::irq(|act| {
-            act.with_id("act1")
-                .with_params_vars(|v| v.with("key", "act1"))
-        })],
+        vec![
+            Step::new()
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                .with_id("act1"),
+        ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;
@@ -895,10 +925,11 @@ async fn sch_act_skip_on_the_acts_tid_joins_the_step() {
 async fn sch_act_error_on_the_acts_tid_fails_the_owning_step() {
     let workflow = block_workflow(
         "flow-act-tid-error",
-        vec![Act::irq(|act| {
-            act.with_id("act1")
-                .with_params_vars(|v| v.with("key", "act1"))
-        })],
+        vec![
+            Step::new()
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                .with_id("act1"),
+        ],
     );
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;

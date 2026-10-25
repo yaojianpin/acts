@@ -199,9 +199,9 @@ mod tests {
         let mut b = ModelGraphBuilder::default();
         for n in [
             node("root", NodeKind::Workflow),
-            node("a", NodeKind::Act),
-            node("b", NodeKind::Act),
-            node("c", NodeKind::Act),
+            node("a", NodeKind::Step),
+            node("b", NodeKind::Step),
+            node("c", NodeKind::Step),
         ] {
             b.add_node(n).unwrap();
         }
@@ -219,9 +219,9 @@ mod tests {
     #[test]
     fn duplicate_identity_is_rejected_not_renamed() {
         let mut b = ModelGraphBuilder::default();
-        b.add_node(node("a", NodeKind::Act)).unwrap();
+        b.add_node(node("a", NodeKind::Step)).unwrap();
         assert_eq!(
-            b.add_node(node("a", NodeKind::Act)),
+            b.add_node(node("a", NodeKind::Step)),
             Err(GraphError::DuplicateNode(id("a")))
         );
     }
@@ -231,8 +231,8 @@ mod tests {
         let mut b = ModelGraphBuilder::default();
         for n in [
             node("root", NodeKind::Workflow),
-            node("a", NodeKind::Act),
-            node("b", NodeKind::Act),
+            node("a", NodeKind::Step),
+            node("b", NodeKind::Step),
         ] {
             b.add_node(n).unwrap();
         }
@@ -247,7 +247,7 @@ mod tests {
     fn disconnected_nodes_are_rejected() {
         let mut b = ModelGraphBuilder::default();
         b.add_node(node("root", NodeKind::Workflow)).unwrap();
-        b.add_node(node("lost", NodeKind::Act)).unwrap();
+        b.add_node(node("lost", NodeKind::Step)).unwrap();
         b.set_root(id("root")).unwrap();
         assert_eq!(
             b.build(),
@@ -274,8 +274,8 @@ mod tests {
         // A second explicit successor for one node is refused.
         let mut b = ModelGraphBuilder::default();
         b.add_node(node("root", NodeKind::Workflow)).unwrap();
-        b.add_node(node("a", NodeKind::Act)).unwrap();
-        b.add_node(node("b", NodeKind::Act)).unwrap();
+        b.add_node(node("a", NodeKind::Step)).unwrap();
+        b.add_node(node("b", NodeKind::Step)).unwrap();
         b.set_explicit_next(id("root"), id("a")).unwrap();
         assert_eq!(
             b.set_explicit_next(id("root"), id("b")),
@@ -284,7 +284,7 @@ mod tests {
 
         // The root must be a declared node.
         let mut b = ModelGraphBuilder::default();
-        b.add_node(node("a", NodeKind::Act)).unwrap();
+        b.add_node(node("a", NodeKind::Step)).unwrap();
         b.set_root(id("ghost")).unwrap();
         assert_eq!(b.build(), Err(GraphError::UnknownNode(id("ghost"))));
 
@@ -309,7 +309,7 @@ mod tests {
 
         // A parent that was never added.
         let mut b = ModelGraphBuilder::default();
-        for n in [node("root", NodeKind::Workflow), node("a", NodeKind::Act)] {
+        for n in [node("root", NodeKind::Workflow), node("a", NodeKind::Step)] {
             b.add_node(n).unwrap();
         }
         b.set_root(id("root")).unwrap();
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn building_without_a_root_is_refused() {
         let mut b = ModelGraphBuilder::default();
-        b.add_node(node("a", NodeKind::Act)).unwrap();
+        b.add_node(node("a", NodeKind::Step)).unwrap();
         assert_eq!(b.build(), Err(GraphError::MissingRoot));
     }
 
