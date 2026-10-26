@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PageData<T> {
@@ -53,6 +54,64 @@ pub struct TaskInfo {
     pub start_time: i64,
     pub end_time: i64,
     pub timestamp: i64,
+}
+
+/// One node of a run's graph, as `proc:graph` answers it. The declaration
+/// fields (`nid`, `name`, `kind`, `uses`, `params`, `vars`) come from the
+/// materialized model; `tid`/`state`/`generation` name one execution instance,
+/// and are empty for a declaration the flow has not reached.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GraphNode {
+    /// The model node id (`Message.nid`).
+    pub nid: String,
+    /// The execution instance id (`Message.tid`), or `None` when the flow has
+    /// not reached the node.
+    #[serde(default)]
+    pub tid: Option<String>,
+    pub name: String,
+    /// `workflow`, `branch`, `step`, or the kernel's virtual `block`.
+    pub kind: String,
+    /// The package the node declares (`uses`).
+    pub uses: Option<String>,
+    /// The enclosing model node; `None` for the workflow root.
+    pub parent: Option<String>,
+    /// The enclosing execution's `tid`; `None` when the parent has none.
+    #[serde(default)]
+    pub parent_tid: Option<String>,
+    /// Pre-order index through the emitted nodes.
+    pub order: usize,
+    /// The step's declared `next`.
+    pub next: Option<String>,
+    /// The execution's state in the read model's vocabulary, or `None` while
+    /// the flow has not reached the node.
+    pub state: Option<String>,
+    /// The generation `state` describes.
+    pub generation: Option<u64>,
+    /// The step's declared params; `null` when it declares none.
+    #[serde(default)]
+    pub params: JsonValue,
+    /// The step's or branch's declared vars, in declaration order.
+    #[serde(default)]
+    pub vars: Vec<GraphVar>,
+}
+
+/// One declared step variable on the graph. The server writes the model's
+/// variant shape, whose name/value pair is all a graph client reads.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GraphVar {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: JsonValue,
+}
+
+/// A run's graph (`proc:graph`): the model's declaration expanded over the
+/// aggregate's execution instances, in declaration order.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ProcessGraph {
+    pub pid: String,
+    pub mid: String,
+    pub nodes: Vec<GraphNode>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

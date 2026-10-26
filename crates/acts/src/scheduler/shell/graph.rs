@@ -141,6 +141,8 @@ struct NodeSpec {
     uses: Option<String>,
     parent: Option<String>,
     next: Option<String>,
+    params: serde_json::Value,
+    vars: Vec<crate::Variant>,
 }
 
 fn push_execution(
@@ -172,6 +174,8 @@ fn push_execution(
         next: spec.next,
         state: live.map(|state| state.as_str().to_string()),
         generation: live.map(|_| tid.generation),
+        params: spec.params,
+        vars: spec.vars,
     });
 }
 
@@ -193,6 +197,8 @@ fn push_placeholder(
         next: spec.next,
         state: None,
         generation: None,
+        params: spec.params,
+        vars: spec.vars,
     });
 }
 
@@ -214,6 +220,8 @@ pub(crate) fn process_graph(
         uses: None,
         parent: None,
         next: None,
+        params: serde_json::Value::Null,
+        vars: Vec::new(),
     };
     let roots = context.executions_under(root, None);
     if roots.is_empty() {
@@ -261,6 +269,8 @@ fn walk_step(
         uses: step.uses.clone().filter(|uses| !uses.trim().is_empty()),
         parent: Some(model_parent.to_string()),
         next: step.next.clone(),
+        params: step.params.clone(),
+        vars: step.vars.clone(),
     };
     let executions = context.executions_under(&step.id, parent_tid);
     if executions.is_empty() {
@@ -327,6 +337,8 @@ fn walk_branch(
         uses: None,
         parent: Some(model_parent.to_string()),
         next: None,
+        params: serde_json::Value::Null,
+        vars: branch.vars.clone(),
     };
     let executions = context.executions_under(&branch.id, parent_tid);
     if executions.is_empty() {
@@ -374,9 +386,9 @@ fn walk_dynamic(
         .and_then(|task| task.parent.as_ref())
         .ok_or_else(|| runtime(format!("dynamic execution {tid:?} has no parent")))?;
     let act = super::action::pushed_act_of(context.snapshot, tid)?;
-    let (name, uses) = match act {
-        Some(act) => (act.name, Some(act.uses)),
-        None => (String::new(), None),
+    let (name, uses, params, vars) = match act {
+        Some(act) => (act.name, Some(act.uses), act.params, act.vars),
+        None => (String::new(), None, serde_json::Value::Null, Vec::new()),
     };
     let spec = NodeSpec {
         nid: tid.node.as_str().to_owned(),
@@ -385,6 +397,8 @@ fn walk_dynamic(
         uses,
         parent: Some(parent.node.as_str().to_owned()),
         next: None,
+        params,
+        vars,
     };
     push_execution(nodes, context, spec, tid);
     for child in context.dynamic_children(tid) {

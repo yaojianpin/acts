@@ -7,7 +7,10 @@ mod status;
 use serde_json::Value;
 
 pub type ActValue = Value;
-pub use info::{EventInfo, MessageInfo, ModelInfo, PackageInfo, PageData, ProcInfo, TaskInfo};
+pub use info::{
+    EventInfo, GraphNode, GraphVar, MessageInfo, ModelInfo, PackageInfo, PageData, ProcInfo,
+    ProcessGraph, TaskInfo,
+};
 pub use message::Message;
 pub use package::Package;
 pub use query::*;

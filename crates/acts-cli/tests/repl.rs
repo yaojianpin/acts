@@ -45,6 +45,47 @@ steps:
       key: cli-test
 "#;
 
+/// A graph with a waiting step, a plain step over a branch, and a step behind
+/// it: the branches and the flow ahead are what `proc graph` renders, and the
+/// vars/params are what its filters read.
+const GRAPH_MODEL: &str = r#"
+name: Graph Cli
+id: graph-cli
+ver: 0.1.0
+steps:
+  - name: wait
+    id: wait
+    uses: acts.core.irq
+    params:
+      key: hold
+    vars:
+      - name: token
+        value: abc
+  - name: outer
+    id: outer
+    branches:
+      - name: branch1
+        id: branch1
+        if: 1 > 0
+        vars:
+          - name: stage
+            value: review
+        steps:
+          - name: notify
+            id: notify
+            uses: acts.core.msg
+            params:
+              key: msg1
+            vars:
+              - name: count
+                value: 2
+  - name: tail
+    id: tail
+    uses: acts.core.irq
+    params:
+      key: tail
+"#;
+
 /// `status` answers the server's vitals over the wire: every section the
 /// engine reports gets its line, on a real server reached the way the REPL
 /// reaches it.
@@ -202,6 +243,221 @@ async fn commands_render_the_answers_of_a_real_server() {
     })
     .await
     .expect("the model, process and snapshot commands must all answer");
+}
+
+/// `proc graph` renders the run's declared tree with its live states, appends
+/// the step vars the user asks for, and applies `--query` inclusions and
+/// `--exclude-query` vetoes (including the reserved `uses` key) — a hidden
+/// step takes its subtree with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_proc_graph_command_renders_vars_and_filters_steps() {
+    common::with_server("graph", true, |_engine, url| async move {
+        let mut channel = client::connect(&url, None).await?;
+        let mut cli = CommandRunner::new(&mut channel);
+
+        let file = scratch_file("graph", GRAPH_MODEL);
+        model::deploy(&mut cli, &file).await?;
+        let _ = std::fs::remove_file(&file);
+        proc_cmd::start(&mut cli, "graph-cli", &Some("g1".to_string()), &Vars::new()).await?;
+        let _ = wait_task_id(&mut cli, "g1").await;
+
+        // The whole declaration, in declaration order, with the flow behind
+        // the waiting act still stateless. No vars unless they are asked for.
+        let out = proc_cmd::graph(&mut cli, "g1", &[], &[], &[]).await?;
+        let body = body_of(&out);
+        assert!(
+            body.contains("workflow id:$ name=Graph Cli"),
+            "the root must lead: {body}"
+        );
+        assert!(
+            body.contains("step id:wait name=wait  uses=acts.core.irq"),
+            "the waiting step must be there: {body}"
+        );
+        assert!(
+            body.contains("step id:outer name=outer"),
+            "the container step must be there: {body}"
+        );
+        assert!(
+            body.contains("branch id:branch1 name=branch1"),
+            "the declared branch must be there: {body}"
+        );
+        assert!(
+            body.contains("step id:notify name=notify  uses=acts.core.msg state=nil"),
+            "the unreached act must carry no state: {body}"
+        );
+        assert!(
+            body.contains("step id:tail name=tail  uses=acts.core.irq state=nil"),
+            "the tail is ahead of the waiting act: {body}"
+        );
+        assert!(!body.contains("vars="), "no var was requested: {body}");
+
+        // --var picks the named declaration; a name the node does not declare
+        // adds nothing.
+        let out = proc_cmd::graph(&mut cli, "g1", &["token".to_string()], &[], &[]).await?;
+        assert!(
+            out.contains(r#"vars={"token":"abc"}"#),
+            "the requested var must be on its step: {out}"
+        );
+        assert!(
+            !out.contains("count") && !out.contains("stage"),
+            "an unrequested var must stay hidden: {out}"
+        );
+        let out = proc_cmd::graph(&mut cli, "g1", &["stage".to_string()], &[], &[]).await?;
+        assert!(
+            out.contains(r#"vars={"stage":"review"}"#),
+            "a branch var must show on its branch: {out}"
+        );
+        let out = proc_cmd::graph(&mut cli, "g1", &["missing".to_string()], &[], &[]).await?;
+        assert!(!out.contains("vars="), "an absent var adds no field: {out}");
+
+        // A bare --var (`*`) shows every declared var.
+        let out = proc_cmd::graph(&mut cli, "g1", &["*".to_string()], &[], &[]).await?;
+        assert!(
+            out.contains(r#"vars={"token":"abc"}"#),
+            "all vars must show on the waiting step: {out}"
+        );
+        assert!(
+            out.contains(r#"vars={"count":2}"#),
+            "all vars must show on the branched step: {out}"
+        );
+        assert!(
+            out.contains(r#"vars={"stage":"review"}"#),
+            "all vars must show on the branch itself: {out}"
+        );
+
+        // `--query uses=...` keeps only the irq steps; the plain step over
+        // the branch does not match, so its subtree goes with it.
+        let out = proc_cmd::graph(
+            &mut cli,
+            "g1",
+            &[],
+            &[("uses".to_string(), Some(json!("acts.core.irq")))],
+            &[],
+        )
+        .await?;
+        assert!(out.contains("id:wait"), "a matching step stays: {out}");
+        assert!(out.contains("id:tail"), "a matching step stays: {out}");
+        assert!(!out.contains("id:outer"), "a non-matching step goes: {out}");
+        assert!(
+            !out.contains("id:notify"),
+            "a hidden step's subtree goes with it: {out}"
+        );
+
+        // `--query key=...` requires the declared pair; a paramless step (and
+        // the branch under it) has nothing to match.
+        let out = proc_cmd::graph(
+            &mut cli,
+            "g1",
+            &[],
+            &[("key".to_string(), Some(json!("hold")))],
+            &[],
+        )
+        .await?;
+        assert!(out.contains("id:wait"), "the matching step stays: {out}");
+        assert!(!out.contains("id:tail"), "another value is filtered: {out}");
+        assert!(
+            !out.contains("id:outer"),
+            "a paramless step is filtered: {out}"
+        );
+
+        // A bare key includes on presence: the top-level steps declaring
+        // `key` stay. `notify` declares it too, but its parent `outer` does
+        // not match, so the branch subtree is filtered with it.
+        let out = proc_cmd::graph(&mut cli, "g1", &[], &[("key".to_string(), None)], &[]).await?;
+        assert!(out.contains("id:wait"), "a declared key matches: {out}");
+        assert!(out.contains("id:tail"), "a declared key matches: {out}");
+        assert!(
+            !out.contains("id:notify"),
+            "a hidden parent takes its subtree: {out}"
+        );
+        assert!(
+            !out.contains("id:outer"),
+            "a paramless step does not match: {out}"
+        );
+
+        // `--exclude-query uses=...` vetoes both irq steps; a step with
+        // another `uses` (or no `uses` at all) keeps showing.
+        let out = proc_cmd::graph(
+            &mut cli,
+            "g1",
+            &[],
+            &[],
+            &[("uses".to_string(), Some(json!("acts.core.irq")))],
+        )
+        .await?;
+        assert!(!out.contains("id:wait"), "an excluded step goes: {out}");
+        assert!(!out.contains("id:tail"), "an excluded step goes: {out}");
+        assert!(
+            out.contains("id:outer"),
+            "a step with no uses is not excluded: {out}"
+        );
+        assert!(
+            out.contains("id:notify"),
+            "a step with another uses is not excluded: {out}"
+        );
+
+        // --exclude-query is a veto: only the step carrying the pair goes,
+        // and everything else keeps showing — a paramless step included.
+        let out = proc_cmd::graph(
+            &mut cli,
+            "g1",
+            &[],
+            &[],
+            &[("key".to_string(), Some(json!("hold")))],
+        )
+        .await?;
+        assert!(!out.contains("id:wait"), "the excluded step goes: {out}");
+        assert!(
+            out.contains("id:outer"),
+            "a paramless step is not excluded: {out}"
+        );
+        assert!(
+            out.contains("id:notify"),
+            "a step with another value is not excluded: {out}"
+        );
+        assert!(
+            out.contains("id:tail"),
+            "a step with another value is not excluded: {out}"
+        );
+
+        // A bare key vetoes on presence, so every step declaring `key` goes;
+        // the plain step over the branch stays.
+        let out = proc_cmd::graph(&mut cli, "g1", &[], &[], &[("key".to_string(), None)]).await?;
+        assert!(out.contains("id:outer"), "the plain step stays: {out}");
+        assert!(
+            !out.contains("id:wait"),
+            "a declared key is excluded: {out}"
+        );
+        assert!(
+            !out.contains("id:notify"),
+            "a declared key is excluded: {out}"
+        );
+        assert!(
+            !out.contains("id:tail"),
+            "a declared key is excluded: {out}"
+        );
+        assert!(
+            !out.contains("id:branch1"),
+            "a branch with no visible descendant goes: {out}"
+        );
+
+        // The two directions compose: `uses=...` admits both irq steps, the
+        // `key=tail` veto drops `tail`.
+        let out = proc_cmd::graph(
+            &mut cli,
+            "g1",
+            &[],
+            &[("uses".to_string(), Some(json!("acts.core.irq")))],
+            &[("key".to_string(), Some(json!("tail")))],
+        )
+        .await?;
+        assert!(out.contains("id:wait"), "an admitted step stays: {out}");
+        assert!(!out.contains("id:tail"), "the veto still wins: {out}");
+
+        Ok(())
+    })
+    .await
+    .expect("proc graph must render the graph, its vars and its filtered steps");
 }
 
 /// What a server refuses is an error naming the action and the server's own

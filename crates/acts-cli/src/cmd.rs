@@ -251,6 +251,16 @@ mod tests {
         };
         assert!(matches!(args.command, proc::ProcCommands::Start { .. }));
 
+        let Commands::Proc(args) = parse(
+            "proc graph p1 --var token -q uses=acts.core.irq -q key=hold -x uses=acts.core.msg -X key=draft",
+        )
+        .unwrap()
+        .command
+        else {
+            panic!("a proc graph line must parse into a proc command");
+        };
+        assert!(matches!(args.command, proc::ProcCommands::Graph { .. }));
+
         assert!(matches!(
             parse("status").unwrap().command,
             Commands::Status(_)

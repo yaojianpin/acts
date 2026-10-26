@@ -40,6 +40,7 @@ async fn sch_graph_answers_every_declared_node_with_its_state() {
             step.with_id("wait")
                 .with_name("wait")
                 .with_uses(USES_IRQ, Vars::new().with("key", "hold"))
+                .with_var("token", 7)
         })
         .with_step(|step| step.with_id("after").with_name("after"));
     let mut fixture = FlowFixture::deploy(&workflow).await;
@@ -77,6 +78,10 @@ async fn sch_graph_answers_every_declared_node_with_its_state() {
     // marks the act (the *message* level).
     assert_eq!(wait.kind, "step");
     assert_eq!(wait.uses.as_deref(), Some(USES_IRQ));
+    assert_eq!(wait.params["key"], "hold");
+    assert_eq!(wait.vars.len(), 1);
+    assert_eq!(wait.vars[0].name, "token");
+    assert_eq!(wait.vars[0].value, 7);
     assert_eq!(wait.parent.as_deref(), Some("$"));
     assert_eq!(wait.state.as_deref(), Some("interrupted"));
     assert_eq!(wait.generation, Some(0));
@@ -389,6 +394,7 @@ async fn sch_graph_shows_a_pushed_act_and_its_removal() {
     assert_eq!(dynamic.name, "added approver");
     assert_eq!(dynamic.kind, "step");
     assert_eq!(dynamic.uses.as_deref(), Some(USES_IRQ));
+    assert_eq!(dynamic.params["key"], "act2");
     assert_eq!(dynamic.parent.as_deref(), Some("s1"));
     assert_eq!(dynamic.parent_tid.as_deref(), step.tid.as_deref());
     assert_eq!(dynamic.tid.as_deref(), Some(pushed.tid.as_str()));

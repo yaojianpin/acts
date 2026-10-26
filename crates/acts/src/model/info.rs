@@ -107,6 +107,15 @@ pub struct GraphNode {
     /// The generation `state` describes (a fan-out item or a `while` turn is
     /// one generation of the node). `None` while the node has no state.
     pub generation: Option<u64>,
+    /// The step's declared `params` (`Value::Null` for a node that declares
+    /// none). A dynamic execution carries the params its durable fact holds.
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// The step's or branch's declared variables, in declaration order. Empty
+    /// for a node that declares none; a dynamic execution carries the vars its
+    /// durable fact holds.
+    #[serde(default)]
+    pub vars: Vec<crate::Variant>,
 }
 
 /// The run's graph (`proc:graph`): the durable (materialized) model expanded
