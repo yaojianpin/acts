@@ -2153,7 +2153,19 @@ impl KernelHost {
         // eager seed (predicate fallback, read-model contexts, tests).
         let (vars, shared_snapshot) = match shared {
             Some(shared) => (Vec::new(), Some(Arc::clone(shared))),
-            None => (scope_vars(snapshot, task_id), None),
+            None => {
+                // No shared aggregate: the scope objects a predicate reads
+                // (`$parent`/`$root`) travel eagerly, under reserved names
+                // the headless scope keeps out of `$data()`.
+                let mut vars = scope_vars(snapshot, task_id);
+                if let Some(parent) = parent_scope_object(snapshot, task_id) {
+                    vars.push(("$parent".to_string(), parent.to_string()));
+                }
+                if let Some(root) = root_scope_object(snapshot) {
+                    vars.push(("$root".to_string(), root.to_string()));
+                }
+                (vars, None)
+            }
         };
         Ok(scope::ScopeSpec {
             process_id: snapshot.process_id.clone(),

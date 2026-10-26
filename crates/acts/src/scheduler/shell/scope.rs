@@ -74,6 +74,10 @@ pub struct Scope {
     /// The shared aggregate a variable lookup walks (parent → root). `None`
     /// for a scope seeded with explicit `vars` only.
     snapshot: Option<Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
+    /// The engine-scope objects (`$parent`, `$root`) a scope without a shared
+    /// aggregate carries eagerly: a predicate scope builds them from the
+    /// snapshot it is deciding, then drops the snapshot with the evaluation.
+    special: Vars,
 }
 
 impl Scope {
@@ -84,11 +88,13 @@ impl Scope {
         id: &str,
         env: Vars,
         snapshot: Option<Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
+        special: Vars,
     ) -> Arc<Self> {
         Arc::new(Self {
             id: id.to_string(),
             env: Arc::new(RwLock::new(env)),
             snapshot,
+            special,
         })
     }
 
@@ -199,6 +205,28 @@ impl Scope {
     /// engine config declares no workdir root.
     pub fn workdir(&self) -> Option<std::path::PathBuf> {
         self.with_env(|env| env.get::<std::path::PathBuf>(consts::PROC_WORKDIR))
+    }
+
+    /// `$parent`: the previous flow execution's data (see
+    /// [`super::facts::parent_scope_object`]). Resolved from the shared
+    /// aggregate on demand; a scope without one answers the object the
+    /// predicate seam seeded eagerly.
+    pub(crate) fn parent_object(
+        &self,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    ) -> Option<serde_json::Value> {
+        match &self.snapshot {
+            Some(snapshot) => super::facts::parent_scope_object(snapshot, task_id),
+            None => self.special.get_value("$parent").cloned(),
+        }
+    }
+
+    /// `$root`: the run's root execution data, resolved the same way.
+    pub(crate) fn root_object(&self) -> Option<serde_json::Value> {
+        match &self.snapshot {
+            Some(snapshot) => super::facts::root_scope_object(snapshot),
+            None => self.special.get_value("$root").cloned(),
+        }
     }
 }
 
@@ -346,6 +374,18 @@ impl ScopeTask {
         None
     }
 
+    /// The `$parent` object this evaluation reads: the previous flow
+    /// execution's data (the interpreter's `parent` task, not the task-tree
+    /// parent).
+    pub(crate) fn parent_object(&self, scope: &Arc<Scope>) -> Option<serde_json::Value> {
+        scope.parent_object(&self.task_id)
+    }
+
+    /// The `$root` object: the workflow root execution's data.
+    pub(crate) fn root_object(&self, scope: &Arc<Scope>) -> Option<serde_json::Value> {
+        scope.root_object()
+    }
+
     /// The acting execution's own declared vars, evaluated against the
     /// current scope. These are the values `prepare` seeds into the local
     /// map; inherited parent/root values stay in the shared chain.
@@ -482,7 +522,22 @@ pub(crate) fn headless_scope(
             crate::ActError::Runtime(format!("model has no node '{}'", spec.node))
         })?),
     };
-    let scope = Scope::headless(&spec.process_id, env, spec.snapshot.clone());
+    // A `$`-prefixed name is an engine-scope object (`$parent`, `$root`),
+    // never workflow data: a predicate scope seeds it because it carries no
+    // shared aggregate, and it must not surface through `$data()`.
+    let mut special = Vars::new();
+    let mut vars = Vars::new();
+    for (name, raw) in &spec.vars {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        if matches!(name.as_str(), "$parent" | "$root") {
+            special.set(name, value);
+        } else {
+            vars.set(name, value);
+        }
+    }
+    let scope = Scope::headless(&spec.process_id, env, spec.snapshot.clone(), special);
     // The headless task is never durable or projected; its id is the acting
     // instance's wire, so a package that forwards a client command
     // (`Runtime::do_action`) addresses exactly the execution the scope was
@@ -495,13 +550,7 @@ pub(crate) fn headless_scope(
         node,
         runtime,
     );
-    if !spec.vars.is_empty() {
-        let mut vars = Vars::new();
-        for (name, raw) in &spec.vars {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-                vars.set(name, value.clone());
-            }
-        }
+    if !vars.is_empty() {
         task.update_data(&vars);
     }
     let ctx = Context::headless(runtime.clone(), scope.clone(), task.clone());
@@ -636,6 +685,7 @@ mod tests {
                 crate::ScopePolicy::deny_all(),
             ),
             None,
+            Vars::new(),
         );
         assert_eq!(scope.id(), "p");
         assert_eq!(scope.env().get::<String>("k").as_deref(), Some("v"));

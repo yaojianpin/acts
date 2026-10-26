@@ -85,6 +85,18 @@ fn step_data(nid: &str) -> Option<Vars> {
 /// `$env`, `$os` and the functions the engine exposes to an expression.
 fn builtin(name: &str) -> Option<Value> {
     Some(match name {
+        // `$parent`: the previous flow execution's data, `$root`: the
+        // workflow root's. Both are engine-scope objects, not workflow data.
+        "$parent" => Context::try_with_current(|ctx| ctx.task().parent_object(&ctx.proc))
+            .ok()
+            .flatten()
+            .map(from_json)
+            .unwrap_or(Value::Null),
+        "$root" => Context::try_with_current(|ctx| ctx.task().root_object(&ctx.proc))
+            .ok()
+            .flatten()
+            .map(from_json)
+            .unwrap_or(Value::Null),
         // `$env`: the system environment overlaid with the process's, minus
         // the engine's private keys; `WORK_DIR` is answered from the process.
         "$env" => from_json(JsonValue::from(env_map())),

@@ -587,6 +587,52 @@ async fn env_data_is_local_and_parent_root_resolve_lazily() {
     fixture.close().await;
 }
 
+/// `$parent` is the *previous flow execution* (step1 when evaluating step2),
+/// and `$root` is the workflow root's data. Both are engine-scope objects, not
+/// local data: `$data()` stays empty and a local shadow never changes what
+/// they answer.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_parent_and_root_resolve_their_scopes() {
+    let env = Environment::new();
+    let workflow = Workflow::new()
+        .with_id("env-parent-root")
+        .with_var("root", 7)
+        .with_var("shadow", 1)
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_var("manager", "u1")
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "a"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_var("shadow", 2)
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "b"))
+        });
+    let (fixture, ctx) = shared_context(&workflow, "s2", |_| {}).await;
+    Context::scope(&ctx, || {
+        assert_eq!(
+            env.eval::<serde_json::Value>("$parent").unwrap(),
+            json!({ "manager": "u1" }),
+            "the parent is the preceding step, not the root"
+        );
+        assert_eq!(env.eval::<String>("$parent.manager").unwrap(), "u1");
+        let root = env.eval::<serde_json::Value>("$root").unwrap();
+        assert_eq!(root["root"], json!(7));
+        assert_eq!(root["shadow"], json!(1));
+        assert_eq!(env.eval::<i64>("$root.root").unwrap(), 7);
+        // The local overlay still wins over the root for a bare name.
+        assert_eq!(env.eval::<i64>("shadow").unwrap(), 2);
+        // The scope objects are not workflow data: the local overlay holds
+        // only the step's own declared var.
+        assert_eq!(
+            env.eval::<serde_json::Value>("$data()").unwrap(),
+            json!({ "shadow": 2 })
+        );
+    });
+    fixture.close().await;
+}
+
 /// A bare step id and the `$step_*` helpers read a previous execution's data,
 /// and `$inputs` projects predecessor outputs plus the step's own vars without
 /// copying either into the local map.

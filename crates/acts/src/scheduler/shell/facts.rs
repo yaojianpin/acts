@@ -51,17 +51,35 @@ pub(super) fn step_rules(
     )
 }
 
-/// The step's input validations, decided at act start: every rule's
-/// expression must hold against the step's scope with the resolved params on
-/// top (what a `rules:` entry calls the act's parameters). `Some` is the
-/// failure the start commits — code `validation_failed` and the rule's own
-/// message — before the act ever reaches a client.
-pub(super) fn input_rule_failure(
+/// What one triggered step rule decided: the failure it walks, the skip it
+/// falls through, or the client action it executes.
+pub(super) enum RuleVerdict {
+    /// The rule's action is `error` (the default): fail the act with
+    /// `validation_failed`.
+    Failure(Failure),
+    /// The rule's action is `skip`: skip the act and continue the flow.
+    Skip,
+    /// The rule's action is a decision the started act executes: `next` and
+    /// `submit` auto-complete it, `abort`/`remove` close it.
+    Action(crate::event::EventAction),
+}
+
+/// The step's input rules, decided at act start: each rule's condition is
+/// evaluated against the step's scope with the resolved params on top (what a
+/// `rules:` entry calls the act's parameters). The first condition that holds
+/// runs its action; a condition that does not hold moves on to the next rule,
+/// and an act whose rules never fire starts normally. `Some` is the first
+/// triggered rule's verdict — before the act ever reaches a client.
+///
+/// The conditions run on the engine's environment (the same seam a branch
+/// guard uses), so a rule can read `$parent`/`$root` and the other built-ins.
+pub(super) async fn input_rule_verdict(
+    host: &super::KernelHost,
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task_id: &crate::scheduler::core::model::task_graph::TaskId,
     model_node: &crate::scheduler::core::model::model_graph::NodeId,
     params: &serde_json::Value,
-) -> Result<Option<Failure>> {
+) -> Result<Option<RuleVerdict>> {
     let rules = step_rules(snapshot, model_node)?;
     if rules.is_empty() {
         return Ok(None);
@@ -79,23 +97,45 @@ pub(super) fn input_rule_failure(
         })
         .unwrap_or_default();
     for rule in &rules {
-        match evaluate_predicate(snapshot, task_id, &rule.r#if, &overlay) {
-            crate::scheduler::core::plan::branch::PredicateValue::True => {}
+        match host
+            .evaluate_branch_predicate(snapshot, task_id, &rule.r#if, &overlay)
+            .await?
+        {
+            crate::scheduler::core::plan::branch::PredicateValue::True => {
+                use crate::event::EventAction as E;
+                return Ok(Some(match &rule.action {
+                    E::Error => RuleVerdict::Failure(Failure::new(
+                        "validation_failed",
+                        rule.failure_message(),
+                    )),
+                    E::Skip => RuleVerdict::Skip,
+                    E::Next | E::Submit | E::Abort | E::Remove => {
+                        RuleVerdict::Action(rule.action.clone())
+                    }
+                    action => RuleVerdict::Failure(Failure::new(
+                        "validation_failed",
+                        format!(
+                            "validation '{}' holds and its action '{action}' cannot be applied when the act starts",
+                            rule.r#if
+                        ),
+                    )),
+                }));
+            }
             crate::scheduler::core::plan::branch::PredicateValue::Invalid { message } => {
-                return Ok(Some(Failure::new(
+                // A rule the engine cannot decide is a configuration error,
+                // never a condition the action may absorb.
+                return Ok(Some(RuleVerdict::Failure(Failure::new(
                     "validation_failed",
                     format!(
                         "validation '{}' could not be evaluated: {message}",
                         rule.r#if
                     ),
-                )));
+                ))));
             }
-            _ => {
-                return Ok(Some(Failure::new(
-                    "validation_failed",
-                    rule.failure_message(),
-                )));
-            }
+            // The rule's condition does not hold: it does not fire, and the
+            // next rule is checked.
+            crate::scheduler::core::plan::branch::PredicateValue::False
+            | crate::scheduler::core::plan::branch::PredicateValue::Null => {}
         }
     }
     Ok(None)
@@ -307,6 +347,65 @@ pub(super) fn root_variables(
         vars.set(name, value);
     }
     vars
+}
+
+/// One execution's own durable data as a JSON object: the scope variables it
+/// wrote (its declared vars, params, outputs and action inputs), engine facts
+/// left out. This is what the `$parent`/`$root` built-ins expose.
+pub(super) fn scope_object(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for ((scope, name), raw) in &snapshot.variables {
+        if scope != task || is_engine_fact(name) {
+            continue;
+        }
+        // A client's completion stores a string input as bare text; decode it
+        // the way the engine reads such facts (JSON first, literal text next).
+        let value = serde_json::from_str::<serde_json::Value>(raw)
+            .unwrap_or_else(|_| serde_json::Value::String(raw.clone()));
+        object.insert(name.clone(), value);
+    }
+    serde_json::Value::Object(object)
+}
+
+/// `$parent`: the data of the execution(s) immediately before this one in the
+/// flow — the predecessors the aggregate recorded, nearest-wins in their
+/// declared order. A step with no flow predecessor (a container's first
+/// child) falls back to its task-tree parent, so `$parent` still names the
+/// node the execution runs under.
+pub(super) fn parent_scope_object(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+) -> Option<serde_json::Value> {
+    let task = snapshot.tasks.get(task_id)?;
+    let mut merged = serde_json::Map::new();
+    let mut found = false;
+    for predecessor in &task.predecessors {
+        if snapshot.tasks.contains_key(predecessor) {
+            found = true;
+            if let serde_json::Value::Object(values) = scope_object(snapshot, predecessor) {
+                merged.extend(values);
+            }
+        }
+    }
+    if !found && let Some(parent) = &task.parent {
+        found = true;
+        if let serde_json::Value::Object(values) = scope_object(snapshot, parent) {
+            merged.extend(values);
+        }
+    }
+    found.then_some(serde_json::Value::Object(merged))
+}
+
+/// `$root`: the run's root execution data — the workflow vars and whatever the
+/// root scope has written since.
+pub(super) fn root_scope_object(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+) -> Option<serde_json::Value> {
+    let root = crate::scheduler::core::decision::root_task(snapshot)?;
+    Some(scope_object(snapshot, &root))
 }
 
 /// One run's declared `exposes` answered over its own scope — the legacy
@@ -609,6 +708,14 @@ pub(super) fn evaluate_predicate(
     // the completing action's inputs on top.
     let merged = scope_vars(snapshot, scope);
     let resolve = |name: &str| -> Option<serde_json::Value> {
+        // The scope objects a rule/guard can read without the engine
+        // environment seam (`$parent`/`$root`).
+        if name == "$parent" {
+            return parent_scope_object(snapshot, scope);
+        }
+        if name == "$root" {
+            return root_scope_object(snapshot);
+        }
         if let Some((_, raw)) = overlay.iter().find(|(key, _)| key == name)
             && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
         {

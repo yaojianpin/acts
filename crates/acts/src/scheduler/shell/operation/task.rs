@@ -7,7 +7,10 @@
 //! what the verdict means: the started execution, the act's `Created` message
 //! (a `Msg` act skips it — its single delivery is the completion record), the
 //! `ApplyAction` operation its effect will run, and the timer a node
-//! declaring `timeouts` arms.
+//! declaring `timeouts` arms. A step `rule` whose condition holds before the
+//! act starts contributes either a failure/skip plan or a durable decision
+//! intent the started act applies as its first action (the act announces no
+//! `Created` request for it).
 
 use super::*;
 use crate::scheduler::shell::*;
@@ -48,6 +51,11 @@ pub(in crate::scheduler::shell) enum Start {
         package: bool,
         /// Whether the act's `Created` record already exists.
         announced: bool,
+        /// The client action a violated rule decided (`next`/`submit`/
+        /// `abort`/`remove`). The started act executes it as its first
+        /// decision instead of waiting for a client, in the same durable
+        /// intent shape a client command uses.
+        rule_action: Option<crate::event::EventAction>,
     },
     /// The act's params did not resolve: the execution is marked started and
     /// the decision is handed to its effect operation, which resolves again and
@@ -121,6 +129,7 @@ impl ActOperation for ExecuteTask {
                 fresh: false,
                 package,
                 announced,
+                rule_action: None,
             }
         } else if let Some(task) = task {
             match host
@@ -133,25 +142,36 @@ impl ActOperation for ExecuteTask {
                 .await
             {
                 Ok(facts) => {
-                    // The step's input validations: every `rules:` expression
-                    // must hold against the scope and the resolved params
-                    // before the act announces itself — the legacy act's
-                    // `run()` gate, one assertion richer.
+                    // The step's input rules: the first `rules:` condition
+                    // that holds against the scope and the resolved params
+                    // runs its action before the act announces itself.
                     let params = facts
                         .as_ref()
                         .map(|facts| &facts.params)
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
-                    if let Some(failure) =
-                        input_rule_failure(snapshot, task_id, &task.model_node, &params)?
+                    if let Some(verdict) =
+                        input_rule_verdict(host, snapshot, task_id, &task.model_node, &params)
+                            .await?
                     {
-                        return Ok(Outcome::Start(Start::Failed(failure)));
+                        return Ok(Outcome::Start(match verdict {
+                            RuleVerdict::Failure(failure) => Start::Failed(failure),
+                            RuleVerdict::Skip => Start::Skipped,
+                            RuleVerdict::Action(action) => Start::Started {
+                                facts,
+                                fresh: true,
+                                package,
+                                announced,
+                                rule_action: Some(action),
+                            },
+                        }));
                     }
                     Start::Started {
                         facts,
                         fresh: true,
                         package,
                         announced,
+                        rule_action: None,
                     }
                 }
                 Err(error) => {
@@ -176,6 +196,7 @@ impl ActOperation for ExecuteTask {
                 fresh: false,
                 package,
                 announced,
+                rule_action: None,
             }
         };
         Ok(Outcome::Start(start))
@@ -258,7 +279,20 @@ impl ActOperation for ExecuteTask {
                 fresh,
                 package: has_package,
                 announced: created_exists,
+                rule_action,
             } => {
+                // A rule that failed with a decision action starts the act
+                // and pins that decision as its first durable intent; the
+                // apply operation replays it exactly like a client command.
+                let rule_action = match rule_action {
+                    Some(action) => Some(rule_action_kind(&action).ok_or_else(|| {
+                        ActError::Runtime(format!(
+                            "validation rule action '{action}' cannot be applied when the act starts"
+                        ))
+                    })?),
+                    None => None,
+                };
+                let auto = auto && rule_action.is_none();
                 // The act message: every `uses` step announces itself to the
                 // client when it starts (the legacy act's `Created` message —
                 // Irq waits on it, Msg informs, Func pairs it with the later
@@ -286,8 +320,11 @@ impl ActOperation for ExecuteTask {
                 // exception: it waits for no client, so it is delivered once —
                 // its completion record, which carries the same payload — and
                 // no `Created` precedes it.
-                let announces_created =
-                    !has_package || !msg_decision(snapshot, id.task.node.as_str())?;
+                // A rule-triggered decision is the act's first verdict: it
+                // must not ask a client whose answer the action already
+                // gives.
+                let announces_created = rule_action.is_none()
+                    && (!has_package || !msg_decision(snapshot, id.task.node.as_str())?);
                 if !created_exists
                     && announces_created
                     && let Some(payload) = host.operation_message_payload(
@@ -317,7 +354,7 @@ impl ActOperation for ExecuteTask {
                 // the act then waits for. Seed that operation here, in the
                 // same commit that parked the act, so the child can never
                 // finish before the parent is waiting.
-                let runs_while_waiting = if auto {
+                let runs_while_waiting = if auto || rule_action.is_some() {
                     false
                 } else {
                     match task {
@@ -330,7 +367,27 @@ impl ActOperation for ExecuteTask {
                         None => false,
                     }
                 };
-                if !action_exists && (auto || runs_while_waiting) {
+                if let Some(kind) = &rule_action {
+                    let sequence = action_id.sequence;
+                    let name = action_fact_var(sequence);
+                    if !snapshot
+                        .variables
+                        .contains_key(&(task_id.clone(), name.clone()))
+                    {
+                        plan.variable_writes.push(VariableWrite {
+                            scope: task_id.clone(),
+                            name,
+                            value: action_fact(kind, &[]),
+                        });
+                    }
+                    if !action_exists {
+                        plan.operations.push(OperationIntent {
+                            id: action_id.clone(),
+                            kind: OperationKind::ApplyAction,
+                            ready_at_ms: None,
+                        });
+                    }
+                } else if !action_exists && (auto || runs_while_waiting) {
                     plan.operations.push(OperationIntent {
                         id: action_id,
                         kind: OperationKind::ApplyAction,
@@ -522,6 +579,24 @@ impl KernelHost {
         }
         plan.validate().map_err(runtime)?;
         Ok(plan)
+    }
+}
+
+/// The kernel action a rule's `action` names when it executes at act start.
+/// `error` and `skip` are decided by the start itself (failure/skip plans);
+/// `back`, `cancel` and `push` need a target/uses the rule does not carry and
+/// are refused by the rule verdict before they reach here.
+fn rule_action_kind(
+    action: &crate::event::EventAction,
+) -> Option<crate::scheduler::core::commit::command::ActionKind> {
+    use crate::event::EventAction as E;
+    use crate::scheduler::core::commit::command::ActionKind as A;
+    match action {
+        E::Next => Some(A::Complete),
+        E::Submit => Some(A::Submit),
+        E::Abort => Some(A::Abort),
+        E::Remove => Some(A::Remove),
+        _ => None,
     }
 }
 

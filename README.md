@@ -466,11 +466,25 @@ refused at start.
 
 ### Step rules
 
-Use `rules` to validate a step's inputs when its act starts: every expression
-must hold against the step's variables and its resolved params. A rule that
-does not hold fails the step before the act reaches a client, with
-`error.code = "validation_failed"` and the rule's own message — a `catches`
-handler picks it up like any other failure.
+Use `rules` to decide what a step does when its act starts. Each rule's `if`
+is a condition over the step's variables and its resolved params; the first
+condition that holds runs its `action`:
+
+- `error` (the default) fails the step before the act reaches a client, with
+  `error.code = "validation_failed"` and the rule's own message — a `catches`
+  handler picks it up like any other failure.
+- `skip` drops the step and lets the flow continue (a concurrent-post approval
+  where the same person holds both posts).
+- `next`/`submit` start the act and apply the action as its first decision —
+  automatic approval, with no `Created` request to a client; `abort`/`remove`
+  close it the same way. `back`, `cancel` and `push` need a target or `uses` a
+  rule does not carry and are refused.
+
+A condition that does not hold moves on to the next rule; when no rule fires,
+the act starts normally. A condition that cannot be evaluated always fails the
+step. The conditions run on the engine's environment, so `$parent` (the
+previous flow execution's data) and `$root` (the workflow root's data) are
+available alongside the other built-ins.
 
 ```yml
 name: model name
@@ -479,12 +493,17 @@ steps:
     uses: acts.core.irq
     vars:
       - { name: amount, value: 0 }
+      - { name: approver, value: u1 }
     params:
       key: review
     rules:
-      - if: "amount > 0"        # must hold, else the step fails
+      - if: "amount <= 0"       # when it holds, the step fails
         message: amount must be positive
-      - "amount <= 10000"       # shorthand: no custom message
+      - if: "$parent.approver == $root.director"
+        action: skip            # concurrent post: drop this approval
+      - if: "$root.amount <= $root.limit"
+        action: next            # under the limit: approve automatically
+      - "amount > 10000"        # shorthand: no custom message
 ```
 
 For more acts example, please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)

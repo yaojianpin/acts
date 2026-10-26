@@ -23,6 +23,7 @@ pub struct Event<T> {
     Debug,
     Clone,
     Default,
+    Eq,
     PartialEq,
     strum::AsRefStr,
     strum::EnumString,

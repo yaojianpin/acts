@@ -59,10 +59,11 @@ pub struct Step {
     #[serde(default)]
     pub options: Vars,
 
-    /// Custom input validations: expressions that must hold against the
-    /// step's scope and its resolved params when the act starts. A rule that
-    /// does not hold fails the step with the `validation_failed` error and
-    /// the rule's message, before the act ever reaches a client.
+    /// Custom input rules: conditions over the step's scope and its resolved
+    /// params, decided when the act starts. The first condition that holds
+    /// runs its action (`error` by default — the step fails with
+    /// `validation_failed` and the rule's message before the act ever reaches
+    /// a client).
     #[serde(default)]
     pub rules: Vec<ValidationRule>,
 
