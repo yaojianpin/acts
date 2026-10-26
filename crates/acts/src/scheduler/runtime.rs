@@ -344,12 +344,15 @@ impl Runtime {
         crate::scheduler::shell::load_proc_rows(&self.store(), pid).await
     }
 
-    /// The run's declared model graph (`proc:graph`): every node the run's
-    /// durable (materialized) model holds, executed or not, in declaration
-    /// order. The ids are the ones the run's messages carry as `nid`, so a
-    /// client renders the full flow and folds the message stream onto it; the
-    /// import's virtual container is kind `block` (the declaration declares
-    /// no such node), which the tree display folds into its parent step.
+    /// The run's graph (`proc:graph`): the durable (materialized) model
+    /// expanded over the aggregate's executions, in declaration order. The
+    /// ids are the ones the run's messages carry as `nid`, and each executed
+    /// node carries the message's `tid`, so a client renders the full flow
+    /// and folds the message stream onto it; a fan-out appears once per item
+    /// and a dynamic execution (a pushed act, a join request) under its
+    /// creating execution. The import's virtual container is kind `block`
+    /// (the declaration declares no such node), which the tree display folds
+    /// into its parent step.
     pub(crate) async fn graph(&self, pid: &str) -> Result<crate::ProcessGraph> {
         self.kernel.graph(pid).await
     }

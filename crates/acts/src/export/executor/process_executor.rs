@@ -147,14 +147,17 @@ impl ProcessExecutor {
         Ok(info)
     }
 
-    /// The run's declared model graph (`proc:graph`): every node the run's
-    /// durable (materialized) model holds, executed or not, in declaration
-    /// order. The node ids are the ones the run's messages carry as `nid`, so
-    /// a client renders the full flow (the nodes no execution reached too)
-    /// and folds the message stream onto it; the import's virtual container
-    /// for a container package's inline acts is kind `block` — the
-    /// declaration declares no such node — and the tree display folds it into
-    /// its parent step.
+    /// The run's graph (`proc:graph`): the durable (materialized) model
+    /// expanded over the aggregate's executions, in declaration order. Every
+    /// declared node appears whether or not an execution reached it, once per
+    /// execution instance (a fan-out's items share one model node), and an
+    /// execution the model does not declare — a pushed act, a join request —
+    /// appears under its creating execution. The node ids are the ones the
+    /// run's messages carry as `nid`, and `tid` is the message's execution
+    /// instance, so a client folds the message stream onto the graph; the
+    /// import's virtual container for a container package's inline acts is
+    /// kind `block` — the declaration declares no such node — and the tree
+    /// display folds it into its parent step.
     #[instrument(skip(self))]
     pub async fn graph(&self, pid: &str) -> Result<ProcessGraph> {
         self.principal.check(GRAPH)?;
