@@ -45,15 +45,16 @@ Run the same per-crate suites CI runs (`.github/workflows/test.yml`) — every
 `--workspace` run; if you encounter resource failure issues, add the parameter `-j 2 `to rerun:
 
 ```sh
-cargo test -p acts
-cargo test -p acts-acl
-cargo test -p acts-expr --all-features
-cargo test -p acts-channel
-cargo test -p acts-plugin-*
-cargo test -p acts-package-*
-cargo test -p acts-store --features sled,sqlite,postgres
-cargo test -p acts-cli
-cargo test -p acts-server
+cargo test -p acts --lib
+cargo test -p acts --doc
+cargo test -p acts-acl --lib
+cargo test -p acts-expr --lib --all-features
+cargo test -p acts-channel --lib
+cargo test -p acts-plugin-* --lib
+cargo test -p acts-package-* --lib
+cargo test -p acts-store --lib --features sled,sqlite,postgres
+cargo test -p acts-cli --lib
+cargo test -p acts-server --lib
 ```
 
 - `acts-store`'s postgres suite (`tests/postgres.rs`) needs a Postgres 16 on
