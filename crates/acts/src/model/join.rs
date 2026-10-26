@@ -12,7 +12,7 @@
 //!   (`partial(3)`, `partial(40%)`). `partial(1)` is `any`,
 //!   `partial(100%)` is `all`.
 //! - [`JoinRule::Action`]: the engine asks the client — one
-//!   `acts.core.join` request per child settlement — and the client's verdict
+//!   `acts.core.decide` request per child settlement — and the client's verdict
 //!   (complete/fail) decides the container; a skipped request defers.
 //!
 //! The declaration is one field with a string or an object shape:
@@ -89,7 +89,7 @@ pub enum JoinRule {
     Any,
     /// A threshold of completions decides the container.
     Partial(PartialThreshold),
-    /// The client decides: one `acts.core.join` request per child settlement,
+    /// The client decides: one `acts.core.decide` request per child settlement,
     /// answered `complete` (pass), `fail` (reject) or `skip` (defer).
     Action {
         /// The key the client's handler is registered under.

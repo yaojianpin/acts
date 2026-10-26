@@ -288,7 +288,7 @@ async fn sch_join_delegated_verdict_completes_the_container() {
 
     // The request carries the action key, the rule's params and the census.
     let request = fixture.wait_created("s1#rule1").await;
-    assert_eq!(request.uses.as_deref(), Some("acts.core.join"));
+    assert_eq!(request.uses.as_deref(), Some("acts.core.decide"));
     let params = request.inputs.get_value("params").expect("request params");
     assert_eq!(params["action"], serde_json::json!("sign"));
     assert_eq!(params["params"], serde_json::json!({ "chair": true }));

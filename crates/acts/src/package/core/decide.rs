@@ -21,13 +21,13 @@ use serde_json::json;
 /// constrains that contract and lets a client route the request by its
 /// `uses`; the transport underneath is the same interrupt-and-answer flow.
 #[derive(Debug, Clone)]
-pub struct JoinPackage;
+pub struct JoinDecidePackage;
 
 #[async_trait::async_trait]
-impl ActPackage for JoinPackage {
+impl ActPackage for JoinDecidePackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
-            id: "acts.core.join",
+            id: "acts.core.decide",
             name: "Rule",
             desc: "ask the client to decide a container's join rule",
             version: "0.1.0",
@@ -70,7 +70,7 @@ impl ActPackage for JoinPackage {
     }
 }
 
-inventory::submit!(ActPackageRegister::new::<JoinPackage>());
+inventory::submit!(ActPackageRegister::new::<JoinDecidePackage>());
 
 #[cfg(test)]
 mod tests {
@@ -91,23 +91,23 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::JoinPackage::definition();
+        let meta = super::JoinDecidePackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
     #[test]
     fn pack_rule_requires_the_action() {
         let value = serde_yaml::from_str::<serde_json::Value>("params: {}").unwrap();
-        let meta = super::JoinPackage::definition();
+        let meta = super::JoinDecidePackage::definition();
         assert!(jsonschema::validate(&meta.schema, &value).is_err());
     }
 
     #[test]
     fn pack_rule_new() {
-        let _package = super::JoinPackage::new(&crate::Config::default()).unwrap();
+        let _package = super::JoinDecidePackage::new(&crate::Config::default()).unwrap();
         // the request waits for the client's verdict: it is not a function package
         assert_eq!(
-            super::JoinPackage::definition().run_as,
+            super::JoinDecidePackage::definition().run_as,
             crate::ActRunAs::Irq
         );
     }

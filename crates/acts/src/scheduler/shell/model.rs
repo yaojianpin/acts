@@ -87,7 +87,7 @@ pub(crate) const SUBFLOW_PACKAGE: &str = "acts.core.subflow";
 /// The join-decision request package: the act a delegated container rule
 /// (`rule: { action, params }`) creates per child settlement, which the
 /// client answers complete/fail/skip to decide the container.
-pub(crate) const JOIN_PACKAGE: &str = "acts.core.join";
+pub(crate) const DECIDE_PACKAGE: &str = "acts.core.decide";
 
 /// Materialize the inline acts of the container packages into the model's own
 /// shape, so the kernel's fan-out machinery drives them.

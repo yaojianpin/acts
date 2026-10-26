@@ -73,7 +73,7 @@ impl<'a> Client<'a> {
         // board countersign passes as soon as the chair approved; until
         // then the request is skipped — deferred — and the
         // engine asks again when the next vote arrives.
-        if message.is_uses("acts.core.join") && message.is_state(MessageState::Created) {
+        if message.is_uses("acts.core.decide") && message.is_state(MessageState::Created) {
             let params = message.inputs.get::<Vars>("params").unwrap_or_default();
             if params.get::<String>("action").as_deref() == Some("board_decision") {
                 let outcomes = params

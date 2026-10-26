@@ -131,16 +131,8 @@ impl KernelHost {
     /// counted child with its node, generation, state and user outputs —
     /// what a client handler needs to decide ("the chair approved" is one
     /// entry's outputs). Requests themselves are not votes.
-    ///
-    /// The census reads the snapshot *and* the plan under construction: the
-    /// settlement that asks may fold into the same commit (the internal
-    /// hand-off fold), and the outputs it carries into the settled child's
-    /// scope are plan writes the snapshot cannot see yet. Overlaying them
-    /// makes the request answer with what the commit will have written, not
-    /// with the child's state minus its outputs.
     fn join_outcomes(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-        plan: &crate::scheduler::core::model::transition_plan::TransitionPlan,
         parent: &crate::scheduler::core::model::task_graph::TaskId,
     ) -> Result<serde_json::Value> {
         let graph = task_graph(snapshot)?;
@@ -152,18 +144,7 @@ impl KernelHost {
             let Some(task) = snapshot.tasks.get(child) else {
                 continue;
             };
-            let mut outputs = root_variables(snapshot, child, |name| !is_error_fact(name));
-            for write in &plan.variable_writes {
-                if write.scope != *child
-                    || is_engine_fact(&write.name)
-                    || is_error_fact(&write.name)
-                {
-                    continue;
-                }
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&write.value) {
-                    outputs.set(&write.name, value);
-                }
-            }
+            let outputs = root_variables(snapshot, child, |name| !is_error_fact(name));
             outcomes.push(serde_json::json!({
                 "node": child.node.as_str(),
                 "generation": child.generation,
@@ -203,9 +184,9 @@ impl KernelHost {
         let ask =
             crate::scheduler::core::model::task_graph::TaskId::new(&node, 0).map_err(runtime)?;
 
-        let outcomes = Self::join_outcomes(snapshot, plan, parent)?;
+        let outcomes = Self::join_outcomes(snapshot, parent)?;
         let act = crate::scheduler::shell::action::PushedAct {
-            uses: crate::scheduler::shell::model::JOIN_PACKAGE.to_string(),
+            uses: crate::scheduler::shell::model::DECIDE_PACKAGE.to_string(),
             name: action.clone(),
             params: serde_json::json!({
                 "action": action,

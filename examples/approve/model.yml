@@ -104,7 +104,7 @@ steps:
   # step 4 · board countersign — join: action
   #
   # The delegated join: the chair and the deputy vote, and the
-  # engine asks the client to decide — one `acts.core.join` request per vote
+  # engine asks the client to decide — one `acts.core.decide` request per vote
   # that lands, carrying every vote's state and outputs. The client's
   # `board_decision` handler passes the step when the chair approved,
   # whatever the deputy answered.

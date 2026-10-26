@@ -439,7 +439,7 @@ steps:
           params:
             key: vote
 
-  # the client decides: one acts.core.join request per settlement, answered
+  # the client decides: one acts.core.decide request per settlement, answered
   # complete (pass) / fail (reject) / skip (defer)
   - id: board
     uses: acts.core.block
