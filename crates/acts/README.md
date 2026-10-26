@@ -405,6 +405,88 @@ steps:
     name: step 2
 ```
 
+### Join
+
+A step whose branches (or whose `acts.core.block{ mode: parallel }` /
+`acts.core.parallel` acts) run together decides by one `join`: how many of the
+children must complete before the step continues.
+
+```yml
+name: model name
+steps:
+  # any one vote completes the step; the votes still out are withdrawn
+  - id: sign
+    uses: acts.core.block
+    params:
+      mode: parallel
+      join: any
+      steps:
+        - uses: acts.core.irq
+          params:
+            key: vote1
+        - uses: acts.core.irq
+          params:
+            key: vote2
+
+  # the first 2 of N items complete the step (partial(40%) works the same way)
+  - id: countersign
+    uses: acts.core.parallel
+    params:
+      in: ${{ approvers }}
+      join: partial(2)
+      steps:
+        - uses: acts.core.irq
+          params:
+            key: vote
+
+  # the client decides: one acts.core.decide request per settlement, answered
+  # complete (pass) / fail (reject) / skip (defer)
+  - id: board
+    uses: acts.core.block
+    params:
+      mode: parallel
+      join:
+        action: countersign
+        params:
+          chair: chair
+      steps:
+        - uses: acts.core.irq
+          params:
+            key: vote
+```
+
+The join is `all` by default (every child must complete — a child failure
+fails the step, the engine's original shape). `any` and `partial(...)` count
+only the children really in the vote: a child its own guard skipped or the
+client removed was never in it, and a failed vote is a vote against — the
+container fails only when the threshold can no longer be reached
+(`partial(n)` with `n` above the real children fails at the fan-out). A join
+on a sequential shape (`acts.core.sequence`, `block{ mode: sequence }`) is
+refused at start.
+
+### Step rules
+
+Use `rules` to validate a step's inputs when its act starts: every expression
+must hold against the step's variables and its resolved params. A rule that
+does not hold fails the step before the act reaches a client, with
+`error.code = "validation_failed"` and the rule's own message — a `catches`
+handler picks it up like any other failure.
+
+```yml
+name: model name
+steps:
+  - id: review
+    uses: acts.core.irq
+    vars:
+      - { name: amount, value: 0 }
+    params:
+      key: review
+    rules:
+      - if: "amount > 0"        # must hold, else the step fails
+        message: amount must be positive
+      - "amount <= 10000"       # shorthand: no custom message
+```
+
 For more acts example, please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)
 
 The active backend is created externally and passed to
@@ -494,6 +576,7 @@ acts:
     - [x] parallel
     - [x] sequence
     - [x] subflow
+    - [x] join
 
   - transform
     - [x] set
