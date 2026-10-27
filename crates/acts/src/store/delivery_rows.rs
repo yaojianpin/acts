@@ -31,12 +31,13 @@ impl Store {
     pub async fn set_delivery(&self, id: &str, status: DeliveryStatus) -> Result<()> {
         let delivery = self
             .update_delivery(id, |mut delivery| {
-                // `Completed` is the final state (the engine closed the
-                // delivery) — a late ack must never downgrade it back to the
-                // intermediate `Acked`. The stored status is read under the
-                // row's lock, so an engine close that won the race is seen
-                // here instead of being overwritten by a stale read.
-                (delivery.status != DeliveryStatus::Completed).then(|| {
+                // `Completed`/`Superseded` are final (the engine closed the
+                // delivery, or a transfer replaced its assignment) — a late
+                // ack must never downgrade one back to the intermediate
+                // `Acked`. The stored status is read under the row's lock, so
+                // an engine close that won the race is seen here instead of
+                // being overwritten by a stale read.
+                (!delivery.status.is_settled()).then(|| {
                     delivery.status = status;
                     delivery
                 })
@@ -55,6 +56,45 @@ impl Store {
             let _ = self.try_mark_removable(&delivery.pid).await;
         }
         Ok(())
+    }
+
+    /// Supersede the open deliveries of a task whose assignment moved to a
+    /// new revision: `Created`/`Delivered`/`Acked` rows below `rev` become
+    /// `Superseded` — the old owner's message is history. The assignment
+    /// notification itself carries the new revision, so it is left alone (and
+    /// rows are matched by pid/tid, not by message id, so the old act message
+    /// and its channel deliveries are settled together).
+    ///
+    /// The rows are read under their document locks through
+    /// [`Store::update_delivery`], exactly like every other delivery
+    /// transition: a concurrent ack or close either lands first (and is seen
+    /// by the check) or after (and sees `Superseded`).
+    pub async fn supersede_task_deliveries(&self, pid: &str, tid: &str, rev: u64) -> Result<usize> {
+        let q = Query::new().filter(
+            Filter::and()
+                .expr(Expr::eq("pid", pid.to_string()))
+                .expr(Expr::eq("tid", tid.to_string())),
+        );
+        let ids = self.deliveries().matching_ids(q.filter.as_ref()).await?;
+        let mut superseded = 0;
+        for id in ids {
+            let updated = self
+                .update_delivery(&id, |mut delivery| {
+                    let open = matches!(
+                        delivery.status,
+                        DeliveryStatus::Created | DeliveryStatus::Delivered | DeliveryStatus::Acked
+                    );
+                    (open && delivery.rev < rev).then(|| {
+                        delivery.status = DeliveryStatus::Superseded;
+                        delivery
+                    })
+                })
+                .await?;
+            if updated.is_some() {
+                superseded += 1;
+            }
+        }
+        Ok(superseded)
     }
 
     /// Re-send every error delivery row (reset to `Created`; the retry timer
@@ -174,6 +214,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(find(&store, "d2").await.status, DeliveryStatus::Acked);
+    }
+
+    #[tokio::test]
+    async fn superseded_rows_are_final_and_do_not_hold_the_process() {
+        let store = store();
+        let mut old = delivery("old", "p1", DeliveryStatus::Delivered);
+        old.tid = "t1".to_string();
+        old.rev = 0;
+        seed(&store, old).await;
+        let mut current = delivery("new", "p1", DeliveryStatus::Delivered);
+        current.tid = "t1".to_string();
+        current.rev = 1;
+        seed(&store, current).await;
+
+        let superseded = store
+            .supersede_task_deliveries("p1", "t1", 1)
+            .await
+            .unwrap();
+        assert_eq!(superseded, 1);
+        assert_eq!(find(&store, "old").await.status, DeliveryStatus::Superseded);
+        assert_eq!(
+            find(&store, "new").await.status,
+            DeliveryStatus::Delivered,
+            "the notification of the current revision stays open"
+        );
+
+        // A late ack must not reopen a superseded delivery ...
+        store
+            .set_delivery("old", DeliveryStatus::Acked)
+            .await
+            .unwrap();
+        assert_eq!(find(&store, "old").await.status, DeliveryStatus::Superseded);
+        // ... and it settles the run once every row is final.
+        store
+            .set_delivery("new", DeliveryStatus::Completed)
+            .await
+            .unwrap();
+        assert!(!store.has_unsettled_deliveries("p1").await.unwrap());
     }
 
     #[tokio::test]

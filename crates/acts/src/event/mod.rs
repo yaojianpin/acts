@@ -42,6 +42,10 @@ pub enum EventAction {
     Error,
     Push,
     Remove,
+    /// Transfer — move an assigned human act's owner to another enabled user
+    /// without deciding it. The act keeps its execution and state; only the
+    /// task's `__assignment` changes.
+    Transfer,
 }
 
 impl EventAction {
@@ -98,6 +102,10 @@ mod tests {
         assert_eq!(EventAction::parse("next").unwrap(), EventAction::Next);
         assert_eq!(EventAction::parse("push").unwrap(), EventAction::Push);
         assert_eq!(EventAction::parse("remove").unwrap(), EventAction::Remove);
+        assert_eq!(
+            EventAction::parse("transfer").unwrap(),
+            EventAction::Transfer
+        );
         let err = EventAction::parse("no_such_action").unwrap_err();
         assert!(
             err.to_string()
@@ -112,6 +120,7 @@ mod tests {
         assert_eq!(EventAction::Submit.to_string(), "submit");
         assert_eq!(EventAction::Push.to_string(), "push");
         assert_eq!(EventAction::Remove.to_string(), "remove");
+        assert_eq!(EventAction::Transfer.to_string(), "transfer");
     }
 
     #[test]

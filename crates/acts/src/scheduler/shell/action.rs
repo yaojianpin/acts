@@ -51,6 +51,9 @@ pub(super) struct PushedAct {
     pub(super) options: serde_json::Value,
     pub(super) exposes: Vec<crate::Variant>,
     pub(super) vars: Vec<crate::Variant>,
+    /// The pushed human act's owner declaration. The act resolves it at its
+    /// own start through the same assignment path a declared leaf uses.
+    pub(super) assign: Option<crate::model::Assign>,
 }
 
 impl PushedAct {
@@ -86,6 +89,13 @@ impl PushedAct {
                 .map_err(|error| runtime(format!("push 'options' is not json: {error}")))?,
             None => serde_json::Value::Null,
         };
+        let assign = match get("assign") {
+            Some(raw) if !raw.trim().is_empty() && raw.trim() != "null" => Some(
+                serde_json::from_str::<crate::model::Assign>(&raw)
+                    .map_err(|error| runtime(format!("push 'assign' is not an owner: {error}")))?,
+            ),
+            _ => None,
+        };
         Ok(Self {
             uses,
             name: get("name").unwrap_or_default(),
@@ -93,6 +103,7 @@ impl PushedAct {
             options,
             exposes: list("exposes", get("exposes"))?,
             vars: list("vars", get("vars"))?,
+            assign,
         })
     }
 
@@ -104,6 +115,7 @@ impl PushedAct {
             "options": self.options,
             "exposes": self.exposes,
             "vars": self.vars,
+            "assign": self.assign,
         })
         .to_string()
     }
@@ -126,6 +138,9 @@ impl PushedAct {
             options: fact["options"].clone(),
             exposes: variant_list(&fact["exposes"])?,
             vars: variant_list(&fact["vars"])?,
+            assign: serde_json::from_value(fact["assign"].clone()).map_err(|error| {
+                runtime(format!("corrupt push fact: invalid 'assign': {error}"))
+            })?,
         })
     }
 
@@ -141,6 +156,7 @@ impl PushedAct {
             options: serde_json::from_value(self.options.clone()).unwrap_or_default(),
             exposes: self.exposes.clone(),
             vars: self.vars.clone(),
+            assign: self.assign.clone(),
             ..Default::default()
         }
     }
@@ -178,6 +194,7 @@ pub(super) fn action_fact(
         }),
         A::Push => serde_json::json!({ "action": "push" }),
         A::Remove => serde_json::json!({ "action": "remove" }),
+        A::Transfer => serde_json::json!({ "action": "transfer" }),
     };
     serde_json::json!({
         "kind": kind,
@@ -212,6 +229,7 @@ pub(super) fn decode_action_fact(
         },
         "push" => crate::scheduler::core::commit::command::ActionKind::Push,
         "remove" => crate::scheduler::core::commit::command::ActionKind::Remove,
+        "transfer" => crate::scheduler::core::commit::command::ActionKind::Transfer,
         other => return Err(runtime(format!("corrupt action fact: action '{other}'"))),
     };
     let inputs = fact["inputs"]
@@ -256,6 +274,9 @@ mod tests {
                 code: "E1".into(),
                 message: "boom".into(),
             },
+            ActionKind::Push,
+            ActionKind::Remove,
+            ActionKind::Transfer,
         ] {
             let text = action_fact(&action, &inputs);
             let (decoded, decoded_inputs) = decode_action_fact(&text).unwrap();

@@ -49,6 +49,20 @@ impl Assignment {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
     }
 
+    /// The assignment a transfer to `to` produces: the target becomes both
+    /// owner and assignee, the revision advances, and the old owner and the
+    /// caller are recorded for audit.
+    pub(super) fn transferred(&self, to: &str, by: Option<&str>, now: i64) -> Self {
+        Self {
+            owner: to.to_string(),
+            assignee: to.to_string(),
+            rev: self.rev.saturating_add(1),
+            transferred_from: Some(self.owner.clone()),
+            updated_by: by.map(str::to_string),
+            updated_at: now,
+        }
+    }
+
     /// Read the assignment of one execution, when the act declares one.
     pub(super) fn of(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -90,6 +104,135 @@ pub(super) fn authorize_decision(
     Ok(())
 }
 
+/// The per-task transfer check: the current owner, or a caller holding the
+/// `assign` capability. A task without an assignment has no owner to move,
+/// so an authenticated caller is refused rather than silently allowed. ACL
+/// disabled (no subject) keeps the old behavior; the plan itself still
+/// refuses an unassigned act.
+pub(super) fn authorize_transfer(
+    assignment: Option<&Assignment>,
+    subject: Option<&str>,
+    can_assign: bool,
+    node: &str,
+) -> Result<()> {
+    let Some(subject) = subject else {
+        return Ok(());
+    };
+    let Some(assignment) = assignment else {
+        return Err(crate::ActError::Action(format!(
+            "ENOTOWNER: act '{node}' has no assignment to transfer"
+        )));
+    };
+    if subject == assignment.owner || can_assign {
+        return Ok(());
+    }
+    Err(crate::ActError::Action(format!(
+        "ENOTOWNER: user '{subject}' is not the owner of act '{node}' and holds no assign capability"
+    )))
+}
+
+/// The caller-correctable checks a transfer must pass before any durable
+/// intent exists: the act is assigned and non-terminal, the caller owns it (or
+/// holds the capability), the target is named, and the client's `expect_rev`
+/// — when present — names the current revision. The plan repeats them for a
+/// replay; a refusal here consumes nothing.
+///
+/// The target is a *business* user, not an access-control user: the engine
+/// implements no business user directory (a design non-goal), so `enabled`
+/// and the target's own decision permission are the calling system's checks.
+/// What the engine can prove it does: the target becomes the act's owner, and
+/// the act's per-task authorization then admits that owner.
+pub(super) fn validate_transfer(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    state: crate::scheduler::core::model::task_graph::TaskState,
+    inputs: &[(String, String)],
+    subject: Option<&str>,
+    can_assign: bool,
+) -> Result<()> {
+    let node = task_id.node.as_str();
+    let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+        crate::ActError::Action(format!(
+            "ENOTOWNER: act '{node}' has no assignment to transfer"
+        ))
+    })?;
+    authorize_transfer(Some(&assignment), subject, can_assign, node)?;
+    if state.is_terminal() {
+        return Err(crate::ActError::Action(format!(
+            "task('{node}') is not allowed to transfer"
+        )));
+    }
+    let input = |name: &str| {
+        inputs
+            .iter()
+            .rev()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let to = input("to")
+        .map(str::trim)
+        .filter(|to| !to.is_empty())
+        .ok_or_else(|| crate::ActError::Action("cannot find 'to' in act:transfer".to_string()))?;
+    let _ = to;
+    if let Some(raw) = input("expect_rev") {
+        let expect = parse_expect_rev(raw)?;
+        if expect != assignment.rev {
+            return Err(crate::ActError::Action(format!(
+                "EASSIGNMENT_CHANGED: act '{node}' assignment rev is {}, not {expect}",
+                assignment.rev
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parse a transfer's `expect_rev` (a JSON number or numeric string, the
+/// shapes the transports carry). A malformed value is refused like a stale
+/// revision: it can never authorize a transfer.
+pub(super) fn parse_expect_rev(raw: &str) -> Result<u64> {
+    let raw = raw.trim();
+    raw.parse::<u64>().or_else(|_| {
+        serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|value| match value {
+                serde_json::Value::Number(number) => number.as_u64(),
+                serde_json::Value::String(text) => text.parse().ok(),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                crate::ActError::Action(format!("EASSIGNMENT_CHANGED: invalid expect_rev '{raw}'"))
+            })
+    })
+}
+
+/// The durable id of one act's `Created` message, read from the record the
+/// start commit wrote. The id lives in the outbox payload, so it survives a
+/// restart and the transfer notification can reference the original message
+/// without inventing one; a record from an older kernel has none and yields
+/// `None`.
+pub(super) fn created_message_id(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+) -> Option<String> {
+    let key = format!(
+        "message.created:{}:{}:{}",
+        snapshot.process_id,
+        task_id.node.as_str(),
+        task_id.generation
+    );
+    snapshot
+        .outbox
+        .values()
+        .find(|record| record.id.key == key)
+        .and_then(|record| serde_json::from_str::<serde_json::Value>(&record.payload).ok())
+        .and_then(|payload| {
+            payload
+                .get("msg_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
 /// The `assign.owner` expression one act declares, after refusing the
 /// declaration where it cannot mean an owner: a package-less node, a
 /// `block`/`parallel`/`sequence` container, a `Func`/`Msg` leaf, or the
@@ -104,7 +247,9 @@ pub(super) fn declared_expression(
         return Ok(None);
     };
     let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
-        return Ok(None);
+        // A pushed act is not in the immutable model: its declaration rides
+        // the execution's durable `__act` fact.
+        return pushed_declared_expression(snapshot, task_id);
     };
     let Some(assign) = &step.assign else {
         return Ok(None);
@@ -138,6 +283,45 @@ pub(super) fn declared_expression(
     // The import's auto decision is the package's run-bound: `Func` and `Msg`
     // self-complete, only `Irq` waits for a client decision.
     if auto_decision(snapshot, model_node.as_str())? {
+        return Err(crate::ActError::Action(format!(
+            "act '{node}' uses '{uses}', which is not a human decision act (ActRunAs::Irq)"
+        )));
+    }
+    Ok(Some(assign.owner.clone()))
+}
+
+/// The `assign.owner` of a pushed act: refused on a container or the waiting
+/// subflow, and on a package whose run-bound self-completes (`Func`/`Msg`).
+/// The push commit wrote the node's decision into the run-bound maps, so the
+/// same check the model's import made applies here.
+fn pushed_declared_expression(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+) -> Result<Option<String>> {
+    let Some(act) = crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)? else {
+        return Ok(None);
+    };
+    let Some(assign) = &act.assign else {
+        return Ok(None);
+    };
+    let node = task_id.node.as_str();
+    let uses = act.uses.trim();
+    if matches!(
+        uses,
+        crate::scheduler::shell::model::BLOCK_PACKAGE
+            | crate::scheduler::shell::model::PARALLEL_PACKAGE
+            | crate::scheduler::shell::model::SEQUENCE_PACKAGE
+    ) {
+        return Err(crate::ActError::Action(format!(
+            "act '{node}' is container '{uses}'; declare assign on its human decision steps, not on the container"
+        )));
+    }
+    if uses == crate::scheduler::shell::model::SUBFLOW_PACKAGE {
+        return Err(crate::ActError::Action(format!(
+            "act '{node}' uses '{uses}', which is not a human decision act (ActRunAs::Irq)"
+        )));
+    }
+    if auto_decision(snapshot, node)? {
         return Err(crate::ActError::Action(format!(
             "act '{node}' uses '{uses}', which is not a human decision act (ActRunAs::Irq)"
         )));

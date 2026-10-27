@@ -196,6 +196,7 @@ impl KernelHost {
             options: serde_json::Value::Null,
             exposes: Vec::new(),
             vars: Vec::new(),
+            assign: None,
         };
 
         // The run-bound decisions the import built for declared nodes; a

@@ -20,6 +20,8 @@ pub(crate) const ERROR: &str = "act:error";
 pub(crate) const PUSH: &str = "act:push";
 /// `act:remove` — remove a task from the tree.
 pub(crate) const REMOVE: &str = "act:remove";
+/// `act:transfer` — move an assigned act's owner to another user.
+pub(crate) const TRANSFER: &str = "act:transfer";
 
 #[derive(Clone)]
 pub struct ActExecutor {
@@ -71,6 +73,24 @@ impl ActExecutor {
         self.do_action(pid, tid, EventAction::Remove, options).await
     }
 
+    /// `act:transfer {pid,tid,to,expect_rev,reason}` — move the act's owner
+    /// to another business user without deciding it. The owner-or-`assign`
+    /// authorization runs in the kernel on the task's state.
+    pub async fn transfer(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        let to = options
+            .get::<String>("to")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if to.is_empty() {
+            return Err(crate::ActError::Action(
+                "cannot find 'to' in act:transfer".to_string(),
+            ));
+        }
+        self.do_action(pid, tid, EventAction::Transfer, options)
+            .await
+    }
+
     /// Run one task action. The action the caller names is the action the
     /// principal is checked against — the wrappers above are spellings of the
     /// same check, never a way around it.
@@ -81,19 +101,42 @@ impl ActExecutor {
         action: EventAction,
         mut options: Vars,
     ) -> Result<()> {
-        self.principal.check(name_of(&action))?;
+        let name = name_of(&action);
+        let is_transfer = matches!(action, EventAction::Transfer);
+        // The shared ACL gate: a per-task action (`act:transfer`) passes for
+        // an authenticated caller and is decided by the kernel on the task;
+        // every other action keeps its global command check. An
+        // unauthenticated transfer is refused here.
+        crate::acl::check_action(&self.principal, name)?;
+        // The capability is computed from the same policy the global check
+        // would apply: `@assign` (or an explicit `act:transfer`) grants it
+        // without `@execute`, and a `deny` still wins.
+        let can_assign = is_transfer && self.principal.check(name).is_ok();
         // The assignment revision is the client's compare value, not state:
         // it rides the action envelope and never becomes a task variable. The
-        // person fields are task state; a client's copies are discarded.
+        // person fields are task state; a client's copies are discarded. The
+        // audit name is server-attributed (`updated_by`), never trusted from
+        // the request.
         let rev = take_rev(&mut options)?;
-        for name in ["owner", "assignee", "delegator", "delegatee", "subject"] {
+        for name in [
+            "owner",
+            "assignee",
+            "delegator",
+            "delegatee",
+            "subject",
+            "updated_by",
+        ] {
             let _ = options.remove(name);
         }
         let subject = (self.principal.is_authenticated() && !self.principal.is_unrestricted())
             .then(|| self.principal.subject().to_string());
+        if is_transfer && let Some(subject) = &subject {
+            options.set("updated_by", subject.clone());
+        }
         let action = Action::new(pid, tid, action, options)
             .with_subject(subject)
-            .with_rev(rev);
+            .with_rev(rev)
+            .with_can_assign(can_assign);
         self.runtime.do_action(&action).await
     }
 }
@@ -127,6 +170,7 @@ fn name_of(action: &EventAction) -> &'static str {
         EventAction::Error => ERROR,
         EventAction::Push => PUSH,
         EventAction::Remove => REMOVE,
+        EventAction::Transfer => TRANSFER,
     }
 }
 
@@ -148,6 +192,7 @@ mod tests {
             (EventAction::Error, "act:error"),
             (EventAction::Push, "act:push"),
             (EventAction::Remove, "act:remove"),
+            (EventAction::Transfer, "act:transfer"),
         ] {
             assert_eq!(name_of(&action), name);
         }

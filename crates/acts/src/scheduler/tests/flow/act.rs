@@ -14,12 +14,17 @@
 //! below so nobody mistakes the legacy expectations for kernel behavior.
 
 use crate::{
-    MessageState, Principal, Step, Vars, Workflow,
+    ChannelOptions, MessageState, Principal, Step, Vars, Workflow,
     acl::UserPolicy,
+    data::DeliveryStatus,
     event::EventAction,
+    query::{Expr, Filter, Query},
     scheduler::{
         core::model::task_graph::TaskState,
-        tests::flow::{FlowFixture, Terminal, irq_workflow},
+        tests::{
+            flow::{FlowFixture, Terminal, irq_workflow},
+            reliability::poll_until,
+        },
     },
     utils::{
         consts,
@@ -1205,4 +1210,656 @@ async fn sch_act_assign_without_acl_keeps_old_behavior() {
         .unwrap();
     fixture.wait_message("s1", MessageState::Completed).await;
     fixture.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Transfer (`act:transfer`)
+// ---------------------------------------------------------------------------
+
+/// A caller holding only the `assign` capability (not `@execute`).
+fn assigner(name: &str) -> Principal {
+    Principal::from_policy(&UserPolicy {
+        name: name.to_string(),
+        enabled: true,
+        allow: vec!["@assign".to_string()],
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+/// Every delivery row of one execution instance.
+async fn deliveries_of(fixture: &FlowFixture, tid: &str) -> Vec<crate::data::Delivery> {
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("tid", tid.to_string())));
+    fixture
+        .engine()
+        .runtime()
+        .store()
+        .deliveries()
+        .query(&q)
+        .await
+        .unwrap()
+        .rows
+}
+
+async fn wait_delivery_present(fixture: &FlowFixture, tid: &str, msg_id: &str) {
+    poll_until("the act delivery row", || async {
+        deliveries_of(fixture, tid)
+            .await
+            .iter()
+            .any(|delivery| delivery.msg_id == msg_id)
+    })
+    .await;
+}
+
+async fn wait_delivery_status(
+    fixture: &FlowFixture,
+    tid: &str,
+    msg_id: &str,
+    status: DeliveryStatus,
+) -> crate::data::Delivery {
+    poll_until("the act delivery to reach its status", || async {
+        deliveries_of(fixture, tid)
+            .await
+            .iter()
+            .any(|delivery| delivery.msg_id == msg_id && delivery.status == status)
+    })
+    .await;
+    deliveries_of(fixture, tid)
+        .await
+        .into_iter()
+        .find(|delivery| delivery.msg_id == msg_id && delivery.status == status)
+        .unwrap_or_else(|| panic!("no {status} delivery of {msg_id}"))
+}
+
+/// The announced `type=assignment` notification.
+async fn wait_assignment(fixture: &FlowFixture) -> crate::Message {
+    poll_until("the assignment notification", || async {
+        fixture
+            .messages()
+            .iter()
+            .any(|message| message.r#type == "assignment")
+    })
+    .await;
+    fixture
+        .messages()
+        .into_iter()
+        .find(|message| message.r#type == "assignment")
+        .expect("the assignment notification")
+}
+
+/// A transfer moves the owner without touching the act: the execution keeps
+/// its id/state, the old delivery is superseded, the new owner receives the
+/// `type=assignment` message, the old owner is refused and the new one can
+/// decide. The durable action fact makes the transfer replayable.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_transfer_moves_the_owner_without_deciding_the_act() {
+    let workflow = assigned_workflow("flow-act-transfer", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    let ack = fixture.engine().channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    ack.on_message(|_| async {});
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+
+    let before = fixture.snapshot().await;
+    let task_id = before
+        .tasks
+        .keys()
+        .find(|id| id.node.as_str() == "s1")
+        .cloned()
+        .expect("the act execution");
+    let task_count = before.tasks.len();
+    wait_delivery_present(&fixture, &tid, &created.id).await;
+
+    // Alice is the owner: she may transfer without the `assign` capability.
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .transfer(
+            &pid,
+            &tid,
+            Vars::new()
+                .with("to", "bob")
+                .with("expect_rev", 0)
+                .with("reason", "holiday"),
+        )
+        .await
+        .unwrap();
+
+    // The act itself is untouched: same instance, same state, no new task.
+    assert_eq!(fixture.state("s1").await, TaskState::Waiting);
+    let after = fixture.snapshot().await;
+    assert_eq!(after.tasks.len(), task_count, "a transfer creates no task");
+    let unchanged = after.tasks.get(&task_id).expect("the same execution");
+    assert_eq!(unchanged.state, TaskState::Waiting);
+
+    // The assignment advanced, with the audit facts.
+    let assignment = assignment_of(&fixture, "s1").await;
+    assert_eq!(assignment["owner"], json!("bob"));
+    assert_eq!(assignment["assignee"], json!("bob"));
+    assert_eq!(assignment["rev"], json!(1));
+    assert_eq!(assignment["transferred_from"], json!("alice"));
+    assert_eq!(assignment["updated_by"], json!("alice"));
+    assert!(assignment["updated_at"].as_i64().unwrap() > 0);
+
+    // The transfer intent is a durable `__action` fact the operation replays.
+    assert!(
+        after.variables.iter().any(|((task, name), value)| {
+            task == &task_id
+                && name.starts_with("__action@")
+                && value.contains("\"transfer\"")
+                && value.contains("bob")
+        }),
+        "the transfer must be replayable from its action fact"
+    );
+
+    // The old owner's message is history; the new one carries the reference.
+    let old = wait_delivery_status(&fixture, &tid, &created.id, DeliveryStatus::Superseded).await;
+    assert_eq!(old.owner.as_deref(), Some("alice"));
+    let notification = wait_assignment(&fixture).await;
+    assert_eq!(notification.tid, tid);
+    assert_eq!(notification.nid, "s1");
+    assert_eq!(notification.owner.as_deref(), Some("bob"));
+    assert_eq!(notification.assignee.as_deref(), Some("bob"));
+    assert_eq!(notification.rev, 1);
+    assert_eq!(
+        notification.ref_msg_id.as_deref(),
+        Some(created.id.as_str())
+    );
+    let options = notification.options().expect("the notification options");
+    assert_eq!(options.get::<String>("owner").as_deref(), Some("bob"));
+    assert_eq!(options.get::<String>("assignee").as_deref(), Some("bob"));
+    // The original Created message stays as history.
+    assert!(
+        fixture
+            .messages()
+            .iter()
+            .any(|message| message.id == created.id && message.state == MessageState::Created)
+    );
+
+    // The old owner can no longer decide; the new owner can, at revision 1.
+    let refused = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("ENOTOWNER"),
+        "the old owner must be refused: {refused}"
+    );
+    fixture
+        .engine()
+        .executor(&approved_user("bob"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap();
+    let completed = fixture.wait_message("s1", MessageState::Completed).await;
+    assert_eq!(completed.owner.as_deref(), Some("bob"));
+    assert_eq!(completed.assignee.as_deref(), Some("bob"));
+    assert_eq!(completed.rev, 1);
+    fixture.close().await;
+}
+
+/// A caller holding `@assign` may transfer an act it does not own; the
+/// capability is independent of `@execute`.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_transfer_accepts_the_assign_capability() {
+    let workflow = assigned_workflow("flow-act-transfer-assign", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    let manager = assigner("manager");
+    assert!(
+        manager.check("act:complete").is_err(),
+        "the assign capability must not imply executing acts"
+    );
+    fixture
+        .engine()
+        .executor(&manager)
+        .act()
+        .transfer(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("to", "bob").with("expect_rev", 0),
+        )
+        .await
+        .unwrap();
+    let assignment = assignment_of(&fixture, "s1").await;
+    assert_eq!(assignment["owner"], json!("bob"));
+    assert_eq!(assignment["updated_by"], json!("manager"));
+    fixture.close().await;
+}
+
+/// The wire action (`actions::apply_as`) authorizes the task's owner even
+/// when the management policy grants it no `@execute` (or any other) command:
+/// a transfer is authorized on the task, not only by a global grant.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_transfer_wire_action_authorizes_the_owner_without_execute() {
+    let workflow = assigned_workflow("flow-act-transfer-wire", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let alice = Principal::from_policy(&UserPolicy {
+        name: "alice".to_string(),
+        enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+
+    let applied = crate::actions::apply_as(
+        fixture.engine(),
+        &alice,
+        "act:transfer",
+        Vars::new()
+            .with("pid", fixture.pid())
+            .with("tid", created.tid.clone())
+            .with("to", "bob")
+            .with("expect_rev", 0),
+    )
+    .await
+    .expect("the owner may transfer without a global grant");
+    // The act actions answer the executor's unit result as `null`, like
+    // `act:complete`/`act:push` in the same dispatch table.
+    assert_eq!(applied, json!(null));
+    assert_eq!(assignment_of(&fixture, "s1").await["owner"], json!("bob"));
+    fixture.close().await;
+}
+
+/// Every refusal is caller-correctable and consumes nothing: a stale
+/// revision, a stranger, a missing target, a terminal act and an act with no
+/// assignment.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_transfer_refuses_invalid_requests() {
+    let workflow = assigned_workflow("flow-act-transfer-refuse", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+
+    let stale = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .transfer(
+            &pid,
+            &tid,
+            Vars::new().with("to", "bob").with("expect_rev", 9),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        stale.to_string().contains("EASSIGNMENT_CHANGED"),
+        "a stale revision must be refused: {stale}"
+    );
+    assert_eq!(assignment_of(&fixture, "s1").await["rev"], json!(0));
+    assert!(
+        fixture
+            .messages()
+            .iter()
+            .all(|message| message.r#type != "assignment"),
+        "a refused transfer must not announce an assignment"
+    );
+
+    let stranger = fixture
+        .engine()
+        .executor(&approved_user("mallory"))
+        .act()
+        .transfer(&pid, &tid, Vars::new().with("to", "bob"))
+        .await
+        .unwrap_err();
+    assert!(
+        stranger.to_string().contains("ENOTOWNER"),
+        "a non-owner without assign must be refused: {stranger}"
+    );
+
+    let missing = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .transfer(&pid, &tid, Vars::new().with("to", " "))
+        .await
+        .unwrap_err();
+    assert!(
+        missing.to_string().contains("'to'"),
+        "a missing target must be refused: {missing}"
+    );
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 0))
+        .await
+        .unwrap();
+    fixture.wait_message("s1", MessageState::Completed).await;
+    let terminal = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .transfer(&pid, &tid, Vars::new().with("to", "bob"))
+        .await
+        .unwrap_err();
+    assert!(
+        terminal.to_string().contains("not allowed to transfer"),
+        "a terminal act must be refused: {terminal}"
+    );
+    fixture.close().await;
+
+    // An act that declares no assignment has no owner to move.
+    let workflow = irq_workflow("flow-act-transfer-unassigned", "s1", "act1");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let unassigned = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .transfer(fixture.pid(), &created.tid, Vars::new().with("to", "bob"))
+        .await
+        .unwrap_err();
+    assert!(
+        unassigned.to_string().contains("has no assignment"),
+        "an unassigned act must be refused: {unassigned}"
+    );
+    fixture.close().await;
+}
+
+/// A transfer and a decision racing on one act: the command lane serializes
+/// them, so exactly one wins and the loser gets its own refusal.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_transfer_and_complete_have_one_winner() {
+    let workflow = assigned_workflow("flow-act-transfer-race", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+    let alice = approved_user("alice");
+
+    let (transferred, completed) = tokio::join!(
+        async {
+            fixture
+                .engine()
+                .executor(&alice)
+                .act()
+                .transfer(
+                    &pid,
+                    &tid,
+                    Vars::new().with("to", "bob").with("expect_rev", 0),
+                )
+                .await
+        },
+        async {
+            fixture
+                .engine()
+                .executor(&alice)
+                .act()
+                .complete(&pid, &tid, Vars::new().with("rev", 0))
+                .await
+        }
+    );
+    match (transferred, completed) {
+        // The decision won: the transfer sees a terminal act.
+        (Err(error), Ok(())) => {
+            assert!(
+                error.to_string().contains("not allowed to transfer"),
+                "the transfer lost to the decision: {error}"
+            );
+            assert_eq!(fixture.state("s1").await, TaskState::Completed);
+        }
+        // The transfer won: the old owner is no longer the owner.
+        (Ok(()), Err(error)) => {
+            assert!(
+                error.to_string().contains("ENOTOWNER"),
+                "the decision lost to the transfer: {error}"
+            );
+            assert_eq!(fixture.state("s1").await, TaskState::Waiting);
+            assert_eq!(assignment_of(&fixture, "s1").await["owner"], json!("bob"));
+        }
+        (transferred, completed) => panic!(
+            "exactly one of transfer/complete wins: transfer={transferred:?} complete={completed:?}"
+        ),
+    }
+    fixture.close().await;
+}
+
+/// Restart: `__assignment`, the superseded delivery and the assignment
+/// message are durable, and the new owner can decide the recovered act.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_transfer_survives_restart() {
+    let workflow = assigned_workflow("flow-act-transfer-restart", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    let ack = fixture.engine().channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    ack.on_message(|_| async {});
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+    let store = fixture.engine().runtime().store().kv();
+    wait_delivery_present(&fixture, &tid, &created.id).await;
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .transfer(
+            &pid,
+            &tid,
+            Vars::new().with("to", "bob").with("expect_rev", 0),
+        )
+        .await
+        .unwrap();
+    let notification = wait_assignment(&fixture).await;
+    let notification_id = notification.id.clone();
+    wait_delivery_status(&fixture, &tid, &created.id, DeliveryStatus::Superseded).await;
+    poll_until("the assignment message row", || async {
+        fixture
+            .engine()
+            .runtime()
+            .store()
+            .messages()
+            .find(&notification_id)
+            .await
+            .is_ok()
+    })
+    .await;
+    fixture.close().await;
+
+    let reloaded = crate::Engine::builder()
+        .set_store(store)
+        .start()
+        .await
+        .unwrap();
+    let snapshot = reloaded
+        .runtime()
+        .kernel()
+        .snapshot(&pid)
+        .await
+        .unwrap()
+        .expect("the recovered aggregate");
+    let task = snapshot
+        .tasks
+        .keys()
+        .find(|id| id.wire(&pid) == tid)
+        .expect("the recovered execution");
+    let raw = snapshot
+        .variables
+        .get(&(task.clone(), "__assignment".to_string()))
+        .expect("the recovered assignment");
+    let assignment: serde_json::Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(assignment["owner"], json!("bob"));
+    assert_eq!(assignment["rev"], json!(1));
+    assert!(
+        reloaded
+            .runtime()
+            .store()
+            .deliveries()
+            .query(&Query::new().filter(Filter::and().expr(Expr::eq("tid", tid.clone()))))
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .any(|delivery| delivery.msg_id == created.id
+                && delivery.status == DeliveryStatus::Superseded),
+        "the superseded delivery must survive the restart"
+    );
+    assert!(
+        reloaded
+            .runtime()
+            .store()
+            .messages()
+            .find(&notification_id)
+            .await
+            .is_ok(),
+        "the assignment message must survive the restart"
+    );
+
+    let refused = reloaded
+        .executor(&approved_user("alice"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("ENOTOWNER"), "{refused}");
+    reloaded
+        .executor(&approved_user("bob"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap();
+    poll_until("the recovered act to complete", || async {
+        reloaded
+            .runtime()
+            .kernel()
+            .snapshot(&pid)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| {
+                snapshot.tasks.iter().any(|(id, task)| {
+                    id.node.as_str() == "s1" && task.state == TaskState::Completed
+                })
+            })
+    })
+    .await;
+    reloaded.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// `act:push` with `assign`
+// ---------------------------------------------------------------------------
+
+/// A pushed human act carries its own `assign.owner`: it resolves for that
+/// child and is independently authorized.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_push_with_assign_owns_the_child_independently() {
+    let workflow = assigned_workflow("flow-act-push-assign", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    fixture
+        .act(
+            &created.pid,
+            &created.tid,
+            EventAction::Push,
+            Vars::new()
+                .with("uses", USES_IRQ)
+                .with("params", Vars::new().with("key", "act2"))
+                .with("assign", json!({ "owner": "bob" })),
+        )
+        .await
+        .unwrap();
+    let pushed = fixture.wait_created("s1#push1").await;
+    assert_eq!(pushed.owner.as_deref(), Some("bob"));
+    assert_eq!(pushed.assignee.as_deref(), Some("bob"));
+    assert_eq!(pushed.rev, 0);
+    let options = pushed.options().expect("the pushed act options");
+    assert_eq!(options.get::<String>("owner").as_deref(), Some("bob"));
+
+    let assignment = assignment_of(&fixture, "s1#push1").await;
+    assert_eq!(assignment["owner"], json!("bob"));
+    assert_eq!(assignment["rev"], json!(0));
+
+    let refused = fixture
+        .engine()
+        .executor(&approved_user("mallory"))
+        .act()
+        .complete(&pushed.pid, &pushed.tid, Vars::new())
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("ENOTOWNER"),
+        "the pushed act admits only its own owner: {refused}"
+    );
+    fixture
+        .engine()
+        .executor(&approved_user("bob"))
+        .act()
+        .complete(&pushed.pid, &pushed.tid, Vars::new())
+        .await
+        .unwrap();
+    fixture.wait_state("s1#push1", TaskState::Completed).await;
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .complete(fixture.pid(), &created.tid, Vars::new().with("rev", 0))
+        .await
+        .unwrap();
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// A pushed non-human act (or an empty owner) fails at its start, naming the
+/// pushed node — the engine never produces an unowned or non-human approval.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_push_assign_is_refused_on_non_human_or_empty() {
+    for (uses, owner) in [(USES_SET, "bob"), (USES_IRQ, "")] {
+        let workflow = irq_workflow("flow-act-push-assign-refuse", "s1", "act1");
+        let mut fixture = FlowFixture::deploy(&workflow).await;
+        fixture.start(Vars::new()).await;
+        let created = fixture.wait_created("s1").await;
+        fixture
+            .act(
+                &created.pid,
+                &created.tid,
+                EventAction::Push,
+                Vars::new()
+                    .with("uses", uses)
+                    .with("params", Vars::new().with("a", 1))
+                    .with("assign", json!({ "owner": owner })),
+            )
+            .await
+            .unwrap();
+        let failed = fixture.wait_message("s1#push1", MessageState::Error).await;
+        let message = failed
+            .outputs
+            .get::<String>(consts::ACT_ERR_MESSAGE)
+            .unwrap_or_default();
+        assert!(
+            message.contains("s1#push1"),
+            "the refusal must name the pushed node: {message}"
+        );
+        assert_eq!(fixture.state("s1#push1").await, TaskState::Failed);
+        fixture.close().await;
+    }
 }

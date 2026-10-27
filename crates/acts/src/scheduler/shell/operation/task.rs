@@ -402,6 +402,11 @@ impl ActOperation for ExecuteTask {
                     if let Some(owner) = &assignment {
                         inject_payload_assignment(&mut payload, &Assignment::new(owner));
                     }
+                    // The message id is minted with the durable record, not
+                    // at delivery time: a later assignment notification
+                    // references the original act message by this id, and a
+                    // restart must not have to invent one.
+                    payload["msg_id"] = serde_json::Value::String(crate::utils::longid());
                     plan.outbox.push(
                         crate::scheduler::core::model::transition_plan::OutboxIntent {
                             key: format!(

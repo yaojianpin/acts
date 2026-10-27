@@ -502,7 +502,8 @@ impl Store {
 
     /// Whether the process still has a delivery that keeps it from being
     /// deleted. Only a row settled `Completed` (the task/message closed by
-    /// the engine) allows deletion — `Acked` is just an intermediate state
+    /// the engine) or `Superseded` (a transfer replaced its assignment)
+    /// allows deletion — `Acked` is just an intermediate state
     /// (the client confirmed receipt, the task may still need an action), and
     /// `Created`/`Delivered` (still being sent/retried) or `Error` (retries
     /// exhausted; only a manual resend/clear resolves it, the process must
@@ -520,7 +521,7 @@ impl Store {
             .filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
         Ok(self
             .deliveries()
-            .find_matching(&q, &|d| d.status != DeliveryStatus::Completed)
+            .find_matching(&q, &|d| !d.status.is_settled())
             .await?
             .is_some())
     }
@@ -597,7 +598,8 @@ impl Store {
     /// before the task closed, only a manual resend/clear resolves it
     /// (`resend_error_deliveries`/`clear_error_deliveries`), and erasing it
     /// would drop the failed delivery from view and let the process be swept
-    /// while the client never received the message.
+    /// while the client never received the message. A `Superseded` row is
+    /// already final and keeps its status.
     ///
     /// A concurrent transition of a row — the retry pass marking it `Error`,
     /// the client acking it — either lands before this read (the row is

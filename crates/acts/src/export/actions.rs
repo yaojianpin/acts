@@ -161,7 +161,7 @@ pub async fn apply_as(
     // again there, against the same principal — one policy, enforced at each
     // entry point, so a caller that reaches the executor directly is held to
     // exactly what this table would grant it.
-    principal.check(name).map_err(deny)?;
+    crate::acl::check_action(principal, name).map_err(deny)?;
 
     let executor = engine.executor(principal);
     match name {
@@ -212,6 +212,13 @@ pub async fn apply_as(
             let pid = pop(&mut options, "pid")?;
             let tid = pop(&mut options, "tid")?;
             value(executor.act().fail(&pid, &tid, options).await)
+        }
+        "act:transfer" => {
+            let pid = pop(&mut options, "pid")?;
+            let tid = pop(&mut options, "tid")?;
+            let to = pop(&mut options, "to")?;
+            options.set("to", to);
+            value(executor.act().transfer(&pid, &tid, options).await)
         }
         // model
         "model:ls" => {
@@ -1664,6 +1671,7 @@ mod tests {
             "act:back",
             "act:skip",
             "act:error",
+            "act:transfer",
         ] {
             let _ = apply(
                 &engine,

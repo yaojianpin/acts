@@ -87,7 +87,7 @@ pub const ANONYMOUS_ALLOW: &[&str] = &["model:ls", "model:get", "pack:get", "pac
 /// Every catalog group a user's `allow`/`deny` list may name, plus the
 /// catch-all. A token that matches none of them is a config error rather
 /// than a grant (or a denial) that silently does nothing.
-pub const CATALOG_GROUPS: &[&str] = &["read", "write", "deploy", "execute", "all"];
+pub const CATALOG_GROUPS: &[&str] = &["read", "write", "deploy", "execute", "assign", "all"];
 
 /// Why an operation was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,14 +322,18 @@ impl ScopePolicy {
 }
 
 /// The catalog (command group) an action belongs to — the `@category` of a
-/// user's `allow`/`deny` list. Four groups cover the action set, plus `all`:
+/// user's `allow`/`deny` list. Five groups cover the action set, plus `all`:
 ///
 /// - `read` — the catalogue and row reads, `acl:whoami`/`acl:getuser`/
 ///   `acl:users`, and `msg:sub` (a subscription is a read of the stream)
 /// - `deploy` — putting work into the catalogues: `model:deploy`,
 ///   `pack:publish`
 /// - `execute` — running and driving that work: `proc:start`,
-///   `proc:start_from_model`, `evt:start`, every `act:*`, and `msg:ack`
+///   `proc:start_from_model`, `evt:start`, the decision `act:*` actions, and
+///   `msg:ack`
+/// - `assign` — reassigning a human act: `act:transfer`. It is deliberately
+///   separate from `@execute`: running a flow must not imply moving someone
+///   else's approval, and a task's owner may transfer it without either grant.
 /// - `write` — changing or destroying stored state: every `*:rm`,
 ///   `msg:redo`/`msg:clear`, the snapshot feeds, and the user management —
 ///   plus `sys:status`, a read that is kept here on purpose (it echoes the
@@ -363,8 +367,26 @@ pub fn action_catalog(action: &str) -> &'static str {
         | "act:skip"
         | "act:error"
         | "msg:ack" => "execute",
+        // Reassigning an act is not running it: the capability is separate
+        // from `@execute` so a user who may drive a flow cannot move someone
+        // else's approval to themselves.
+        "act:transfer" => "assign",
         _ => "write",
     }
+}
+
+/// The request gate for one action.
+///
+/// Every action is decided by [`Principal::check`], except a per-task action
+/// (`act:transfer`, the `assign` group): its authority is the task's owner or
+/// the caller's `assign` capability, so an authenticated caller passes this
+/// global gate and the kernel decides on the task state. An unauthenticated
+/// caller has no identity the kernel could authorize and is refused here.
+pub fn check_action(principal: &Principal, action: &str) -> std::result::Result<(), AclError> {
+    if action_catalog(action) != "assign" || !principal.is_authenticated() {
+        principal.check(action)?;
+    }
+    Ok(())
 }
 
 /// A token that grants (or denies) everything: `@all`, `@*` or `*`.
@@ -398,7 +420,7 @@ fn split_tokens(
             {
                 return Err(ActError::Config(format!(
                     "acl user '{user}' has a {field} catalog token '@{pattern}' that names no \
-                     catalog group (read, write, deploy, execute, all)"
+                     catalog group (read, write, deploy, execute, assign, all)"
                 )));
             }
             catalogs.push(pattern.to_string());
@@ -897,6 +919,7 @@ mod tests {
         assert_eq!(action_catalog("proc:start"), "execute");
         assert_eq!(action_catalog("proc:start_from_model"), "execute");
         assert_eq!(action_catalog("act:complete"), "execute");
+        assert_eq!(action_catalog("act:transfer"), "assign");
         assert_eq!(action_catalog("msg:ack"), "execute");
         assert_eq!(action_catalog("model:rm"), "write");
         assert_eq!(action_catalog("snap:upsert"), "write");
@@ -936,6 +959,9 @@ mod tests {
         // a command pattern names one action of a group not granted
         principal.check("pack:publish").unwrap();
         assert!(principal.check("model:deploy").is_err());
+        // `@assign` is independent of `@execute`: this policy holds neither,
+        // and a transfer is out of reach.
+        assert!(principal.check("act:transfer").is_err());
         // @write denies every removal and feed, named or not
         assert!(principal.check("model:rm").is_err());
         assert!(principal.check("snap:upsert").is_err());
@@ -951,6 +977,49 @@ mod tests {
         let policy = principal.scope_policy();
         assert!(policy.allows("secrets", "operator"));
         assert!(!policy.allows("secrets", "someone-else"));
+    }
+
+    #[test]
+    fn assign_is_its_own_capability() {
+        let assigner = Principal::from_policy(&UserPolicy {
+            allow: vec!["@assign".to_string()],
+            ..policy("assigner")
+        })
+        .unwrap();
+        assigner.check("act:transfer").unwrap();
+        assert!(
+            assigner.check("act:complete").is_err(),
+            "@assign must not imply running acts"
+        );
+
+        let operator = Principal::from_policy(&UserPolicy {
+            allow: vec!["@execute".to_string()],
+            ..policy("operator")
+        })
+        .unwrap();
+        operator.check("act:complete").unwrap();
+        assert!(
+            operator.check("act:transfer").is_err(),
+            "@execute must not imply reassigning acts"
+        );
+    }
+
+    #[test]
+    fn per_task_actions_pass_the_global_gate_only_when_authenticated() {
+        let owner = Principal::from_policy(&policy("alice")).unwrap();
+        // An authenticated caller reaches the kernel's task check even with
+        // no command grant; an unauthenticated one has no identity to check.
+        check_action(&owner, "act:transfer").unwrap();
+        assert!(check_action(&owner, "act:complete").is_err());
+        assert!(check_action(&Principal::anonymous(), "act:transfer").is_err());
+
+        // A global grant still passes the gate; the kernel decides ownership.
+        let operator = Principal::from_policy(&UserPolicy {
+            allow: vec!["@execute".to_string()],
+            ..policy("operator")
+        })
+        .unwrap();
+        check_action(&operator, "act:transfer").unwrap();
     }
 
     #[test]

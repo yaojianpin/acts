@@ -44,6 +44,11 @@ pub enum DeliveryStatus {
     /// `Delivered` delivery only needs an ack (or the task close) to finish,
     /// a `Created` one still needs to be (re-)dispatched.
     Delivered = 4,
+    /// Superseded = 5: the delivery of an earlier assignment of the same act.
+    /// A transfer gives the act a new owner, so the previous owner's message
+    /// is history — it can be neither acked into a decision nor retired as a
+    /// completed delivery. Like `Completed` it is final and settled.
+    Superseded = 5,
 }
 
 /// Canonical emitted message — one row per message id. It records the message
@@ -180,6 +185,7 @@ impl fmt::Display for DeliveryStatus {
             DeliveryStatus::Completed => "completed",
             DeliveryStatus::Error => "error",
             DeliveryStatus::Delivered => "delivered",
+            DeliveryStatus::Superseded => "superseded",
         })
     }
 }
@@ -191,6 +197,7 @@ impl From<i8> for DeliveryStatus {
             2 => DeliveryStatus::Completed,
             3 => DeliveryStatus::Error,
             4 => DeliveryStatus::Delivered,
+            5 => DeliveryStatus::Superseded,
             _ => DeliveryStatus::Created,
         }
     }
@@ -204,7 +211,17 @@ impl From<DeliveryStatus> for i8 {
             DeliveryStatus::Completed => 2,
             DeliveryStatus::Error => 3,
             DeliveryStatus::Delivered => 4,
+            DeliveryStatus::Superseded => 5,
         }
+    }
+}
+
+impl DeliveryStatus {
+    /// Whether the row can never transition again, so it does not keep its
+    /// process alive. `Error` is deliberately not settled: only a manual
+    /// resend/clear resolves it.
+    pub fn is_settled(self) -> bool {
+        matches!(self, DeliveryStatus::Completed | DeliveryStatus::Superseded)
     }
 }
 
@@ -216,6 +233,7 @@ impl From<DeliveryStatus> for i64 {
             DeliveryStatus::Completed => 2,
             DeliveryStatus::Error => 3,
             DeliveryStatus::Delivered => 4,
+            DeliveryStatus::Superseded => 5,
         }
     }
 }
@@ -241,6 +259,9 @@ mod tests {
 
         let created: i8 = DeliveryStatus::Delivered.into();
         assert_eq!(created, 4);
+
+        let created: i8 = DeliveryStatus::Superseded.into();
+        assert_eq!(created, 5);
     }
 
     #[test]
@@ -260,6 +281,9 @@ mod tests {
         let created: DeliveryStatus = 4.into();
         assert_eq!(created, DeliveryStatus::Delivered);
 
+        let created: DeliveryStatus = 5.into();
+        assert_eq!(created, DeliveryStatus::Superseded);
+
         let created: DeliveryStatus = 100.into();
         assert_eq!(created, DeliveryStatus::Created);
     }
@@ -271,6 +295,11 @@ mod tests {
         assert_eq!(DeliveryStatus::Completed.to_string(), "completed");
         assert_eq!(DeliveryStatus::Error.to_string(), "error");
         assert_eq!(DeliveryStatus::Delivered.to_string(), "delivered");
+        assert_eq!(DeliveryStatus::Superseded.to_string(), "superseded");
+        assert!(DeliveryStatus::Superseded.is_settled());
+        assert!(DeliveryStatus::Completed.is_settled());
+        assert!(!DeliveryStatus::Acked.is_settled());
+        assert!(!DeliveryStatus::Error.is_settled());
     }
 
     fn message_json(v: i32, extra: bool) -> JsonValue {
@@ -381,6 +410,7 @@ mod tests {
             (DeliveryStatus::Completed, 2),
             (DeliveryStatus::Error, 3),
             (DeliveryStatus::Delivered, 4),
+            (DeliveryStatus::Superseded, 5),
         ];
         for (status, expected) in values {
             let as_i64: i64 = status.into();

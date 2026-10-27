@@ -43,6 +43,9 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         "task.aborted" => MessageState::Aborted,
         "task.skipped" => MessageState::Skipped,
         "task.removed" => MessageState::Removed,
+        // A transfer notification is an event of its own: the act is still
+        // waiting, so it carries the `created` state of a live message.
+        "assignment.transferred" => MessageState::Created,
         _ => return None,
     };
     let payload: serde_json::Value = serde_json::from_str(&record.payload).ok()?;
@@ -111,8 +114,18 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         }
     }
 
+    // The id the planning commit pinned, when the payload carries one: the
+    // message is then addressable before delivery, which is what an
+    // assignment notification's `ref_msg_id` points at. A record from an
+    // older kernel has none and keeps the delivery-time id.
+    let id = payload
+        .get("msg_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(crate::utils::longid);
+
     Some(Message {
-        id: crate::utils::longid(),
+        id,
         delivery_id: None,
         tid,
         name,

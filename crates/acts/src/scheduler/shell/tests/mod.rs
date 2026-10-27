@@ -10544,6 +10544,7 @@ async fn an_action_intent_that_is_already_closed_is_not_claimable() {
             inputs,
             None,
             None,
+            false,
             &mut pinned,
         )
         .await

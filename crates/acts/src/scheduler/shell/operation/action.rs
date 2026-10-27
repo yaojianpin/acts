@@ -143,6 +143,15 @@ impl KernelHost {
                 Ok(plan)
             }
             Some(kind) => {
+                // A client `Transfer` decides nothing: it rewrites the act's
+                // assignment and announces the new owner. The execution keeps
+                // its state, its id and its flow.
+                if matches!(
+                    kind,
+                    crate::scheduler::core::commit::command::ActionKind::Transfer
+                ) {
+                    return self.transfer_plan(snapshot, id, task_id, task, claim, &inputs);
+                }
                 // A client `Push` decides nothing on the target: it
                 // creates the pushed act under it. The target's own flow is
                 // untouched — the pushed act announces itself when it starts.
@@ -426,6 +435,119 @@ impl KernelHost {
         {
             plan.outbox[0].payload = payload.to_string();
         }
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    /// The plan of a client `Transfer`: rewrite the act's `__assignment`
+    /// and announce the new owner. No state change, no propagation and no new
+    /// execution are part of it — the act is still the same instance waiting
+    /// for its (new) owner's decision.
+    ///
+    /// The original `Created` message stays in the store as history; the new
+    /// `assignment.transferred` record points at it through the message id
+    /// the start commit pinned (`ref_msg_id`), so the reference survives a
+    /// restart instead of being invented at delivery time.
+    fn transfer_plan(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        id: &OperationId,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        task: &TaskSnapshot,
+        claim: &OperationCommit,
+        inputs: &[(String, String)],
+    ) -> Result<TransitionPlan> {
+        let input = |name: &str| {
+            inputs
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let node = task_id.node.as_str();
+        let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+            crate::ActError::Action(format!(
+                "ENOTOWNER: act '{node}' has no assignment to transfer"
+            ))
+        })?;
+        if task.state.is_terminal() {
+            return Err(crate::ActError::Action(format!(
+                "task('{node}') is not allowed to transfer"
+            )));
+        }
+        let to = input("to")
+            .map(str::trim)
+            .filter(|to| !to.is_empty())
+            .ok_or_else(|| {
+                crate::ActError::Action("cannot find 'to' in act:transfer".to_string())
+            })?;
+        if let Some(raw) = input("expect_rev") {
+            let expect = parse_expect_rev(raw)?;
+            if expect != assignment.rev {
+                return Err(crate::ActError::Action(format!(
+                    "EASSIGNMENT_CHANGED: act '{node}' assignment rev is {}, not {expect}",
+                    assignment.rev
+                )));
+            }
+        }
+        let by = input("updated_by").filter(|by| !by.trim().is_empty());
+        let next = assignment.transferred(to, by, crate::utils::time::time_millis());
+        let mut plan = self.task_operation_plan(
+            snapshot,
+            id,
+            task_id,
+            Some(task),
+            claim,
+            &format!("transferred.{}", next.rev),
+            "task.transferred",
+        )?;
+        plan.variable_writes.push(VariableWrite {
+            scope: task_id.clone(),
+            name: ASSIGNMENT_VAR.to_string(),
+            value: next.value(),
+        });
+        // A delegation belongs to the old owner's task; a transfer clears it
+        // so the old owner's delegatee cannot act on the new owner's behalf.
+        // The variable is P3's; writing `null` is harmless when it is absent
+        // and keeps a replayed state consistent.
+        if snapshot
+            .variables
+            .contains_key(&(task_id.clone(), "__delegation".to_string()))
+        {
+            plan.variable_writes.push(VariableWrite {
+                scope: task_id.clone(),
+                name: "__delegation".to_string(),
+                value: serde_json::Value::Null.to_string(),
+            });
+        }
+        let facts = act_facts(snapshot, task_id);
+        let mut payload = self
+            .operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
+            .ok_or_else(|| {
+                runtime(format!(
+                    "act '{node}' has no message payload for its transfer"
+                ))
+            })?;
+        payload["kind"] = serde_json::json!("assignment");
+        inject_payload_assignment(&mut payload, &next);
+        payload["ref_msg_id"] = created_message_id(snapshot, task_id)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null);
+        // The notification's own id is pinned now, in the durable record.
+        payload["msg_id"] = serde_json::Value::String(crate::utils::longid());
+        if let Some(reason) = input("reason").filter(|reason| !reason.is_empty()) {
+            payload["reason"] = serde_json::Value::String(reason.to_string());
+        }
+        plan.outbox.push(
+            crate::scheduler::core::model::transition_plan::OutboxIntent {
+                key: format!(
+                    "assignment.transferred:{}:{}:{}:{}",
+                    plan.process_id, node, task_id.generation, next.rev
+                ),
+                topic: "assignment.transferred".into(),
+                payload: payload.to_string(),
+            },
+        );
         plan.validate().map_err(runtime)?;
         Ok(plan)
     }
@@ -1494,8 +1616,24 @@ impl ActOperation for ApplyAction {
                 // such an action at the preflight; what reaches here is the
                 // stale auto operation a failure raced, which keeps the operation's
                 // own commit as its bare remainder.
+                // A transfer is not a state transition (`action_allowed`
+                // answers the state table), but it is admissible on exactly
+                // the live states a decision can reach: any other state means
+                // the intent lost to a decision and leaves the bare
+                // remainder.
+                let transfer_live = matches!(
+                    action,
+                    crate::scheduler::core::commit::command::ActionKind::Transfer
+                ) && matches!(
+                    task.state,
+                    crate::scheduler::core::model::task_graph::TaskState::Running
+                        | crate::scheduler::core::model::task_graph::TaskState::Waiting
+                );
                 if is_catch_decider(snapshot, task_id)
-                    || !crate::scheduler::core::commit::command::action_allowed(task.state, &action)
+                    || (!transfer_live
+                        && !crate::scheduler::core::commit::command::action_allowed(
+                            task.state, &action,
+                        ))
                 {
                     // The state moved past the decision while the intent was in
                     // flight (an earlier decision won, a cascade closed the
@@ -1690,6 +1828,7 @@ impl ActOperation for ApplyAction {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2585,6 +2724,73 @@ mod tests {
         };
         let outcome = ApplyAction.run(&host, &mut operation).await.unwrap();
         assert!(matches!(outcome, Outcome::Effect(Effect::Nothing)));
+    }
+
+    /// A durable transfer intent replays as the same assignment plan: the
+    /// execution keeps its state and operation set, and only `__assignment`
+    /// plus the assignment notification are written.
+    #[tokio::test]
+    async fn a_transfer_fact_replays_without_a_state_change() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("a")
+                .with_uses("acts.core.irq", crate::Vars::new())
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        snapshot.variables.insert(
+            (task_id.clone(), ASSIGNMENT_VAR.to_string()),
+            Assignment::new("alice").value(),
+        );
+        snapshot.variables.insert(
+            (task_id.clone(), action_fact_var(0)),
+            action_fact(
+                &ActionKind::Transfer,
+                &[
+                    ("to".to_string(), "bob".to_string()),
+                    ("expect_rev".to_string(), "0".to_string()),
+                    ("updated_by".to_string(), "manager".to_string()),
+                ],
+            ),
+        );
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let mut operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let outcome = ApplyAction.run(&host, &mut operation).await.unwrap();
+        assert!(
+            matches!(outcome, Outcome::Effect(Effect::Decision { .. })),
+            "a live transfer is a decision to replay"
+        );
+        let plan = ApplyAction.next(&host, &operation, outcome).await.unwrap();
+        assert!(plan.state_changes.is_empty());
+        assert!(plan.task_creates.is_empty());
+        assert!(plan.operations.is_empty());
+        assert!(
+            plan.outbox
+                .iter()
+                .any(|item| item.topic == "assignment.transferred")
+        );
+        let write = plan
+            .variable_writes
+            .iter()
+            .find(|write| write.name == ASSIGNMENT_VAR)
+            .expect("the replayed assignment write");
+        let assignment: serde_json::Value = serde_json::from_str(&write.value).unwrap();
+        assert_eq!(assignment["owner"], serde_json::json!("bob"));
+        assert_eq!(assignment["assignee"], serde_json::json!("bob"));
+        assert_eq!(assignment["rev"], serde_json::json!(1));
+        assert_eq!(assignment["transferred_from"], serde_json::json!("alice"));
+        assert_eq!(assignment["updated_by"], serde_json::json!("manager"));
     }
 
     /// A decision whose execution already moved past it is the bare

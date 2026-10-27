@@ -18,6 +18,11 @@ pub(crate) enum ActionKind {
     /// Remove — drop an act: the execution is decided `Removed` and its flow
     /// continues, exactly like the legacy `task.removed` walk.
     Remove,
+    /// Transfer — move an assigned human act's owner to another user without
+    /// deciding it. The plan writes only `__assignment` (and the assignment
+    /// notification); it never changes the task's state, never completes it
+    /// and never creates another execution.
+    Transfer,
 }
 
 pub(super) fn action_name(action: &ActionKind) -> &'static str {
@@ -31,5 +36,6 @@ pub(super) fn action_name(action: &ActionKind) -> &'static str {
         ActionKind::Fail { .. } => "failed",
         ActionKind::Push => "pushed",
         ActionKind::Remove => "removed",
+        ActionKind::Transfer => "transferred",
     }
 }

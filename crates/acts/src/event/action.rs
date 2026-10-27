@@ -20,6 +20,13 @@ pub struct Action {
     /// keeps the pre-assignment clients working.
     #[serde(default)]
     pub rev: Option<u64>,
+    /// Whether the server's ACL grants the caller the `assign` capability
+    /// (`@assign`, or an explicit `act:transfer` pattern). Computed by the
+    /// executor from the authenticated principal; it is never read from the
+    /// wire and never authorizes a decision itself — the kernel admits a
+    /// transfer by the task's owner *or* this capability.
+    #[serde(skip)]
+    pub can_assign: bool,
 }
 
 impl Action {
@@ -32,6 +39,7 @@ impl Action {
             options,
             subject: None,
             rev: None,
+            can_assign: false,
         }
     }
 
@@ -46,6 +54,12 @@ impl Action {
     /// [`Self::rev`]).
     pub fn with_rev(mut self, revision: Option<u64>) -> Self {
         self.rev = revision;
+        self
+    }
+
+    /// Carry the server-computed `assign` capability (see [`Self::can_assign`]).
+    pub fn with_can_assign(mut self, can_assign: bool) -> Self {
+        self.can_assign = can_assign;
         self
     }
 }

@@ -142,6 +142,25 @@ impl Runtime {
         self.writer.saturated()
     }
 
+    /// A committed transfer supersedes the deliveries of the act's previous
+    /// assignment: the old owner's message must stop being ackable. The
+    /// assignment's new revision is read back from the authoritative
+    /// aggregate; a failure to project it is logged, never turned into a
+    /// refusal of a transfer that already committed.
+    async fn settle_transfer_deliveries(&self, pid: &str, tid: &str) {
+        let rev = match self.kernel.assignment_rev(pid, tid).await {
+            Ok(Some(rev)) => rev,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(pid, tid, error = %error, "reading the transferred assignment failed");
+                return;
+            }
+        };
+        if let Err(error) = self.store().supersede_task_deliveries(pid, tid, rev).await {
+            warn!(pid, tid, rev, error = %error, "superseding the old assignment deliveries failed");
+        }
+    }
+
     /// Store one message's canonical row and one delivery row through the
     /// write-behind queue (see [`writebehind::store_delivery`]).
     pub(crate) async fn store_delivery(
@@ -402,7 +421,12 @@ impl Runtime {
     pub async fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         // The kernel serves the action: the aggregate is the record and
         // `apply_action` re-plans against its authoritative snapshot.
-        Self::kernel_action(&self.kernel, action).await
+        let result = Self::kernel_action(&self.kernel, action).await;
+        if result.is_ok() && matches!(&action.event, crate::event::EventAction::Transfer) {
+            self.settle_transfer_deliveries(&action.pid, &action.tid)
+                .await;
+        }
+        result
     }
 
     /// Apply one action to `tid` — the shape a test's message handler calls
@@ -437,8 +461,11 @@ impl Runtime {
             &action.tid,
             kind,
             inputs,
-            action.subject.as_deref(),
-            action.rev,
+            crate::scheduler::shell::ActionAttribution {
+                subject: action.subject.as_deref(),
+                rev: action.rev,
+                can_assign: action.can_assign,
+            },
         )
         .await
     }
@@ -489,6 +516,15 @@ impl Runtime {
                 K::Push
             }
             E::Remove => K::Remove,
+            E::Transfer => {
+                let to = action.options.get::<String>("to");
+                if to.as_deref().unwrap_or_default().trim().is_empty() {
+                    return Err(ActError::Action(
+                        "cannot find 'to' in act:transfer".to_string(),
+                    ));
+                }
+                K::Transfer
+            }
         };
         Ok(kind)
     }

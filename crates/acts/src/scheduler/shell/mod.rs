@@ -165,6 +165,28 @@ const ACTION_ATTEMPTS: usize = 8;
 const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
 
+/// The server-attributed facts one client action carries: the authenticated
+/// subject, the client's assignment revision, and whether its ACL grants the
+/// `assign` capability. Bundled so the action entry points keep one authority
+/// parameter instead of three loose ones.
+pub(crate) struct ActionAttribution<'a> {
+    pub(crate) subject: Option<&'a str>,
+    pub(crate) rev: Option<u64>,
+    pub(crate) can_assign: bool,
+}
+
+impl ActionAttribution<'_> {
+    /// The embedder/engine caller: no subject (ACL disabled or engine origin),
+    /// no revision and no assign capability.
+    pub(crate) fn none() -> Self {
+        Self {
+            subject: None,
+            rev: None,
+            can_assign: false,
+        }
+    }
+}
+
 /// What one quiescence pass did.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1404,12 +1426,12 @@ impl KernelHost {
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
     ) -> Result<()> {
-        self.apply_action_as(process_id, node, action, inputs, None, None)
+        self.apply_action_as(process_id, node, action, inputs, ActionAttribution::none())
             .await
     }
 
     /// The client path: the action plus the server-attributed subject and the
-    /// client's assignment revision. `subject = None` is the ACL-disabled (or
+    /// client's assignment revision. An absent subject is the ACL-disabled (or
     /// engine-originated) caller, which keeps the pre-assignment behavior;
     /// `rev` only guards an assigned task's revision.
     pub(crate) async fn apply_action_as(
@@ -1418,8 +1440,7 @@ impl KernelHost {
         node: &str,
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
-        subject: Option<&str>,
-        rev: Option<u64>,
+        authority: ActionAttribution<'_>,
     ) -> Result<()> {
         // The pid's command lane (A4) serializes this attempt against the
         // driver's operations and every other client of the same run, so the
@@ -1441,8 +1462,9 @@ impl KernelHost {
                     node,
                     action.clone(),
                     inputs.clone(),
-                    subject,
-                    rev,
+                    authority.subject,
+                    authority.rev,
+                    authority.can_assign,
                     &mut pinned,
                 )
                 .await
@@ -1757,6 +1779,7 @@ impl KernelHost {
         inputs: Vec<(String, String)>,
         subject: Option<&str>,
         rev: Option<u64>,
+        can_assign: bool,
         pinned: &mut Option<ActionIntent>,
     ) -> Result<()> {
         // A4: the whole attempt — load, preflight, durable intent, claim,
@@ -1778,12 +1801,24 @@ impl KernelHost {
         // one.
         let intent = Self::action_identity(&snapshot, process_id, node, &action, &inputs, pinned)?;
         let (task_id, operation_id) = (intent.task.clone(), intent.operation.clone());
-        // The per-task decision check: an act declaring an assignment admits
-        // only its owner/assignee, on the authoritative task state (never a
-        // client field). `subject = None` is the ACL-disabled/engine path and
-        // keeps the old `@execute` behavior. Push/remove keep their existing
+        // The per-task check: a declared assignment admits only its
+        // owner/assignee for a decision, and only its owner (or the `assign`
+        // capability) for a transfer, on the authoritative task state (never
+        // a client field). `subject = None` is the ACL-disabled/engine path
+        // and keeps the old behavior. Push/remove keep their existing
         // authority — they manage the act, not its decision.
-        if !matches!(
+        let transfer = matches!(
+            &action,
+            crate::scheduler::core::commit::command::ActionKind::Transfer
+        );
+        if transfer {
+            let state = snapshot
+                .tasks
+                .get(&task_id)
+                .map(|task| task.state)
+                .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
+            validate_transfer(&snapshot, &task_id, state, &inputs, subject, can_assign)?;
+        } else if !matches!(
             &action,
             crate::scheduler::core::commit::command::ActionKind::Push
                 | crate::scheduler::core::commit::command::ActionKind::Remove
@@ -1815,8 +1850,18 @@ impl KernelHost {
         };
 
         // Preflight against the current snapshot: a caller-correctable
-        // rejection (terminal task, unknown execution) consumes nothing.
-        ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
+        // rejection (terminal task, unknown execution) consumes nothing. A
+        // transfer has no state transition to plan: its envelope is the
+        // action's own commit, and `validate_transfer` above already decided
+        // the caller-correctable refusals.
+        if matches!(
+            command.action,
+            crate::scheduler::core::commit::command::ActionKind::Transfer
+        ) {
+            ActionPlanner::validate_command(&command).map_err(runtime)?;
+        } else {
+            ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
+        }
         // A `Back` without the step it names is the legacy refusal, checked
         // before the durable intent: the rewind target is the client's own
         // input, not something the kernel can invent.
@@ -2397,6 +2442,25 @@ impl KernelHost {
             .load(process_id)
             .await?
             .map(|loaded| std::sync::Arc::unwrap_or_clone(loaded.snapshot)))
+    }
+
+    /// The assignment revision of the newest execution addressed by `wire`,
+    /// when it declares one. The runtime reads it back after a committed
+    /// transfer to supersede the deliveries of the previous assignment.
+    pub(crate) async fn assignment_rev(&self, process_id: &str, wire: &str) -> Result<Option<u64>> {
+        let Some(snapshot) = self.snapshot(process_id).await? else {
+            return Ok(None);
+        };
+        let task = snapshot
+            .tasks
+            .keys()
+            .filter(|id| id.wire(process_id) == wire)
+            .max_by_key(|id| id.generation)
+            .cloned();
+        let Some(task) = task else {
+            return Ok(None);
+        };
+        Ok(Assignment::of(&snapshot, &task)?.map(|assignment| assignment.rev))
     }
 
     /// Whether the aggregate of `process_id` exists — the durable record of a
