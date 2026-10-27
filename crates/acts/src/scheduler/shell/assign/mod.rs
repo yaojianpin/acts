@@ -16,6 +16,12 @@ use super::*;
 /// only its projection.
 pub(super) const ASSIGNMENT_VAR: &str = "__assignment";
 
+/// The private execution variable carrying one human act's active delegation:
+/// `{"id","delegator","delegatee","granted_by","expires_at","reason"}`, or
+/// `null` once revoked. It is the authorization source for a delegatee; the
+/// message fields are only its projection.
+pub(super) const DELEGATION_VAR: &str = "__delegation";
+
 /// The assignment state of one human decision execution.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct Assignment {
@@ -63,6 +69,33 @@ impl Assignment {
         }
     }
 
+    /// The assignment a delegation to `delegatee` produces: the owner and the
+    /// audit trail stay, the assignee becomes the delegatee and the revision
+    /// advances. A delegation never moves the act's owner.
+    pub(super) fn delegated(&self, delegatee: &str, by: Option<&str>, now: i64) -> Self {
+        Self {
+            owner: self.owner.clone(),
+            assignee: delegatee.to_string(),
+            rev: self.rev.saturating_add(1),
+            transferred_from: self.transferred_from.clone(),
+            updated_by: by.map(str::to_string),
+            updated_at: now,
+        }
+    }
+
+    /// The assignment revoking a delegation produces: the owner becomes the
+    /// assignee again and the revision advances.
+    pub(super) fn revoked(&self, by: Option<&str>, now: i64) -> Self {
+        Self {
+            owner: self.owner.clone(),
+            assignee: self.owner.clone(),
+            rev: self.rev.saturating_add(1),
+            transferred_from: self.transferred_from.clone(),
+            updated_by: by.map(str::to_string),
+            updated_at: now,
+        }
+    }
+
     /// Read the assignment of one execution, when the act declares one.
     pub(super) fn of(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -75,23 +108,105 @@ impl Assignment {
     }
 }
 
-/// The per-task decision check: a declared assignment admits only its owner
-/// or assignee, and a decision carrying a revision must name the current one.
-/// No assignment (or no authenticated subject — ACL disabled) keeps the old
-/// `@execute` behavior.
+/// The per-task delegation of one human decision execution: at most one is
+/// active. The variable holds `null` after `act:undelegate` or a transfer, so
+/// an old delegatee is refused even though the scope keeps a record.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(super) struct Delegation {
+    #[serde(default)]
+    pub(super) id: String,
+    pub(super) delegator: String,
+    pub(super) delegatee: String,
+    #[serde(default)]
+    pub(super) granted_by: Option<String>,
+    #[serde(default)]
+    pub(super) expires_at: Option<i64>,
+    #[serde(default)]
+    pub(super) reason: Option<String>,
+}
+
+impl Delegation {
+    /// The delegation one `act:delegate` writes: the delegator is the current
+    /// owner (the engine's fact, never a client field) and `granted_by` is the
+    /// authenticated caller.
+    pub(super) fn new(
+        id: String,
+        delegator: &str,
+        delegatee: &str,
+        granted_by: Option<&str>,
+        expires_at: Option<i64>,
+        reason: Option<&str>,
+    ) -> Self {
+        Self {
+            id,
+            delegator: delegator.to_string(),
+            delegatee: delegatee.to_string(),
+            granted_by: granted_by.map(str::to_string),
+            expires_at,
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    /// Whether the delegation still admits the delegatee at `now`. An absent
+    /// `expires_at` never expires; expiry is checked when a decision is made,
+    /// never by a background sweep.
+    pub(super) fn is_valid(&self, now: i64) -> bool {
+        self.expires_at.is_none_or(|expires_at| now < expires_at)
+    }
+
+    /// The aggregate's JSON-text representation (a scope variable value).
+    pub(super) fn value(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "null".to_string())
+    }
+
+    /// Read the active delegation of one execution. A missing variable and the
+    /// persisted `null` both mean "no delegation"; a real record decodes.
+    pub(super) fn of(
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        task: &crate::scheduler::core::model::task_graph::TaskId,
+    ) -> Result<Option<Self>> {
+        let Some(raw) = task_variable(snapshot, task, DELEGATION_VAR) else {
+            return Ok(None);
+        };
+        serde_json::from_str::<Option<Self>>(raw).map_err(runtime)
+    }
+}
+
+/// The per-task decision check: a declared assignment admits only its owner,
+/// or a delegatee whose delegation is still valid at `now`; a decision
+/// carrying a revision must name the current one. No assignment (or no
+/// authenticated subject — ACL disabled) keeps the old `@execute` behavior.
+///
+/// An expired delegation is a refusal that names the act and the expiry, never
+/// a silent fallback to the assignee: the assignee *is* the expired delegatee
+/// until the decision is refused.
 pub(super) fn authorize_decision(
     assignment: Option<&Assignment>,
+    delegation: Option<&Delegation>,
     subject: Option<&str>,
     rev: Option<u64>,
     node: &str,
+    now: i64,
 ) -> Result<()> {
     let (Some(assignment), Some(subject)) = (assignment, subject) else {
         return Ok(());
     };
-    if subject != assignment.owner && subject != assignment.assignee {
-        return Err(crate::ActError::Action(format!(
-            "ENOTOWNER: user '{subject}' is not the owner or assignee of act '{node}'"
-        )));
+    if subject != assignment.owner {
+        let active = delegation.filter(|delegation| delegation.delegatee == subject);
+        match active {
+            Some(delegation) if delegation.is_valid(now) => {}
+            Some(delegation) => {
+                return Err(crate::ActError::Action(format!(
+                    "ENOTOWNER: the delegation of act '{node}' to '{subject}' expired at {}",
+                    delegation.expires_at.unwrap_or_default()
+                )));
+            }
+            None => {
+                return Err(crate::ActError::Action(format!(
+                    "ENOTOWNER: user '{subject}' is not the owner or an active delegatee of act '{node}'"
+                )));
+            }
+        }
     }
     if let Some(rev) = rev
         && rev != assignment.rev
@@ -104,15 +219,16 @@ pub(super) fn authorize_decision(
     Ok(())
 }
 
-/// The per-task transfer check: the current owner, or a caller holding the
-/// `assign` capability. A task without an assignment has no owner to move,
-/// so an authenticated caller is refused rather than silently allowed. ACL
-/// disabled (no subject) keeps the old behavior; the plan itself still
-/// refuses an unassigned act.
-pub(super) fn authorize_transfer(
+/// The per-task assignment-change check (transfer, delegate, undelegate): the
+/// current owner, or a caller holding the `assign` capability. A task without
+/// an assignment has no owner to move, so an authenticated caller is refused
+/// rather than silently allowed. ACL disabled (no subject) keeps the old
+/// behavior; the plan itself still refuses an unassigned act.
+pub(super) fn authorize_assignment_change(
     assignment: Option<&Assignment>,
     subject: Option<&str>,
     can_assign: bool,
+    action: &str,
     node: &str,
 ) -> Result<()> {
     let Some(subject) = subject else {
@@ -120,7 +236,7 @@ pub(super) fn authorize_transfer(
     };
     let Some(assignment) = assignment else {
         return Err(crate::ActError::Action(format!(
-            "ENOTOWNER: act '{node}' has no assignment to transfer"
+            "ENOTOWNER: act '{node}' has no assignment to {action}"
         )));
     };
     if subject == assignment.owner || can_assign {
@@ -156,7 +272,7 @@ pub(super) fn validate_transfer(
             "ENOTOWNER: act '{node}' has no assignment to transfer"
         ))
     })?;
-    authorize_transfer(Some(&assignment), subject, can_assign, node)?;
+    authorize_assignment_change(Some(&assignment), subject, can_assign, "transfer", node)?;
     if state.is_terminal() {
         return Err(crate::ActError::Action(format!(
             "task('{node}') is not allowed to transfer"
@@ -184,6 +300,122 @@ pub(super) fn validate_transfer(
         }
     }
     Ok(())
+}
+
+/// The caller-correctable checks a delegation must pass before any durable
+/// intent exists: the act is assigned, the caller owns it (or holds the
+/// capability), the delegatee is named, an explicit `expires_at` parses, and
+/// the client's revision — when present — names the current one. The
+/// delegatee is a *business* user, never an access-control user: the engine
+/// checks that it is named and then admits it as the act's delegatee, and the
+/// calling system owns `enabled` and business-permission checks.
+pub(super) fn validate_delegate(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    state: crate::scheduler::core::model::task_graph::TaskState,
+    inputs: &[(String, String)],
+    subject: Option<&str>,
+    can_assign: bool,
+    rev: Option<u64>,
+) -> Result<()> {
+    let node = task_id.node.as_str();
+    let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+        crate::ActError::Action(format!(
+            "ENOTOWNER: act '{node}' has no assignment to delegate"
+        ))
+    })?;
+    authorize_assignment_change(Some(&assignment), subject, can_assign, "delegate", node)?;
+    if state.is_terminal() {
+        return Err(crate::ActError::Action(format!(
+            "task('{node}') is not allowed to delegate"
+        )));
+    }
+    let input = |name: &str| {
+        inputs
+            .iter()
+            .rev()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    input("delegatee")
+        .map(str::trim)
+        .filter(|delegatee| !delegatee.is_empty())
+        .ok_or_else(|| {
+            crate::ActError::Action("cannot find 'delegatee' in act:delegate".to_string())
+        })?;
+    if let Some(raw) = input("expires_at")
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    {
+        parse_expires_at(raw)?;
+    }
+    compare_rev(&assignment, rev, node)
+}
+
+/// The caller-correctable checks an undelegation must pass: the act is
+/// assigned, the caller owns it (or holds the capability), an active
+/// delegation exists, the act is not terminal and the revision matches.
+pub(super) fn validate_undelegate(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    state: crate::scheduler::core::model::task_graph::TaskState,
+    subject: Option<&str>,
+    can_assign: bool,
+    rev: Option<u64>,
+) -> Result<()> {
+    let node = task_id.node.as_str();
+    let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+        crate::ActError::Action(format!(
+            "ENOTOWNER: act '{node}' has no assignment to undelegate"
+        ))
+    })?;
+    authorize_assignment_change(Some(&assignment), subject, can_assign, "undelegate", node)?;
+    if state.is_terminal() {
+        return Err(crate::ActError::Action(format!(
+            "task('{node}') is not allowed to undelegate"
+        )));
+    }
+    Delegation::of(snapshot, task_id)?.ok_or_else(|| {
+        crate::ActError::Action(format!(
+            "ENODELEGATION: act '{node}' has no active delegation to revoke"
+        ))
+    })?;
+    compare_rev(&assignment, rev, node)
+}
+
+/// The client's revision, when it named one, must be the current assignment
+/// revision: a decision racing a transfer/delegation gets a refusal naming the
+/// revision it actually holds.
+pub(super) fn compare_rev(assignment: &Assignment, rev: Option<u64>, node: &str) -> Result<()> {
+    if let Some(rev) = rev
+        && rev != assignment.rev
+    {
+        return Err(crate::ActError::Action(format!(
+            "EASSIGNMENT_CHANGED: act '{node}' assignment rev is {}, not {rev}",
+            assignment.rev
+        )));
+    }
+    Ok(())
+}
+
+/// Parse a delegation's optional `expires_at` (a JSON number or numeric string,
+/// the shapes the transports carry). A malformed value is refused before
+/// anything durable exists; the decision path later compares it with its own
+/// clock.
+pub(super) fn parse_expires_at(raw: &str) -> Result<i64> {
+    let raw = raw.trim();
+    raw.parse::<i64>()
+        .or_else(|_| {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| match value {
+                    serde_json::Value::Number(number) => number.as_i64(),
+                    serde_json::Value::String(text) => text.parse().ok(),
+                    _ => None,
+                })
+                .ok_or(())
+        })
+        .map_err(|_| crate::ActError::Action(format!("invalid expires_at '{raw}' in act:delegate")))
 }
 
 /// Parse a transfer's `expect_rev` (a JSON number or numeric string, the
@@ -444,6 +676,64 @@ pub(super) fn inject_payload_assignment(payload: &mut serde_json::Value, assignm
         inputs.insert(
             "options".to_string(),
             options_with_assignment(options, assignment),
+        );
+    }
+}
+
+/// Project an active delegation's delegator/delegatee onto a payload that
+/// already carries the assignment fields. The owner and assignee stay what
+/// [`inject_payload_assignment`] wrote.
+pub(super) fn inject_payload_delegation(
+    payload: &mut serde_json::Value,
+    delegator: &str,
+    delegatee: &str,
+) {
+    payload["delegator"] = serde_json::Value::String(delegator.to_string());
+    payload["delegatee"] = serde_json::Value::String(delegatee.to_string());
+}
+
+/// Project a decided act's assignment with the decision's attribution: an
+/// owner's decision records the owner as the assignee; a delegatee's records
+/// it as the assignee and the delegation's delegator/delegatee. An unattributed
+/// decision (ACL disabled, engine origin) keeps the assignment's own assignee.
+/// The subject is the durable fact the action recorded, never a client field.
+pub(super) fn inject_decision_assignment(
+    payload: &mut serde_json::Value,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    subject: Option<&str>,
+) -> Result<()> {
+    let Some(assignment) = Assignment::of(snapshot, task_id)? else {
+        return Ok(());
+    };
+    inject_payload_assignment(payload, &assignment);
+    let Some(subject) = subject else {
+        return Ok(());
+    };
+    if subject == assignment.owner {
+        // The owner decides for themselves, even while a delegation is
+        // active: the decision is the owner's, not the delegatee's.
+        set_payload_assignee(payload, &assignment.owner);
+    } else if let Some(delegation) = Delegation::of(snapshot, task_id)?
+        && delegation.delegatee == subject
+    {
+        inject_payload_delegation(payload, &delegation.delegator, subject);
+    }
+    Ok(())
+}
+
+/// Rewrite the assignee (top-level field and its `inputs.options` copy) on a
+/// payload whose owner/rev are already projected.
+fn set_payload_assignee(payload: &mut serde_json::Value, assignee: &str) {
+    payload["assignee"] = serde_json::Value::String(assignee.to_string());
+    if let Some(options) = payload
+        .get_mut("inputs")
+        .and_then(|inputs| inputs.get_mut("options"))
+        .and_then(|options| options.as_object_mut())
+    {
+        options.insert(
+            "assignee".to_string(),
+            serde_json::Value::String(assignee.to_string()),
         );
     }
 }

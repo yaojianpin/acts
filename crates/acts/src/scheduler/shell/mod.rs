@@ -1475,7 +1475,10 @@ impl KernelHost {
                         return Err(error);
                     }
                     if let Some(intent) = &pinned {
-                        match self.resume_action_intent(intent, &action, &inputs).await? {
+                        match self
+                            .resume_action_intent(intent, &action, &inputs, authority.subject)
+                            .await?
+                        {
                             ActionResume::Applied => return Ok(()),
                             ActionResume::Retry => {}
                         }
@@ -1579,10 +1582,11 @@ impl KernelHost {
         node: &str,
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
+        subject: Option<&str>,
         pinned: &mut Option<ActionIntent>,
     ) -> Result<ActionIntent> {
         if let Some(intent) = pinned.as_ref()
-            && Self::action_intent_is_mine(snapshot, intent, action, inputs)
+            && Self::action_intent_is_mine(snapshot, intent, action, inputs, subject)
         {
             return Ok(ActionIntent {
                 task: intent.task.clone(),
@@ -1661,6 +1665,7 @@ impl KernelHost {
         intent: &ActionIntent,
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
+        subject: Option<&str>,
     ) -> bool {
         snapshot.operations.contains_key(&intent.operation)
             && snapshot
@@ -1669,7 +1674,7 @@ impl KernelHost {
                     intent.task.clone(),
                     action_fact_var(intent.operation.sequence),
                 ))
-                .is_some_and(|fact| fact == &action_fact(action, inputs))
+                .is_some_and(|fact| fact == &action_fact(action, inputs, subject))
     }
 
     /// The durable intent of one client action: the `ApplyAction` operation
@@ -1683,6 +1688,7 @@ impl KernelHost {
         operation: &OperationId,
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
+        subject: Option<&str>,
         expected: crate::scheduler::core::model::transition_plan::ProcessVersion,
     ) -> TransitionPlan {
         TransitionPlan {
@@ -1693,7 +1699,7 @@ impl KernelHost {
             variable_writes: vec![VariableWrite {
                 scope: task.clone(),
                 name: action_fact_var(operation.sequence),
-                value: action_fact(action, inputs),
+                value: action_fact(action, inputs, subject),
             }],
             source_operation: None,
             operations: vec![OperationIntent {
@@ -1721,6 +1727,7 @@ impl KernelHost {
         intent: &ActionIntent,
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
+        subject: Option<&str>,
     ) -> Result<ActionResume> {
         // A4: the release below is a command on the same pid — it takes the
         // lane; the operation revision it carries stays the fence.
@@ -1728,7 +1735,7 @@ impl KernelHost {
         let Some(snapshot) = self.load(&intent.operation.process_id).await? else {
             return Ok(ActionResume::Retry);
         };
-        if !Self::action_intent_is_mine(&snapshot.snapshot, intent, action, inputs) {
+        if !Self::action_intent_is_mine(&snapshot.snapshot, intent, action, inputs, subject) {
             return Ok(ActionResume::Retry);
         }
         let Some(operation) = snapshot.snapshot.operations.get(&intent.operation) else {
@@ -1799,34 +1806,54 @@ impl KernelHost {
         // so a concurrent client action can hold the same one, and resuming a
         // foreign operation would report the other client's outcome to this
         // one.
-        let intent = Self::action_identity(&snapshot, process_id, node, &action, &inputs, pinned)?;
+        let intent = Self::action_identity(
+            &snapshot, process_id, node, &action, &inputs, subject, pinned,
+        )?;
         let (task_id, operation_id) = (intent.task.clone(), intent.operation.clone());
-        // The per-task check: a declared assignment admits only its
-        // owner/assignee for a decision, and only its owner (or the `assign`
-        // capability) for a transfer, on the authoritative task state (never
-        // a client field). `subject = None` is the ACL-disabled/engine path
-        // and keeps the old behavior. Push/remove keep their existing
-        // authority — they manage the act, not its decision.
-        let transfer = matches!(
-            &action,
-            crate::scheduler::core::commit::command::ActionKind::Transfer
-        );
-        if transfer {
+        // The per-task check: a declared assignment admits only its owner or
+        // an active delegatee for a decision, and only its owner (or the
+        // `assign` capability) for a transfer/delegate/undelegate, on the
+        // authoritative task state (never a client field). `subject = None` is
+        // the ACL-disabled/engine path and keeps the old behavior. Push/remove
+        // keep their existing authority — they manage the act, not its
+        // decision.
+        let now = SystemClock.now_ms();
+        if action.moves_assignment() {
             let state = snapshot
                 .tasks
                 .get(&task_id)
                 .map(|task| task.state)
                 .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
-            validate_transfer(&snapshot, &task_id, state, &inputs, subject, can_assign)?;
+            match &action {
+                crate::scheduler::core::commit::command::ActionKind::Transfer => {
+                    validate_transfer(&snapshot, &task_id, state, &inputs, subject, can_assign)?;
+                }
+                crate::scheduler::core::commit::command::ActionKind::Delegate => {
+                    validate_delegate(
+                        &snapshot, &task_id, state, &inputs, subject, can_assign, rev,
+                    )?;
+                }
+                crate::scheduler::core::commit::command::ActionKind::Undelegate => {
+                    validate_undelegate(&snapshot, &task_id, state, subject, can_assign, rev)?;
+                }
+                _ => unreachable!("moves_assignment names exactly the assignment actions"),
+            }
         } else if !matches!(
             &action,
             crate::scheduler::core::commit::command::ActionKind::Push
                 | crate::scheduler::core::commit::command::ActionKind::Remove
         ) {
             let assignment = Assignment::of(&snapshot, &task_id)?;
-            authorize_decision(assignment.as_ref(), subject, rev, task_id.node.as_str())?;
+            let delegation = Delegation::of(&snapshot, &task_id)?;
+            authorize_decision(
+                assignment.as_ref(),
+                delegation.as_ref(),
+                subject,
+                rev,
+                task_id.node.as_str(),
+                now,
+            )?;
         }
-        let now = SystemClock.now_ms();
         // The preflight envelope: `ActionPlanner` validates the whole command —
         // identity and sequence included — before the durable intent exists, so
         // a caller-correctable refusal consumes nothing. The claim on this
@@ -1850,14 +1877,12 @@ impl KernelHost {
         };
 
         // Preflight against the current snapshot: a caller-correctable
-        // rejection (terminal task, unknown execution) consumes nothing. A
-        // transfer has no state transition to plan: its envelope is the
-        // action's own commit, and `validate_transfer` above already decided
-        // the caller-correctable refusals.
-        if matches!(
-            command.action,
-            crate::scheduler::core::commit::command::ActionKind::Transfer
-        ) {
+        // rejection (terminal task, unknown execution) consumes nothing. An
+        // assignment change (transfer/delegate/undelegate) has no state
+        // transition to plan: its envelope is the action's own commit, and
+        // the per-task validation above already decided the caller-correctable
+        // refusals.
+        if command.action.moves_assignment() {
             ActionPlanner::validate_command(&command).map_err(runtime)?;
         } else {
             ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
@@ -1910,13 +1935,20 @@ impl KernelHost {
         // retry whose intent already landed goes straight to the claim, and an
         // operation already standing at the id (a racer's, or our own from a
         // released attempt) is a retryable race, never a domain error.
-        if !Self::action_intent_is_mine(&snapshot, &intent, &command.action, &command.inputs) {
+        if !Self::action_intent_is_mine(
+            &snapshot,
+            &intent,
+            &command.action,
+            &command.inputs,
+            subject,
+        ) {
             let plan = Self::action_intent(
                 process_id,
                 &task_id,
                 &operation_id,
                 &command.action,
                 &command.inputs,
+                subject,
                 snapshot.version.clone(),
             );
             match self

@@ -331,9 +331,10 @@ impl ScopePolicy {
 /// - `execute` — running and driving that work: `proc:start`,
 ///   `proc:start_from_model`, `evt:start`, the decision `act:*` actions, and
 ///   `msg:ack`
-/// - `assign` — reassigning a human act: `act:transfer`. It is deliberately
-///   separate from `@execute`: running a flow must not imply moving someone
-///   else's approval, and a task's owner may transfer it without either grant.
+/// - `assign` — managing who decides a human act: `act:transfer`,
+///   `act:delegate`, `act:undelegate`. It is deliberately separate from
+///   `@execute`: running a flow must not imply moving someone else's approval,
+///   and a task's owner may manage its assignment without either grant.
 /// - `write` — changing or destroying stored state: every `*:rm`,
 ///   `msg:redo`/`msg:clear`, the snapshot feeds, and the user management —
 ///   plus `sys:status`, a read that is kept here on purpose (it echoes the
@@ -369,8 +370,9 @@ pub fn action_catalog(action: &str) -> &'static str {
         | "msg:ack" => "execute",
         // Reassigning an act is not running it: the capability is separate
         // from `@execute` so a user who may drive a flow cannot move someone
-        // else's approval to themselves.
-        "act:transfer" => "assign",
+        // else's approval to themselves. Delegating and revoking a delegation
+        // are the same management surface.
+        "act:transfer" | "act:delegate" | "act:undelegate" => "assign",
         _ => "write",
     }
 }
@@ -920,6 +922,8 @@ mod tests {
         assert_eq!(action_catalog("proc:start_from_model"), "execute");
         assert_eq!(action_catalog("act:complete"), "execute");
         assert_eq!(action_catalog("act:transfer"), "assign");
+        assert_eq!(action_catalog("act:delegate"), "assign");
+        assert_eq!(action_catalog("act:undelegate"), "assign");
         assert_eq!(action_catalog("msg:ack"), "execute");
         assert_eq!(action_catalog("model:rm"), "write");
         assert_eq!(action_catalog("snap:upsert"), "write");

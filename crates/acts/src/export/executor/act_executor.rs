@@ -22,6 +22,10 @@ pub(crate) const PUSH: &str = "act:push";
 pub(crate) const REMOVE: &str = "act:remove";
 /// `act:transfer` — move an assigned act's owner to another user.
 pub(crate) const TRANSFER: &str = "act:transfer";
+/// `act:delegate` — let another user decide an assigned act for its owner.
+pub(crate) const DELEGATE: &str = "act:delegate";
+/// `act:undelegate` — revoke an assigned act's delegation.
+pub(crate) const UNDELEGATE: &str = "act:undelegate";
 
 #[derive(Clone)]
 pub struct ActExecutor {
@@ -91,6 +95,30 @@ impl ActExecutor {
             .await
     }
 
+    /// `act:delegate {pid,tid,delegatee,expires_at,reason}` — let another
+    /// business user decide the act for its owner. The owner-or-`assign`
+    /// authorization runs in the kernel on the task's state.
+    pub async fn delegate(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        let delegatee = options
+            .get::<String>("delegatee")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if delegatee.is_empty() {
+            return Err(crate::ActError::Action(
+                "cannot find 'delegatee' in act:delegate".to_string(),
+            ));
+        }
+        self.do_action(pid, tid, EventAction::Delegate, options)
+            .await
+    }
+
+    /// `act:undelegate {pid,tid}` — revoke the act's delegation.
+    pub async fn undelegate(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Undelegate, options)
+            .await
+    }
+
     /// Run one task action. The action the caller names is the action the
     /// principal is checked against — the wrappers above are spellings of the
     /// same check, never a way around it.
@@ -102,37 +130,45 @@ impl ActExecutor {
         mut options: Vars,
     ) -> Result<()> {
         let name = name_of(&action);
-        let is_transfer = matches!(action, EventAction::Transfer);
-        // The shared ACL gate: a per-task action (`act:transfer`) passes for
-        // an authenticated caller and is decided by the kernel on the task;
-        // every other action keeps its global command check. An
-        // unauthenticated transfer is refused here.
+        let moves_assignment = matches!(
+            action,
+            EventAction::Transfer | EventAction::Delegate | EventAction::Undelegate
+        );
+        // The shared ACL gate: a per-task action (`act:transfer`,
+        // `act:delegate`, `act:undelegate`) passes for an authenticated caller
+        // and is decided by the kernel on the task; every other action keeps
+        // its global command check. An unauthenticated assignment change is
+        // refused here.
         crate::acl::check_action(&self.principal, name)?;
         // The capability is computed from the same policy the global check
-        // would apply: `@assign` (or an explicit `act:transfer`) grants it
-        // without `@execute`, and a `deny` still wins.
-        let can_assign = is_transfer && self.principal.check(name).is_ok();
+        // would apply: `@assign` (or an explicit action) grants it without
+        // `@execute`, and a `deny` still wins.
+        let can_assign = moves_assignment && self.principal.check(name).is_ok();
         // The assignment revision is the client's compare value, not state:
         // it rides the action envelope and never becomes a task variable. The
-        // person fields are task state; a client's copies are discarded. The
-        // audit name is server-attributed (`updated_by`), never trusted from
-        // the request.
+        // person and audit fields are task state, never trusted from the
+        // request: the caller is the server-attributed subject the action
+        // fact persists.
         let rev = take_rev(&mut options)?;
-        for name in [
+        let mut person_fields = vec![
             "owner",
             "assignee",
             "delegator",
-            "delegatee",
             "subject",
             "updated_by",
-        ] {
+            "granted_by",
+        ];
+        // `delegatee` is the delegate action's *target* (the caller's own
+        // choice, like a transfer's `to`), not a claim about the task's
+        // current state: every other action's copy is discarded.
+        if !matches!(action, EventAction::Delegate) {
+            person_fields.push("delegatee");
+        }
+        for name in person_fields {
             let _ = options.remove(name);
         }
         let subject = (self.principal.is_authenticated() && !self.principal.is_unrestricted())
             .then(|| self.principal.subject().to_string());
-        if is_transfer && let Some(subject) = &subject {
-            options.set("updated_by", subject.clone());
-        }
         let action = Action::new(pid, tid, action, options)
             .with_subject(subject)
             .with_rev(rev)
@@ -171,6 +207,8 @@ fn name_of(action: &EventAction) -> &'static str {
         EventAction::Push => PUSH,
         EventAction::Remove => REMOVE,
         EventAction::Transfer => TRANSFER,
+        EventAction::Delegate => DELEGATE,
+        EventAction::Undelegate => UNDELEGATE,
     }
 }
 
@@ -193,6 +231,8 @@ mod tests {
             (EventAction::Push, "act:push"),
             (EventAction::Remove, "act:remove"),
             (EventAction::Transfer, "act:transfer"),
+            (EventAction::Delegate, "act:delegate"),
+            (EventAction::Undelegate, "act:undelegate"),
         ] {
             assert_eq!(name_of(&action), name);
         }

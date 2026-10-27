@@ -175,9 +175,14 @@ pub(super) fn pushed_act_of(
 }
 
 /// The action a durable intent carries, as the JSON text its operation replays.
+/// `subject` is the server-attributed decision maker (the executor's fill): it
+/// is persisted here because a replayed decision must announce the same
+/// owner/assignee/delegator/delegatee as the original call — replay has no
+/// authenticated caller to consult. It is never read from the client.
 pub(super) fn action_fact(
     action: &crate::scheduler::core::commit::command::ActionKind,
     inputs: &[(String, String)],
+    subject: Option<&str>,
 ) -> String {
     use crate::scheduler::core::commit::command::ActionKind as A;
     let kind = match action {
@@ -195,9 +200,12 @@ pub(super) fn action_fact(
         A::Push => serde_json::json!({ "action": "push" }),
         A::Remove => serde_json::json!({ "action": "remove" }),
         A::Transfer => serde_json::json!({ "action": "transfer" }),
+        A::Delegate => serde_json::json!({ "action": "delegate" }),
+        A::Undelegate => serde_json::json!({ "action": "undelegate" }),
     };
     serde_json::json!({
         "kind": kind,
+        "subject": subject,
         "inputs": inputs
             .iter()
             .map(|(name, value)| serde_json::json!([name, value]))
@@ -206,13 +214,16 @@ pub(super) fn action_fact(
     .to_string()
 }
 
-/// Decode a durable action fact back into the decision it records.
-pub(super) fn decode_action_fact(
-    text: &str,
-) -> Result<(
+/// A decoded durable action fact: the action, its inputs, and the
+/// server-attributed subject (absent on facts an older kernel wrote).
+pub(super) type DecodedActionFact = (
     crate::scheduler::core::commit::command::ActionKind,
     Vec<(String, String)>,
-)> {
+    Option<String>,
+);
+
+/// Decode a durable action fact back into the decision it records.
+pub(super) fn decode_action_fact(text: &str) -> Result<DecodedActionFact> {
     let fact: serde_json::Value = serde_json::from_str(text)
         .map_err(|error| runtime(format!("corrupt action fact: {error}")))?;
     let kind = &fact["kind"];
@@ -230,6 +241,8 @@ pub(super) fn decode_action_fact(
         "push" => crate::scheduler::core::commit::command::ActionKind::Push,
         "remove" => crate::scheduler::core::commit::command::ActionKind::Remove,
         "transfer" => crate::scheduler::core::commit::command::ActionKind::Transfer,
+        "delegate" => crate::scheduler::core::commit::command::ActionKind::Delegate,
+        "undelegate" => crate::scheduler::core::commit::command::ActionKind::Undelegate,
         other => return Err(runtime(format!("corrupt action fact: action '{other}'"))),
     };
     let inputs = fact["inputs"]
@@ -247,7 +260,8 @@ pub(super) fn decode_action_fact(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Ok((action, inputs))
+    let subject = fact["subject"].as_str().map(str::to_string);
+    Ok((action, inputs, subject))
 }
 
 #[cfg(test)]
@@ -277,11 +291,18 @@ mod tests {
             ActionKind::Push,
             ActionKind::Remove,
             ActionKind::Transfer,
+            ActionKind::Delegate,
+            ActionKind::Undelegate,
         ] {
-            let text = action_fact(&action, &inputs);
-            let (decoded, decoded_inputs) = decode_action_fact(&text).unwrap();
+            let text = action_fact(&action, &inputs, Some("alice"));
+            let (decoded, decoded_inputs, subject) = decode_action_fact(&text).unwrap();
             assert_eq!(decoded, action);
             assert_eq!(decoded_inputs, inputs);
+            assert_eq!(subject.as_deref(), Some("alice"));
+            // An unattributed fact (the engine origin) decodes without one.
+            let text = action_fact(&action, &inputs, None);
+            let (_, _, subject) = decode_action_fact(&text).unwrap();
+            assert_eq!(subject, None);
         }
         assert_eq!(action_fact_var(7), "__action@7");
     }
@@ -305,7 +326,8 @@ mod tests {
     #[test]
     fn malformed_input_pairs_are_skipped() {
         let text = r#"{"kind":{"action":"fail","code":"E"},"inputs":["x",["only-name"],[1,2],["ok","1"]]}"#;
-        let (action, inputs) = decode_action_fact(text).unwrap();
+        let (action, inputs, subject) = decode_action_fact(text).unwrap();
+        assert_eq!(subject, None);
         assert_eq!(
             action,
             ActionKind::Fail {
@@ -315,7 +337,9 @@ mod tests {
         );
         assert_eq!(inputs, vec![("ok".to_string(), "1".to_string())]);
 
-        let (_, inputs) = decode_action_fact(r#"{"kind":{"action":"skip"},"inputs":7}"#).unwrap();
+        let (_, inputs, subject) =
+            decode_action_fact(r#"{"kind":{"action":"skip"},"inputs":7}"#).unwrap();
         assert!(inputs.is_empty());
+        assert_eq!(subject, None);
     }
 }

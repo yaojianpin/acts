@@ -23,6 +23,23 @@ pub(crate) enum ActionKind {
     /// notification); it never changes the task's state, never completes it
     /// and never creates another execution.
     Transfer,
+    /// Delegate — let a business user decide the act for its owner until the
+    /// delegation expires or is revoked. Like a transfer it writes assignment
+    /// state only: `__delegation` plus the assignee, no state change.
+    Delegate,
+    /// Undelegate — revoke the act's delegation, restoring the owner as the
+    /// assignee. No state change, no propagation.
+    Undelegate,
+}
+
+impl ActionKind {
+    /// Whether the action changes who may decide an act rather than deciding
+    /// it. Every such action writes `__assignment`/`__delegation` and
+    /// announces an `assignment` message, and is admissible on exactly the
+    /// live states a decision may reach.
+    pub(crate) fn moves_assignment(&self) -> bool {
+        matches!(self, Self::Transfer | Self::Delegate | Self::Undelegate)
+    }
 }
 
 pub(super) fn action_name(action: &ActionKind) -> &'static str {
@@ -37,5 +54,7 @@ pub(super) fn action_name(action: &ActionKind) -> &'static str {
         ActionKind::Push => "pushed",
         ActionKind::Remove => "removed",
         ActionKind::Transfer => "transferred",
+        ActionKind::Delegate => "delegated",
+        ActionKind::Undelegate => "undelegated",
     }
 }

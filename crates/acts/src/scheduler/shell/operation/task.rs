@@ -448,7 +448,7 @@ impl ActOperation for ExecuteTask {
                         plan.variable_writes.push(VariableWrite {
                             scope: task_id.clone(),
                             name,
-                            value: action_fact(kind, &[]),
+                            value: action_fact(kind, &[], None),
                         });
                     }
                     if !action_exists {

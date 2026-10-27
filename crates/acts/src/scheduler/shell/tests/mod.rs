@@ -6037,6 +6037,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
             message: "recovered".into(),
         },
         &[],
+        None,
         snapshot.version.clone(),
     );
     host.processes
@@ -9462,7 +9463,8 @@ fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
     // No operations: the sequence default (0) is used.
     let mut pinned = None;
     let first =
-        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, &mut pinned).unwrap();
+        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, None, &mut pinned)
+            .unwrap();
     assert_eq!(first.operation.sequence, 1);
     assert!(pinned.is_some());
 
@@ -9476,14 +9478,15 @@ fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
             first.task.clone(),
             action_fact_var(first.operation.sequence),
         ),
-        action_fact(&action, &inputs),
+        action_fact(&action, &inputs, None),
     );
     pinned = Some(ActionIntent {
         task: first.task.clone(),
         operation: first.operation.clone(),
     });
     let resumed =
-        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, &mut pinned).unwrap();
+        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, None, &mut pinned)
+            .unwrap();
     assert_eq!(resumed.operation, first.operation);
 
     // A pin whose fact is not this decision is replaced by a fresh identity.
@@ -9492,7 +9495,8 @@ fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
         operation: operation_id(pid, root, 99),
     });
     let minted =
-        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, &mut foreign).unwrap();
+        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, None, &mut foreign)
+            .unwrap();
     assert_eq!(minted.operation.sequence, 2);
 
     // An operation already standing at the minted sequence is skipped.
@@ -9502,7 +9506,8 @@ fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
     );
     let mut fresh = None;
     let next =
-        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, &mut fresh).unwrap();
+        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, None, &mut fresh)
+            .unwrap();
     assert_eq!(next.operation.sequence, 3);
 }
 
@@ -9528,37 +9533,38 @@ fn an_action_intent_is_ours_only_with_its_own_fact() {
     let inputs: Vec<(String, String)> = Vec::new();
 
     assert!(!KernelHost::action_intent_is_mine(
-        &snapshot, &intent, &action, &inputs
+        &snapshot, &intent, &action, &inputs, None
     ));
     snapshot.operations.insert(
         operation.clone(),
         OperationRecord::pending(operation.clone(), OperationKind::SkipTask),
     );
     assert!(
-        !KernelHost::action_intent_is_mine(&snapshot, &intent, &action, &inputs),
+        !KernelHost::action_intent_is_mine(&snapshot, &intent, &action, &inputs, None),
         "an operation without the fact is not ours"
     );
     snapshot.variables.insert(
         (task.clone(), action_fact_var(1)),
-        action_fact(&ActionKind::Complete, &inputs),
+        action_fact(&ActionKind::Complete, &inputs, None),
     );
     assert!(
-        !KernelHost::action_intent_is_mine(&snapshot, &intent, &action, &inputs),
+        !KernelHost::action_intent_is_mine(&snapshot, &intent, &action, &inputs, None),
         "another decision's fact is not ours"
     );
     snapshot.variables.insert(
         (task.clone(), action_fact_var(1)),
-        action_fact(&action, &inputs),
+        action_fact(&action, &inputs, None),
     );
     assert!(KernelHost::action_intent_is_mine(
-        &snapshot, &intent, &action, &inputs
+        &snapshot, &intent, &action, &inputs, None
     ));
     assert!(
         !KernelHost::action_intent_is_mine(
             &snapshot,
             &intent,
             &action,
-            &[("other".to_string(), "value".to_string())]
+            &[("other".to_string(), "value".to_string())],
+            None
         ),
         "different inputs are a different decision"
     );
@@ -9581,7 +9587,7 @@ async fn resume_action_intent_retries_absent_runs_and_foreign_pins() {
         operation: operation_id("p-resume-absent", root, 0),
     };
     assert!(matches!(
-        host.resume_action_intent(&absent, &action, &inputs)
+        host.resume_action_intent(&absent, &action, &inputs, None)
             .await
             .unwrap(),
         ActionResume::Retry
@@ -9595,7 +9601,7 @@ async fn resume_action_intent_retries_absent_runs_and_foreign_pins() {
         operation: operation_id(pid, root, 7),
     };
     assert!(matches!(
-        host.resume_action_intent(&foreign, &action, &inputs)
+        host.resume_action_intent(&foreign, &action, &inputs, None)
             .await
             .unwrap(),
         ActionResume::Retry
@@ -10485,6 +10491,7 @@ async fn an_action_intent_that_is_already_closed_is_not_claimable() {
         &operation,
         &action,
         &inputs,
+        None,
         snapshot.version.clone(),
     );
     host.processes

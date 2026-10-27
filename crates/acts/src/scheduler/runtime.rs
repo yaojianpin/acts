@@ -525,6 +525,16 @@ impl Runtime {
                 }
                 K::Transfer
             }
+            E::Delegate => {
+                let delegatee = action.options.get::<String>("delegatee");
+                if delegatee.as_deref().unwrap_or_default().trim().is_empty() {
+                    return Err(ActError::Action(
+                        "cannot find 'delegatee' in act:delegate".to_string(),
+                    ));
+                }
+                K::Delegate
+            }
+            E::Undelegate => K::Undelegate,
         };
         Ok(kind)
     }

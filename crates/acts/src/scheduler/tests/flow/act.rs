@@ -1761,6 +1761,792 @@ async fn sch_act_transfer_survives_restart() {
 }
 
 // ---------------------------------------------------------------------------
+// Delegate (`act:delegate` / `act:undelegate`)
+// ---------------------------------------------------------------------------
+
+/// The persisted `__delegation` of the newest execution of `node`, if it is
+/// an active record (`null` reads as `None`).
+async fn delegation_of(fixture: &FlowFixture, node: &str) -> Option<serde_json::Value> {
+    let snapshot = fixture.snapshot().await;
+    let task = snapshot
+        .tasks
+        .keys()
+        .filter(|id| id.node.as_str() == node)
+        .max_by_key(|id| id.generation)
+        .cloned()
+        .unwrap_or_else(|| panic!("no execution of {node}"));
+    let raw = snapshot
+        .variables
+        .get(&(task, "__delegation".to_string()))?;
+    serde_json::from_str::<Option<serde_json::Value>>(raw)
+        .ok()
+        .flatten()
+}
+
+/// The announced `type=assignment` notification at `rev`.
+async fn wait_assignment_at(fixture: &FlowFixture, rev: u64) -> crate::Message {
+    let what = format!("the assignment notification at rev {rev}");
+    poll_until(&what, || async {
+        fixture
+            .messages()
+            .iter()
+            .any(|message| message.r#type == "assignment" && message.rev == rev)
+    })
+    .await;
+    fixture
+        .messages()
+        .into_iter()
+        .find(|message| message.r#type == "assignment" && message.rev == rev)
+        .unwrap_or_else(|| panic!("{what}"))
+}
+
+fn future_millis(offset: i64) -> i64 {
+    crate::utils::time::time_millis() + offset
+}
+
+/// A delegation keeps the owner and the execution, records the delegation,
+/// announces the delegatee and admits both the owner and the delegatee.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_delegate_admits_the_delegatee_and_projects_the_audit_fields() {
+    let workflow = assigned_workflow("flow-act-delegate", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+    let before = fixture.snapshot().await;
+    let task_count = before.tasks.len();
+    let mut before_tasks: Vec<(String, u64)> = before
+        .tasks
+        .keys()
+        .map(|id| (id.node.as_str().to_string(), id.generation))
+        .collect();
+    before_tasks.sort();
+    let deadline = future_millis(600_000);
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(
+            &pid,
+            &tid,
+            Vars::new()
+                .with("delegatee", "bob")
+                .with("expires_at", deadline)
+                .with("reason", "holiday")
+                .with("rev", 0),
+        )
+        .await
+        .unwrap();
+
+    // The act itself is untouched: same instance, same state, no new task.
+    assert_eq!(fixture.state("s1").await, TaskState::Waiting);
+    let after = fixture.snapshot().await;
+    assert_eq!(
+        after.tasks.len(),
+        task_count,
+        "a delegation creates no task"
+    );
+    let mut after_tasks: Vec<(String, u64)> = after
+        .tasks
+        .keys()
+        .map(|id| (id.node.as_str().to_string(), id.generation))
+        .collect();
+    after_tasks.sort();
+    assert_eq!(after_tasks, before_tasks, "no new generation");
+
+    let assignment = assignment_of(&fixture, "s1").await;
+    assert_eq!(assignment["owner"], json!("alice"));
+    assert_eq!(assignment["assignee"], json!("bob"));
+    assert_eq!(assignment["rev"], json!(1));
+    assert_eq!(assignment["updated_by"], json!("alice"));
+    assert!(assignment["updated_at"].as_i64().unwrap() > 0);
+
+    let delegation = delegation_of(&fixture, "s1")
+        .await
+        .expect("the active delegation");
+    assert_eq!(delegation["id"], json!("dg1"));
+    assert_eq!(delegation["delegator"], json!("alice"));
+    assert_eq!(delegation["delegatee"], json!("bob"));
+    assert_eq!(delegation["granted_by"], json!("alice"));
+    assert_eq!(delegation["expires_at"], json!(deadline));
+    assert_eq!(delegation["reason"], json!("holiday"));
+
+    let notification = wait_assignment_at(&fixture, 1).await;
+    assert_eq!(notification.tid, tid);
+    assert_eq!(notification.nid, "s1");
+    assert_eq!(notification.owner.as_deref(), Some("alice"));
+    assert_eq!(notification.assignee.as_deref(), Some("bob"));
+    assert_eq!(notification.delegator.as_deref(), Some("alice"));
+    assert_eq!(notification.delegatee.as_deref(), Some("bob"));
+    assert_eq!(notification.rev, 1);
+    assert_eq!(
+        notification.ref_msg_id.as_deref(),
+        Some(created.id.as_str())
+    );
+    let options = notification.options().expect("the notification options");
+    assert_eq!(options.get::<String>("owner").as_deref(), Some("alice"));
+    assert_eq!(options.get::<String>("assignee").as_deref(), Some("bob"));
+
+    // The delegatee decides, and the Completed record carries the delegation.
+    fixture
+        .engine()
+        .executor(&approved_user("bob"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap();
+    let completed = fixture.wait_message("s1", MessageState::Completed).await;
+    assert_eq!(completed.owner.as_deref(), Some("alice"));
+    assert_eq!(completed.assignee.as_deref(), Some("bob"));
+    assert_eq!(completed.delegator.as_deref(), Some("alice"));
+    assert_eq!(completed.delegatee.as_deref(), Some("bob"));
+    assert_eq!(completed.rev, 1);
+    let options = completed.options().expect("the completed act options");
+    assert_eq!(options.get::<String>("owner").as_deref(), Some("alice"));
+    assert_eq!(options.get::<String>("assignee").as_deref(), Some("bob"));
+    fixture.close().await;
+}
+
+/// The owner may always decide; their decision records no delegation.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_delegate_keeps_the_owner_as_a_decider() {
+    let workflow = assigned_workflow("flow-act-delegate-owner", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(
+            &pid,
+            &tid,
+            Vars::new()
+                .with("delegatee", "bob")
+                .with("expires_at", future_millis(600_000)),
+        )
+        .await
+        .unwrap();
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap();
+    let completed = fixture.wait_message("s1", MessageState::Completed).await;
+    assert_eq!(completed.owner.as_deref(), Some("alice"));
+    assert_eq!(completed.assignee.as_deref(), Some("alice"));
+    assert_eq!(completed.delegator, None);
+    assert_eq!(completed.delegatee, None);
+    assert_eq!(completed.rev, 1);
+    fixture.close().await;
+}
+
+/// An expired delegation refuses the delegatee with the expiry fact; the
+/// owner still decides. Expiry is checked at decision time, not by a sweep.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_delegate_refuses_the_delegatee_after_expiry() {
+    let workflow = assigned_workflow("flow-act-delegate-expired", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+    let deadline = future_millis(-1_000);
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(
+            &pid,
+            &tid,
+            Vars::new()
+                .with("delegatee", "bob")
+                .with("expires_at", deadline)
+                .with("rev", 0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.state("s1").await, TaskState::Waiting);
+
+    let refused = fixture
+        .engine()
+        .executor(&approved_user("bob"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("ENOTOWNER")
+            && refused.to_string().contains("expired")
+            && refused.to_string().contains("s1"),
+        "the refusal must name the act and the expiry: {refused}"
+    );
+    assert_eq!(fixture.state("s1").await, TaskState::Waiting);
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap();
+    fixture.wait_message("s1", MessageState::Completed).await;
+    fixture.close().await;
+}
+
+/// Undelegating restores the owner as the assignee and refuses the old
+/// delegatee immediately.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_undelegate_revokes_the_delegatee() {
+    let workflow = assigned_workflow("flow-act-undelegate", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(
+            &pid,
+            &tid,
+            Vars::new()
+                .with("delegatee", "bob")
+                .with("expires_at", future_millis(600_000))
+                .with("rev", 0),
+        )
+        .await
+        .unwrap();
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .undelegate(&pid, &tid, Vars::new().with("rev", 1))
+        .await
+        .unwrap();
+
+    let assignment = assignment_of(&fixture, "s1").await;
+    assert_eq!(assignment["owner"], json!("alice"));
+    assert_eq!(assignment["assignee"], json!("alice"));
+    assert_eq!(assignment["rev"], json!(2));
+    assert_eq!(assignment["updated_by"], json!("alice"));
+    assert_eq!(
+        delegation_of(&fixture, "s1").await,
+        None,
+        "the revoked delegation must read as absent"
+    );
+
+    let notification = wait_assignment_at(&fixture, 2).await;
+    assert_eq!(notification.owner.as_deref(), Some("alice"));
+    assert_eq!(notification.assignee.as_deref(), Some("alice"));
+    assert_eq!(notification.delegator, None);
+    assert_eq!(notification.delegatee, None);
+    assert_eq!(notification.rev, 2);
+    assert_eq!(
+        notification.ref_msg_id.as_deref(),
+        Some(created.id.as_str())
+    );
+
+    let refused = fixture
+        .engine()
+        .executor(&approved_user("bob"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 2))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("ENOTOWNER"),
+        "the revoked delegatee must be refused: {refused}"
+    );
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 2))
+        .await
+        .unwrap();
+    let completed = fixture.wait_message("s1", MessageState::Completed).await;
+    assert_eq!(completed.assignee.as_deref(), Some("alice"));
+    assert_eq!(completed.delegator, None);
+    assert_eq!(completed.delegatee, None);
+    fixture.close().await;
+}
+
+/// A transfer clears the old owner's delegation: the former delegatee cannot
+/// act for the new owner, and the new owner can decide.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_transfer_clears_the_delegation() {
+    let workflow = assigned_workflow("flow-act-transfer-delegation", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(
+            &pid,
+            &tid,
+            Vars::new()
+                .with("delegatee", "bob")
+                .with("expires_at", future_millis(600_000))
+                .with("rev", 0),
+        )
+        .await
+        .unwrap();
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .transfer(
+            &pid,
+            &tid,
+            Vars::new().with("to", "carol").with("expect_rev", 1),
+        )
+        .await
+        .unwrap();
+
+    let assignment = assignment_of(&fixture, "s1").await;
+    assert_eq!(assignment["owner"], json!("carol"));
+    assert_eq!(assignment["assignee"], json!("carol"));
+    assert_eq!(assignment["rev"], json!(2));
+    assert_eq!(
+        delegation_of(&fixture, "s1").await,
+        None,
+        "a transfer must clear the old owner's delegation"
+    );
+    let notification = wait_assignment_at(&fixture, 2).await;
+    assert_eq!(notification.owner.as_deref(), Some("carol"));
+    assert_eq!(notification.delegator, None);
+    assert_eq!(notification.delegatee, None);
+
+    let refused = fixture
+        .engine()
+        .executor(&approved_user("bob"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 2))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("ENOTOWNER"),
+        "the old delegatee must not inherit the new owner's act: {refused}"
+    );
+    fixture
+        .engine()
+        .executor(&approved_user("carol"))
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 2))
+        .await
+        .unwrap();
+    let completed = fixture.wait_message("s1", MessageState::Completed).await;
+    assert_eq!(completed.owner.as_deref(), Some("carol"));
+    assert_eq!(completed.assignee.as_deref(), Some("carol"));
+    assert_eq!(completed.delegator, None);
+    assert_eq!(completed.delegatee, None);
+    fixture.close().await;
+}
+
+/// Every delegation refusal is caller-correctable and consumes nothing: a
+/// missing delegatee, a stranger, a stale revision, an unassigned act and an
+/// act with no delegation to revoke.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_delegate_refuses_invalid_requests() {
+    let workflow = assigned_workflow("flow-act-delegate-refuse", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+
+    let missing = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(&pid, &tid, Vars::new().with("delegatee", " "))
+        .await
+        .unwrap_err();
+    assert!(
+        missing.to_string().contains("delegatee"),
+        "a missing delegatee must be refused: {missing}"
+    );
+
+    let stranger = fixture
+        .engine()
+        .executor(&approved_user("mallory"))
+        .act()
+        .delegate(&pid, &tid, Vars::new().with("delegatee", "bob"))
+        .await
+        .unwrap_err();
+    assert!(
+        stranger.to_string().contains("ENOTOWNER"),
+        "a non-owner without assign must be refused: {stranger}"
+    );
+
+    let stale = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(
+            &pid,
+            &tid,
+            Vars::new().with("delegatee", "bob").with("rev", 9),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        stale.to_string().contains("EASSIGNMENT_CHANGED"),
+        "a stale revision must be refused: {stale}"
+    );
+
+    let no_delegation = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .undelegate(&pid, &tid, Vars::new())
+        .await
+        .unwrap_err();
+    assert!(
+        no_delegation.to_string().contains("ENODELEGATION"),
+        "nothing to revoke must be refused: {no_delegation}"
+    );
+
+    assert_eq!(assignment_of(&fixture, "s1").await["rev"], json!(0));
+    assert!(
+        fixture
+            .messages()
+            .iter()
+            .all(|message| message.r#type != "assignment"),
+        "refused delegations must not announce an assignment"
+    );
+    fixture.close().await;
+
+    // An act that declares no assignment has no owner to delegate.
+    let workflow = irq_workflow("flow-act-delegate-unassigned", "s1", "act1");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let unassigned = fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("delegatee", "bob"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        unassigned.to_string().contains("has no assignment"),
+        "an unassigned act must be refused: {unassigned}"
+    );
+    fixture.close().await;
+}
+
+/// A delegation and a decision racing on one act: the command lane and the
+/// revision guard leave exactly one winner.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_delegate_and_complete_have_one_winner() {
+    let workflow = assigned_workflow("flow-act-delegate-race", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+    let alice = approved_user("alice");
+
+    let (delegated, completed) = tokio::join!(
+        async {
+            fixture
+                .engine()
+                .executor(&alice)
+                .act()
+                .delegate(
+                    &pid,
+                    &tid,
+                    Vars::new().with("delegatee", "bob").with("rev", 0),
+                )
+                .await
+        },
+        async {
+            fixture
+                .engine()
+                .executor(&alice)
+                .act()
+                .complete(&pid, &tid, Vars::new().with("rev", 0))
+                .await
+        }
+    );
+    match (delegated, completed) {
+        (Err(error), Ok(())) => {
+            assert!(
+                error.to_string().contains("not allowed to delegate"),
+                "the delegation lost to the decision: {error}"
+            );
+            assert_eq!(fixture.state("s1").await, TaskState::Completed);
+        }
+        (Ok(()), Err(error)) => {
+            assert!(
+                error.to_string().contains("EASSIGNMENT_CHANGED"),
+                "the decision lost to the delegation: {error}"
+            );
+            assert_eq!(fixture.state("s1").await, TaskState::Waiting);
+            assert_eq!(assignment_of(&fixture, "s1").await["rev"], json!(1));
+        }
+        (delegated, completed) => panic!(
+            "exactly one of delegate/complete wins: delegate={delegated:?} complete={completed:?}"
+        ),
+    }
+    fixture.close().await;
+}
+
+/// A transfer and a delegation racing on one act: exactly one wins.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_transfer_and_delegate_have_one_winner() {
+    let workflow = assigned_workflow("flow-act-transfer-delegate-race", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+    let alice = approved_user("alice");
+
+    let (transferred, delegated) = tokio::join!(
+        async {
+            fixture
+                .engine()
+                .executor(&alice)
+                .act()
+                .transfer(
+                    &pid,
+                    &tid,
+                    Vars::new().with("to", "carol").with("expect_rev", 0),
+                )
+                .await
+        },
+        async {
+            fixture
+                .engine()
+                .executor(&alice)
+                .act()
+                .delegate(
+                    &pid,
+                    &tid,
+                    Vars::new().with("delegatee", "bob").with("rev", 0),
+                )
+                .await
+        }
+    );
+    match (transferred, delegated) {
+        (Ok(()), Err(error)) => {
+            // The transfer moved the owner first: the old owner is no longer
+            // an owner (ENOTOWNER), or the stale revision is named
+            // (EASSIGNMENT_CHANGED) when the identity check still passes.
+            assert!(
+                error.to_string().contains("ENOTOWNER")
+                    || error.to_string().contains("EASSIGNMENT_CHANGED"),
+                "the delegation lost to the transfer: {error}"
+            );
+            assert_eq!(assignment_of(&fixture, "s1").await["owner"], json!("carol"));
+            assert_eq!(delegation_of(&fixture, "s1").await, None);
+        }
+        (Err(error), Ok(())) => {
+            assert!(
+                error.to_string().contains("EASSIGNMENT_CHANGED"),
+                "the transfer lost to the delegation: {error}"
+            );
+            let assignment = assignment_of(&fixture, "s1").await;
+            assert_eq!(assignment["owner"], json!("alice"));
+            assert_eq!(assignment["assignee"], json!("bob"));
+            assert!(delegation_of(&fixture, "s1").await.is_some());
+        }
+        (transferred, delegated) => panic!(
+            "exactly one of transfer/delegate wins: transfer={transferred:?} delegate={delegated:?}"
+        ),
+    }
+    fixture.close().await;
+}
+
+/// Restart: the delegation, the assignment and the wire action survive, and
+/// the recovered delegatee decides with the audit fields intact.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_delegate_survives_restart() {
+    let workflow = assigned_workflow("flow-act-delegate-restart", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+    let store = fixture.engine().runtime().store().kv();
+    let deadline = future_millis(600_000);
+
+    fixture
+        .engine()
+        .executor(&approved_user("alice"))
+        .act()
+        .delegate(
+            &pid,
+            &tid,
+            Vars::new()
+                .with("delegatee", "bob")
+                .with("expires_at", deadline)
+                .with("reason", "holiday")
+                .with("rev", 0),
+        )
+        .await
+        .unwrap();
+    wait_assignment_at(&fixture, 1).await;
+    fixture.close().await;
+
+    let reloaded = crate::Engine::builder()
+        .set_store(store)
+        .start()
+        .await
+        .unwrap();
+    // A channel makes the reloaded engine persist the delivered messages
+    // (delivery rows carry their canonical message row).
+    let ack = reloaded.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    ack.on_message(|_| async {});
+    let snapshot = reloaded
+        .runtime()
+        .kernel()
+        .snapshot(&pid)
+        .await
+        .unwrap()
+        .expect("the recovered aggregate");
+    let task = snapshot
+        .tasks
+        .keys()
+        .find(|id| id.wire(&pid) == tid)
+        .expect("the recovered execution");
+    let raw = snapshot
+        .variables
+        .get(&(task.clone(), "__delegation".to_string()))
+        .expect("the recovered delegation");
+    let delegation: serde_json::Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(delegation["delegator"], json!("alice"));
+    assert_eq!(delegation["delegatee"], json!("bob"));
+    assert_eq!(delegation["expires_at"], json!(deadline));
+    assert_eq!(delegation["reason"], json!("holiday"));
+
+    // The wire action still admits the delegatee after the restart.
+    let applied = crate::actions::apply_as(
+        &reloaded,
+        &approved_user("bob"),
+        "act:complete",
+        Vars::new()
+            .with("pid", pid.clone())
+            .with("tid", tid.clone())
+            .with("rev", 1),
+    )
+    .await
+    .expect("the recovered delegatee may decide");
+    assert_eq!(applied, json!(null));
+
+    poll_until("the recovered delegated act to complete", || async {
+        reloaded
+            .runtime()
+            .kernel()
+            .snapshot(&pid)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| {
+                snapshot.tasks.iter().any(|(id, task)| {
+                    id.node.as_str() == "s1" && task.state == TaskState::Completed
+                })
+            })
+    })
+    .await;
+    poll_until("the recovered Completed message", || async {
+        reloaded
+            .runtime()
+            .store()
+            .messages()
+            .query(
+                &Query::new()
+                    .filter(Filter::and().expr(Expr::eq("tid", tid.clone())))
+                    .limit(10),
+            )
+            .await
+            .is_ok_and(|rows| {
+                rows.rows.iter().any(|message| {
+                    message.state == MessageState::Completed
+                        && message.delegator.as_deref() == Some("alice")
+                        && message.delegatee.as_deref() == Some("bob")
+                })
+            })
+    })
+    .await;
+    reloaded.close().await;
+}
+
+/// The wire route (`act:delegate`/`act:undelegate`) reaches the same executor
+/// and kernel authorization as the typed executor.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_delegate_wire_actions() {
+    let workflow = assigned_workflow("flow-act-delegate-wire", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let alice = approved_user("alice");
+
+    let applied = crate::actions::apply_as(
+        fixture.engine(),
+        &alice,
+        "act:delegate",
+        Vars::new()
+            .with("pid", fixture.pid())
+            .with("tid", created.tid.clone())
+            .with("delegatee", "bob")
+            .with("expires_at", future_millis(600_000))
+            .with("reason", "holiday")
+            .with("rev", 0),
+    )
+    .await
+    .expect("the owner may delegate through the wire");
+    assert_eq!(applied, json!(null));
+    assert_eq!(assignment_of(&fixture, "s1").await["rev"], json!(1));
+    assert_eq!(
+        delegation_of(&fixture, "s1").await.expect("the delegation")["delegatee"],
+        json!("bob")
+    );
+
+    let applied = crate::actions::apply_as(
+        fixture.engine(),
+        &alice,
+        "act:undelegate",
+        Vars::new()
+            .with("pid", fixture.pid())
+            .with("tid", created.tid.clone())
+            .with("rev", 1),
+    )
+    .await
+    .expect("the owner may revoke through the wire");
+    assert_eq!(applied, json!(null));
+    assert_eq!(assignment_of(&fixture, "s1").await["rev"], json!(2));
+    assert_eq!(delegation_of(&fixture, "s1").await, None);
+    fixture.close().await;
+}
+
+// ---------------------------------------------------------------------------
 // `act:push` with `assign`
 // ---------------------------------------------------------------------------
 

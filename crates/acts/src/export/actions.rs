@@ -220,6 +220,18 @@ pub async fn apply_as(
             options.set("to", to);
             value(executor.act().transfer(&pid, &tid, options).await)
         }
+        "act:delegate" => {
+            let pid = pop(&mut options, "pid")?;
+            let tid = pop(&mut options, "tid")?;
+            let delegatee = pop(&mut options, "delegatee")?;
+            options.set("delegatee", delegatee);
+            value(executor.act().delegate(&pid, &tid, options).await)
+        }
+        "act:undelegate" => {
+            let pid = pop(&mut options, "pid")?;
+            let tid = pop(&mut options, "tid")?;
+            value(executor.act().undelegate(&pid, &tid, options).await)
+        }
         // model
         "model:ls" => {
             let query = options

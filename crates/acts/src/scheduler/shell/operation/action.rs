@@ -46,6 +46,7 @@ impl KernelHost {
         action: Option<crate::scheduler::core::commit::command::ActionKind>,
         inputs: Vec<(String, String)>,
         effect: Option<&effects::EffectOutcome>,
+        subject: Option<&str>,
     ) -> Result<TransitionPlan> {
         match action {
             None => {
@@ -96,8 +97,9 @@ impl KernelHost {
                 if self.waits_for_timeouts(snapshot, task_id, task)?
                     || self.waits_for_pushed(snapshot, task_id)?
                 {
-                    let mut plan =
-                        self.park_for_children_plan(snapshot, id, task_id, task, claim, &inputs)?;
+                    let mut plan = self.park_for_children_plan(
+                        snapshot, id, task_id, task, claim, &inputs, None,
+                    )?;
                     if let Some(outcome) = effect {
                         self.fold_effect_outcome(task_id, outcome, &mut plan);
                         plan.validate().map_err(runtime)?;
@@ -150,7 +152,25 @@ impl KernelHost {
                     kind,
                     crate::scheduler::core::commit::command::ActionKind::Transfer
                 ) {
-                    return self.transfer_plan(snapshot, id, task_id, task, claim, &inputs);
+                    return self
+                        .transfer_plan(snapshot, id, task_id, task, claim, &inputs, subject);
+                }
+                // A client `Delegate`/`Undelegate` decides nothing either: it
+                // rewrites the act's delegation and announces the new
+                // assignee. Owner, state and execution stay.
+                if matches!(
+                    kind,
+                    crate::scheduler::core::commit::command::ActionKind::Delegate
+                ) {
+                    return self
+                        .delegate_plan(snapshot, id, task_id, task, claim, &inputs, subject);
+                }
+                if matches!(
+                    kind,
+                    crate::scheduler::core::commit::command::ActionKind::Undelegate
+                ) {
+                    return self
+                        .undelegate_plan(snapshot, id, task_id, task, claim, &inputs, subject);
                 }
                 // A client `Push` decides nothing on the target: it
                 // creates the pushed act under it. The target's own flow is
@@ -183,8 +203,9 @@ impl KernelHost {
                 ) && (self.waits_for_timeouts(snapshot, task_id, task)?
                     || self.waits_for_pushed(snapshot, task_id)?)
                 {
-                    return self
-                        .park_for_children_plan(snapshot, id, task_id, task, claim, &inputs);
+                    return self.park_for_children_plan(
+                        snapshot, id, task_id, task, claim, &inputs, subject,
+                    );
                 }
                 // A client's error on a step declaring `catches` is the legacy
                 // `Step::on_error`: the step stays running and dispatches its
@@ -254,7 +275,7 @@ impl KernelHost {
                 }
                 // A client action that decides a `uses` execution announces it
                 // on the act's own message, exactly like the legacy act.
-                self.attach_operation_message(snapshot, task_id, &mut plan)?;
+                self.attach_operation_message(snapshot, task_id, &mut plan, subject)?;
                 Ok(plan)
             }
         }
@@ -380,6 +401,7 @@ impl KernelHost {
 
     /// Record that `execution` parked in `Waiting` for its children. The
     /// planner's own fact wins over a client input of the same private name.
+    #[allow(clippy::too_many_arguments)]
     fn park_for_children_plan(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -388,6 +410,7 @@ impl KernelHost {
         task: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
         claim: &OperationCommit,
         inputs: &[(String, String)],
+        subject: Option<&str>,
     ) -> Result<TransitionPlan> {
         let mut plan = self.task_operation_plan(
             snapshot,
@@ -424,7 +447,7 @@ impl KernelHost {
         if self
             .step_uses(snapshot, task_id, &task.model_node)?
             .is_some()
-            && let Some(payload) = self.operation_message_payload(
+            && let Some(mut payload) = self.operation_message_payload(
                 snapshot,
                 task_id,
                 id.task.node.as_str(),
@@ -433,6 +456,7 @@ impl KernelHost {
                 None,
             )?
         {
+            inject_decision_assignment(&mut payload, snapshot, task_id, subject)?;
             plan.outbox[0].payload = payload.to_string();
         }
         plan.validate().map_err(runtime)?;
@@ -448,6 +472,7 @@ impl KernelHost {
     /// `assignment.transferred` record points at it through the message id
     /// the start commit pinned (`ref_msg_id`), so the reference survives a
     /// restart instead of being invented at delivery time.
+    #[allow(clippy::too_many_arguments)]
     fn transfer_plan(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -456,6 +481,7 @@ impl KernelHost {
         task: &TaskSnapshot,
         claim: &OperationCommit,
         inputs: &[(String, String)],
+        subject: Option<&str>,
     ) -> Result<TransitionPlan> {
         let input = |name: &str| {
             inputs
@@ -490,7 +516,11 @@ impl KernelHost {
                 )));
             }
         }
-        let by = input("updated_by").filter(|by| !by.trim().is_empty());
+        // The caller is the server-attributed subject the durable fact
+        // persisted. `updated_by` is only the pre-attribution fallback for an
+        // embedder that calls the runtime directly (and only when the engine
+        // had no authenticated subject to record).
+        let by = subject.or_else(|| input("updated_by").filter(|by| !by.trim().is_empty()));
         let next = assignment.transferred(to, by, crate::utils::time::time_millis());
         let mut plan = self.task_operation_plan(
             snapshot,
@@ -512,11 +542,11 @@ impl KernelHost {
         // and keeps a replayed state consistent.
         if snapshot
             .variables
-            .contains_key(&(task_id.clone(), "__delegation".to_string()))
+            .contains_key(&(task_id.clone(), DELEGATION_VAR.to_string()))
         {
             plan.variable_writes.push(VariableWrite {
                 scope: task_id.clone(),
-                name: "__delegation".to_string(),
+                name: DELEGATION_VAR.to_string(),
                 value: serde_json::Value::Null.to_string(),
             });
         }
@@ -545,6 +575,205 @@ impl KernelHost {
                     plan.process_id, node, task_id.generation, next.rev
                 ),
                 topic: "assignment.transferred".into(),
+                payload: payload.to_string(),
+            },
+        );
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    /// The plan of a client `Delegate`: install one delegation and announce
+    /// the delegatee. The owner, the act's state and its execution are all
+    /// unchanged — only `__delegation`, the assignee and the revision move.
+    ///
+    /// The delegator is the task's current owner (never a client field), the
+    /// caller is the durable subject, and the delegation id derives from the
+    /// revision it writes, so a replay mints the same record.
+    #[allow(clippy::too_many_arguments)]
+    fn delegate_plan(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        id: &OperationId,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        task: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
+        claim: &OperationCommit,
+        inputs: &[(String, String)],
+        subject: Option<&str>,
+    ) -> Result<TransitionPlan> {
+        let input = |name: &str| {
+            inputs
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let node = task_id.node.as_str();
+        let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+            crate::ActError::Action(format!(
+                "ENOTOWNER: act '{node}' has no assignment to delegate"
+            ))
+        })?;
+        if task.state.is_terminal() {
+            return Err(crate::ActError::Action(format!(
+                "task('{node}') is not allowed to delegate"
+            )));
+        }
+        let delegatee = input("delegatee")
+            .map(str::trim)
+            .filter(|delegatee| !delegatee.is_empty())
+            .ok_or_else(|| {
+                crate::ActError::Action("cannot find 'delegatee' in act:delegate".to_string())
+            })?;
+        let expires_at = input("expires_at")
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(parse_expires_at)
+            .transpose()?;
+        let reason = input("reason").filter(|reason| !reason.is_empty());
+        let now = crate::utils::time::time_millis();
+        let next = assignment.delegated(delegatee, subject, now);
+        let delegation = Delegation::new(
+            format!("dg{}", next.rev),
+            &assignment.owner,
+            delegatee,
+            subject,
+            expires_at,
+            reason,
+        );
+        let mut plan = self.task_operation_plan(
+            snapshot,
+            id,
+            task_id,
+            Some(task),
+            claim,
+            &format!("delegated.{}", next.rev),
+            "task.delegated",
+        )?;
+        plan.variable_writes.push(VariableWrite {
+            scope: task_id.clone(),
+            name: DELEGATION_VAR.to_string(),
+            value: delegation.value(),
+        });
+        plan.variable_writes.push(VariableWrite {
+            scope: task_id.clone(),
+            name: ASSIGNMENT_VAR.to_string(),
+            value: next.value(),
+        });
+        let facts = act_facts(snapshot, task_id);
+        let mut payload = self
+            .operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
+            .ok_or_else(|| {
+                runtime(format!(
+                    "act '{node}' has no message payload for its delegation"
+                ))
+            })?;
+        payload["kind"] = serde_json::json!("assignment");
+        inject_payload_assignment(&mut payload, &next);
+        inject_payload_delegation(&mut payload, &delegation.delegator, &delegation.delegatee);
+        payload["ref_msg_id"] = created_message_id(snapshot, task_id)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null);
+        // The notification's own id is pinned now, in the durable record.
+        payload["msg_id"] = serde_json::Value::String(crate::utils::longid());
+        if let Some(reason) = reason {
+            payload["reason"] = serde_json::Value::String(reason.to_string());
+        }
+        plan.outbox.push(
+            crate::scheduler::core::model::transition_plan::OutboxIntent {
+                key: format!(
+                    "assignment.delegated:{}:{}:{}:{}",
+                    plan.process_id, node, task_id.generation, next.rev
+                ),
+                topic: "assignment.delegated".into(),
+                payload: payload.to_string(),
+            },
+        );
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    /// The plan of a client `Undelegate`: clear `__delegation` and restore the
+    /// owner as the assignee. The variable is written as `null` (the plan has
+    /// no deletion), so a replayed or recovered state never resurrects the
+    /// revoked delegatee.
+    #[allow(clippy::too_many_arguments)]
+    fn undelegate_plan(
+        &self,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        id: &OperationId,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        task: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
+        claim: &OperationCommit,
+        inputs: &[(String, String)],
+        subject: Option<&str>,
+    ) -> Result<TransitionPlan> {
+        let input = |name: &str| {
+            inputs
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let node = task_id.node.as_str();
+        let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+            crate::ActError::Action(format!(
+                "ENOTOWNER: act '{node}' has no assignment to undelegate"
+            ))
+        })?;
+        if task.state.is_terminal() {
+            return Err(crate::ActError::Action(format!(
+                "task('{node}') is not allowed to undelegate"
+            )));
+        }
+        Delegation::of(snapshot, task_id)?.ok_or_else(|| {
+            crate::ActError::Action(format!(
+                "ENODELEGATION: act '{node}' has no active delegation to revoke"
+            ))
+        })?;
+        let next = assignment.revoked(subject, crate::utils::time::time_millis());
+        let mut plan = self.task_operation_plan(
+            snapshot,
+            id,
+            task_id,
+            Some(task),
+            claim,
+            &format!("undelegated.{}", next.rev),
+            "task.undelegated",
+        )?;
+        plan.variable_writes.push(VariableWrite {
+            scope: task_id.clone(),
+            name: DELEGATION_VAR.to_string(),
+            value: serde_json::Value::Null.to_string(),
+        });
+        plan.variable_writes.push(VariableWrite {
+            scope: task_id.clone(),
+            name: ASSIGNMENT_VAR.to_string(),
+            value: next.value(),
+        });
+        let facts = act_facts(snapshot, task_id);
+        let mut payload = self
+            .operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
+            .ok_or_else(|| {
+                runtime(format!(
+                    "act '{node}' has no message payload for its undelegation"
+                ))
+            })?;
+        payload["kind"] = serde_json::json!("assignment");
+        inject_payload_assignment(&mut payload, &next);
+        payload["ref_msg_id"] = created_message_id(snapshot, task_id)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null);
+        payload["msg_id"] = serde_json::Value::String(crate::utils::longid());
+        if let Some(reason) = input("reason").filter(|reason| !reason.is_empty()) {
+            payload["reason"] = serde_json::Value::String(reason.to_string());
+        }
+        plan.outbox.push(
+            crate::scheduler::core::model::transition_plan::OutboxIntent {
+                key: format!(
+                    "assignment.undelegated:{}:{}:{}:{}",
+                    plan.process_id, node, task_id.generation, next.rev
+                ),
+                topic: "assignment.undelegated".into(),
                 payload: payload.to_string(),
             },
         );
@@ -997,6 +1226,7 @@ impl KernelHost {
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         plan: &mut TransitionPlan,
+        subject: Option<&str>,
     ) -> Result<()> {
         let Some(change) = plan
             .state_changes
@@ -1029,7 +1259,7 @@ impl KernelHost {
             .as_ref()
             .map(|(code, message)| (code.as_str(), message.as_str()));
         let facts = act_facts(snapshot, task_id);
-        if let Some(payload) = self.operation_message_payload(
+        if let Some(mut payload) = self.operation_message_payload(
             snapshot,
             task_id,
             task_id.node.as_str(),
@@ -1037,6 +1267,10 @@ impl KernelHost {
             Some(&plan.variable_writes),
             error,
         )? {
+            // The decision's actor is a durable fact: an owner's completion
+            // records the owner as the assignee, a delegatee's records the
+            // delegation. The payload was built from the assignment alone.
+            inject_decision_assignment(&mut payload, snapshot, task_id, subject)?;
             match plan.outbox.first_mut() {
                 Some(record) => record.payload = payload.to_string(),
                 None => plan.outbox.push(
@@ -1564,10 +1798,13 @@ pub(in crate::scheduler::shell) enum Effect {
     /// decision landed on an execution that can no longer take it. The operation's
     /// bare remainder completes the operation.
     Nothing,
-    /// A durable client decision to replay.
+    /// A durable client decision to replay. `subject` is the server-attributed
+    /// decision maker the fact persisted (absent for engine-originated
+    /// decisions and for facts an older kernel wrote).
     Decision {
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
+        subject: Option<String>,
     },
     /// The auto-completion operation: the act's own package ran, or its node carries
     /// no package at all.
@@ -1609,28 +1846,26 @@ impl ActOperation for ApplyAction {
             .cloned();
         let effect = match fact {
             Some(fact) => {
-                let (action, inputs) = decode_action_fact(&fact)?;
+                let (action, inputs, subject) = decode_action_fact(&fact)?;
                 // The step is already deciding a caught error (the sign its
                 // failure operation pinned): no later operation may complete, fail or fan
                 // it out — the catch join decides it. The client path refuses
                 // such an action at the preflight; what reaches here is the
                 // stale auto operation a failure raced, which keeps the operation's
                 // own commit as its bare remainder.
-                // A transfer is not a state transition (`action_allowed`
-                // answers the state table), but it is admissible on exactly
-                // the live states a decision can reach: any other state means
-                // the intent lost to a decision and leaves the bare
-                // remainder.
-                let transfer_live = matches!(
-                    action,
-                    crate::scheduler::core::commit::command::ActionKind::Transfer
-                ) && matches!(
-                    task.state,
-                    crate::scheduler::core::model::task_graph::TaskState::Running
-                        | crate::scheduler::core::model::task_graph::TaskState::Waiting
-                );
+                // An assignment change (transfer/delegate/undelegate) is not a
+                // state transition (`action_allowed` answers the state table),
+                // but it is admissible on exactly the live states a decision
+                // can reach: any other state means the intent lost to a
+                // decision and leaves the bare remainder.
+                let assignment_live = action.moves_assignment()
+                    && matches!(
+                        task.state,
+                        crate::scheduler::core::model::task_graph::TaskState::Running
+                            | crate::scheduler::core::model::task_graph::TaskState::Waiting
+                    );
                 if is_catch_decider(snapshot, task_id)
-                    || (!transfer_live
+                    || (!assignment_live
                         && !crate::scheduler::core::commit::command::action_allowed(
                             task.state, &action,
                         ))
@@ -1641,7 +1876,11 @@ impl ActOperation for ApplyAction {
                     // an error.
                     Effect::Nothing
                 } else {
-                    Effect::Decision { action, inputs }
+                    Effect::Decision {
+                        action,
+                        inputs,
+                        subject,
+                    }
                 }
             }
             None if !matches!(
@@ -1722,6 +1961,10 @@ impl ActOperation for ApplyAction {
                                                 inputs: crate::scheduler::Runtime::kernel_inputs(
                                                     &action.options,
                                                 ),
+                                                // A package's deferred decision is
+                                                // engine-originated: no client
+                                                // subject is attributed to it.
+                                                subject: None,
                                             }
                                         }
                                         Ok(kind) => Effect::Failed(crate::ActError::Action(
@@ -1780,7 +2023,11 @@ impl ActOperation for ApplyAction {
                 "completed",
                 "task.completed",
             ),
-            Effect::Decision { action, inputs } => {
+            Effect::Decision {
+                action,
+                inputs,
+                subject,
+            } => {
                 host.completion_plan(
                     snapshot,
                     id,
@@ -1790,6 +2037,7 @@ impl ActOperation for ApplyAction {
                     Some(action),
                     inputs,
                     None,
+                    subject.as_deref(),
                 )
                 .await
             }
@@ -1805,6 +2053,7 @@ impl ActOperation for ApplyAction {
                     None,
                     Vec::new(),
                     effect.as_ref(),
+                    None,
                 )
                 .await
             }
@@ -1919,6 +2168,7 @@ mod tests {
                 Some(ActionKind::Back),
                 Vec::new(),
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -1955,6 +2205,7 @@ mod tests {
                 &claim,
                 Some(ActionKind::Back),
                 vec![(crate::utils::consts::ACT_TO.to_string(), "s1".into())],
+                None,
                 None,
             )
             .await
@@ -1996,6 +2247,7 @@ mod tests {
                 Some(ActionKind::Complete),
                 Vec::new(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2030,6 +2282,7 @@ mod tests {
                 &claim,
                 None,
                 Vec::new(),
+                None,
                 None,
             )
             .await
@@ -2077,6 +2330,7 @@ mod tests {
                 None,
                 Vec::new(),
                 Some(&outcome),
+                None,
             )
             .await
             .unwrap();
@@ -2123,6 +2377,7 @@ mod tests {
                 None,
                 Vec::new(),
                 Some(&EffectOutcome::empty()),
+                None,
             )
             .await
             .unwrap();
@@ -2176,6 +2431,7 @@ mod tests {
                 None,
                 Vec::new(),
                 Some(&outcome),
+                None,
             )
             .await
             .unwrap();
@@ -2206,6 +2462,7 @@ mod tests {
                 &claim,
                 None,
                 Vec::new(),
+                None,
                 None,
             )
             .await
@@ -2238,6 +2495,7 @@ mod tests {
                 }),
                 Vec::new(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2269,6 +2527,7 @@ mod tests {
                 snapshot_task,
                 &claim,
                 &[("answer".to_string(), "42".to_string())],
+                None,
             )
             .unwrap();
         assert!(
@@ -2531,7 +2790,7 @@ mod tests {
 
         // No state change for the execution.
         let mut plan = empty_plan(&snapshot);
-        host.attach_operation_message(&snapshot, &task_id, &mut plan)
+        host.attach_operation_message(&snapshot, &task_id, &mut plan, None)
             .unwrap();
         assert!(plan.outbox.is_empty());
 
@@ -2542,7 +2801,7 @@ mod tests {
             from: TaskState::Running,
             to: TaskState::Running,
         });
-        host.attach_operation_message(&snapshot, &task_id, &mut plan)
+        host.attach_operation_message(&snapshot, &task_id, &mut plan, None)
             .unwrap();
         assert!(plan.outbox.is_empty());
 
@@ -2555,7 +2814,7 @@ mod tests {
                 payload: String::new(),
             },
         );
-        host.attach_operation_message(&snapshot, &task_id, &mut plan)
+        host.attach_operation_message(&snapshot, &task_id, &mut plan, None)
             .unwrap();
         assert!(!plan.outbox[0].payload.is_empty());
 
@@ -2569,7 +2828,7 @@ mod tests {
             from: TaskState::Running,
             to: TaskState::Completed,
         });
-        host.attach_operation_message(&gone, &task_id, &mut plan)
+        host.attach_operation_message(&gone, &task_id, &mut plan, None)
             .unwrap();
         assert!(plan.outbox.is_empty());
 
@@ -2586,7 +2845,7 @@ mod tests {
             name: "error.code".into(),
             value: serde_json::json!("E1").to_string(),
         });
-        host.attach_operation_message(&snapshot, &task_id, &mut plan)
+        host.attach_operation_message(&snapshot, &task_id, &mut plan, None)
             .unwrap();
         assert_eq!(plan.outbox[0].topic, "task.failed");
         assert!(plan.outbox[0].payload.contains("E1"));
@@ -2752,6 +3011,7 @@ mod tests {
                     ("expect_rev".to_string(), "0".to_string()),
                     ("updated_by".to_string(), "manager".to_string()),
                 ],
+                None,
             ),
         );
         let id = id("a", 0);
@@ -2793,6 +3053,159 @@ mod tests {
         assert_eq!(assignment["updated_by"], serde_json::json!("manager"));
     }
 
+    /// A durable delegation intent replays as the same assignment plan: no
+    /// state change, no new execution, and both `__delegation` and the
+    /// assignee are written with the durable caller as `granted_by`.
+    #[tokio::test]
+    async fn a_delegate_fact_replays_without_a_state_change() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("a")
+                .with_uses("acts.core.irq", crate::Vars::new())
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        snapshot.variables.insert(
+            (task_id.clone(), ASSIGNMENT_VAR.to_string()),
+            Assignment::new("alice").value(),
+        );
+        snapshot.variables.insert(
+            (task_id.clone(), action_fact_var(0)),
+            action_fact(
+                &ActionKind::Delegate,
+                &[
+                    ("delegatee".to_string(), "bob".to_string()),
+                    ("expires_at".to_string(), "1761000000000".to_string()),
+                    ("reason".to_string(), "holiday".to_string()),
+                ],
+                Some("alice"),
+            ),
+        );
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let mut operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let outcome = ApplyAction.run(&host, &mut operation).await.unwrap();
+        assert!(
+            matches!(outcome, Outcome::Effect(Effect::Decision { .. })),
+            "a live delegation is a decision to replay"
+        );
+        let plan = ApplyAction.next(&host, &operation, outcome).await.unwrap();
+        assert!(plan.state_changes.is_empty());
+        assert!(plan.task_creates.is_empty());
+        assert!(plan.operations.is_empty());
+        assert!(
+            plan.outbox
+                .iter()
+                .any(|item| item.topic == "assignment.delegated")
+        );
+        let assignment: serde_json::Value = serde_json::from_str(
+            &plan
+                .variable_writes
+                .iter()
+                .find(|write| write.name == ASSIGNMENT_VAR)
+                .expect("the replayed assignment write")
+                .value,
+        )
+        .unwrap();
+        assert_eq!(assignment["owner"], serde_json::json!("alice"));
+        assert_eq!(assignment["assignee"], serde_json::json!("bob"));
+        assert_eq!(assignment["rev"], serde_json::json!(1));
+        assert_eq!(assignment["updated_by"], serde_json::json!("alice"));
+        let delegation: serde_json::Value = serde_json::from_str(
+            &plan
+                .variable_writes
+                .iter()
+                .find(|write| write.name == DELEGATION_VAR)
+                .expect("the replayed delegation write")
+                .value,
+        )
+        .unwrap();
+        assert_eq!(delegation["id"], serde_json::json!("dg1"));
+        assert_eq!(delegation["delegator"], serde_json::json!("alice"));
+        assert_eq!(delegation["delegatee"], serde_json::json!("bob"));
+        assert_eq!(delegation["granted_by"], serde_json::json!("alice"));
+        assert_eq!(
+            delegation["expires_at"],
+            serde_json::json!(1761000000000i64)
+        );
+        assert_eq!(delegation["reason"], serde_json::json!("holiday"));
+    }
+
+    /// A delegatee's decision is announced from the durable subject the fact
+    /// carries: replay records the same delegator/delegatee as the live call,
+    /// not the assignment's bare assignee.
+    #[tokio::test]
+    async fn a_delegated_completion_projects_the_durable_actor() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("a")
+                .with_uses("acts.core.irq", crate::Vars::new())
+        });
+        let mut snapshot = from_workflow(&workflow);
+        let task_id = task("a");
+        snapstate(&mut snapshot, &task_id, TaskState::Waiting);
+        let assignment = Assignment::new("alice").delegated("bob", Some("alice"), 1);
+        let delegation =
+            Delegation::new("dg1".to_string(), "alice", "bob", Some("alice"), None, None);
+        snapshot.variables.insert(
+            (task_id.clone(), ASSIGNMENT_VAR.to_string()),
+            assignment.value(),
+        );
+        snapshot.variables.insert(
+            (task_id.clone(), DELEGATION_VAR.to_string()),
+            delegation.value(),
+        );
+        snapshot.variables.insert(
+            (task_id.clone(), action_fact_var(0)),
+            action_fact(&ActionKind::Complete, &[], Some("bob")),
+        );
+        let id = id("a", 0);
+        let claim = commit(&id);
+        let mut lane = CommandLane::detached(&host);
+        let mut operation = Operation {
+            id: &id,
+            claim: &claim,
+            task_id: id.task.clone(),
+            task: snapshot.tasks.get(&id.task).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let outcome = ApplyAction.run(&host, &mut operation).await.unwrap();
+        let plan = ApplyAction.next(&host, &operation, outcome).await.unwrap();
+        let payload = plan
+            .outbox
+            .iter()
+            .find(|item| item.topic == "task.completed")
+            .expect("the completion record")
+            .payload
+            .clone();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["owner"], serde_json::json!("alice"));
+        assert_eq!(payload["assignee"], serde_json::json!("bob"));
+        assert_eq!(payload["delegator"], serde_json::json!("alice"));
+        assert_eq!(payload["delegatee"], serde_json::json!("bob"));
+        assert_eq!(payload["rev"], serde_json::json!(1));
+        assert_eq!(
+            payload["inputs"]["options"]["owner"],
+            serde_json::json!("alice")
+        );
+        assert_eq!(
+            payload["inputs"]["options"]["assignee"],
+            serde_json::json!("bob")
+        );
+    }
+
     /// A decision whose execution already moved past it is the bare
     /// remainder, not an error.
     #[tokio::test]
@@ -2803,7 +3216,7 @@ mod tests {
         snapstate(&mut snapshot, &task_id, TaskState::Completed);
         snapshot.variables.insert(
             (task_id.clone(), action_fact_var(0)),
-            action_fact(&ActionKind::Complete, &[]),
+            action_fact(&ActionKind::Complete, &[], None),
         );
         let id = id("a", 0);
         let claim = commit(&id);
@@ -2890,7 +3303,7 @@ mod tests {
         );
         snapshot.variables.insert(
             (task_id.clone(), action_fact_var(0)),
-            action_fact(&ActionKind::Complete, &[]),
+            action_fact(&ActionKind::Complete, &[], None),
         );
         let id = id("s1", 0);
         let claim = commit(&id);
@@ -2971,6 +3384,7 @@ mod tests {
                 None,
                 Vec::new(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3018,6 +3432,7 @@ mod tests {
                 snapshot_task,
                 &claim,
                 &[],
+                None,
             )
             .unwrap();
         assert_eq!(plan.outbox.len(), 1);

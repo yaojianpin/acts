@@ -43,9 +43,11 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         "task.aborted" => MessageState::Aborted,
         "task.skipped" => MessageState::Skipped,
         "task.removed" => MessageState::Removed,
-        // A transfer notification is an event of its own: the act is still
+        // An assignment notification is an event of its own: the act is still
         // waiting, so it carries the `created` state of a live message.
-        "assignment.transferred" => MessageState::Created,
+        "assignment.transferred" | "assignment.delegated" | "assignment.undelegated" => {
+            MessageState::Created
+        }
         _ => return None,
     };
     let payload: serde_json::Value = serde_json::from_str(&record.payload).ok()?;

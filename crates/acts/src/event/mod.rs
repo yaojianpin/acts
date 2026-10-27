@@ -46,6 +46,13 @@ pub enum EventAction {
     /// without deciding it. The act keeps its execution and state; only the
     /// task's `__assignment` changes.
     Transfer,
+    /// Delegate — let another business user decide an assigned human act for
+    /// its owner until the delegation expires or is revoked. The act keeps its
+    /// execution, state and owner; only `__delegation` and the assignee change.
+    Delegate,
+    /// Undelegate — revoke the act's delegation: the owner becomes the
+    /// assignee again and the delegatee can no longer decide.
+    Undelegate,
 }
 
 impl EventAction {
@@ -106,6 +113,14 @@ mod tests {
             EventAction::parse("transfer").unwrap(),
             EventAction::Transfer
         );
+        assert_eq!(
+            EventAction::parse("delegate").unwrap(),
+            EventAction::Delegate
+        );
+        assert_eq!(
+            EventAction::parse("undelegate").unwrap(),
+            EventAction::Undelegate
+        );
         let err = EventAction::parse("no_such_action").unwrap_err();
         assert!(
             err.to_string()
@@ -121,6 +136,8 @@ mod tests {
         assert_eq!(EventAction::Push.to_string(), "push");
         assert_eq!(EventAction::Remove.to_string(), "remove");
         assert_eq!(EventAction::Transfer.to_string(), "transfer");
+        assert_eq!(EventAction::Delegate.to_string(), "delegate");
+        assert_eq!(EventAction::Undelegate.to_string(), "undelegate");
     }
 
     #[test]
