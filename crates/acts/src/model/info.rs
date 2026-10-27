@@ -271,6 +271,14 @@ pub struct MessageInfo {
     pub status: String,
     pub timestamp: i64,
     pub uses: Option<String>,
+
+    /// Projected assignment of a human act.
+    pub owner: Option<String>,
+    pub assignee: Option<String>,
+    pub delegator: Option<String>,
+    pub delegatee: Option<String>,
+    pub rev: u64,
+    pub ref_msg_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -419,6 +427,30 @@ impl MessageInfo {
             update_time: delivery.update_time,
             retry_times: delivery.retry_times,
             status: delivery.status.to_string(),
+            // assignment projection (canonical message first; the delivery's
+            // denormalized copy is the fallback for an older canonical row)
+            owner: message.owner.clone().or_else(|| delivery.owner.clone()),
+            assignee: message
+                .assignee
+                .clone()
+                .or_else(|| delivery.assignee.clone()),
+            delegator: message
+                .delegator
+                .clone()
+                .or_else(|| delivery.delegator.clone()),
+            delegatee: message
+                .delegatee
+                .clone()
+                .or_else(|| delivery.delegatee.clone()),
+            rev: if message.rev > 0 || message.owner.is_some() {
+                message.rev
+            } else {
+                delivery.rev
+            },
+            ref_msg_id: message
+                .ref_msg_id
+                .clone()
+                .or_else(|| delivery.ref_msg_id.clone()),
         }
     }
 }

@@ -68,6 +68,21 @@ pub struct Message {
 
     pub create_time: i64,
     pub timestamp: i64,
+
+    /// Projected assignment of a human act (see `__assignment`).
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub delegator: Option<String>,
+    #[serde(default)]
+    pub delegatee: Option<String>,
+    #[serde(default)]
+    pub rev: u64,
+    #[serde(default)]
+    pub ref_msg_id: Option<String>,
+
     pub v: i32,
 }
 
@@ -82,13 +97,14 @@ impl DbCollectionIden for Message {
         &["timestamp"]
     }
     fn version() -> i32 {
-        2
+        3
     }
 
     fn upcast(value: JsonValue) -> Result<Self> {
         let v = value.get("v").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         match v {
-            2 => Self::upcast_current(value),
+            3 => Self::upcast_current(value),
+            2 => Self::migrate_v2(value),
             1 => Self::migrate_v1(value),
             0 => {
                 // v0 → v1: move 'tag' field into inputs.options
@@ -136,6 +152,20 @@ impl Message {
             map.insert(
                 "v".to_string(),
                 JsonValue::Number(serde_json::Number::from(2)),
+            );
+        }
+        Self::migrate_v2(value)
+    }
+
+    /// v2 → v3: the assignment projection (`owner`, `assignee`, `delegator`,
+    /// `delegatee`, `rev`, `ref_msg_id`) was added. Old rows carry
+    /// none of them; every field is `#[serde(default)]`, so bumping the
+    /// version is the whole migration.
+    fn migrate_v2(mut value: JsonValue) -> Result<Self> {
+        if let JsonValue::Object(map) = &mut value {
+            map.insert(
+                "v".to_string(),
+                JsonValue::Number(serde_json::Number::from(3)),
             );
         }
         Self::upcast_current(value)
@@ -313,7 +343,7 @@ mod tests {
 
         let msg = Message::upcast(JsonValue::Object(map)).unwrap();
         assert_eq!(msg.id, "m1");
-        assert_eq!(msg.v, 2);
+        assert_eq!(msg.v, 3);
         // verify tag moved into inputs.options
         let inputs: JsonValue = serde_json::from_str(&msg.inputs).unwrap();
         assert_eq!(inputs["options"]["tag"].as_str().unwrap(), "old-tag");
@@ -323,21 +353,27 @@ mod tests {
     fn upcast_v1_merged_row_becomes_canonical() {
         let msg = Message::upcast(message_json(1, true)).unwrap();
         assert_eq!(msg.id, "m1");
-        assert_eq!(msg.v, 2);
+        assert_eq!(msg.v, 3);
     }
 
     #[test]
     fn upcast_v2_canonical_passes_through() {
         let msg = Message::upcast(message_json(2, false)).unwrap();
         assert_eq!(msg.id, "m1");
-        assert_eq!(msg.v, 2);
+        assert_eq!(msg.v, 3);
+        // A v2 row predates the assignment projection: the new fields read
+        // their serde defaults.
+        assert_eq!(msg.owner, None);
+        assert_eq!(msg.assignee, None);
+        assert_eq!(msg.rev, 0);
+        assert_eq!(msg.ref_msg_id, None);
     }
 
     #[test]
     fn message_metadata_and_i64_status_conversion() {
         assert_eq!(Message::iden(), "messages");
         assert_eq!(Message::ordered_index_fields(), &["timestamp"]);
-        assert_eq!(Message::version(), 2);
+        assert_eq!(Message::version(), 3);
 
         let values = [
             (DeliveryStatus::Created, 0i64),
@@ -363,7 +399,7 @@ mod tests {
         // v0 without a tag, and a v0 body that is not an object at all: both
         // just bump the version and decode.
         let plain = Message::upcast(message_json(0, false)).unwrap();
-        assert_eq!(plain.v, 2);
+        assert_eq!(plain.v, 3);
 
         let err = Message::upcast(JsonValue::Null).unwrap_err();
         assert!(err.to_string().contains("invalid type"));

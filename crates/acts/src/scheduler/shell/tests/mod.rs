@@ -2743,6 +2743,7 @@ async fn kernel_engine_keeps_a_run_with_an_open_delivery() {
             update_time: now,
             timestamp: now,
             v: 1,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -10536,7 +10537,15 @@ async fn an_action_intent_that_is_already_closed_is_not_claimable() {
         operation: operation.clone(),
     });
     let error = host
-        .apply_action_once(PID, &tid_of(PID, "wait", 0), action, inputs, &mut pinned)
+        .apply_action_once(
+            PID,
+            &tid_of(PID, "wait", 0),
+            action,
+            inputs,
+            None,
+            None,
+            &mut pinned,
+        )
         .await
         .unwrap_err();
     assert!(

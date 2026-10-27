@@ -56,6 +56,10 @@ pub(in crate::scheduler::shell) enum Start {
         /// decision instead of waiting for a client, in the same durable
         /// intent shape a client command uses.
         rule_action: Option<crate::event::EventAction>,
+        /// The owner a declared `assign.owner` resolved to. `Some` only for a
+        /// fresh start of an assigned act; its `__assignment` write rides
+        /// this plan.
+        assignment: Option<String>,
     },
     /// The act's params did not resolve: the execution is marked started and
     /// the decision is handed to its effect operation, which resolves again and
@@ -100,6 +104,51 @@ impl ActOperation for ExecuteTask {
             Guard::Fail(failure) => return Ok(Outcome::Start(Start::Failed(failure))),
             Guard::Run => {}
         }
+        // A declared `assign.owner` is a human decision act's owner. The
+        // declaration is refused on anything else before the act can wait,
+        // and its expression must resolve to a non-empty owner: an unowned
+        // approval is never produced.
+        let assignment_expr = match task {
+            Some(task) => match declared_expression(snapshot, task_id, &task.model_node) {
+                Ok(assignment) => assignment,
+                Err(error) => {
+                    return Ok(Outcome::Start(Start::Failed(Failure::new(
+                        "invalid_assignment",
+                        error.to_string(),
+                    ))));
+                }
+            },
+            None => None,
+        };
+        let assignment = match assignment_expr {
+            Some(expr) => {
+                match host
+                    .resolve_assignment_owner(snapshot, Some(&operation.snapshot), task_id, &expr)
+                    .await
+                {
+                    Ok(Some(owner)) => Some(owner),
+                    Ok(None) => {
+                        return Ok(Outcome::Start(Start::Failed(Failure::new(
+                            "assignment_failed",
+                            format!(
+                                "act '{}': assign.owner resolved to an empty value; refusing an unowned decision",
+                                task_id.node.as_str()
+                            ),
+                        ))));
+                    }
+                    Err(error) => {
+                        return Ok(Outcome::Start(Start::Failed(Failure::new(
+                            "assignment_failed",
+                            format!(
+                                "act '{}': assign.owner could not be resolved: {error}",
+                                task_id.node.as_str()
+                            ),
+                        ))));
+                    }
+                }
+            }
+            None => None,
+        };
         // The act's package facts and its own gate: every `uses` step resolves
         // its package at start, and the pinned facts ride every later message
         // record — so no later operation re-runs the headless scope, whose snapshot
@@ -130,6 +179,7 @@ impl ActOperation for ExecuteTask {
                 package,
                 announced,
                 rule_action: None,
+                assignment: assignment.clone(),
             }
         } else if let Some(task) = task {
             match host
@@ -163,6 +213,7 @@ impl ActOperation for ExecuteTask {
                                 package,
                                 announced,
                                 rule_action: Some(action),
+                                assignment: assignment.clone(),
                             },
                         }));
                     }
@@ -172,6 +223,7 @@ impl ActOperation for ExecuteTask {
                         package,
                         announced,
                         rule_action: None,
+                        assignment: assignment.clone(),
                     }
                 }
                 Err(error) => {
@@ -197,6 +249,7 @@ impl ActOperation for ExecuteTask {
                 package,
                 announced,
                 rule_action: None,
+                assignment,
             }
         };
         Ok(Outcome::Start(start))
@@ -280,6 +333,7 @@ impl ActOperation for ExecuteTask {
                 package: has_package,
                 announced: created_exists,
                 rule_action,
+                assignment,
             } => {
                 // A rule that failed with a decision action starts the act
                 // and pins that decision as its first durable intent; the
@@ -313,6 +367,13 @@ impl ActOperation for ExecuteTask {
                         value: facts.options.to_string(),
                     });
                 }
+                if fresh && let Some(owner) = &assignment {
+                    plan.variable_writes.push(VariableWrite {
+                        scope: task_id.clone(),
+                        name: ASSIGNMENT_VAR.to_string(),
+                        value: Assignment::new(owner).value(),
+                    });
+                }
                 // The execution announces itself: the act's Created message
                 // for a `uses` step, the task-level one (type = the node kind)
                 // for a package-less execution — the legacy engine's `on_task`
@@ -327,7 +388,7 @@ impl ActOperation for ExecuteTask {
                     && (!has_package || !msg_decision(snapshot, id.task.node.as_str())?);
                 if !created_exists
                     && announces_created
-                    && let Some(payload) = host.operation_message_payload(
+                    && let Some(mut payload) = host.operation_message_payload(
                         snapshot,
                         &task_id,
                         id.task.node.as_str(),
@@ -336,6 +397,11 @@ impl ActOperation for ExecuteTask {
                         None,
                     )?
                 {
+                    // The payload was built before this plan writes
+                    // `__assignment`; the start's resolved owner is merged in.
+                    if let Some(owner) = &assignment {
+                        inject_payload_assignment(&mut payload, &Assignment::new(owner));
+                    }
                     plan.outbox.push(
                         crate::scheduler::core::model::transition_plan::OutboxIntent {
                             key: format!(

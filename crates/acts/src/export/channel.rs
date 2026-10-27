@@ -477,6 +477,36 @@ mod tests {
         assert!(!is_match(&by_uses, &event));
     }
 
+    /// The assignment projection in `inputs.options` is what the existing
+    /// channel globs match: `options.owner` selects the owner's channel.
+    #[test]
+    fn an_assignment_owner_option_matches_the_channel_glob() {
+        let message = Message {
+            inputs: Vars::new().with(
+                "options",
+                Vars::new().with("owner", "alice").with("assignee", "alice"),
+            ),
+            ..Default::default()
+        };
+        let event = Event::from_inner(message);
+
+        let owner = (
+            compile_glob("*", "type"),
+            compile_glob("*", "state"),
+            compile_glob("*", "uses"),
+            vec![("owner".to_string(), compile_glob("alice", "owner"))],
+        );
+        assert!(is_match(&owner, &event));
+
+        let other = (
+            compile_glob("*", "type"),
+            compile_glob("*", "state"),
+            compile_glob("*", "uses"),
+            vec![("owner".to_string(), compile_glob("bob", "owner"))],
+        );
+        assert!(!is_match(&other, &event));
+    }
+
     /// A delivery is stored only for a non-empty channel id on a message that
     /// has no delivery row yet; a redelivery and an unnamed channel are
     /// handed over without storing.

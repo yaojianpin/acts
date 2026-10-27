@@ -109,6 +109,7 @@ use tokio::sync::mpsc::{Receiver, Sender, channel};
 // through it.
 mod action;
 pub(crate) mod admission;
+mod assign;
 mod context;
 pub(crate) mod delivery;
 mod effects;
@@ -131,8 +132,9 @@ pub(crate) mod timers;
 pub(crate) mod validation;
 
 use self::model::task_graph;
-use self::{action::*, errors::*, facts::*, planning::*};
+use self::{action::*, assign::*, errors::*, facts::*, planning::*};
 pub(crate) use admission::{AdmissionCaps, Admissions};
+pub(crate) use assign::{AssignmentResolver, RuntimeAssignmentResolver};
 pub use context::Context;
 pub(crate) use delivery::ShadowTransport;
 pub(crate) use effects::PackageEffectRunner;
@@ -211,6 +213,10 @@ pub(crate) struct KernelHost {
     /// headless task, exactly like the legacy branch task; without one the
     /// built-in subset evaluator decides (see `predicate`).
     predicate: Arc<parking_lot::RwLock<Option<Arc<dyn predicate::PredicateRunner>>>>,
+    /// The assignment seam: when attached, a human act's `assign.owner`
+    /// expression resolves on a headless task at start. Without one a
+    /// declared assignment fails closed (an act never runs unowned).
+    assignment: Arc<parking_lot::RwLock<Option<Arc<dyn AssignmentResolver>>>>,
     /// The runtime's store-facing timers (schedule triggers, delivery retries,
     /// terminal cleanup, snapshot purge), once attached: the driver's serve
     /// loop ticks them, so ONE background task owns every store-reaching pass.
@@ -340,6 +346,7 @@ impl KernelHost {
                 lifecycle: Arc::new(parking_lot::RwLock::new(None)),
                 projection: Arc::new(parking_lot::RwLock::new(None)),
                 predicate: Arc::new(parking_lot::RwLock::new(None)),
+                assignment: Arc::new(parking_lot::RwLock::new(None)),
                 timer_guider: Arc::new(parking_lot::RwLock::new(None)),
                 timer_guards: Arc::new(TimerGuards::new()),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
@@ -1397,6 +1404,23 @@ impl KernelHost {
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
     ) -> Result<()> {
+        self.apply_action_as(process_id, node, action, inputs, None, None)
+            .await
+    }
+
+    /// The client path: the action plus the server-attributed subject and the
+    /// client's assignment revision. `subject = None` is the ACL-disabled (or
+    /// engine-originated) caller, which keeps the pre-assignment behavior;
+    /// `rev` only guards an assigned task's revision.
+    pub(crate) async fn apply_action_as(
+        &self,
+        process_id: &str,
+        node: &str,
+        action: crate::scheduler::core::commit::command::ActionKind,
+        inputs: Vec<(String, String)>,
+        subject: Option<&str>,
+        rev: Option<u64>,
+    ) -> Result<()> {
         // The pid's command lane (A4) serializes this attempt against the
         // driver's operations and every other client of the same run, so the
         // normal path commits on the first attempt. The loop below stays as
@@ -1417,6 +1441,8 @@ impl KernelHost {
                     node,
                     action.clone(),
                     inputs.clone(),
+                    subject,
+                    rev,
                     &mut pinned,
                 )
                 .await
@@ -1722,12 +1748,15 @@ impl KernelHost {
     /// standard operation over the operation that intent names (see
     /// [`Self::apply_action`] for the retry around it). `pinned` carries the
     /// identity the first attempt fixed.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_action_once(
         &self,
         process_id: &str,
         node: &str,
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
+        subject: Option<&str>,
+        rev: Option<u64>,
         pinned: &mut Option<ActionIntent>,
     ) -> Result<()> {
         // A4: the whole attempt — load, preflight, durable intent, claim,
@@ -1749,6 +1778,19 @@ impl KernelHost {
         // one.
         let intent = Self::action_identity(&snapshot, process_id, node, &action, &inputs, pinned)?;
         let (task_id, operation_id) = (intent.task.clone(), intent.operation.clone());
+        // The per-task decision check: an act declaring an assignment admits
+        // only its owner/assignee, on the authoritative task state (never a
+        // client field). `subject = None` is the ACL-disabled/engine path and
+        // keeps the old `@execute` behavior. Push/remove keep their existing
+        // authority — they manage the act, not its decision.
+        if !matches!(
+            &action,
+            crate::scheduler::core::commit::command::ActionKind::Push
+                | crate::scheduler::core::commit::command::ActionKind::Remove
+        ) {
+            let assignment = Assignment::of(&snapshot, &task_id)?;
+            authorize_decision(assignment.as_ref(), subject, rev, task_id.node.as_str())?;
+        }
         let now = SystemClock.now_ms();
         // The preflight envelope: `ActionPlanner` validates the whole command —
         // identity and sequence included — before the durable intent exists, so
@@ -2004,6 +2046,11 @@ impl KernelHost {
         let options = facts
             .map(|facts| facts.options.clone())
             .unwrap_or(serde_json::Value::Null);
+        // The assignment projection: the persisted task state is the only
+        // source of these fields, never a client's inputs or options. It is
+        // merged into the payload after the inputs are built (see
+        // `inject_payload_assignment`).
+        let assignment = Assignment::of(snapshot, task_id)?;
 
         let mut inputs = input_vars(snapshot, task_id);
         // The act folds into its step node in the kernel, so the step the
@@ -2042,6 +2089,9 @@ impl KernelHost {
             "mid": mid,
             "inputs": serde_json::Value::Object(inputs),
         });
+        if let Some(assignment) = &assignment {
+            inject_payload_assignment(&mut payload, assignment);
+        }
         if let Some((code, message)) = error {
             payload["error"] = serde_json::json!({ "code": code, "message": message });
         } else if let Some(outputs) = outputs {

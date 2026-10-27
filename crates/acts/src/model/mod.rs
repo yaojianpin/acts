@@ -18,7 +18,7 @@ pub use info::{
     EventInfo, GraphNode, MessageInfo, ModelInfo, PackageInfo, ProcInfo, ProcessGraph, TaskInfo,
 };
 pub use join::{JoinRule, PartialThreshold};
-pub use step::Step;
+pub use step::{Assign, Step};
 pub use timeout::{Timeout, TimeoutLimit, TimeoutUnit};
 pub use trigger::{
     TRIGGER_CHAT, TRIGGER_HOOK, TRIGGER_MANUAL, TRIGGER_SCHEDULE, Trigger, TriggerKind,

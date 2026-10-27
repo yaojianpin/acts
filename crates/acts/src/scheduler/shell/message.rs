@@ -71,6 +71,16 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
+    let text = |name: &str| {
+        payload
+            .get(name)
+            .and_then(|value| value.as_str())
+            .map(String::from)
+    };
+    let rev = payload
+        .get("rev")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
 
     // The message's inputs: the scope inputs the operation recorded, plus the
     // resolved params/options the message carries (the legacy
@@ -118,6 +128,12 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         end_time: 0,
         retry_times: 0,
         timestamp: crate::utils::time::time_millis(),
+        owner: text("owner"),
+        assignee: text("assignee"),
+        delegator: text("delegator"),
+        delegatee: text("delegatee"),
+        rev,
+        ref_msg_id: text("ref_msg_id"),
     })
 }
 

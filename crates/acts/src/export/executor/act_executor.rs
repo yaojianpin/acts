@@ -79,13 +79,40 @@ impl ActExecutor {
         pid: &str,
         tid: &str,
         action: EventAction,
-        options: Vars,
+        mut options: Vars,
     ) -> Result<()> {
         self.principal.check(name_of(&action))?;
-        self.runtime
-            .do_action(&Action::new(pid, tid, action, options))
-            .await
+        // The assignment revision is the client's compare value, not state:
+        // it rides the action envelope and never becomes a task variable. The
+        // person fields are task state; a client's copies are discarded.
+        let rev = take_rev(&mut options)?;
+        for name in ["owner", "assignee", "delegator", "delegatee", "subject"] {
+            let _ = options.remove(name);
+        }
+        let subject = (self.principal.is_authenticated() && !self.principal.is_unrestricted())
+            .then(|| self.principal.subject().to_string());
+        let action = Action::new(pid, tid, action, options)
+            .with_subject(subject)
+            .with_rev(rev);
+        self.runtime.do_action(&action).await
     }
+}
+
+/// Pop the client's `rev` compare value: a JSON number or a numeric
+/// string (the transports carry options as JSON text). A malformed value is
+/// refused like a stale revision, before any durable intent exists.
+fn take_rev(options: &mut Vars) -> Result<Option<u64>> {
+    let Some(value) = options.remove("rev") else {
+        return Ok(None);
+    };
+    let revision = match &value {
+        serde_json::Value::Number(number) => number.as_u64(),
+        serde_json::Value::String(text) => text.parse::<u64>().ok(),
+        _ => None,
+    };
+    revision.map(Some).ok_or_else(|| {
+        crate::ActError::Action(format!("EASSIGNMENT_CHANGED: invalid rev '{value}'"))
+    })
 }
 
 /// The action name of a task action, as the shared dispatch table spells it.

@@ -1087,7 +1087,8 @@ macro_rules! gen_store_tests {
                 create_time: 0,
                 timestamp: 0,
                 v: 0,
-            };
+                ..Default::default()
+                        };
 
             store.messages().create(&msg).await.expect("create message");
 
@@ -1120,7 +1121,8 @@ macro_rules! gen_store_tests {
                 create_time: 0,
                 timestamp: 0,
                 v: 0,
-            };
+                ..Default::default()
+                        };
 
             store.messages().create(&msg).await.unwrap();
 
@@ -1156,7 +1158,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: 0,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -1203,7 +1206,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: 0,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -1250,7 +1254,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: 0,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -1272,7 +1277,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: 0,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -1313,7 +1319,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: timestamp(),
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -1358,7 +1365,8 @@ macro_rules! gen_store_tests {
                 create_time: 0,
                 timestamp: 0,
                 v: 0,
-            };
+                ..Default::default()
+                        };
 
             store.messages().create(&msg).await.unwrap();
 
@@ -1397,7 +1405,8 @@ macro_rules! gen_store_tests {
                 create_time: 0,
                 timestamp: 0,
                 v: 0,
-            };
+                ..Default::default()
+                        };
 
             store.messages().create(&msg).await.unwrap();
             store.messages().delete(&msg.id).await.unwrap();
@@ -2040,7 +2049,8 @@ macro_rules! gen_store_tests {
                 create_time: 0,
                 timestamp: 0,
                 v: 0,
-            };
+                ..Default::default()
+                        };
             store.messages().create(&msg).await.expect("create message");
 
             // find goes through upcast
@@ -2132,7 +2142,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -2183,7 +2194,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -2239,7 +2251,8 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.deliveries().create(&msg).await.unwrap();
             }
 
@@ -2293,7 +2306,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -2417,7 +2431,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -2490,7 +2505,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -2554,7 +2570,8 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.deliveries().create(&msg).await.unwrap();
             }
             let q = Query::new()
@@ -2610,7 +2627,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -2802,7 +2820,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -3009,7 +3028,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -3058,7 +3078,8 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.deliveries().create(&msg).await.unwrap();
             }
 
@@ -3145,7 +3166,8 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.deliveries().create(&msg).await.unwrap();
             }
 
@@ -3313,7 +3335,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -3445,7 +3468,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -3547,7 +3571,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -3603,7 +3628,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -3665,7 +3691,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -3721,7 +3748,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -3783,7 +3811,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -3839,7 +3868,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -3901,7 +3931,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 
@@ -3956,7 +3987,8 @@ macro_rules! gen_store_tests {
                         update_time: 0,
                         timestamp: 0,
                         v: 0,
-                    };
+                        ..Default::default()
+                                        };
                     store.deliveries().create(&msg).await.unwrap();
                 }
             }
@@ -4106,7 +4138,8 @@ macro_rules! gen_store_tests {
                     create_time: 0,
                     timestamp: ts,
                     v: 0,
-                };
+                    ..Default::default()
+                                };
                 store.messages().create(&msg).await.unwrap();
             }
 

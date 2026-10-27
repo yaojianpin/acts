@@ -432,8 +432,15 @@ impl Runtime {
     ) -> Result<()> {
         let kind = Self::kernel_kind(action)?;
         let inputs = Self::kernel_inputs(&action.options);
-        host.apply_action(&action.pid, &action.tid, kind, inputs)
-            .await
+        host.apply_action_as(
+            &action.pid,
+            &action.tid,
+            kind,
+            inputs,
+            action.subject.as_deref(),
+            action.rev,
+        )
+        .await
     }
 
     /// Map a wire event to its kernel action. `Next` is the wire name of
@@ -600,6 +607,11 @@ impl Runtime {
         // task of the declaring model.
         host.attach_predicate_runner(Arc::new(
             crate::scheduler::shell::EnginePredicateRunner::new(runtime.clone()),
+        ));
+        // A human act's `assign.owner` resolves on the same headless scope
+        // (and `fill_params` path) its params use.
+        host.attach_assignment_resolver(Arc::new(
+            crate::scheduler::shell::RuntimeAssignmentResolver::new(runtime.clone()),
         ));
         // The store-facing timers ride the host's serve loop: the guider's
         // four passes are ticks of the ONE background task that reaches the

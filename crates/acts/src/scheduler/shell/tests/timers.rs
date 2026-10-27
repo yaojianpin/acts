@@ -123,6 +123,7 @@ async fn sch_timers_retry_drops_a_delivery_without_a_canonical_message() {
         update_time: 0,
         timestamp: now,
         v: 1,
+        ..Default::default()
     };
     runtime
         .store()

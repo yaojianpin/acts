@@ -87,6 +87,31 @@ pub struct Message {
 
     /// message timestamp in microseconds
     pub timestamp: i64,
+
+    /// The human act's current owner — a projection of the task's
+    /// `__assignment`, never an authorization source on this struct.
+    #[serde(default)]
+    pub owner: Option<String>,
+
+    /// The human act's current assignee (the owner unless delegated).
+    #[serde(default)]
+    pub assignee: Option<String>,
+
+    /// The delegator of the decision, when the assignee is acting for one.
+    #[serde(default)]
+    pub delegator: Option<String>,
+
+    /// The delegatee of the decision, when one is acting for the owner.
+    #[serde(default)]
+    pub delegatee: Option<String>,
+
+    /// The assignment revision this message's act was at.
+    #[serde(default)]
+    pub rev: u64,
+
+    /// The message this one relates to (a transfer/delegation notice).
+    #[serde(default)]
+    pub ref_msg_id: Option<String>,
 }
 
 impl Message {
@@ -174,6 +199,12 @@ impl Message {
             end_time: self.end_time,
             create_time: utils::time::time_millis(),
             timestamp: self.timestamp,
+            owner: self.owner.clone(),
+            assignee: self.assignee.clone(),
+            delegator: self.delegator.clone(),
+            delegatee: self.delegatee.clone(),
+            rev: self.rev,
+            ref_msg_id: self.ref_msg_id.clone(),
             v: data::Message::version(),
         }
     }
@@ -193,6 +224,12 @@ impl Message {
             create_time: utils::time::time_millis(),
             update_time: 0,
             timestamp: self.timestamp,
+            owner: self.owner.clone(),
+            assignee: self.assignee.clone(),
+            delegator: self.delegator.clone(),
+            delegatee: self.delegatee.clone(),
+            rev: self.rev,
+            ref_msg_id: self.ref_msg_id.clone(),
             v: data::Delivery::version(),
         }
     }
@@ -259,6 +296,12 @@ impl From<data::Message> for Message {
             end_time: v.end_time,
             retry_times: 0,
             timestamp: v.timestamp,
+            owner: v.owner,
+            assignee: v.assignee,
+            delegator: v.delegator,
+            delegatee: v.delegatee,
+            rev: v.rev,
+            ref_msg_id: v.ref_msg_id,
         }
     }
 }
@@ -361,6 +404,9 @@ mod tests {
             uses: Some("acts.core.msg".to_string()),
             inputs: r#"{"a":1}"#.to_string(),
             outputs: "not json".to_string(),
+            owner: Some("alice".to_string()),
+            assignee: Some("alice".to_string()),
+            rev: 1,
             ..Default::default()
         };
         let msg = Message::from(stored);
@@ -369,5 +415,14 @@ mod tests {
         assert_eq!(msg.inputs.get::<i32>("a"), Some(1));
         // an unreadable stored payload degrades to empty rather than failing
         assert!(msg.outputs.is_empty());
+        // the assignment projection survives the stored-row round trip and
+        // reaches the delivery row too
+        assert_eq!(msg.owner.as_deref(), Some("alice"));
+        assert_eq!(msg.assignee.as_deref(), Some("alice"));
+        assert_eq!(msg.rev, 1);
+        let delivery = msg.into_delivery("c1", "*");
+        assert_eq!(delivery.owner.as_deref(), Some("alice"));
+        assert_eq!(delivery.assignee.as_deref(), Some("alice"));
+        assert_eq!(delivery.rev, 1);
     }
 }

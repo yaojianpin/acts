@@ -14,7 +14,8 @@
 //! below so nobody mistakes the legacy expectations for kernel behavior.
 
 use crate::{
-    MessageState, Step, Vars, Workflow,
+    MessageState, Principal, Step, Vars, Workflow,
+    acl::UserPolicy,
     event::EventAction,
     scheduler::{
         core::model::task_graph::TaskState,
@@ -945,5 +946,263 @@ async fn sch_act_error_on_the_acts_tid_fails_the_owning_step() {
     assert_eq!(fixture.state("act1").await, TaskState::Failed);
     fixture.wait_state("step1", TaskState::Failed).await;
     fixture.wait_error().await;
+    fixture.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Assignment (`assign.owner`) + per-task decision authorization
+// ---------------------------------------------------------------------------
+
+/// One top-level `Irq` act with its owner declaration.
+fn assigned_workflow(id: &str, owner: &str) -> Workflow {
+    let mut workflow = Workflow::new().with_id(id).with_var("reviewer", "alice");
+    workflow.steps.push(
+        Step::new()
+            .with_id("s1")
+            .with_name("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+            .with_assign(owner),
+    );
+    workflow
+}
+
+/// A non-unrestricted principal allowed to complete acts.
+fn approved_user(name: &str) -> Principal {
+    Principal::from_policy(&UserPolicy {
+        name: name.to_string(),
+        enabled: true,
+        allow: vec!["act:complete".to_string()],
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+/// The persisted `__assignment` of the newest execution of `node`.
+async fn assignment_of(fixture: &FlowFixture, node: &str) -> serde_json::Value {
+    let snapshot = fixture.snapshot().await;
+    let task = snapshot
+        .tasks
+        .keys()
+        .filter(|id| id.node.as_str() == node)
+        .max_by_key(|id| id.generation)
+        .cloned()
+        .unwrap_or_else(|| panic!("no execution of {node}"));
+    let raw = snapshot
+        .variables
+        .get(&(task, "__assignment".to_string()))
+        .unwrap_or_else(|| panic!("{node} has no __assignment"));
+    serde_json::from_str(raw).unwrap()
+}
+
+/// `assign.owner` resolves through the params path (`${{ reviewer }}`), is
+/// persisted as the initial assignment, and rides the message projection:
+/// top-level fields plus the `inputs.options` copy the channel globs read.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_resolves_and_projects_the_owner() {
+    let workflow = assigned_workflow("flow-act-assign", "${{ reviewer }}");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("s1").await;
+    assert_eq!(created.owner.as_deref(), Some("alice"));
+    assert_eq!(created.assignee.as_deref(), Some("alice"));
+    assert_eq!(created.rev, 0);
+    assert_eq!(created.delegator, None);
+    assert_eq!(created.delegatee, None);
+    let options = created.options().expect("the act options");
+    assert_eq!(options.get::<String>("owner").as_deref(), Some("alice"));
+    assert_eq!(options.get::<String>("assignee").as_deref(), Some("alice"));
+
+    let assignment = assignment_of(&fixture, "s1").await;
+    assert_eq!(assignment["owner"], json!("alice"));
+    assert_eq!(assignment["assignee"], json!("alice"));
+    assert_eq!(assignment["rev"], json!(0));
+    assert_eq!(assignment["transferred_from"], json!(null));
+    assert_eq!(assignment["updated_by"], json!(null));
+    assert_eq!(assignment["updated_at"], json!(0));
+
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+    let completed = fixture.wait_message("s1", MessageState::Completed).await;
+    assert_eq!(completed.owner.as_deref(), Some("alice"));
+    assert_eq!(completed.assignee.as_deref(), Some("alice"));
+    assert_eq!(completed.rev, 0);
+    let options = completed.options().expect("the completed act options");
+    assert_eq!(options.get::<String>("owner").as_deref(), Some("alice"));
+    assert_eq!(options.get::<String>("assignee").as_deref(), Some("alice"));
+    fixture.close().await;
+}
+
+/// An owner expression resolving to nothing fails the act: no unowned
+/// approval is produced.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_empty_owner_fails_the_act() {
+    let workflow = assigned_workflow("flow-act-assign-empty", "");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let failed = fixture.wait_message("s1", MessageState::Error).await;
+    let message = failed
+        .outputs
+        .get::<String>(consts::ACT_ERR_MESSAGE)
+        .unwrap_or_default();
+    assert!(
+        message.contains("assign.owner") && message.contains("s1"),
+        "the failure must name the act and the declaration: {message}"
+    );
+    assert_eq!(fixture.state("s1").await, TaskState::Failed);
+    fixture.wait_error().await;
+    fixture.close().await;
+}
+
+/// `assign` is refused at act start on everything that is not a human
+/// decision leaf; the failure names the node.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_is_refused_on_non_human_nodes() {
+    let mut container = block_workflow(
+        "flow-act-assign-container",
+        vec![
+            Step::new()
+                .with_uses(USES_MSG, Vars::new())
+                .with_id("inner"),
+        ],
+    );
+    container.steps[0].assign = Some(crate::model::Assign {
+        owner: "alice".to_string(),
+    });
+
+    let mut func = Workflow::new().with_id("flow-act-assign-func");
+    func.steps.push(
+        Step::new()
+            .with_id("f1")
+            .with_uses(USES_SET, Vars::new().with("a", 1))
+            .with_assign("alice"),
+    );
+
+    let mut msg = Workflow::new().with_id("flow-act-assign-msg");
+    msg.steps.push(
+        Step::new()
+            .with_id("m1")
+            .with_uses(USES_MSG, Vars::new())
+            .with_assign("alice"),
+    );
+
+    for (node, workflow) in [("step1", container), ("f1", func), ("m1", msg)] {
+        let mut fixture = FlowFixture::deploy(&workflow).await;
+        fixture.start(Vars::new()).await;
+        let failed = fixture.wait_message(node, MessageState::Error).await;
+        let message = failed
+            .outputs
+            .get::<String>(consts::ACT_ERR_MESSAGE)
+            .unwrap_or_default();
+        assert!(
+            message.contains(node),
+            "the refusal must name the node '{node}': {message}"
+        );
+        assert_eq!(fixture.state(node).await, TaskState::Failed);
+        fixture.wait_error().await;
+        fixture.close().await;
+    }
+}
+
+/// A declared assignment admits only its owner/assignee, and a decision's
+/// revision must name the current one. A client's own owner/assignee fields
+/// are discarded (the task state decides), and a rejected decision consumes
+/// nothing.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_authorizes_owner_and_revision() {
+    let workflow = assigned_workflow("flow-act-assign-auth", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let (pid, tid) = (fixture.pid().to_string(), created.tid.clone());
+
+    let stranger = approved_user("mallory");
+    let refused = fixture
+        .engine()
+        .executor(&stranger)
+        .act()
+        .complete(
+            &pid,
+            &tid,
+            Vars::new()
+                .with("owner", "alice")
+                .with("assignee", "alice")
+                .with("rev", 0),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("ENOTOWNER"),
+        "a non-owner must be refused: {refused}"
+    );
+
+    let owner = approved_user("alice");
+    let refused = fixture
+        .engine()
+        .executor(&owner)
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 9))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("EASSIGNMENT_CHANGED"),
+        "a stale revision must be refused: {refused}"
+    );
+
+    fixture
+        .engine()
+        .executor(&owner)
+        .act()
+        .complete(&pid, &tid, Vars::new().with("rev", 0))
+        .await
+        .unwrap();
+    fixture.wait_message("s1", MessageState::Completed).await;
+    fixture.close().await;
+}
+
+/// Without an assignment the task keeps the old `@execute` behavior, even for
+/// an authenticated subject that is not any owner.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_without_assign_keeps_execute_behavior() {
+    let workflow = irq_workflow("flow-act-assign-unassigned", "s1", "act1");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    let stranger = approved_user("mallory");
+    fixture
+        .engine()
+        .executor(&stranger)
+        .act()
+        .complete(fixture.pid(), &created.tid, Vars::new())
+        .await
+        .unwrap();
+    fixture.wait_message("s1", MessageState::Completed).await;
+    fixture.close().await;
+}
+
+/// ACL disabled (an unrestricted principal) keeps the old behavior: the
+/// executor carries no subject, so the assignment is only a routing hint.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_without_acl_keeps_old_behavior() {
+    let workflow = assigned_workflow("flow-act-assign-no-acl", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    fixture
+        .engine()
+        .executor(&Principal::unrestricted())
+        .act()
+        .complete(fixture.pid(), &created.tid, Vars::new())
+        .await
+        .unwrap();
+    fixture.wait_message("s1", MessageState::Completed).await;
     fixture.close().await;
 }

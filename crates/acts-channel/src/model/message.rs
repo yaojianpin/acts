@@ -74,6 +74,30 @@ pub struct Message {
 
     /// record the message retry times
     pub retry_times: i32,
+
+    /// The human act's owner (projected from the task's assignment).
+    #[serde(default)]
+    pub owner: Option<String>,
+
+    /// The human act's current assignee.
+    #[serde(default)]
+    pub assignee: Option<String>,
+
+    /// The delegator of this decision, when one applies.
+    #[serde(default)]
+    pub delegator: Option<String>,
+
+    /// The delegatee of this decision, when one applies.
+    #[serde(default)]
+    pub delegatee: Option<String>,
+
+    /// The assignment revision this message's act was at.
+    #[serde(default)]
+    pub rev: u64,
+
+    /// The message this one relates to (a transfer/delegation notice).
+    #[serde(default)]
+    pub ref_msg_id: Option<String>,
 }
 
 impl Message {
@@ -219,6 +243,7 @@ mod tests {
             start_time: 10,
             end_time: 35,
             retry_times: 2,
+            ..Default::default()
         }
     }
 
@@ -321,6 +346,32 @@ mod tests {
             ..Default::default()
         };
         assert!(!other_key.is_params_key("k"));
+    }
+
+    #[test]
+    fn a_legacy_payload_defaults_the_assignment_fields() {
+        let legacy = json!({
+            "id": "m1",
+            "tid": "t1",
+            "nid": "n1",
+            "mid": "mid1",
+            "name": "act1",
+            "state": "created",
+            "type": "act",
+            "pid": "p1",
+            "inputs": {},
+            "outputs": {},
+            "start_time": 0,
+            "end_time": 0,
+            "retry_times": 0
+        });
+        let message: Message = serde_json::from_value(legacy).unwrap();
+        assert_eq!(message.owner, None);
+        assert_eq!(message.assignee, None);
+        assert_eq!(message.delegator, None);
+        assert_eq!(message.delegatee, None);
+        assert_eq!(message.rev, 0);
+        assert_eq!(message.ref_msg_id, None);
     }
 
     #[test]

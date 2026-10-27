@@ -5,6 +5,18 @@ use crate::{ModelBase, Vars, model::Branch};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+/// The declared owner of one human decision act: the expression the act
+/// resolves at start into its persisted `__assignment` task state. Only a
+/// human decision leaf (`ActRunAs::Irq`) may declare one; the kernel refuses
+/// an `assign` on a container or a `Func`/`Msg` leaf when the act starts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Assign {
+    /// The owner expression, resolved through the same `fill_params` path as
+    /// the act's `params`. An empty resolution fails the act.
+    #[serde(default)]
+    pub owner: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Step {
     #[serde(default)]
@@ -48,6 +60,11 @@ pub struct Step {
     // package params
     #[serde(default)]
     pub params: JsonValue,
+
+    /// The human act's owner declaration. Only a human decision leaf may
+    /// carry one; see [`Assign`].
+    #[serde(default)]
+    pub assign: Option<Assign>,
 
     #[serde(default)]
     pub catches: Vec<Step>,
@@ -163,6 +180,14 @@ impl Step {
         T: Serialize + Clone,
     {
         self.options.set(name, value);
+        self
+    }
+
+    /// Declare the act's owner expression (see [`Assign`]).
+    pub fn with_assign(mut self, owner: &str) -> Self {
+        self.assign = Some(Assign {
+            owner: owner.to_string(),
+        });
         self
     }
 
