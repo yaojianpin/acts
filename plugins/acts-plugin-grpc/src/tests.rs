@@ -176,6 +176,69 @@ async fn test_snapshot_upsert_remove_over_grpc() {
     }
 }
 
+/// The gRPC action path carries the assignment actions to the same shared
+/// table: transfer, delegate and undelegate run against the act, and the
+/// act's state is untouched (the decisions still complete it).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_assignment_actions_over_grpc() {
+    let port = free_port();
+    let engine = engine_with_grpc(port).await;
+    let (pid, tid) = start_assigned(&engine, "grpc-act-actions").await;
+
+    let url = format!("http://127.0.0.1:{port}");
+    let mut client = loop {
+        match ActsServiceClient::connect(url.clone()).await {
+            Ok(client) => break client,
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    };
+
+    let answer = client
+        .send(action(
+            "act:transfer",
+            json!({"pid": &pid, "tid": &tid, "to": "bob", "expect_rev": 0}),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(payload(&answer), json!(null));
+
+    let answer = client
+        .send(action(
+            "act:delegate",
+            json!({
+                "pid": &pid,
+                "tid": &tid,
+                "delegatee": "carol",
+                "expires_at": 1_761_000_000_000i64,
+                "reason": "holiday"
+            }),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(payload(&answer), json!(null));
+
+    let answer = client
+        .send(action("act:undelegate", json!({"pid": &pid, "tid": &tid})))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(payload(&answer), json!(null));
+
+    // The act itself was never decided by the assignment actions.
+    let answer = client
+        .send(action(
+            "act:complete",
+            json!({"pid": &pid, "tid": &tid, "rev": 3}),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(payload(&answer), json!(null));
+    engine.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_grpc_server_new() {
     let engine = Engine::builder().start().await.unwrap();
@@ -238,6 +301,43 @@ async fn test_do_action_rejects_malformed_data() {
     }
 
     engine.close().await;
+}
+
+/// Deploy and start one assigned irq act, answering `(pid, tid)` from its
+/// Created message. The channel is registered before the start, so the message
+/// cannot be missed.
+async fn start_assigned(engine: &Engine, id: &str) -> (String, String) {
+    let workflow = Workflow::new().with_id(id).with_step(|step| {
+        step.with_id("step1")
+            .with_uses("acts.core.irq", Vars::new().with("key", "grpc-act-test"))
+            .with_assign("alice")
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let chan = engine.channel();
+    chan.on_message(move |message| {
+        let tx = tx.clone();
+        async move {
+            if message.state == acts::MessageState::Created && message.r#type == "act" {
+                let _ = tx.send(message.inner().clone());
+            }
+        }
+    });
+    engine
+        .executor(&acts::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+    let pid = engine
+        .executor(&acts::Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap()
+        .pid()
+        .to_string();
+    let created = rx.recv().await.expect("the act's Created message");
+    (pid, created.tid)
 }
 
 async fn run_irq_workflow(engine: &Engine, key: &str) {

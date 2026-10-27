@@ -115,6 +115,44 @@ pub async fn list(
     .await
 }
 
+/// The task actions the HTTP surface exposes. The set is the decision surface
+/// plus the assignment actions (`transfer`/`delegate`/`undelegate`): the route
+/// never composes an action name the shared table does not define, and the
+/// kernel — not this transport — authorizes the caller on the task.
+const ACT_ACTIONS: &[&str] = &[
+    "complete",
+    "submit",
+    "back",
+    "cancel",
+    "abort",
+    "skip",
+    "error",
+    "push",
+    "remove",
+    "transfer",
+    "delegate",
+    "undelegate",
+];
+
+/// Run one task action (`/api/act/{action}`) as the authenticated caller.
+///
+/// The body carries `pid`, `tid` and the action's own options. Authorization
+/// stays in `actions::apply_as` and the kernel's per-task check; the route
+/// only maps the path segment onto the action's wire name.
+pub async fn act(
+    State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
+    Path(action): Path<String>,
+    Json(data): Json<Vars>,
+) -> Result<impl IntoResponse, AppError> {
+    if !ACT_ACTIONS.contains(&action.as_str()) {
+        return Err(AppError::bad_request(format!(
+            "unknown act action '{action}'"
+        )));
+    }
+    call(&state, &principal, &format!("act:{action}"), data).await
+}
+
 pub async fn proc_start(
     State(state): State<Arc<Engine>>,
     Extension(principal): Extension<Principal>,

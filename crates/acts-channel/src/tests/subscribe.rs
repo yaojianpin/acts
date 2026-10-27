@@ -32,6 +32,8 @@ struct MockService {
     script: Vec<Result<Message, Status>>,
     /// when set, the handshake's options are recorded here
     seen: Option<std::sync::Arc<parking_lot::Mutex<Option<MessageOptions>>>>,
+    /// when set, every `Send` request is recorded here
+    sent: Option<std::sync::Arc<parking_lot::Mutex<Vec<Message>>>>,
 }
 
 fn wire(seq: &str, data: &[u8]) -> Message {
@@ -57,6 +59,9 @@ impl ActsService for MockService {
     type OnMessageStream = MessageStream;
 
     async fn send(&self, request: tonic::Request<Message>) -> Result<Response<Message>, Status> {
+        if let Some(sent) = &self.sent {
+            sent.lock().push(request.get_ref().clone());
+        }
         if let Some(status) = self.errors.get(request.get_ref().name.as_str()) {
             return Err(status.clone());
         }
@@ -410,6 +415,66 @@ async fn subscription_forwards_its_selectors() {
             .unwrap()
             .is_ok()
     );
+    tx.send(()).unwrap();
+}
+
+/// The assignment actions carry exactly the server's wire shape: the action
+/// names, the target and revision facts — never the act's owner/assignee or
+/// an audit subject.
+#[tokio::test]
+async fn assignment_actions_carry_their_wire_shape() {
+    let sent = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let (mut client, tx) = connect(MockService {
+        sent: Some(sent.clone()),
+        ..Default::default()
+    })
+    .await;
+
+    client
+        .transfer::<()>("p1", "t1", "bob", Some(2), Some("holiday"))
+        .await
+        .unwrap();
+    client
+        .delegate::<()>("p1", "t1", "carol", Some(1_761_000_000_000), Some("leave"))
+        .await
+        .unwrap();
+    client.undelegate::<()>("p1", "t1").await.unwrap();
+
+    let sent = sent.lock();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[0].name, "act:transfer");
+    assert_eq!(sent[1].name, "act:delegate");
+    assert_eq!(sent[2].name, "act:undelegate");
+    let data = |index: usize| -> serde_json::Value {
+        serde_json::from_slice(sent[index].data.as_deref().unwrap()).unwrap()
+    };
+    let transfer = data(0);
+    assert_eq!(transfer["pid"], serde_json::json!("p1"));
+    assert_eq!(transfer["tid"], serde_json::json!("t1"));
+    assert_eq!(transfer["to"], serde_json::json!("bob"));
+    assert_eq!(transfer["expect_rev"], serde_json::json!(2));
+    assert_eq!(transfer["reason"], serde_json::json!("holiday"));
+
+    let delegate = data(1);
+    assert_eq!(delegate["delegatee"], serde_json::json!("carol"));
+    assert_eq!(
+        delegate["expires_at"],
+        serde_json::json!(1_761_000_000_000i64)
+    );
+    assert_eq!(delegate["reason"], serde_json::json!("leave"));
+
+    let undelegate = data(2);
+    assert_eq!(undelegate["pid"], serde_json::json!("p1"));
+    assert_eq!(undelegate["tid"], serde_json::json!("t1"));
+
+    for payload in [&transfer, &delegate, &undelegate] {
+        for field in ["owner", "assignee", "delegator", "subject", "updated_by"] {
+            assert!(
+                payload.get(field).is_none(),
+                "the client must not send '{field}': {payload}"
+            );
+        }
+    }
     tx.send(()).unwrap();
 }
 

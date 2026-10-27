@@ -104,7 +104,23 @@ impl<'a> Client<'a> {
             return Ok(());
         }
 
-        if let Some(params) = message.inputs.get::<Vars>("params")
+        // A transfer/delegation notice is its own event: print the assignment
+        // it projects and never answer it like the act's Created message.
+        if message.r#type == "assignment" {
+            println!(
+                "assignment: nid={} owner={:?} assignee={:?} delegator={:?} delegatee={:?} rev={}",
+                message.nid,
+                message.owner,
+                message.assignee,
+                message.delegator,
+                message.delegatee,
+                message.rev
+            );
+            return Ok(());
+        }
+
+        if message.is_type("act")
+            && let Some(params) = message.inputs.get::<Vars>("params")
             && let Some(key) = params.get::<String>("key")
         {
             println!(
@@ -223,6 +239,51 @@ impl<'a> Client<'a> {
                     {
                         println!("deputy vote ignored: {err}");
                     }
+                }
+                // step 5 · transfer: the act starts owned by user 1; move it to
+                // user 3 and let the new owner decide the same act.
+                "assignment_transfer" if message.is_state(MessageState::Created) => {
+                    executor
+                        .act()
+                        .transfer(
+                            &message.pid,
+                            &message.tid,
+                            Vars::new()
+                                .with("to", "3")
+                                .with("expect_rev", 0)
+                                .with("reason", "demo: transfer to user 3"),
+                        )
+                        .await?;
+                    println!("transferred {} to user 3", message.tid);
+                    self.complete(
+                        executor,
+                        &message.pid,
+                        &message.tid,
+                        &[("uid", json!("3")), ("rev", json!(1))],
+                    )
+                    .await?;
+                }
+                // step 5 · delegate: the act stays owned by user 2, user 4 acts
+                // as the delegatee and completes it at revision 1.
+                "assignment_delegate" if message.is_state(MessageState::Created) => {
+                    executor
+                        .act()
+                        .delegate(
+                            &message.pid,
+                            &message.tid,
+                            Vars::new()
+                                .with("delegatee", "4")
+                                .with("reason", "demo: delegate to user 4"),
+                        )
+                        .await?;
+                    println!("delegated {} to user 4", message.tid);
+                    self.complete(
+                        executor,
+                        &message.pid,
+                        &message.tid,
+                        &[("uid", json!("4")), ("rev", json!(1))],
+                    )
+                    .await?;
                 }
                 _ => {}
             }

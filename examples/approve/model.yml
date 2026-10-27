@@ -129,3 +129,33 @@ steps:
         - uses: acts.core.irq
           params:
             key: board_deputy
+
+  # ---------------------------------------------------------------------------
+  # step 5 · assignment demo — transfer and delegate
+  #
+  # Two assigned approvals demonstrate the assignment actions without
+  # changing their own execution:
+  #   * `assignment_transfer` starts owned by user 1; the client transfers it
+  #     to user 3 (`act:transfer`) and user 3's answer completes the same act.
+  #   * `assignment_delegate` starts owned by user 2; the client delegates it
+  #     to user 4 (`act:delegate`) and the delegatee completes it. A transfer
+  #     would clear the delegation; a delegate keeps the owner and adds an
+  #     assignee.
+  # ---------------------------------------------------------------------------
+  - name: assignment demo
+    id: assignment_demo
+    desc: demonstrate act:transfer and act:delegate on human approvals
+    uses: acts.core.block
+    params:
+      mode: sequence
+      steps:
+        - uses: acts.core.irq
+          assign:
+            owner: '1'
+          params:
+            key: assignment_transfer
+        - uses: acts.core.irq
+          assign:
+            owner: '2'
+          params:
+            key: assignment_delegate

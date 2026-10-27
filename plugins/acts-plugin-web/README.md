@@ -81,6 +81,7 @@ See the access-control chapter of the book for the user model and the grants.
 | `POST` | `/api/model/get` | Get a model by id |
 | `POST` | `/api/model/rm` | Remove a model |
 | `POST` | `/api/proc/start` | Start a process (by model id or inline) |
+| `POST` | `/api/act/{action}` | Run a task action (`complete`, `transfer`, `delegate`, `undelegate`, …) |
 | `POST` | `/api/pack/list` | List available packages |
 | `GET` | `/api/pack/catalogs` | List package catalogs |
 | `POST` | `/api/pack` | Get package details |

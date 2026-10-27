@@ -28,6 +28,7 @@
         - [条件](./model/step/if.md)
         - [活动列表](./model/step/acts.md)
     - [分支](./model/branch.md)
+    - [承办人、转办与代办](./model/assign.md)
     - [活动](./model/act.md)
         - [Set 设置](./model/act/set.md)
         - [IRQ 中断请求](./model/act/irq.md)

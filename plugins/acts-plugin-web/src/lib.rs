@@ -53,6 +53,7 @@ impl ActPlugin for WebPlugin {
             .route("/model/rm", post(routes::rm))
             .route("/model/deploy", post(routes::deploy))
             .route("/proc/start", post(routes::proc_start))
+            .route("/act/{action}", post(routes::act))
             .route("/pack/list", post(routes::pack_list))
             .route("/pack/catalogs", get(routes::pack_catalogs))
             .route("/pack", post(routes::pack_get))

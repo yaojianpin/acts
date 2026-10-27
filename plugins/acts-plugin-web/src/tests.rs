@@ -410,6 +410,51 @@ use acts::{Engine, Principal, Vars, Workflow};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 
+/// A workflow with one assigned irq act: the per-task assignment actions
+/// (`transfer`/`delegate`/`undelegate`) need an owner.
+fn assigned_workflow(id: &str) -> Workflow {
+    Workflow::new()
+        .with_id(id)
+        .with_rn("web-act-test")
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses("acts.core.irq", Vars::new().with("key", "web-act-test"))
+                .with_assign("alice")
+        })
+}
+
+/// Deploy and start `workflow`, answering `(pid, tid)` from the act's Created
+/// message. The channel is registered before the start, so the message cannot
+/// be missed.
+async fn start_and_wait(engine: &Engine, workflow: &Workflow) -> (String, String) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let chan = engine.channel();
+    chan.on_message(move |message| {
+        let tx = tx.clone();
+        async move {
+            if message.state == acts::MessageState::Created && message.r#type == "act" {
+                let _ = tx.send(message.inner().clone());
+            }
+        }
+    });
+    engine
+        .executor(&Principal::unrestricted())
+        .model()
+        .deploy(workflow, None)
+        .await
+        .unwrap();
+    let pid = engine
+        .executor(&Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap()
+        .pid()
+        .to_string();
+    let created = rx.recv().await.expect("the act's Created message");
+    (pid, created.tid)
+}
+
 /// A workflow the web surface can deploy and start: the in-memory irq package
 /// needs no external runtime, so a run completes without extra packages.
 fn irq_workflow(id: &str) -> Workflow {
@@ -687,6 +732,78 @@ async fn routes_cover_proc_start_modes() {
         );
     }
 
+    engine.close().await;
+}
+
+/// The task-action route: the assignment actions reach the shared table as
+/// their wire names, and an action outside the decision set is a `400` rather
+/// than an arbitrary name forwarded to the engine.
+#[tokio::test(flavor = "multi_thread")]
+async fn routes_cover_the_assignment_actions() {
+    let engine = unrestricted_engine().await;
+    let state = State(Arc::new(engine.clone()));
+    let principal = Extension(engine.acl().authenticate(None).unwrap());
+    let workflow = assigned_workflow("web-act-actions");
+    let (pid, tid) = start_and_wait(&engine, &workflow).await;
+
+    let transfer = routes::act(
+        state.clone(),
+        principal.clone(),
+        Path("transfer".to_string()),
+        Json(
+            Vars::new()
+                .with("pid", pid.clone())
+                .with("tid", tid.clone())
+                .with("to", "bob")
+                .with("expect_rev", 0),
+        ),
+    )
+    .await
+    .expect("the transfer action must run");
+    assert_eq!(transfer.into_response().status(), StatusCode::OK);
+
+    let delegate = routes::act(
+        state.clone(),
+        principal.clone(),
+        Path("delegate".to_string()),
+        Json(
+            Vars::new()
+                .with("pid", pid.clone())
+                .with("tid", tid.clone())
+                .with("delegatee", "carol")
+                .with("expires_at", 1_761_000_000_000i64)
+                .with("reason", "holiday"),
+        ),
+    )
+    .await
+    .expect("the delegate action must run");
+    assert_eq!(delegate.into_response().status(), StatusCode::OK);
+
+    let undelegate = routes::act(
+        state.clone(),
+        principal.clone(),
+        Path("undelegate".to_string()),
+        Json(
+            Vars::new()
+                .with("pid", pid.clone())
+                .with("tid", tid.clone()),
+        ),
+    )
+    .await
+    .expect("the undelegate action must run");
+    assert_eq!(undelegate.into_response().status(), StatusCode::OK);
+
+    let unknown = routes::act(
+        state,
+        principal,
+        Path("explode".to_string()),
+        Json(Vars::new().with("pid", pid).with("tid", tid)),
+    )
+    .await;
+    match unknown {
+        Ok(_) => panic!("an unknown act action must be refused"),
+        Err(err) => assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST),
+    }
     engine.close().await;
 }
 

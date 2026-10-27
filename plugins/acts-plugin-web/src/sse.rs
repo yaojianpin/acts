@@ -231,13 +231,24 @@ mod tests {
         principal: &Principal,
         id: &str,
     ) -> impl Stream<Item = Result<Bytes, axum::Error>> + Unpin {
+        subscribe_with_options(engine, principal, id, Vars::new()).await
+    }
+
+    /// The same subscription with a `ChannelOptions` glob filter, e.g.
+    /// `options.owner = alice`.
+    async fn subscribe_with_options(
+        engine: &Engine,
+        principal: &Principal,
+        id: &str,
+        options: Vars,
+    ) -> impl Stream<Item = Result<Bytes, axum::Error>> + Unpin {
         let query = MessageQuery {
             id: id.to_string(),
             r#type: None,
             uses: None,
             state: None,
             key: None,
-            options: Vars::new(),
+            options,
         };
         let response = sse(
             State(Arc::new(engine.clone())),
@@ -404,6 +415,81 @@ mod tests {
             "dropped SSE channel must not store further deliveries"
         );
 
+        engine.close().await;
+    }
+
+    /// The assignment projection is what `ChannelOptions.options` globs match:
+    /// the owner's subscription sees the act's Created message, and the
+    /// transfer's `type=assignment` notification reaches the new owner's
+    /// subscription (not the old owner's).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sse_filters_assignment_by_options_owner() {
+        let engine = Engine::builder().disable_acl().start().await.unwrap();
+        let principal = engine.acl().authenticate(None).unwrap();
+        let workflow = Workflow::new().with_id("sse-assignment").with_step(|step| {
+            step.with_id("step1")
+                .with_uses("acts.core.irq", Vars::new().with("key", "sse-assignment"))
+                .with_assign("alice")
+        });
+        engine
+            .executor(&acts::Principal::unrestricted())
+            .model()
+            .deploy(&workflow, None)
+            .await
+            .unwrap();
+
+        let mut alice = subscribe_with_options(
+            &engine,
+            &principal,
+            "owner-alice",
+            Vars::new().with("owner", "alice"),
+        )
+        .await;
+        let pid = start_owned(&engine, &principal, "sse-assignment").await;
+        let created = drain(&mut alice, 1000).await;
+        let act = created
+            .iter()
+            .find(|message| message.nid == "step1" && message.owner.as_deref() == Some("alice"))
+            .expect("the owner-filtered subscription receives the act");
+        assert_eq!(act.assignee.as_deref(), Some("alice"));
+        let tid = act.tid.clone();
+
+        let mut bob = subscribe_with_options(
+            &engine,
+            &principal,
+            "owner-bob",
+            Vars::new().with("owner", "bob"),
+        )
+        .await;
+        actions::apply_as(
+            &engine,
+            &principal,
+            "act:transfer",
+            Vars::new()
+                .with("pid", pid.clone())
+                .with("tid", tid.clone())
+                .with("to", "bob")
+                .with("expect_rev", 0),
+        )
+        .await
+        .expect("the transfer runs");
+
+        let notification = drain(&mut bob, 1000).await;
+        let assignment = notification
+            .iter()
+            .find(|message| message.r#type == "assignment")
+            .expect("the new owner receives the assignment notification");
+        assert_eq!(assignment.owner.as_deref(), Some("bob"));
+        assert_eq!(assignment.assignee.as_deref(), Some("bob"));
+        assert_eq!(assignment.rev, 1);
+
+        // The old owner's filtered subscription does not receive the new
+        // owner's notification.
+        let stale = drain(&mut alice, 300).await;
+        assert!(
+            stale.iter().all(|message| message.r#type != "assignment"),
+            "the old owner must not receive the transfer notification: {stale:?}"
+        );
         engine.close().await;
     }
 

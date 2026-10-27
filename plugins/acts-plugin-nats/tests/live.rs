@@ -82,6 +82,43 @@ async fn engine_with_nats_unrestricted(config: &Config) -> Engine {
         .unwrap()
 }
 
+/// Deploy and start one assigned irq act, answering `(pid, tid)` from its
+/// Created message. The channel is registered before the start, so the message
+/// cannot be missed.
+async fn start_assigned(engine: &Engine, id: &str) -> (String, String) {
+    let workflow = Workflow::new().with_id(id).with_step(|step| {
+        step.with_id("step1")
+            .with_uses("acts.core.irq", Vars::new().with("key", "nats-act-test"))
+            .with_assign("alice")
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let chan = engine.channel();
+    chan.on_message(move |message| {
+        let tx = tx.clone();
+        async move {
+            if message.state == acts::MessageState::Created && message.r#type == "act" {
+                let _ = tx.send(message.inner().clone());
+            }
+        }
+    });
+    engine
+        .executor(&acts::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+    let pid = engine
+        .executor(&acts::Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap()
+        .pid()
+        .to_string();
+    let created = rx.recv().await.expect("the act's Created message");
+    (pid, created.tid)
+}
+
 /// Publish one action and await its reply; retries while the plugin's
 /// actions subscription is still starting up.
 async fn request_action(client: &Client, subject: String, payload: JsonValue) -> JsonValue {
@@ -165,6 +202,80 @@ async fn snapshot_actions_over_nats() {
     .await;
     assert_eq!(reply["data"], json!(true));
     assert!(engine.snapshot().read("profile", "u1").is_none());
+
+    engine.close().await;
+    std::fs::remove_file(&path).ok();
+}
+
+/// The NATS action path carries the assignment actions to the shared table:
+/// transfer, delegate and undelegate run against the act without deciding it;
+/// the decision still completes it afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn assignment_actions_over_nats() {
+    let Some(client) = connect_or_skip().await else {
+        return;
+    };
+
+    let (path, config) =
+        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-assign-test\"\n");
+    let engine = engine_with_nats_unrestricted(&config).await;
+    let (pid, tid) = start_assigned(&engine, "nats-act-actions").await;
+    let subject = "acts-assign-test.cmd".to_string();
+
+    let reply = request_action(
+        &client,
+        subject.clone(),
+        json!({
+            "name": "act:transfer",
+            "seq": "t-1",
+            "data": {"pid": &pid, "tid": &tid, "to": "bob", "expect_rev": 0}
+        }),
+    )
+    .await;
+    assert!(reply["err"].is_null(), "transfer failed: {reply}");
+    assert_eq!(reply["data"], JsonValue::Null);
+
+    let reply = request_action(
+        &client,
+        subject.clone(),
+        json!({
+            "name": "act:delegate",
+            "seq": "t-2",
+            "data": {
+                "pid": &pid,
+                "tid": &tid,
+                "delegatee": "carol",
+                "expires_at": 1_761_000_000_000i64,
+                "reason": "holiday"
+            }
+        }),
+    )
+    .await;
+    assert!(reply["err"].is_null(), "delegate failed: {reply}");
+
+    let reply = request_action(
+        &client,
+        subject.clone(),
+        json!({
+            "name": "act:undelegate",
+            "seq": "t-3",
+            "data": {"pid": &pid, "tid": &tid}
+        }),
+    )
+    .await;
+    assert!(reply["err"].is_null(), "undelegate failed: {reply}");
+
+    let reply = request_action(
+        &client,
+        subject.clone(),
+        json!({
+            "name": "act:complete",
+            "seq": "t-4",
+            "data": {"pid": &pid, "tid": &tid, "rev": 3}
+        }),
+    )
+    .await;
+    assert!(reply["err"].is_null(), "complete failed: {reply}");
 
     engine.close().await;
     std::fs::remove_file(&path).ok();

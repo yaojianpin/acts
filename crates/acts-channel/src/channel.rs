@@ -648,6 +648,74 @@ impl ActsChannel {
         )
         .await
     }
+
+    /// Transfer an assigned act to `to` without deciding it.
+    ///
+    /// `expect_rev` is the assignment revision the caller saw; a stale value
+    /// is refused with `EASSIGNMENT_CHANGED`. The target is a business user,
+    /// and the caller never sends the act's owner/assignee fields — the
+    /// server attributes the caller and the kernel authorizes them.
+    pub async fn transfer<T>(
+        &mut self,
+        pid: &str,
+        tid: &str,
+        to: &str,
+        expect_rev: Option<u64>,
+        reason: Option<&str>,
+    ) -> Result<ActionResult<T>, Status>
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let mut data = Vars::new().with("pid", pid).with("tid", tid).with("to", to);
+        if let Some(expect_rev) = expect_rev {
+            data.set("expect_rev", expect_rev);
+        }
+        if let Some(reason) = reason {
+            data.set("reason", reason);
+        }
+        self.send("act:transfer", data).await
+    }
+
+    /// Delegate an assigned act to `delegatee` until `expires_at` (epoch
+    /// milliseconds) or until it is revoked. The owner stays the owner and
+    /// may still decide; the delegatee may decide while the delegation is
+    /// valid.
+    pub async fn delegate<T>(
+        &mut self,
+        pid: &str,
+        tid: &str,
+        delegatee: &str,
+        expires_at: Option<i64>,
+        reason: Option<&str>,
+    ) -> Result<ActionResult<T>, Status>
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let mut data = Vars::new()
+            .with("pid", pid)
+            .with("tid", tid)
+            .with("delegatee", delegatee);
+        if let Some(expires_at) = expires_at {
+            data.set("expires_at", expires_at);
+        }
+        if let Some(reason) = reason {
+            data.set("reason", reason);
+        }
+        self.send("act:delegate", data).await
+    }
+
+    /// Revoke an act's delegation. The owner becomes the assignee again and
+    /// the delegatee can no longer decide.
+    pub async fn undelegate<T>(&mut self, pid: &str, tid: &str) -> Result<ActionResult<T>, Status>
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        self.send(
+            "act:undelegate",
+            Vars::new().with("pid", pid).with("tid", tid),
+        )
+        .await
+    }
 }
 
 /// A fault of a running subscription that does not end its feed.
