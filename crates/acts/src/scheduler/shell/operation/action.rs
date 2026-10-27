@@ -1110,6 +1110,11 @@ impl KernelHost {
         }
         let children = match shape {
             ContainerShape::Branches(branches) => {
+                let branch_index: std::collections::HashMap<&str, usize> = branches
+                    .iter()
+                    .enumerate()
+                    .map(|(index, branch)| (branch.id.as_str(), index))
+                    .collect();
                 let mut candidates = Vec::with_capacity(branches.len());
                 for branch in branches {
                     candidates.push(BranchCandidate {
@@ -1121,6 +1126,13 @@ impl KernelHost {
                                     .await?
                             }
                             None => {
+                                // Selection is the `if`/`else` decision, never
+                                // `needs`: an unguarded branch is unselected
+                                // (Skipped) and an `else` is the fallback. An
+                                // unguarded branch that carries `needs` is
+                                // additionally selected as an ordered stage
+                                // below, without changing what the guards mean
+                                // for its siblings.
                                 if branch.r#else {
                                     PredicateValue::True
                                 } else {
@@ -1202,6 +1214,58 @@ impl KernelHost {
                                 serde_json::json!({ "code": "", "message": message }).to_string(),
                             ));
                         }
+                        // A `needs` branch with no guard is a stage of the
+                        // ordered fan-out: it runs after its predecessors even
+                        // though a plain unguarded branch would be skipped. It
+                        // does not enter the guard decision, so an `else`
+                        // sibling keeps its own `if`-based meaning.
+                        let unguarded_stage =
+                            branch.r#if.is_none() && !branch.r#else && !branch.needs.is_empty();
+                        let runs = selected.contains(&branch.id)
+                            || branch_error(&branch.id).is_some()
+                            || unguarded_stage;
+                        // A selected branch with `needs` is queued behind its
+                        // predecessor branches instead of being admitted now.
+                        // The propagation that settles each predecessor admits
+                        // it once every dependency is terminal (see
+                        // `waits_for_needs`); the graph edge is the ordering.
+                        // An unselected branch settles immediately, so a branch
+                        // that needs it is not held by a branch that never ran.
+                        let mut predecessors = Vec::new();
+                        if runs {
+                            for need in &branch.needs {
+                                if need == &branch.id {
+                                    return Err(runtime(format!(
+                                        "branch '{}' declares its own id in 'needs'",
+                                        branch.id
+                                    )));
+                                }
+                                let index = *branch_index.get(need.as_str()).ok_or_else(|| {
+                                    runtime(format!(
+                                        "branch '{}' needs unknown branch '{}' in the same step",
+                                        branch.id, need
+                                    ))
+                                })?;
+                                let reference = ContainerPredecessor::Sibling(index);
+                                if !predecessors.contains(&reference) {
+                                    predecessors.push(reference);
+                                }
+                            }
+                        }
+                        if predecessors.is_empty() {
+                            predecessors.push(ContainerPredecessor::Source);
+                        }
+                        let plan = match (runs, branch.needs.is_empty()) {
+                            (false, _) => ContainerChildPlan::Skip,
+                            (true, false) => ContainerChildPlan::Queued,
+                            (true, true) => ContainerChildPlan::Entry,
+                        };
+                        if plan == ContainerChildPlan::Queued {
+                            vars.push((
+                                crate::scheduler::core::plan::container::NEEDS_VAR.to_string(),
+                                "1".to_string(),
+                            ));
+                        }
                         Ok(ContainerChild {
                             node: branch.id.clone(),
                             model_node: node_id(&branch.id)?,
@@ -1209,14 +1273,8 @@ impl KernelHost {
                             // execution (Skipped) — the parity floor counts a
                             // terminal task per model node, and the legacy
                             // engine keeps the skipped branch task.
-                            plan: if selected.contains(&branch.id)
-                                || branch_error(&branch.id).is_some()
-                            {
-                                ContainerChildPlan::Entry
-                            } else {
-                                ContainerChildPlan::Skip
-                            },
-                            predecessors: vec![ContainerPredecessor::Source],
+                            plan,
+                            predecessors,
                             vars,
                             auto: true,
                         })

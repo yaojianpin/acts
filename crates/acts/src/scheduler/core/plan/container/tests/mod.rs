@@ -109,7 +109,7 @@ fn container_errors_render() {
         ContainerError::SourceOperationTargetsDifferentTask,
         ContainerError::InvalidSourcePark(TaskState::Completed),
         ContainerError::EmptyChildTaskId,
-        ContainerError::ForwardSibling(1),
+        ContainerError::SiblingOutOfRange(1),
         ContainerError::ReadmitNotCreated {
             task: id("a", 0),
             state: TaskState::Running,

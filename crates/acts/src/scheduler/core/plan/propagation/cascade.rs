@@ -187,6 +187,9 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                 // joins the skip cascade in place instead of running on
                 // behind a dead path.
                 if !source_alive
+                    && !crate::scheduler::core::plan::container::waits_for_needs(
+                        snapshot, successor,
+                    )
                     && matches!(
                         target.state,
                         TaskState::Ready | TaskState::Running | TaskState::Waiting
@@ -225,7 +228,17 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                 }
                 continue;
             }
-            let readiness = readiness(graph, snapshot, successor, command.join_policy)?;
+            // A branch's `needs` are ordering dependencies, not a success
+            // chain: its predecessors may be skipped/failed/cancelled and it
+            // still runs once they have all settled. Every other successor
+            // keeps the command's policy.
+            let policy =
+                if crate::scheduler::core::plan::container::waits_for_needs(snapshot, successor) {
+                    JoinPolicy::AllTerminal
+                } else {
+                    command.join_policy
+                };
+            let readiness = readiness(graph, snapshot, successor, policy)?;
             match readiness {
                 JoinReadiness::Ready => {
                     state_changes.push(StateChange {

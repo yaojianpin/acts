@@ -35,7 +35,7 @@ steps:
 | id | ID | Unique branch identifier |
 | name | Name | Branch name |
 | if | Condition | When condition is satisfied, execute this branch |
-| needs | Dependencies | Predecessor branch IDs, sets Pending state |
+| needs | Dependencies | Sibling branch IDs; the branch waits until all of them are terminal |
 | vars | Variables | Local variables |
 | steps | Steps | Child steps of this branch |
 | inputs | Inputs | Input schema |
@@ -56,7 +56,16 @@ branches:
         - id: step4
 ```
 
-If branch `b1` depends on `b2`, the engine sets `b1` to Pending state until `b2` is completed.
+Selected branches of one step run in parallel by default; `needs` adds dependencies
+between those parallel branches and serializes the dependent ones. A branch with `needs`
+is created `pending` (the kernel's `Created`) and is admitted only after **every** named
+predecessor is terminal. The dependency is ordering, not success:
+a predecessor skipped by its own `if`, failed or cancelled has still settled and does not
+block the dependent. A `needs` branch with no `if` is selected (it is the next stage of the
+ordered fan-out); an explicit `if` is still evaluated.
+
+Every id must name a sibling branch in the same `branches` list (a later declaration is
+allowed); an unknown id or a dependency cycle refuses the start.
 
 ## Expressions in Conditions
 

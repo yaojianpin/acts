@@ -348,7 +348,34 @@ fn fanout_refuses_bad_envelopes_and_children() {
 }
 
 #[test]
-fn a_sibling_reference_may_not_point_forward() {
+fn a_sibling_reference_may_point_forward() {
+    let (snapshot, command) = fanout_command(
+        "step1",
+        TaskState::Running,
+        vec![
+            child(
+                "b1",
+                ContainerChildPlan::Queued,
+                vec![ContainerPredecessor::Sibling(1)],
+            ),
+            child(
+                "b2",
+                ContainerChildPlan::Entry,
+                vec![ContainerPredecessor::Source],
+            ),
+        ],
+    );
+    let plan = Fanout::plan(&snapshot, &command).unwrap();
+    let queued = plan
+        .task_creates
+        .iter()
+        .find(|create| create.task.node.as_str() == "b1")
+        .unwrap();
+    assert_eq!(queued.predecessors, vec![id("b2", 0)]);
+}
+
+#[test]
+fn a_sibling_reference_past_the_command_is_refused() {
     let (snapshot, mut command) = fanout_command(
         "step1",
         TaskState::Running,
@@ -361,7 +388,7 @@ fn a_sibling_reference_may_not_point_forward() {
     command.source_park = TaskState::Running;
     assert_eq!(
         Fanout::plan(&snapshot, &command),
-        Err(ContainerError::ForwardSibling(2))
+        Err(ContainerError::SiblingOutOfRange(2))
     );
 }
 
@@ -444,7 +471,7 @@ fn container_errors_render() {
         ContainerError::SourceOperationTargetsDifferentTask,
         ContainerError::InvalidSourcePark(TaskState::Completed),
         ContainerError::EmptyChildTaskId,
-        ContainerError::ForwardSibling(1),
+        ContainerError::SiblingOutOfRange(1),
         ContainerError::ReadmitNotCreated {
             task: id("a", 0),
             state: TaskState::Running,

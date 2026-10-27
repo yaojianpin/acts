@@ -588,6 +588,48 @@ fn model_workflow_valid_rejects_duplicate_branch_and_nested_ids() {
 }
 
 #[test]
+fn model_workflow_valid_checks_branch_needs() {
+    // An unknown sibling would never settle, so the start refuses it.
+    let unknown = Workflow::new().with_id("m1").with_step(|step| {
+        step.with_id("s1")
+            .with_branch(|b| b.with_id("b1").with_need("b2"))
+    });
+    let err = unknown.valid().unwrap_err();
+    assert!(
+        err.to_string().contains("needs unknown branch 'b2'"),
+        "{err}"
+    );
+
+    // A self reference is a one-node cycle.
+    let itself = Workflow::new().with_id("m1").with_step(|step| {
+        step.with_id("s1")
+            .with_branch(|b| b.with_id("b1").with_need("b1"))
+    });
+    let err = itself.valid().unwrap_err();
+    assert!(err.to_string().contains("needs itself"), "{err}");
+
+    // Two branches that wait on each other can never settle.
+    let cycle = Workflow::new().with_id("m1").with_step(|step| {
+        step.with_id("s1")
+            .with_branch(|b| b.with_id("b1").with_need("b2"))
+            .with_branch(|b| b.with_id("b2").with_need("b1"))
+    });
+    let err = cycle.valid().unwrap_err();
+    assert!(
+        err.to_string().contains("form a cycle: b1 -> b2 -> b1"),
+        "{err}"
+    );
+
+    // A forward reference is a legal order (the English model docs use it).
+    let forward = Workflow::new().with_id("m1").with_step(|step| {
+        step.with_id("s1")
+            .with_branch(|b| b.with_id("b1").with_need("b2"))
+            .with_branch(|b| b.with_id("b2"))
+    });
+    assert!(forward.valid().is_ok());
+}
+
+#[test]
 fn model_workflow_tree_output_covers_branches_links_and_catches() {
     let m = Workflow::new()
         .with_id("m1")

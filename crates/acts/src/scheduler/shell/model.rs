@@ -421,12 +421,9 @@ fn import_step(
                 step.id
             )));
         }
-        if !branch.needs.is_empty() {
-            return Err(ActError::Runtime(format!(
-                "branch '{}' declares 'needs'; branch dependencies are not imported yet",
-                branch.id
-            )));
-        }
+        // `needs` is imported as ordering: the branch is queued behind its
+        // sibling predecessors when the step fans out, and propagation admits
+        // it once they settled (see `container::NEEDS_VAR`).
         for inner in &branch.steps {
             import_step(
                 inner,
@@ -485,13 +482,15 @@ impl ProcessSpec {
     /// the workflow vars and the per-node auto decision all become durable
     /// root-scope variables, so the aggregate replays without the spec.
     ///
-    /// Not imported (rejected instead of silently flattened into wrong
-    /// semantics): branch `needs` (a dependency deferral the shadow has no
-    /// re-evaluation driver for yet), `if`/`while` guards on steps inside a
-    /// branch (the kernel join treats `Skipped` as a dead path, while a
-    /// legacy step guard falls through to the chain — one state cannot mean
-    /// both) and a step declaring both `catches` and `timeouts` (two child
-    /// sets the kernel's catch join cannot tell apart).
+    /// Branch `needs` is imported as an ordering dependency: the dependent
+    /// branch is created `Created` with its sibling predecessors, and
+    /// propagation admits it after all of them are terminal whatever their
+    /// outcome. Not imported (rejected instead of silently flattened into
+    /// wrong semantics): `if`/`while` guards on steps inside a branch (the
+    /// kernel join treats `Skipped` as a dead path, while a legacy step guard
+    /// falls through to the chain — one state cannot mean both) and a step
+    /// declaring both `catches` and `timeouts` (two child sets the kernel's
+    /// catch join cannot tell apart).
     pub(crate) fn from_workflow(
         process_id: impl Into<String>,
         workflow: &crate::model::Workflow,
@@ -969,17 +968,35 @@ mod tests {
     }
 
     #[test]
-    fn branch_needs_are_rejected_not_silently_flattened() {
+    fn branch_needs_import_as_ordering_dependencies() {
         let workflow = crate::model::Workflow::new().with_step(|step| {
-            step.with_id("step1").with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_need("b0")
-                    .with_step(|step| step.with_id("s11"))
-            })
+            step.with_id("step1")
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b1")
+                        .with_if("true")
+                        .with_need("b2")
+                        .with_step(|step| step.with_id("s11"))
+                })
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b2")
+                        .with_if("true")
+                        .with_step(|step| step.with_id("s21"))
+                })
         });
-        let error = spec(&workflow).unwrap_err();
-        assert!(format!("{error}").contains("'b1' declares 'needs'"));
+        workflow.valid().unwrap();
+        let spec = spec(&workflow).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        let root = TaskId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let model: crate::model::Workflow = serde_json::from_str(
+            snapshot
+                .variables
+                .get(&(root, MODEL_VAR.to_string()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(model.steps[0].branches[0].needs, vec!["b2".to_string()]);
     }
 
     #[test]

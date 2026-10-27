@@ -19,6 +19,11 @@ use std::fmt;
 pub(crate) enum JoinPolicy {
     /// Every predecessor must have a successful terminal outcome.
     AllSucceeded,
+    /// Every predecessor merely has to be terminal. Used by an execution whose
+    /// predecessors are ordering dependencies (a branch's `needs`): a
+    /// predecessor skipped by its guard, failed or cancelled has still
+    /// *happened*, so the dependent runs after it.
+    AllTerminal,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

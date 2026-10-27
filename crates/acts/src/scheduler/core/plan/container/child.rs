@@ -37,5 +37,21 @@ pub(crate) struct ContainerChild {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ContainerPredecessor {
     Source,
+    /// The `index`-th child of the same command. The fan-out resolves every
+    /// child before it plans any create, so a reference may point at a
+    /// sibling declared *after* the dependent (a branch's `needs` may name a
+    /// later branch).
     Sibling(usize),
+}
+
+/// The private variable marking an execution whose predecessors are *ordering
+/// dependencies* (a branch's `needs`) rather than a success chain: propagation
+/// admits it once every predecessor is terminal, whatever their outcome.
+pub(crate) const NEEDS_VAR: &str = "__needs";
+
+/// Whether one execution waits on ordering dependencies (see [`NEEDS_VAR`]).
+pub(crate) fn waits_for_needs(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {
+    snapshot
+        .variables
+        .contains_key(&(task.clone(), NEEDS_VAR.to_string()))
 }

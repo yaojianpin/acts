@@ -192,32 +192,190 @@ async fn sch_branch_stays_running_while_its_child_waits() {
     fixture.close().await;
 }
 
-/// Branch dependencies (`needs`) are not imported by the kernel: the start
-/// refuses the model instead of silently flattening the dependency (the
-/// kernel's documented boundary; the legacy `sch_task_branch_needs_state`
-/// pinned the engine-side deferral that no longer exists).
+/// A branch that `needs` a predecessor stays queued until the predecessor's
+/// whole subtree settles, then runs its own steps (the legacy
+/// `sch_task_branch_needs_state`, now without the refusal).
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_branch_needs_is_refused_at_start() {
+async fn sch_branch_needs_runs_after_its_predecessor_completes() {
     let workflow = Workflow::new()
         .with_id("flow-branch-needs")
         .with_step(|step| {
-            step.with_id("s1").with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_if("true")
-                    .with_need("b2")
-                    .with_step(|inner| inner.with_id("i1"))
-            })
+            step.with_id("s1")
+                .with_branch(|branch| {
+                    branch.with_id("b1").with_if("true").with_step(|inner| {
+                        inner
+                            .with_id("i1")
+                            .with_uses(USES_IRQ, Vars::new().with("key", "first"))
+                    })
+                })
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b2")
+                        .with_if("true")
+                        .with_need("b1")
+                        .with_step(|inner| {
+                            inner
+                                .with_id("i2")
+                                .with_uses(USES_IRQ, Vars::new().with("key", "second"))
+                        })
+                })
         });
     let mut fixture = FlowFixture::deploy(&workflow).await;
-    let error = fixture
-        .try_start(Vars::new())
-        .await
-        .expect_err("branch needs must be refused");
-    assert!(
-        format!("{error}").contains("needs"),
-        "the refusal names the unsupported field: {error}"
+    fixture.start(Vars::new()).await;
+    let first = fixture.wait_created("i1").await;
+    assert_eq!(fixture.state("b1").await, TaskState::Running);
+    assert_eq!(
+        fixture.state("b2").await,
+        TaskState::Created,
+        "the dependent branch is queued behind b1"
     );
+    assert!(
+        fixture.messages_of("i2").is_empty(),
+        "b2's steps must not have started"
+    );
+
+    fixture.next(&first.pid, &first.tid).await.unwrap();
+    let second = fixture.wait_created("i2").await;
+    assert_eq!(
+        fixture.state("b1").await,
+        TaskState::Completed,
+        "b1 settled before b2 was admitted"
+    );
+    fixture.next(&second.pid, &second.tid).await.unwrap();
+    completed(&fixture.wait_terminal().await);
+    assert_eq!(fixture.state("b2").await, TaskState::Completed);
+    fixture.close().await;
+}
+
+/// Every id in `needs` must settle: the dependent waits for both
+/// predecessors, not just the first one.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_branch_needs_waits_for_every_predecessor() {
+    let workflow = Workflow::new()
+        .with_id("flow-branch-needs-many")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_branch(|branch| {
+                    branch.with_id("b1").with_if("true").with_step(|inner| {
+                        inner
+                            .with_id("i1")
+                            .with_uses(USES_IRQ, Vars::new().with("key", "one"))
+                    })
+                })
+                .with_branch(|branch| {
+                    branch.with_id("b2").with_if("true").with_step(|inner| {
+                        inner
+                            .with_id("i2")
+                            .with_uses(USES_IRQ, Vars::new().with("key", "two"))
+                    })
+                })
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b3")
+                        .with_if("true")
+                        .with_need("b1")
+                        .with_need("b2")
+                        .with_step(|inner| {
+                            inner
+                                .with_id("i3")
+                                .with_uses(USES_IRQ, Vars::new().with("key", "three"))
+                        })
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let first = fixture.wait_created("i1").await;
+    let second = fixture.wait_created("i2").await;
+    assert_eq!(fixture.state("b3").await, TaskState::Created);
+
+    fixture.next(&first.pid, &first.tid).await.unwrap();
+    fixture.wait_state("b1", TaskState::Completed).await;
+    assert_eq!(
+        fixture.state("b3").await,
+        TaskState::Created,
+        "one settled predecessor is not enough"
+    );
+    assert!(fixture.messages_of("i3").is_empty());
+
+    fixture.next(&second.pid, &second.tid).await.unwrap();
+    let third = fixture.wait_created("i3").await;
+    fixture.next(&third.pid, &third.tid).await.unwrap();
+    completed(&fixture.wait_terminal().await);
+    assert_eq!(fixture.state("b3").await, TaskState::Completed);
+    fixture.close().await;
+}
+
+/// A dependency may name a later-declared sibling, and a predecessor that its
+/// own guard skipped still counts as settled: `needs` is ordering, not a
+/// success chain.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_branch_needs_accepts_forward_and_skipped_predecessors() {
+    let workflow = Workflow::new()
+        .with_id("flow-branch-needs-forward")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b1")
+                        .with_if("true")
+                        .with_need("b2")
+                        .with_step(|inner| {
+                            inner
+                                .with_id("i1")
+                                .with_uses(USES_IRQ, Vars::new().with("key", "after"))
+                        })
+                })
+                .with_branch(|branch| {
+                    branch.with_id("b2").with_if("false").with_step(|inner| {
+                        inner
+                            .with_id("i2")
+                            .with_uses(USES_IRQ, Vars::new().with("key", "never"))
+                    })
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("i1").await;
+    assert_eq!(fixture.state("b2").await, TaskState::Skipped);
+    assert_eq!(fixture.state("b1").await, TaskState::Running);
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+    completed(&fixture.wait_terminal().await);
+    assert_eq!(fixture.state("b1").await, TaskState::Completed);
+    assert!(
+        fixture.messages_of("i2").is_empty(),
+        "the skipped predecessor's steps never run"
+    );
+    fixture.close().await;
+}
+
+/// An unguarded branch with `needs` is a stage of the ordered fan-out, not an
+/// unselected branch: it runs after its predecessor (the docs' `needs` shape).
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_branch_needs_without_a_guard_is_selected() {
+    let workflow = Workflow::new()
+        .with_id("flow-branch-needs-unguarded")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b1")
+                        .with_else(true)
+                        .with_step(|inner| inner.with_id("i1"))
+                })
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b2")
+                        .with_need("b1")
+                        .with_step(|inner| inner.with_id("i2"))
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    completed(&fixture.run(Vars::new()).await);
+    assert_eq!(fixture.state("b1").await, TaskState::Completed);
+    assert_eq!(fixture.state("b2").await, TaskState::Completed);
     fixture.close().await;
 }

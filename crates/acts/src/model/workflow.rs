@@ -455,6 +455,7 @@ fn validate_step(step: &Step, built: &mut HashSet<String>) -> Result<()> {
             }
         }
         None => {
+            validate_branch_needs(step)?;
             for branch in &step.branches {
                 if !built.insert(branch.id.clone()) {
                     return Err(ActError::Model(format!("dup node id with '{}'", branch.id)));
@@ -471,6 +472,81 @@ fn validate_step(step: &Step, built: &mut HashSet<String>) -> Result<()> {
     }
     for timeout in &step.timeouts {
         validate_step(timeout, built)?;
+    }
+    Ok(())
+}
+
+/// A branch's `needs` names sibling branches of the same step, and the
+/// dependency graph must be acyclic — the kernel queues a dependent branch
+/// until every predecessor is terminal, so a missing target or a cycle would
+/// leave it `Created` forever instead of failing the start.
+fn validate_branch_needs(step: &Step) -> Result<()> {
+    let positions: HashMap<&str, usize> = step
+        .branches
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| (branch.id.as_str(), index))
+        .collect();
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); step.branches.len()];
+    for (index, branch) in step.branches.iter().enumerate() {
+        for need in &branch.needs {
+            if need == &branch.id {
+                return Err(ActError::Model(format!(
+                    "branch '{}' in step '{}' needs itself",
+                    branch.id, step.id
+                )));
+            }
+            let dependency = positions.get(need.as_str()).copied().ok_or_else(|| {
+                ActError::Model(format!(
+                    "branch '{}' in step '{}' needs unknown branch '{}'",
+                    branch.id, step.id, need
+                ))
+            })?;
+            edges[index].push(dependency);
+        }
+    }
+    fn visit(
+        index: usize,
+        edges: &[Vec<usize>],
+        ids: &[&str],
+        step: &str,
+        states: &mut [u8],
+        stack: &mut Vec<usize>,
+    ) -> Result<()> {
+        match states[index] {
+            2 => return Ok(()),
+            1 => {
+                let start = stack
+                    .iter()
+                    .position(|node| *node == index)
+                    .unwrap_or_default();
+                let mut path: Vec<&str> = stack[start..].iter().map(|node| ids[*node]).collect();
+                path.push(ids[index]);
+                return Err(ActError::Model(format!(
+                    "branch 'needs' in step '{step}' form a cycle: {}",
+                    path.join(" -> ")
+                )));
+            }
+            _ => {}
+        }
+        states[index] = 1;
+        stack.push(index);
+        for next in &edges[index] {
+            visit(*next, edges, ids, step, states, stack)?;
+        }
+        stack.pop();
+        states[index] = 2;
+        Ok(())
+    }
+    let ids: Vec<&str> = step
+        .branches
+        .iter()
+        .map(|branch| branch.id.as_str())
+        .collect();
+    let mut states = vec![0u8; step.branches.len()];
+    let mut stack = Vec::new();
+    for index in 0..step.branches.len() {
+        visit(index, &edges, &ids, &step.id, &mut states, &mut stack)?;
     }
     Ok(())
 }

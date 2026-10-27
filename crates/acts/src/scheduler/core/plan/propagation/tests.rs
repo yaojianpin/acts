@@ -157,6 +157,46 @@ fn dead_predecessor_puts_success_join_into_the_skip_cascade() {
 }
 
 #[test]
+fn a_needs_successor_is_admitted_once_every_predecessor_settled() {
+    // A branch's `needs` is ordering, not success: a predecessor that failed
+    // has still settled, so the dependent branch runs.
+    let mut snap = snapshot(TaskState::Failed, TaskState::Completed);
+    snap.variables.insert(
+        (
+            id("join"),
+            crate::scheduler::core::plan::container::NEEDS_VAR.to_string(),
+        ),
+        "1".into(),
+    );
+    let plan = Propagate::plan((&graph(), &snap), &command("b", JoinPolicy::AllSucceeded)).unwrap();
+    assert_eq!(plan.state_changes.len(), 1);
+    assert_eq!(plan.state_changes[0].task, id("join"));
+    assert_eq!(plan.state_changes[0].to, TaskState::Ready);
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(plan.operations[0].kind, OperationKind::ExecuteTask);
+}
+
+#[test]
+fn a_replayed_dead_predecessor_does_not_cascade_an_admitted_needs_successor() {
+    // The dependent was admitted when every predecessor settled; a replay of a
+    // failed predecessor's propagation must not turn it into a skip.
+    let mut snap = snapshot(TaskState::Failed, TaskState::Completed);
+    if let Some(target) = snap.tasks.get_mut(&id("join")) {
+        target.state = TaskState::Ready;
+    }
+    snap.variables.insert(
+        (
+            id("join"),
+            crate::scheduler::core::plan::container::NEEDS_VAR.to_string(),
+        ),
+        "1".into(),
+    );
+    let plan = Propagate::plan((&graph(), &snap), &command("a", JoinPolicy::AllSucceeded)).unwrap();
+    assert!(plan.state_changes.is_empty());
+    assert!(plan.operations.is_empty());
+}
+
+#[test]
 fn dead_source_sends_admitted_unfinished_successors_into_the_cascade() {
     // `join` is already `Ready` (admitted, start operation pending) when its
     // predecessor is cancelled: it must skip, not run behind a dead path.

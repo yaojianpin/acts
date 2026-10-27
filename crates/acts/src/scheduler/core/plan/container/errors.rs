@@ -8,7 +8,7 @@ pub(crate) enum ContainerError {
     SourceOperationTargetsDifferentTask,
     InvalidSourcePark(TaskState),
     EmptyChildTaskId,
-    ForwardSibling(usize),
+    SiblingOutOfRange(usize),
     ReadmitNotCreated { task: TaskId, state: TaskState },
     GraphVersionConflict { graph: u64, snapshot: u64 },
     GenerationOverflow,

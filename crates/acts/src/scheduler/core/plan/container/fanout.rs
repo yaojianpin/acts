@@ -24,6 +24,18 @@ pub(crate) struct ContainerFanoutCommand {
     pub(crate) source_park: TaskState,
 }
 
+/// What the first pass decided for one child: an execution the fan-out leaves
+/// alone (ignored active generation, or a queued successor the propagation
+/// admits), a fresh generation to create, or an unstarted generation to
+/// readmit. The second pass resolves predecessor references against *every*
+/// child's execution, which is what lets a reference point forward.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreparedSlot {
+    Existing,
+    Create,
+    Readmit,
+}
+
 /// Fan a container's children out in one atomic plan.
 pub(crate) struct Fanout;
 
@@ -113,7 +125,11 @@ impl ActPlan for Fanout {
         // snapshot's `next_generation` reports.
         let mut allocated: std::collections::HashMap<String, u64> =
             std::collections::HashMap::with_capacity(command.children.len());
-        for (index, child) in command.children.iter().enumerate() {
+        // Pass one: decide every child's execution. The resolved ids are
+        // complete before pass two builds any create, so one child may name a
+        // later sibling as its predecessor (a branch's `needs`).
+        let mut slots: Vec<PreparedSlot> = Vec::with_capacity(command.children.len());
+        for child in &command.children {
             if child.node.trim().is_empty() {
                 return Err(ContainerError::EmptyChildTaskId);
             }
@@ -142,7 +158,7 @@ impl ActPlan for Fanout {
                 ),
                 None => base,
             };
-            let task = match infallible(crate::scheduler::core::plan::task_admission::Admit::plan(
+            match infallible(crate::scheduler::core::plan::task_admission::Admit::plan(
                 (),
                 &(
                     crate::scheduler::core::plan::task_admission::TaskSlotKind::Once,
@@ -154,34 +170,14 @@ impl ActPlan for Fanout {
                     resolved.push(
                         existing.ok_or(ContainerError::TaskNotFound(command.source.clone()))?,
                     );
-                    continue;
+                    slots.push(PreparedSlot::Existing);
                 }
                 crate::scheduler::core::plan::task_admission::AdmissionDecision::AllocateGeneration => {
                     let task = TaskId::new(child.node.clone(), generation)
                         .map_err(|_| ContainerError::EmptyChildTaskId)?;
                     allocated.insert(child.node.clone(), generation);
-                    creates.push(TaskCreate {
-                        task: task.clone(),
-                        model_node: child.model_node.clone(),
-                        parent: Some(command.source.clone()),
-                        predecessors: resolve_predecessors(
-                            &child.predecessors,
-                            &command.source,
-                            &resolved,
-                            index,
-                        )?,
-                        initial_state: match child.plan {
-                            ContainerChildPlan::Queued => TaskState::Created,
-                            ContainerChildPlan::Entry | ContainerChildPlan::Skip => {
-                                TaskState::Ready
-                            }
-                        },
-                    });
-                    if let Some(intent) = child_operation(command, &task, child.plan)? {
-                        operations.push(intent);
-                    }
-                    child_variables(&mut variable_writes, &task, child);
-                    task
+                    resolved.push(task);
+                    slots.push(PreparedSlot::Create);
                 }
                 crate::scheduler::core::plan::task_admission::AdmissionDecision::ReadmitExisting => {
                     let task =
@@ -192,24 +188,57 @@ impl ActPlan for Fanout {
                     // its predecessor settles. Readmitting it would hand it
                     // `Ready` with no operation to run — and take the admission
                     // the propagation is about to perform.
-                    if child.plan == ContainerChildPlan::Queued {
-                        resolved.push(task);
-                        continue;
+                    slots.push(if child.plan == ContainerChildPlan::Queued {
+                        PreparedSlot::Existing
+                    } else {
+                        PreparedSlot::Readmit
+                    });
+                    resolved.push(task);
+                }
+            }
+        }
+
+        // Pass two: build the transition now that every child's execution id
+        // is known.
+        for (index, child) in command.children.iter().enumerate() {
+            let task = &resolved[index];
+            match slots[index] {
+                PreparedSlot::Existing => {}
+                PreparedSlot::Create => {
+                    creates.push(TaskCreate {
+                        task: task.clone(),
+                        model_node: child.model_node.clone(),
+                        parent: Some(command.source.clone()),
+                        predecessors: resolve_predecessors(
+                            &child.predecessors,
+                            &command.source,
+                            &resolved,
+                        )?,
+                        initial_state: match child.plan {
+                            ContainerChildPlan::Queued => TaskState::Created,
+                            ContainerChildPlan::Entry | ContainerChildPlan::Skip => {
+                                TaskState::Ready
+                            }
+                        },
+                    });
+                    if let Some(intent) = child_operation(command, task, child.plan)? {
+                        operations.push(intent);
                     }
+                    child_variables(&mut variable_writes, task, child);
+                }
+                PreparedSlot::Readmit => {
                     // The latest generation exists but never ran (a Cancel
                     // rewind recreated it): admit it in place instead of
                     // allocating a second live generation.
-                    if let Some(change) = readmit_change(snapshot, &task)? {
+                    if let Some(change) = readmit_change(snapshot, task)? {
                         state_changes.push(change);
                     }
-                    if let Some(intent) = child_operation(command, &task, child.plan)? {
+                    if let Some(intent) = child_operation(command, task, child.plan)? {
                         operations.push(intent);
                     }
-                    child_variables(&mut variable_writes, &task, child);
-                    task
+                    child_variables(&mut variable_writes, task, child);
                 }
-            };
-            resolved.push(task);
+            }
         }
 
         let plan = TransitionPlan {
@@ -313,27 +342,22 @@ fn next_generation(snapshot: &ProcessSnapshot, node: &str) -> Option<u64> {
 }
 
 /// Turn symbolic predecessor references into execution ids: the container
-/// itself, or a sibling processed earlier in the same command (its resolved
-/// id, created or readmitted).
+/// itself, or any child of the same command (its resolved id, created,
+/// readmitted or already held). Every child is resolved before pass two, so a
+/// reference may point forward.
 fn resolve_predecessors(
     references: &[ContainerPredecessor],
     source: &TaskId,
     resolved: &[TaskId],
-    current: usize,
 ) -> Result<Vec<TaskId>, ContainerError> {
     references
         .iter()
         .map(|reference| match *reference {
             ContainerPredecessor::Source => Ok(source.clone()),
-            ContainerPredecessor::Sibling(index) => {
-                if index >= current {
-                    return Err(ContainerError::ForwardSibling(index));
-                }
-                resolved
-                    .get(index)
-                    .cloned()
-                    .ok_or(ContainerError::ForwardSibling(index))
-            }
+            ContainerPredecessor::Sibling(index) => resolved
+                .get(index)
+                .cloned()
+                .ok_or(ContainerError::SiblingOutOfRange(index)),
         })
         .collect()
 }
@@ -477,22 +501,26 @@ mod tests {
     }
 
     #[test]
-    fn a_sibling_index_past_the_resolved_prefix_is_a_forward_reference() {
+    fn a_sibling_reference_resolves_any_child_of_the_command() {
         let source = TaskId::new("step1", 0).unwrap();
-        assert_eq!(
-            resolve_predecessors(&[ContainerPredecessor::Sibling(4)], &source, &[], 0),
-            Err(ContainerError::ForwardSibling(4))
-        );
-        // An index inside the command that was not resolved (a gap) is also a
-        // forward reference.
+        let first = TaskId::new("a", 0).unwrap();
+        let later = TaskId::new("b", 0).unwrap();
+        // A forward reference is a real child of this command, so it resolves.
         assert_eq!(
             resolve_predecessors(
-                &[ContainerPredecessor::Sibling(1)],
+                &[
+                    ContainerPredecessor::Source,
+                    ContainerPredecessor::Sibling(1)
+                ],
                 &source,
-                &[TaskId::new("a", 0).unwrap()],
-                2
+                &[first.clone(), later.clone()]
             ),
-            Err(ContainerError::ForwardSibling(1))
+            Ok(vec![source.clone(), later])
+        );
+        // An index past the command's children is refused.
+        assert_eq!(
+            resolve_predecessors(&[ContainerPredecessor::Sibling(2)], &source, &[first]),
+            Err(ContainerError::SiblingOutOfRange(2))
         );
     }
 }
