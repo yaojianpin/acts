@@ -97,7 +97,7 @@ bashkit = { version = "0.18", default-features = false, features = ["realfs"] }
 # system metrics (the engine's `sys:status` action reports the host process's
 # memory and cpu usage). `system` alone: memory, cpu and processes — no disks,
 # networks, components or users.
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 # message brokers / stores
 async-nats = "0.50"
 redis = { version = "1.7", default-features = false, features = [
