@@ -47,6 +47,10 @@ fn resolve(env: &super::Environment, name: &str) -> Option<Value> {
         // pushed act injected one (`$index`, `$value`).
     }
 
+    if let Some(function) = env.function(name) {
+        return Some(plugin_function(function));
+    }
+
     if let Some(data) = step_data(name) {
         return Some(from_json(JsonValue::from(data)));
     }
@@ -55,6 +59,27 @@ fn resolve(env: &super::Environment, name: &str) -> Option<Value> {
     }
 
     task_var(name).map(from_json)
+}
+
+/// Bridge one plugin method into the expression evaluator.
+fn plugin_function(function: Arc<dyn crate::ActFunction>) -> Value {
+    Value::function(move |args: &[Value]| {
+        let name = function.name();
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(arg.to_json().map_err(|error| ExprError::Function {
+                name: name.clone(),
+                message: error.to_string(),
+            })?);
+        }
+        let value = function
+            .call(&values)
+            .map_err(|error| ExprError::Function {
+                name: name.clone(),
+                message: error.to_string(),
+            })?;
+        Ok(Value::from(value))
+    })
 }
 
 /// A sealed `$name` of this task or of an ancestor (child overrides parent).

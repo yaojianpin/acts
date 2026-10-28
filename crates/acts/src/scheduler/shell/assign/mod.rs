@@ -621,7 +621,23 @@ impl AssignmentResolver for RuntimeAssignmentResolver {
         // act's params: seed the declared vars and seal the snapshot data the
         // expression may read.
         ctx.prepare().await?;
-        let participants = ctx.resolve_owners(expr)?;
+        // The model carries the provider key frozen at publish/start. Use that
+        // exact port; only a model that never went through capability
+        // resolution (a direct kernel test) falls back to the default.
+        let provider = find_step_in_model(&scope.model, &scope.node)
+            .and_then(|step| step.assign.as_ref())
+            .and_then(|assign| assign.provider.as_deref());
+        let participants = match provider {
+            Some(key) => {
+                let resolver = self.runtime.participant_resolver_for(key).ok_or_else(|| {
+                    ActError::Runtime(format!(
+                        "assign.owner provider '{key}' has no participant resolver: install a plugin that registers both from ActPlugin::on_init"
+                    ))
+                })?;
+                resolver.resolve(&ctx, expr)?
+            }
+            None => ctx.resolve_owners(expr)?,
+        };
         match participants.as_slice() {
             [] => Ok(None),
             [owner] => Ok(Some(owner.id.clone())),

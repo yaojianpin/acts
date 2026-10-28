@@ -23,7 +23,10 @@ use tokio::time::Instant;
 #[cfg(test)]
 use crate::scheduler::{ProcRead, ProcessSnapshot, TaskRow, TaskState};
 use crate::{
-    Action, Config, Engine, Message, MessageState, Principal, Vars, Workflow, event::EventAction,
+    ActPlugin, Action, Config, Context, Engine, Message, MessageState, OwnerExpr, Participant,
+    ParticipantResolver, Principal, Vars, Workflow,
+    capability::{CapabilityKind, CapabilityProvider},
+    event::EventAction,
     utils::consts,
 };
 
@@ -35,6 +38,41 @@ pub type Created = Message;
 const WAIT: Duration = Duration::from_secs(90);
 /// How long a wait sleeps between polls.
 const TICK: Duration = Duration::from_millis(20);
+/// The fixture's provider key: a test-only plugin, not the participant crate.
+const FIXTURE_PARTICIPANT_PROVIDER: &str = "acts-testing-participant";
+
+/// The fixture's participant resolver: the kernel's local evaluation.
+///
+/// A fixture engine supports `assign.owner` without the participant plugin
+/// crate (the crate under test cannot depend on a plugin that depends on it),
+/// but the resolver still enters through the same startup hook a plugin uses.
+#[derive(Clone)]
+struct FixtureParticipantResolver;
+
+impl ParticipantResolver for FixtureParticipantResolver {
+    fn resolve(&self, ctx: &Context, expr: &OwnerExpr) -> crate::Result<Vec<Participant>> {
+        ctx.resolve_local_owners(expr)
+    }
+}
+
+#[derive(Clone)]
+struct FixtureParticipantPlugin;
+
+#[async_trait::async_trait]
+impl ActPlugin for FixtureParticipantPlugin {
+    fn on_init(&self, engine: &Engine) -> crate::Result<()> {
+        engine.register_capability_provider(CapabilityProvider {
+            kind: CapabilityKind::Participant,
+            key: FIXTURE_PARTICIPANT_PROVIDER.to_string(),
+            plugin: FIXTURE_PARTICIPANT_PROVIDER.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })?;
+        engine.register_participant_resolver(
+            FIXTURE_PARTICIPANT_PROVIDER,
+            Arc::new(FixtureParticipantResolver),
+        )
+    }
+}
 
 /// How a run ended, from its lifecycle channel.
 #[cfg(test)]
@@ -61,8 +99,18 @@ impl FlowFixture {
     }
 
     /// Deploy `workflow` with the cell's own config (a run bound, a tick).
+    ///
+    /// The fixture engine installs a local participant resolver, so
+    /// `assign.owner` works without a plugin dependency cycle. A cell that
+    /// needs a bare engine (to observe the no-resolver failure, or a custom
+    /// resolver) builds it and uses [`Self::deploy_on`].
     pub async fn deploy_with(workflow: &Workflow, config: &Config) -> Self {
-        let engine = Engine::builder().set_config(config).start().await.unwrap();
+        let engine = Engine::builder()
+            .set_config(config)
+            .add_plugin(&FixtureParticipantPlugin)
+            .start()
+            .await
+            .unwrap();
         Self::deploy_on(engine, workflow).await
     }
 

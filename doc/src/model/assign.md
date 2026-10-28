@@ -4,6 +4,14 @@
 
 ## 声明承办人
 
+`assign.owner` 是模型层的参与人原语，**解析由参与人插件提供**：安装
+`acts_plugin_participant::ParticipantPlugin` 后使用默认
+`LocalParticipantResolver`，或用 `ParticipantPlugin::with_resolver` 替换。
+没有安装插件（且未通过 `Engine::register_capability_provider` 广播能力、再用
+`Engine::register_participant_resolver(key, ...)` 注册解析器）时，
+发布含 `assign.owner` 的模型会直接失败并点名插件；活动启动路径也会 fail
+closed。`__assignment`/`__delegation` 和决策授权仍在引擎内核。
+
 `assign` 只允许写在人类决策叶子上（`ActRunAs::Irq` 的包，如 `acts.core.irq`、`acts.core.decide`，以及自定义 IRQ 包）。
 
 ```yml
@@ -14,7 +22,16 @@
     key: approve
   assign:
     owner: "${{ reviewer }}"
+    provider: "acme.participant" # optional
 ```
+
+`assign.provider` 选择解析该活动的参与人提供者：
+
+- 省略时使用该能力类型唯一的已安装提供者；
+- 注册了多个提供者时必须显式声明，否则发布失败；
+- 发布时把 key 固化到存储的模型，活动启动和重启都使用该 key；
+- 同一个 provider key 在任一时刻只有一个活动实现；`version` 只用于能力表诊断和
+  版本校验，不支持同 key 多版本共驻。
 
 规则：
 

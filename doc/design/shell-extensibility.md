@@ -1,6 +1,6 @@
 # scheduler/shell 扩展性设计
 
-- 状态：方案（P1 待实施）
+- 状态：方案（能力模型已定稿；P1 待实施，participant 原型暂停）
 - 日期：2026-10-28
 - 范围：`crates/acts/src/scheduler/shell`、`crates/acts/src/scheduler/runtime.rs`、`crates/acts/src/plugin`、`crates/acts/src/package`
 
@@ -61,6 +61,23 @@
    - 新持久状态/新操作 → core（必须走设计评审）。
    - 新传输 → 插件。
    - 新报表/投影字段 → 投影端口或 package，不进 `KernelHost`。
+6. **模型原语与能力广告。** 可选功能先在模型层定义原语（如
+   `assign.owner`），再由插件从 `ActPlugin::on_init` 注册类型化端口并广告能力。
+   provider key 由插件定义，内核只定义能力类型：
+   ```rust
+   // 插件自定义 key；内核不定义 "acme.participant" 这个字符串
+   engine.register_participant_resolver("acme.participant", resolver)?;
+   engine.register_capability_provider(
+       CapabilityKind::Participant,
+       "acme.participant",
+   )?;
+   ```
+   模型通过 `Workflow::required_capabilities` 声明所需能力类型；发布和启动路径
+   解析提供者并检查，缺失时返回点名属性/能力的错误，而不是让功能静默失效。
+   能力表与端口槽位都在启动 pass 封口，运行中不动态替换。
+7. **环境扩展是插件逻辑的一部分。** `ActUserVar`（变量）和 `ActFunction`
+   （方法）让插件在表达式层实现自己的规则；它们只扩展表达式能读到/调用什么，
+   不绕过内核的授权和状态机。
 
 ## 4. 清单与分类
 
@@ -88,7 +105,7 @@
 
 - `EffectRunner`（`effects.rs`）
 - `PredicateRunner`（`predicate.rs`）
-- `AssignmentResolver`（`assign/mod.rs`）
+- `ParticipantResolver`（`assign` 的启动解析；本次原型的第一个公开端口）
 - `OutboxTransport`（`core::outbox::outbox_dispatch`）
 - `LifecycleSink`（`lifecycle`）
 - `RowProjector`（`projection`）
@@ -103,28 +120,96 @@
 - 没有统一的装配结构，新增端口要改 `KernelHost` 字段、`attach_*` 和
   `Runtime::create` 三处。
 
+本次原型的 `ParticipantResolver` 是第一个公开端口，能力类型 + provider key
+的契约见 §6；其余端口仍按 P1 逐步公开。
+
 ## 6. 目标架构
 
-### 6.1 `KernelPorts`
+### 6.1 能力模型
+
+把四个概念分开，避免把内核变成服务定位器：
+
+| 概念 | 归属 | 例子 |
+| --- | --- | --- |
+| 属性（attribute） | Model | `assign.owner` |
+| 能力类型（kind） | Kernel：trait + 枚举 | `CapabilityKind::Participant` → `dyn ParticipantResolver` |
+| 提供者 key | 插件自定义字符串 | `acme.participant` |
+| 提供者实现 | 插件 | `MyParticipantResolver` |
+
+- 内核常量只用于**内部默认**（测试、内置实现）；插件 key 不在 `acts` 定义。
+- 模型属性到能力类型是内核的静态映射，不依赖插件注册顺序。
+- 能力表记录 `(kind, key) -> {plugin, version}`，只用于发布/启动检查和错误
+  提示，不承载执行。
+
+### 6.2 属性 → 能力类型 → 提供者
+
+1. 模型发布时，`AttributeMap` 把 `assign.owner` 解析为
+   `CapabilityKind::Participant`。
+2. 选择提供者：
+   - 模型显式声明 `provider: "acme.participant"` → 用该 key；
+   - 未声明且该 kind 只有一个提供者 → 用唯一提供者；
+   - 未声明且有多个 → 发布失败，要求显式选择。
+3. 在能力表校验 `(kind, key)`；缺失 → `ActError::Model`，错误点名属性和 key。
+4. 把 `ResolvedCapability { kind, key, provider_version }` 固化到 process spec。
+5. shell 操作按这个 key 从类型化端口取出实现并调用；不再猜测。
+6. 重启/恢复时 key 或版本缺失 → 明确失败，不静默回退到另一个实现。
+
+### 6.3 `KernelPorts` 与 `PortSet`
 
 ```rust
+pub struct PortSet<T: ?Sized + Send + Sync> {
+    entries: BTreeMap<String, Arc<T>>,
+    default: Option<String>,
+}
+
 pub struct KernelPorts {
-    pub effects: Option<Arc<dyn EffectRunner>>,
-    pub predicates: Option<Arc<dyn PredicateRunner>>,
-    pub assignment: Option<Arc<dyn AssignmentResolver>>,
-    pub delivery: Option<Box<dyn OutboxTransport>>,
-    pub lifecycle: Option<LifecycleSink>,
-    pub projection: Option<Arc<RowProjector>>,
-    pub timers: Option<Arc<TimerGuider>>,
+    pub effects: PortSet<dyn EffectRunner>,
+    pub predicates: PortSet<dyn PredicateRunner>,
+    pub participants: PortSet<dyn ParticipantResolver>,
+    pub delivery: PortSet<dyn OutboxTransport>,
+    pub lifecycle: PortSet<dyn LifecycleSink>,
+    pub projection: PortSet<dyn RowProjector>,
+    pub timers: PortSet<dyn TimerGuider>,
 }
 ```
 
-- `Runtime::create` 先装默认实现，再用 `EngineBuilder`/`ActPlugin::on_init`
-  注册的 ports 覆盖；`None` 表示“用默认”。
-- 端口 trait 移到 `acts::ext`（`pub`），参数只使用公开类型。
-- 装配在第一次 serve 前完成；之后只读。
+- 每种能力类型一个 trait 和一个 `PortSet`；`KernelHost` 只负责组装和调度。
+- 插件注册使用自己的 key：
+  ```rust
+  engine.register_participant_resolver(
+      "acme.participant",
+      Arc::new(MyParticipantResolver),
+  )?;
+  ```
+- 不使用 `HashMap<String, Arc<dyn Any>>`，也不把 `dyn Resolver` 作为统一执行面。
+- 装配在第一次 serve 前完成；启动 pass 后只读。默认实现可以注册为内部 key。
 
-### 6.2 窄宿主
+### 6.4 模型原语
+
+- 核心原语（`assign.owner`、`OwnerExpr`）继续使用 Rust 类型和 serde；内核的
+  单 owner、`__assignment`、授权依赖它。
+- 插件自定义原语使用通用信封：
+  ```json
+  { "capability": "acme.discount", "payload": { } }
+  ```
+  内核只校验信封、能力是否存在、payload schema 是否由插件声明；payload 的
+  解析和执行由插件 `AttributeHandler` 负责。
+- `assign.owner` 暂不迁移成无类型 JSON；等通用信封稳定后再评估，避免同时改
+  模型、状态机和插件协议。
+
+### 6.5 环境扩展
+
+`ActUserVar`（变量）和 `ActFunction`（表达式方法）是插件实现解析规则的
+表达式层扩展：
+
+- 插件在 `on_init` 中用 `Engine::register_env_var` /
+  `Engine::register_env_function` 注册；
+- 嵌入方在运行时用 `executor.ext().register_var` /
+  `register_function`，走 ACL 检查；
+- 函数在表达式引用时才注入；引擎内建方法优先；
+- 变量/方法只扩展表达式能读到/调用什么，不改变授权和状态机。
+
+### 6.6 窄宿主
 
 端口不拿 `Arc<Runtime>`。新增一个公开的宿主 trait：
 
@@ -144,13 +229,13 @@ pub trait ShellHost: Send + Sync {
 这样 `PackageEffectRunner`、`PredicateRunner` 等实现可以搬出 `acts`，只依赖
 `acts` 的公开类型。
 
-### 6.3 包运行时 API
+### 6.7 包运行时 API
 
 `Context`/`Scope`/`ScopeTask` 是 package 作者真正使用的表面。它们应成为
 `acts-runtime-api`（或 `acts::runtime` 公开模块），而不是 `shell` 的私有结构。
 这一步与端口公开一起做，避免“trait 公开了但参数类型不可命名”。
 
-### 6.4 默认实现的位置
+### 6.8 默认实现的位置
 
 | 端口 | 默认实现 | 目标位置 |
 | --- | --- | --- |
@@ -158,7 +243,7 @@ pub trait ShellHost: Send + Sync {
 | predicates | acts-expr 适配器 | `acts-predicate-expr` |
 | delivery | `MessageForwarder`/`ShadowTransport` | `acts-channel` 或传输插件 |
 | lifecycle | emitter sink | 保留在 `acts`（很薄） |
-| assignment | `RuntimeAssignmentResolver` | 保留在 `acts`（与 `assign` 语义同层） |
+| participant | 内核本地求值原语 + 插件 `LocalParticipantResolver` | 端口在 `acts`，默认实现在参与人插件 |
 | timers | 内核 liveness | 保留；schedule 触发可独立 |
 | projection | 行投影器 | 保留；目标端口在 P5 |
 
@@ -173,16 +258,26 @@ pub trait ShellHost: Send + Sync {
   不增加 shell 的业务逻辑。
 - 验收：新功能的 diff 不增加 `shell/` 的公开/私有模块数。
 
-### P1：公开端口 + `KernelPorts`（低风险）
+### P1：类型化端口 + `KernelPorts`（低风险）
 
-- 新增 `acts::ext`，公开七个端口 trait 和它们的数据类型。
-- `KernelHost` 用 `KernelPorts` 装配；`EngineBuilder::ports`/`ActPlugin::on_init`
-  可以注册。
-- 默认实现留在原处（仍可用），只是可以通过端口覆盖。
+- 新增 `acts::capability`（或 `acts::ports`）：公开七个端口 trait、请求/响应
+  类型、`PortSet<T>`、`KernelPorts`。
+- `KernelHost` 用 `KernelPorts` 装配；默认实现仍可用。
+- 插件注册使用自己的 key；内核只定义能力类型。
 - 风险：公开 API 的 semver；参数类型必须稳定。
-- 验收：一个外部测试 crate 实现其中一个端口并在引擎里生效；现有测试不变。
+- 验收：一个外部测试 crate 实现一个端口并在引擎里生效；现有测试不变。
 
-### P2：抽出效果运行器 + 运行时 API（中风险）
+### P2：能力注册 + 属性映射 + 发布/启动检查（中风险）
+
+- `CapabilityKind`（能力类型）、`AttributeMap`（`assign.owner` →
+  `Participant`）、`CapabilityRequirement`。
+- 插件广告 `(kind, key, plugin, version)`；重复 key 报错。
+- 发布时解析属性到提供者并固化到 process spec；启动时按固化 key 取端口。
+- 缺失能力 → 发布 `ActError::Model`，启动 fail closed。
+- participant 作为第一个外部能力；env 变量/方法扩展同时落地。
+- 验收：无插件发布失败并点名能力；插件替换解析器生效；授权回归不变。
+
+### P3：抽出效果运行器 + 运行时 API（中风险）
 
 - 把 `Context`/`Scope`/`ScopeTask` 稳定成 `acts-runtime-api`。
 - 把 `PackageEffectRunner` 移到 `acts-effect-package`；`effects.rs` 只剩 trait
@@ -191,34 +286,43 @@ pub trait ShellHost: Send + Sync {
 - 验收：默认引擎行为不变；`acts-effect-package` 的测试覆盖包执行、sealed、
   超时/取消。
 
-### P3：谓词、投递、包 schema（中风险）
+### P4：谓词、投递、包 schema（中风险）
 
 - 谓词默认实现移到 `acts-predicate-expr`。
 - 投递跟随 `acts-channel`/传输插件；`delivery/mod.rs` 只保留端口调用。
-- 包 schema 由包定义/校验端口负责，`validation.rs` 缩到缓存和错误映射。
+- 包 schema 由包定义/校验端口负责；`validation.rs` 缩到缓存和错误映射。
 - 验收：分支/投递/包校验的全量测试通过。
 
-### P4：定时器注册（低-中风险）
+### P5：定时器注册（低-中风险）
 
 - retry/cleanup/purge 保持内核 liveness；schedule 触发变成一个可选端口/插件。
 - 验收：schedule 测试、恢复测试、关闭测试通过。
 
-### P5：投影目标端口（中风险）
+### P6：投影目标端口（中风险）
 
 - `RowProjector` 的默认实现保留；允许插件注册额外的投影目标。
 - 读模型正确性（source revision、CAS、修复）仍是内核。
 - 验收：读模型一致性测试、投影修复测试通过。
+
+### P7：插件自定义原语信封（高风险，后续）
+
+- 模型支持 `{ capability, payload }` 信封；内核校验能力和信封，插件解析
+  payload 并实现 `AttributeHandler`。
+- 只对插件新增原语开放；核心原语（`assign.owner`）保持类型化。
+- 验收：一个插件定义新原语并通过发布/启动/恢复测试；核心模型不变。
 
 ## 8. 复杂度与风险
 
 | 阶段 | 规模 | 风险 | 回滚 |
 | --- | --- | --- | --- |
 | P0 | 评审规则 | 低 | 无代码 |
-| P1 | ~400 行公开 API + 装配 | 中：semver/隐私 | 默认实现仍可用，端口可忽略 |
-| P2 | ~600 行移动 + 宿主 trait | 中高：循环依赖 | 保留旧实现，双路径一个版本 |
-| P3 | ~500 行移动 | 中：传输行为 | 传输插件可回退 |
-| P4 | ~200 行 | 低中：定时器时序 | 定时器默认不变 |
-| P5 | ~300 行 | 中：投影一致性 | 默认投影不变 |
+| P1 | ~600 行端口/PortSet/KernelPorts | 中：semver/隐私 | 默认实现仍可用，端口可忽略 |
+| P2 | ~300 行能力表/属性映射/检查 | 中：提供者选择与重放 | 保留单默认端口；能力检查可暂缓 |
+| P3 | ~600 行移动 + 宿主 trait | 中高：循环依赖 | 保留旧实现，双路径一个版本 |
+| P4 | ~500 行移动 | 中：传输行为 | 传输插件可回退 |
+| P5 | ~200 行 | 低中：定时器时序 | 定时器默认不变 |
+| P6 | ~300 行 | 中：投影一致性 | 默认投影不变 |
+| P7 | ~800 行模型信封 + 插件 handler | 高：schema/恢复/版本 | 只对插件原语开放，核心保持类型化 |
 
 其他风险：
 
@@ -229,6 +333,11 @@ pub trait ShellHost: Send + Sync {
 - **测试**：每个端口提供 fake；现有 `FlowFixture` 继续覆盖默认实现。
 - **兼容**：端口公开是新增 API；默认行为不变。移除 `crate-private` 路径前保留
   一个版本的 deprecated 别名。
+- **提供者选择**：同一能力类型有多个提供者时必须显式选择或用唯一默认；不能
+  让启动注册顺序决定行为。解析后的 `(kind, key, version)` 必须固化到 process
+  spec，恢复时缺失就失败，不静默换实现。
+- **key 归属**：内核只定义能力类型和属性映射；插件 key 由插件定义。内部默认
+  能力可以使用内核常量，但不能要求插件改内核才能注册。
 
 ## 9. 不抽离的部分
 
@@ -245,10 +354,13 @@ pub trait ShellHost: Send + Sync {
 
 ## 10. 结论
 
-shell 不应该继续按“新功能 = 新模块”增长。把可选能力收敛到公开端口，默认实现
-放到独立 crate/插件，shell 只保留确定性内核和编排。本次参与人改造已经按这个
-方向落地：`acts.core.owner` 是 IRQ 包，业务数据在业务系统，不在 shell，也不在
-插件配置里。
+shell 不应该继续按“新功能 = 新模块”增长。把可选能力收敛为“能力类型 trait +
+类型化 PortSet + KernelPorts 装配”，模型属性通过静态映射找到能力类型，插件
+用自定义 key 注册实现；能力表只负责发布/启动检查和错误提示，不做统一
+`dyn Resolver` 执行。
 
-下一步是 P1：公开七个端口和 `KernelPorts`，用默认实现保持行为不变；随后按 P2
-抽出效果运行器和运行时 API。
+参与人改造是第一个外部能力：`assign.owner` 是模型原语，
+`CapabilityKind::Participant` 对应 `dyn ParticipantResolver`，
+`acts-plugin-participant` 注册自己的 provider key。当前实现是未提交原型，
+P3 契约调整后暂停；下一步按 P1（类型化端口）和 P2（能力注册/属性映射/发布
+检查）落地，再回到 participant 的完整验收。

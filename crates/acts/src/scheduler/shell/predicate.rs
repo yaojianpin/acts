@@ -12,33 +12,13 @@
 //! legacy run meant. Losing the seam (a host driving without a Runtime) falls
 //! back to the subset evaluator.
 
-use super::scope::ScopeSpec;
 use crate::scheduler::{Runtime, core::plan::branch::PredicateValue};
 
 use std::sync::Arc;
 
-/// One predicate to decide: the acting execution's variable space plus the
-/// expression the model declared.
-pub(crate) struct PredicateRequest {
-    /// The variable space the headless scope sees (the acting execution's
-    /// scope, the run's env and authority).
-    pub(crate) scope: ScopeSpec,
-    /// The branch `if` expression.
-    pub(crate) expr: String,
-    /// The completing action's inputs, on top of the scope: the legacy engine
-    /// writes the action's vars into the task scope *before* it schedules the
-    /// branches, so a predicate sees them.
-    pub(crate) overlay: Vec<(String, String)>,
-}
-
-/// Decides one branch predicate. Attach with
-/// [`KernelHost::attach_predicate_runner`](super::KernelHost::attach_predicate_runner).
-#[async_trait::async_trait]
-pub(crate) trait PredicateRunner: Send + Sync {
-    /// The predicate's value. An error is the legacy branch task's `init`
-    /// error: the branch is decided `Failed`.
-    async fn evaluate(&self, request: PredicateRequest) -> crate::Result<PredicateValue>;
-}
+// The port lives in `capability`; this module owns the shell's default
+// implementation.
+pub(crate) use crate::capability::{PredicateRequest, PredicateRunner};
 
 /// Evaluates predicates on the engine's environment, through a headless task
 /// of the declaring model.

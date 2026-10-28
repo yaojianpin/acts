@@ -22,6 +22,13 @@ pub struct Assign {
     /// resolution with more than one participant.
     #[serde(default)]
     pub owner: Box<OwnerExpr>,
+    /// The capability provider key that resolves this assignment.
+    ///
+    /// A model may declare it explicitly; the publish path fills the only
+    /// registered provider when omitted, so the stored model carries the
+    /// frozen selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -104,6 +111,24 @@ pub struct Step {
 impl ModelBase for Step {
     fn id(&self) -> &str {
         &self.id
+    }
+}
+
+impl Step {
+    /// Whether this step or any nested step declares `assign.owner`.
+    ///
+    /// The engine checks this when publishing a model: `assign.owner` is a
+    /// participant primitive, and without a participant resolver the model
+    /// must be refused with a message naming the plugin rather than accepted
+    /// and failing later.
+    pub fn has_assignment(&self) -> bool {
+        self.assign.is_some()
+            || self
+                .branches
+                .iter()
+                .any(|branch| branch.steps.iter().any(Step::has_assignment))
+            || self.catches.iter().any(Step::has_assignment)
+            || self.timeouts.iter().any(Step::has_assignment)
     }
 }
 
@@ -195,6 +220,7 @@ impl Step {
     pub fn with_assign(mut self, owner: &str) -> Self {
         self.assign = Some(Assign {
             owner: Box::new(OwnerExpr::Value(owner.to_string())),
+            provider: None,
         });
         self
     }
@@ -204,7 +230,19 @@ impl Step {
     pub fn with_assign_expr(mut self, owner: OwnerExpr) -> Self {
         self.assign = Some(Assign {
             owner: Box::new(owner),
+            provider: None,
         });
+        self
+    }
+
+    /// Choose the capability provider that resolves this step's `assign.owner`.
+    ///
+    /// A no-op when the step has no assignment. The publish path validates the
+    /// key against the installed providers and freezes it into the model.
+    pub fn with_assign_provider(mut self, provider: impl Into<String>) -> Self {
+        if let Some(assign) = &mut self.assign {
+            assign.provider = Some(provider.into());
+        }
         self
     }
 

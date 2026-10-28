@@ -1,10 +1,16 @@
-use crate::{ActPackageDefinition, Principal, Result, env::ActUserVar, scheduler::Runtime};
+use crate::{
+    ActFunction, ActPackageDefinition, Principal, Result, env::ActUserVar, scheduler::Runtime,
+};
 use std::sync::Arc;
 
 /// `ext:register_var` — install a user var module into the engine's
 /// expression environment. Unlike the model/package names it has no wire
 /// equivalent: only an embedder registers one.
 pub(crate) const REGISTER_VAR: &str = "ext:register_var";
+
+/// `ext:register_function` — install an expression method into the engine's
+/// environment. Like `ext:register_var`, it has no wire equivalent.
+pub(crate) const REGISTER_FUNCTION: &str = "ext:register_function";
 
 /// `pack:publish` — a package definition is written to the store, which is
 /// what `pack().publish()` does too, so the two share one grant.
@@ -67,6 +73,17 @@ impl ExtExecutor {
     pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) -> Result<()> {
         self.principal.check(REGISTER_VAR)?;
         self.runtime.env().register_var(module);
+        Ok(())
+    }
+
+    /// register an expression method, so a workflow expression can call it
+    ///
+    /// The method is resolved by name when the expression references it; the
+    /// engine's own built-ins take precedence over a plugin method of the same
+    /// name.
+    pub fn register_function<T: ActFunction + Clone + 'static>(&self, function: &T) -> Result<()> {
+        self.principal.check(REGISTER_FUNCTION)?;
+        self.runtime.env().register_function(function);
         Ok(())
     }
 

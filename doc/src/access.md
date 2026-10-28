@@ -147,7 +147,7 @@ let engine = Engine::builder().with_user_acl().start().await?;
 | `@read` | `model:ls` `model:get` `pack:ls` `pack:get` `proc:ls` `proc:get` `task:ls` `task:get` `msg:ls` `msg:get` `evt:ls` `evt:get` `snap:get` `snap:ls` `msg:sub` `acl:whoami` `acl:getuser` `acl:users` |
 | `@deploy` | `model:deploy` `pack:publish` |
 | `@execute` | `proc:start` `proc:start_from_model` `evt:start` `act:push` `act:remove` `act:submit` `act:complete` `act:abort` `act:cancel` `act:back` `act:skip` `act:error` `msg:ack` |
-| `@write` | `model:rm` `pack:rm` `msg:rm` `msg:redo` `msg:clear` `msg:unsub` `snap:upsert` `snap:remove` `acl:setuser` `acl:deluser` `ext:register_var`，另有 `acl:login` `acl:refresh` `acl:logout`（这三个本就不需要授权） |
+| `@write` | `model:rm` `pack:rm` `msg:rm` `msg:redo` `msg:clear` `msg:unsub` `snap:upsert` `snap:remove` `acl:setuser` `acl:deluser` `ext:register_var` `ext:register_function`，另有 `acl:login` `acl:refresh` `acl:logout`（这三个本就不需要授权） |
 | `@all` | 全部动作（`@*` 与 `*` 是同一份授权） |
 
 这四个分组对应一次部署通常要划开的四种权限：`@read` 只看，`@deploy` 把工作放进目录，
@@ -160,10 +160,11 @@ let engine = Engine::builder().with_user_acl().start().await?;
 所有 snapshot scope 可读、任何资源名都可部署；`deny` 里的 `@all` 则拒绝一切，压过任何
 本可放行的命令模式。
 
-`ext:register_var` 是嵌入式调用者自己的接口——把用户变量模块装进表达式环境。线上动作表里
-没有任何一项通到它，因此传输层的调用者根本够不着；扩展自己所托管的引擎的嵌入式调用者，
-传的是它自己的身份（见[executor](#executor)）。发布包定义（`ext().register_package`）
-走的是 `pack:publish`，因此随 `@deploy` 走。
+`ext:register_var` / `ext:register_function` 是嵌入式调用者自己的接口——把用户变量
+模块或表达式方法装进表达式环境。线上动作表里没有任何一项通到它们，因此传输层的调用者
+根本够不着；扩展自己所托管的引擎的嵌入式调用者，传的是它自己的身份（见
+[executor](#executor)）。发布包定义（`ext().register_package`）走的是 `pack:publish`，
+因此随 `@deploy` 走。
 
 `anonymous` 主体拿到的正是 `model:ls` `model:get` `pack:ls` `pack:get`——目录。
 这是引擎无法指名道姓的调用者可以被授予的最小集合，而且这份清单由测试钉死，不留给解读。

@@ -1076,6 +1076,7 @@ async fn sch_act_assign_is_refused_on_non_human_nodes() {
     );
     container.steps[0].assign = Some(crate::model::Assign {
         owner: Box::new(crate::model::OwnerExpr::Value("alice".to_string())),
+        provider: None,
     });
 
     let mut func = Workflow::new().with_id("flow-act-assign-func");
@@ -1206,6 +1207,28 @@ async fn sch_act_assign_rejects_multiple_participants() {
     );
     fixture.wait_error().await;
     fixture.close().await;
+}
+
+/// Owner resolution is a participant feature. An engine with no
+/// `ParticipantResolver` refuses to publish a model that declares an
+/// assignment, naming the plugin, instead of accepting it and failing the
+/// approval later.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_requires_a_participant_resolver() {
+    let workflow = assigned_workflow("flow-act-assign-no-resolver", "alice");
+    let engine = crate::Engine::builder().start().await.unwrap();
+    let error = engine
+        .executor(&Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("capability 'assign.owner'")
+            && error.to_string().contains("acts-plugin-participant"),
+        "the publish refusal must name the capability and the plugin: {error}"
+    );
 }
 
 /// On a fresh run nothing has been decided, so the current actor is the

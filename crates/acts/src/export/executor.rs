@@ -102,7 +102,7 @@ impl Executor {
         Self {
             msg: message_executor::MessageExecutor::new(rt, &principal),
             act: act_executor::ActExecutor::new(rt, &principal),
-            model: model_executor::ModelExecutor::new(&store, &principal),
+            model: model_executor::ModelExecutor::new(&store, rt, &principal),
             proc: process_executor::ProcessExecutor::new(rt, &principal),
             task: task_executor::TaskExecutor::new(&store, &principal),
             pack: package_executor::PackageExecutor::new(rt, &principal),

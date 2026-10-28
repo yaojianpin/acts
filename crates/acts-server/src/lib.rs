@@ -963,6 +963,66 @@ ttl = "5m"
         }
     }
 
+    /// The server's builder installs the participant plugin: a model with
+    /// `assign.owner` publishes, resolves its local owner, and the resolved
+    /// user can decide the act. This is the server-side end-to-end path, not
+    /// the plugin's own fixture.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_engine_resolves_assign_owner_through_the_participant_plugin() {
+        let (dir, path) = write_config("");
+        let config = Config::create(&path).unwrap();
+        let engine = engine_builder(
+            &config,
+            Arc::new(MemoryStore::new()),
+            &ServerPlugins::default(),
+        )
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+
+        let workflow = acts::Workflow::new()
+            .with_id("server-participant-e2e")
+            .with_step(|step| {
+                step.with_id("approve")
+                    .with_uses("acts.core.irq", acts::Vars::new().with("key", "approve"))
+                    .with_assign_expr(acts::OwnerExpr::User {
+                        name: "alice".to_string(),
+                    })
+            });
+        let mut fixture = acts::testing::FlowFixture::deploy_on(engine, &workflow).await;
+        fixture.start(acts::Vars::new()).await;
+
+        let created = fixture.wait_created("approve").await;
+        assert_eq!(
+            created.owner.as_deref(),
+            Some("alice"),
+            "the server engine must resolve the assignment through ParticipantPlugin"
+        );
+
+        let alice = acts::Principal::from_policy(&acts::UserPolicy {
+            name: "alice".to_string(),
+            enabled: true,
+            allow: vec!["act:complete".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+        fixture
+            .engine()
+            .executor(&alice)
+            .act()
+            .complete(fixture.pid(), &created.tid, acts::Vars::new())
+            .await
+            .unwrap();
+        fixture
+            .wait_message("approve", acts::MessageState::Completed)
+            .await;
+        fixture.close().await;
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
     #[test]
     fn snapshot_config_defaults_fill_missing_fields() {
         let (dir, path) = write_config("[[snapshot]]\nname = \"profile\"\n");

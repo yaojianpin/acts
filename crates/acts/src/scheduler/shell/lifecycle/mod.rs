@@ -8,19 +8,7 @@
 //! ordered under the pid's existence lock.
 
 use super::*;
-
-/// Which engine event a run's lifecycle report is: the driver's mirror of the
-/// legacy `on_proc` emission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProcessEvent {
-    Started,
-    Completed,
-    Errored,
-}
-
-/// The process-lifecycle sink: the engine routes it onto its channel events
-/// (`on_start`/`on_complete`/`on_error`).
-pub(crate) type LifecycleSink = Box<dyn Fn(&crate::Message, ProcessEvent) + Send + Sync>;
+use crate::capability::ProcessEvent;
 
 /// Which runs were already reported: a start once, a terminal once.
 ///
@@ -166,8 +154,8 @@ impl KernelHost {
         directive: Option<&LifecycleDirective>,
         times: Option<(i64, i64)>,
     ) {
-        let lifecycle = self.lifecycle.read();
-        let Some(sink) = lifecycle.as_ref() else {
+        let sink = self.ports.read().lifecycle.default_port();
+        let Some(sink) = sink else {
             return;
         };
         let Some(root) = root_task(snapshot) else {

@@ -5,13 +5,11 @@ mod tree;
 
 use super::*;
 use crate::{
+    capability::{DeliveryOutcome, ProcessEvent},
     scheduler::core::{
         commit::command::ActionKind,
         model::task_graph::TaskState,
-        outbox::{
-            outbox_dispatch::DeliveryOutcome,
-            records::{OutboxRecord, OutboxState},
-        },
+        outbox::records::{OutboxRecord, OutboxState},
     },
     store::MemoryStore,
 };
@@ -38,8 +36,8 @@ struct CountingTransport {
     delivered: Arc<parking_lot::Mutex<usize>>,
 }
 
-impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for CountingTransport {
-    fn deliver(&mut self, _record: &OutboxRecord) -> DeliveryOutcome {
+impl crate::capability::OutboxTransport for CountingTransport {
+    fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
         *self.delivered.lock() += 1;
         DeliveryOutcome::Delivered {
             receipt: "ok".into(),
@@ -1875,7 +1873,7 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
     // Which runs the driver started, in order: the FIFO the cap must respect.
     let started = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let recorded = started.clone();
-    host.attach_lifecycle_sink(Box::new(move |message, event| {
+    host.attach_lifecycle_sink(Arc::new(move |message, event| {
         if event == ProcessEvent::Started {
             recorded.lock().push(message.pid.clone());
         }
@@ -7105,8 +7103,8 @@ async fn uses_steps_write_created_message_records() {
     struct TopicTransport {
         topics: Arc<parking_lot::Mutex<Vec<String>>>,
     }
-    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for TopicTransport {
-        fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
+    impl crate::capability::OutboxTransport for TopicTransport {
+        fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
             self.topics.lock().push(record.topic.clone());
             DeliveryOutcome::Delivered {
                 receipt: "ok".into(),
@@ -8030,8 +8028,8 @@ struct OrderingTransport {
     observed: Arc<parking_lot::Mutex<Vec<bool>>>,
 }
 
-impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for OrderingTransport {
-    fn deliver(&mut self, _record: &OutboxRecord) -> DeliveryOutcome {
+impl crate::capability::OutboxTransport for OrderingTransport {
+    fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
         self.observed
             .lock()
             .push(self.kv.wrote_prefix(&self.proc_prefix));
@@ -8279,8 +8277,8 @@ async fn partial_delivery_failures_are_persisted_and_keep_the_run() {
     struct PartialTransport {
         delivered: Arc<parking_lot::Mutex<usize>>,
     }
-    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for PartialTransport {
-        fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
+    impl crate::capability::OutboxTransport for PartialTransport {
+        fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             match record.topic.as_str() {
                 "task.started" => DeliveryOutcome::RetryAt {
@@ -8788,7 +8786,7 @@ async fn a_projection_failure_is_repaired_before_the_completion_event() {
     host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
     let completed = Arc::new(AtomicUsize::new(0));
     let seen = completed.clone();
-    host.attach_lifecycle_sink(Box::new(move |_, event| {
+    host.attach_lifecycle_sink(Arc::new(move |_, event| {
         if event == ProcessEvent::Completed {
             seen.fetch_add(1, Ordering::SeqCst);
         }
@@ -9426,7 +9424,7 @@ fn a_lifecycle_decision_without_sink_root_or_directive_is_ignored() {
 
     let reported = Arc::new(AtomicUsize::new(0));
     let seen = reported.clone();
-    host.attach_lifecycle_sink(Box::new(move |_, _| {
+    host.attach_lifecycle_sink(Arc::new(move |_, _| {
         seen.fetch_add(1, Ordering::SeqCst);
     }));
     // Nothing to report.
@@ -9978,8 +9976,8 @@ async fn a_record_rescheduled_for_now_wakes_the_retry_pass() {
     struct DueNowTransport {
         delivered: Arc<parking_lot::Mutex<usize>>,
     }
-    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for DueNowTransport {
-        fn deliver(&mut self, _record: &OutboxRecord) -> DeliveryOutcome {
+    impl crate::capability::OutboxTransport for DueNowTransport {
+        fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             DeliveryOutcome::RetryAt {
                 available_at_ms: 0,
@@ -10601,8 +10599,8 @@ async fn a_lost_outbox_claim_skips_the_record_without_failing_the_pass() {
     struct RescheduleNow {
         delivered: Arc<parking_lot::Mutex<usize>>,
     }
-    impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for RescheduleNow {
-        fn deliver(&mut self, _record: &OutboxRecord) -> DeliveryOutcome {
+    impl crate::capability::OutboxTransport for RescheduleNow {
+        fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             DeliveryOutcome::RetryAt {
                 available_at_ms: 0,

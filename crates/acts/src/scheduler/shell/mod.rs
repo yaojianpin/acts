@@ -41,6 +41,10 @@
 
 use crate::{
     ActError, NodeKind, Result,
+    capability::{
+        DeliveryOutcome, EffectRequest, EffectRunner, KernelPorts, LifecycleSink, OutboxTransport,
+        ParticipantResolver, PredicateRunner,
+    },
     scheduler::{
         core::{
             commit::{
@@ -64,7 +68,6 @@ use crate::{
                 },
             },
             outbox::{
-                outbox_dispatch::DeliveryOutcome,
                 outbox_repository::OutboxCursor,
                 records::{DeliveryClaim, OutboxEvent, OutboxRecord},
             },
@@ -137,10 +140,10 @@ use self::{action::*, assign::*, errors::*, facts::*, planning::*};
 pub(crate) use admission::{AdmissionCaps, Admissions};
 pub(crate) use assign::{AssignmentResolver, RuntimeAssignmentResolver};
 pub use context::Context;
+pub(crate) use context::DeferredAction;
 pub(crate) use delivery::ShadowTransport;
 pub(crate) use effects::PackageEffectRunner;
 pub(crate) use lifecycle::ReportedRuns;
-pub(crate) use lifecycle::{LifecycleSink, ProcessEvent};
 pub(crate) use message::MessageForwarder;
 pub(crate) use model::ProcessSpec;
 pub(crate) use predicate::EnginePredicateRunner;
@@ -148,13 +151,20 @@ pub(crate) use projection::{ProjectionMetrics, RowProjector};
 pub(crate) use read_model::{ProcRead, load as load_proc_rows};
 #[cfg(test)]
 pub(crate) use read_model::{TaskRow, context as read_context};
-pub(crate) use scope::{Scope, ScopeTask};
 #[cfg(test)]
-pub(crate) use scope::{ScopeSpec, headless_scope};
+pub(crate) use scope::headless_scope;
+pub(crate) use scope::{Scope, ScopeSpec, ScopeTask};
 pub(crate) use snapshot::SnapshotRegistry;
 pub(crate) use timers::TimerGuider;
 
 const OWNER: &str = "kernel-host";
+/// Internal keys for the shell's built-in port implementations. These are not
+/// plugin provider keys: the serving assembly installs one default per port,
+/// and a later provider-selection task replaces this with plugin-chosen keys.
+const DEFAULT_EFFECT: &str = "kernel.effect";
+const DEFAULT_PREDICATE: &str = "kernel.predicate";
+const DEFAULT_DELIVERY: &str = "kernel.delivery";
+const DEFAULT_LIFECYCLE: &str = "kernel.lifecycle";
 const LEASE_MS: i64 = 60_000;
 /// How many times a client action re-plans after losing a compare-and-swap.
 /// The per-pid command lane (A4) serializes every in-process writer of one
@@ -205,40 +215,28 @@ pub(crate) struct KernelHost {
     processes: Arc<AsyncProcessRepository>,
     recovery: Arc<AsyncRecoveryRepository>,
     wake_tx: Sender<OperationId>,
-    /// The effect seam: when attached, a Func package's work runs inside the
-    /// ApplyAction operation and its outputs commit with the completion. Without
-    /// one the host auto-completes (the shadow contract).
-    effect: Arc<parking_lot::RwLock<Option<Arc<dyn effects::EffectRunner>>>>,
-    /// The outbox delivery seam: the shadow logs; the driver's transport
-    /// maps records onto engine messages (see `message::message_from_record`).
-    transport: Arc<
-        parking_lot::RwLock<
-            Box<dyn crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport>,
-        >,
-    >,
+    /// The extensible capabilities the scheduler calls: package effects,
+    /// branch predicates, outbox delivery and process lifecycle. The scheduler
+    /// holds the capability traits, never the shell's default implementations;
+    /// the host's serving assembly installs those defaults after construction.
+    /// The read model and the store-facing timers are not extension points and
+    /// stay as their own fields below.
+    ports: Arc<parking_lot::RwLock<KernelPorts>>,
     /// Retry delivery: a normal-path confirmation that lost its guard, or a
     /// record the transport deferred, notifies the driver so its outbox pass
     /// redelivers at once instead of waiting for the next tick. The tick stays
     /// the retry net.
     deliver: Arc<tokio::sync::Notify>,
-    /// The process-lifecycle seam: when attached, a run's start and terminal
-    /// are reported as engine events — the driver's mirror of the legacy
-    /// `on_proc` emission. The host builds the `Message` from the aggregate,
-    /// its only source.
-    lifecycle: Arc<parking_lot::RwLock<Option<LifecycleSink>>>,
     /// The read-model seam: when attached, every commit re-materializes the
     /// legacy rows (`procs`/`tasks`/`vars`) from the committed snapshot, so
     /// the row-reading APIs and the sweeper see the run (see `projection`).
     /// Without one the host keeps no read model — the kernel's own tests.
     projection: Arc<parking_lot::RwLock<Option<Arc<projection::RowProjector>>>>,
-    /// The predicate seam: when attached, a branch `if` is decided on the
-    /// engine's own environment (`ctx.eval`, engine functions included) on a
-    /// headless task, exactly like the legacy branch task; without one the
-    /// built-in subset evaluator decides (see `predicate`).
-    predicate: Arc<parking_lot::RwLock<Option<Arc<dyn predicate::PredicateRunner>>>>,
     /// The assignment seam: when attached, a human act's `assign.owner`
     /// expression resolves on a headless task at start. Without one a
-    /// declared assignment fails closed (an act never runs unowned).
+    /// declared assignment fails closed (an act never runs unowned). It is the
+    /// kernel's adapter from a headless scope to the participant capability,
+    /// not a second provider-facing port.
     assignment: Arc<parking_lot::RwLock<Option<Arc<dyn AssignmentResolver>>>>,
     /// The runtime's store-facing timers (schedule triggers, delivery retries,
     /// terminal cleanup, snapshot purge), once attached: the driver's serve
@@ -358,17 +356,18 @@ impl KernelHost {
         let processes = Arc::new(AsyncProcessRepository::new(store));
         let recovery = Arc::new(AsyncRecoveryRepository::new(processes.clone()));
         let (wake_tx, wake_rx) = channel(PAGE_SIZE * 8);
+        let mut ports = KernelPorts::default();
+        ports
+            .delivery
+            .install_default(DEFAULT_DELIVERY, Arc::new(ShadowTransport));
         (
             Arc::new(Self {
                 processes,
                 recovery,
                 wake_tx,
-                effect: Arc::new(parking_lot::RwLock::new(None)),
-                transport: Arc::new(parking_lot::RwLock::new(Box::new(ShadowTransport))),
+                ports: Arc::new(parking_lot::RwLock::new(ports)),
                 deliver: Arc::new(tokio::sync::Notify::new()),
-                lifecycle: Arc::new(parking_lot::RwLock::new(None)),
                 projection: Arc::new(parking_lot::RwLock::new(None)),
-                predicate: Arc::new(parking_lot::RwLock::new(None)),
                 assignment: Arc::new(parking_lot::RwLock::new(None)),
                 timer_guider: Arc::new(parking_lot::RwLock::new(None)),
                 timer_guards: Arc::new(TimerGuards::new()),
@@ -456,25 +455,58 @@ impl KernelHost {
     /// Attach the effect runner: from then on a Func package's work runs
     /// inside the ApplyAction operation (see [`effects`]). Idempotent — the last
     /// attach wins; attach before driving operations.
-    pub(crate) fn attach_effect_runner(&self, runner: Arc<dyn effects::EffectRunner>) {
-        *self.effect.write() = Some(runner);
+    pub(crate) fn attach_effect_runner(&self, runner: Arc<dyn EffectRunner>) {
+        let mut ports = self.ports.write();
+        ports.effects.install_default(DEFAULT_EFFECT, runner);
+    }
+
+    /// Register the participant resolver under its plugin provider key.
+    ///
+    /// A duplicate key is refused; the resolver becomes the default port the
+    /// assignment path consults. The runtime seals the slot after `on_init`.
+    pub(crate) fn attach_participant_resolver(
+        &self,
+        key: &str,
+        resolver: Arc<dyn ParticipantResolver>,
+    ) -> Result<()> {
+        let mut ports = self.ports.write();
+        let first = ports.participants.default_port().is_none();
+        ports.participants.register(key, resolver)?;
+        if first {
+            ports.participants.set_default(key)?;
+        }
+        Ok(())
+    }
+
+    /// The participant capability `assign.owner` currently uses, if any.
+    pub(crate) fn participant_resolver(&self) -> Option<Arc<dyn ParticipantResolver>> {
+        self.ports.read().participants.default_port()
+    }
+
+    /// The participant resolver registered under provider `key`, if any.
+    pub(crate) fn participant_resolver_for(
+        &self,
+        key: &str,
+    ) -> Option<Arc<dyn ParticipantResolver>> {
+        self.ports.read().participants.get(key)
     }
 
     /// Replace the outbox transport: the shadow's logs records; the driver's
     /// transport maps them onto engine messages (see [`message`]). Attach
     /// before driving operations.
-    pub(crate) fn attach_outbox_transport(
-        &self,
-        transport: Box<dyn crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport>,
-    ) {
-        *self.transport.write() = transport;
+    pub(crate) fn attach_outbox_transport(&self, transport: Box<dyn OutboxTransport>) {
+        let mut ports = self.ports.write();
+        ports
+            .delivery
+            .install_default(DEFAULT_DELIVERY, Arc::from(transport));
     }
 
     /// Attach the process-lifecycle sink: from then on a run reports one
     /// start when it is alive and one terminal event when every execution
     /// settled — the driver's `on_proc`. Attach before driving operations.
-    pub(crate) fn attach_lifecycle_sink(&self, sink: LifecycleSink) {
-        *self.lifecycle.write() = Some(sink);
+    pub(crate) fn attach_lifecycle_sink(&self, sink: Arc<LifecycleSink>) {
+        let mut ports = self.ports.write();
+        ports.lifecycle.install_default(DEFAULT_LIFECYCLE, sink);
     }
 
     /// Attach the read-model projector: from then on every commit
@@ -488,8 +520,9 @@ impl KernelHost {
     /// the engine's own environment on a headless task (see [`predicate`]);
     /// without one the built-in subset evaluator decides. Attach before
     /// driving operations.
-    pub(crate) fn attach_predicate_runner(&self, runner: Arc<dyn predicate::PredicateRunner>) {
-        *self.predicate.write() = Some(runner);
+    pub(crate) fn attach_predicate_runner(&self, runner: Arc<dyn PredicateRunner>) {
+        let mut ports = self.ports.write();
+        ports.predicates.install_default(DEFAULT_PREDICATE, runner);
     }
 
     /// Attach the runtime's timer guider: the serve loop then ticks the four
@@ -535,7 +568,7 @@ impl KernelHost {
         expr: &str,
         inputs: &[(String, String)],
     ) -> Result<PredicateValue> {
-        let runner = self.predicate.read().clone();
+        let runner = self.ports.read().predicates.default_port();
         let (Some(runner), Some(model)) = (runner, model_of(snapshot)?) else {
             return Ok(evaluate_predicate(snapshot, task_id, expr, inputs));
         };
@@ -2316,8 +2349,8 @@ impl KernelHost {
         shared: Option<&Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
-    ) -> Result<Option<(Arc<dyn effects::EffectRunner>, effects::EffectRequest)>> {
-        let Some(runner) = self.effect.read().clone() else {
+    ) -> Result<Option<(Arc<dyn EffectRunner>, EffectRequest)>> {
+        let Some(runner) = self.ports.read().effects.default_port() else {
             return Ok(None);
         };
         let Some(model) = model_of(snapshot)? else {

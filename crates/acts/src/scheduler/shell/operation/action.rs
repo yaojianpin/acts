@@ -824,9 +824,10 @@ impl KernelHost {
         // pushed package's own `run_as`. An unregistered package is the `Irq`
         // default — the pushed act waits for its client.
         let run_as = self
-            .effect
+            .ports
             .read()
-            .as_ref()
+            .effects
+            .default_port()
             .and_then(|runner| runner.run_as(&act.uses));
         let auto = matches!(run_as, Some(crate::ActRunAs::Func | crate::ActRunAs::Msg));
         let msg = run_as == Some(crate::ActRunAs::Msg);

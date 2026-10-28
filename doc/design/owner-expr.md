@@ -103,6 +103,13 @@ let the business system return the participants, and assign from the returned id
 
 `acts.core.owner` 的 params 可以包含全部原子，因为业务系统会解析它们。
 
+`assign.owner` 的解析通过 `ParticipantResolver` 端口完成。内核只定义能力类型
+和属性映射（`assign.owner` → `CapabilityKind::Participant`）以及确定性本地
+求值原语；参与人插件用自己的 provider key 注册默认 `LocalParticipantResolver`。
+默认实现仍只解析本地原子，业务原子继续要求显式 `acts.core.owner` 步骤；替换
+解析器可以改变“本地表达式解析成谁”，但不能改变单 owner、`__assignment` 和
+决策授权。没有 provider 时发布模型或启动活动会明确失败，不会产生无人审批。
+
 ### 3.3 为什么不做插件目录
 
 方案对比：

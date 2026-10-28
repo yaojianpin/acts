@@ -22,6 +22,7 @@
 
 mod acl;
 mod builder;
+pub mod capability;
 
 mod config;
 mod engine;
@@ -54,9 +55,10 @@ pub use acl::{
     DisabledAcl, LoginTokens, Principal, ScopePolicy, UserPolicy, UserSpec, action_catalog,
 };
 pub use builder::EngineBuilder;
+pub use capability::ParticipantResolver;
 pub use config::{Config, ConfigLog, DEFAULT_LOG_MAX_FILES, MissingParamAction};
 pub use engine::{EffectResolution, EffectUnknown, Engine};
-pub use env::ActUserVar;
+pub use env::{ActFunction, ActUserVar};
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};
 pub use export::actions;

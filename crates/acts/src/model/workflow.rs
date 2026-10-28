@@ -1,5 +1,6 @@
 use crate::{
     ActError, ActSchema, Branch, JoinRule, ModelBase, Result, Step, Trigger, Variant, Vars,
+    capability::{CapabilityKind, CapabilityRequirement},
     scheduler::{
         BLOCK_PACKAGE, NodeContent, NodeData, PARALLEL_PACKAGE, SEQUENCE_PACKAGE, assign_ids,
     },
@@ -323,6 +324,24 @@ impl Workflow {
             vars.set(&var.name, var.value.clone());
         });
         vars
+    }
+
+    /// Whether any step declares `assign.owner`.
+    ///
+    /// `assign.owner` is a participant primitive: a model that uses it needs
+    /// a participant resolver installed, and the publish path checks this
+    /// before accepting the model.
+    pub fn has_assignment(&self) -> bool {
+        self.steps.iter().any(Step::has_assignment)
+    }
+
+    /// The capabilities this model requires, as capability types and optional
+    /// provider keys. The publish path resolves each requirement against the
+    /// installed providers and refuses the model when none can serve it.
+    pub fn required_capabilities(&self) -> Vec<CapabilityRequirement> {
+        let mut capabilities = Vec::new();
+        collect_capability_requirements(&self.steps, &mut capabilities);
+        capabilities
     }
 
     pub fn with_step(mut self, build: fn(Step) -> Step) -> Self {
@@ -707,6 +726,25 @@ fn write_tree_output(
     {
         let next_is_last = locate(model, next).is_none_or(|position| position.next_id.is_none());
         write_tree_output(model, next, next_is_last, &path, visited, output);
+    }
+}
+
+fn collect_capability_requirements(steps: &[Step], capabilities: &mut Vec<CapabilityRequirement>) {
+    for step in steps {
+        if let Some(assign) = &step.assign {
+            let requirement = CapabilityRequirement {
+                kind: CapabilityKind::Participant,
+                key: assign.provider.clone(),
+            };
+            if !capabilities.contains(&requirement) {
+                capabilities.push(requirement);
+            }
+        }
+        for branch in &step.branches {
+            collect_capability_requirements(&branch.steps, capabilities);
+        }
+        collect_capability_requirements(&step.catches, capabilities);
+        collect_capability_requirements(&step.timeouts, capabilities);
     }
 }
 

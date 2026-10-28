@@ -219,16 +219,43 @@ impl Context {
 
     /// Evaluate the local atoms of one owner expression against this scope.
     ///
-    /// `assign.owner` uses this and then requires exactly one participant.
+    /// This is the deterministic local evaluation — literal users, the context
+    /// variables, user-valued variables and the set operations — that the
+    /// participant plugin's default resolver delegates to. `assign.owner` does
+    /// not call it directly: it goes through [`Self::resolve_owners`] and the
+    /// installed [`ParticipantResolver`](crate::ParticipantResolver).
+    ///
     /// Business-data atoms (roles, groups, resource owners, relations) are
-    /// not resolved here: the `acts.core.owner` IRQ package sends the
-    /// expression to the business system, and the workflow assigns from the
-    /// ids the business system returns.
-    pub fn resolve_owners(
+    /// refused here with a message naming the `acts.core.owner` IRQ package.
+    pub fn resolve_local_owners(
         &self,
         expr: &crate::model::OwnerExpr,
     ) -> crate::Result<Vec<crate::model::Participant>> {
         super::owner::evaluate(self, expr)
+    }
+
+    /// Evaluate one owner expression against this scope through the engine's
+    /// current [`ParticipantResolver`](crate::ParticipantResolver).
+    ///
+    /// `assign.owner` uses this and then requires exactly one participant.
+    /// The participant plugin installs its default resolver from
+    /// `ActPlugin::on_init`; a deployment that declares an assignment without
+    /// one fails closed here, naming the plugin, rather than producing an
+    /// unowned approval. Business-data atoms (roles, groups, resource owners,
+    /// relations) are not resolved here: the `acts.core.owner` IRQ package
+    /// sends the expression to the business system, and the workflow assigns
+    /// from the ids the business system returns.
+    pub fn resolve_owners(
+        &self,
+        expr: &crate::model::OwnerExpr,
+    ) -> crate::Result<Vec<crate::model::Participant>> {
+        let Some(resolver) = self.runtime.participant_resolver() else {
+            return Err(ActError::Runtime(
+                "assign.owner requires a participant resolver: install acts-plugin-participant (ParticipantPlugin) or register one with Engine::register_participant_resolver from ActPlugin::on_init"
+                    .to_string(),
+            ));
+        };
+        resolver.resolve(self, expr)
     }
 
     /// The decision subjects recorded on the acting execution and its

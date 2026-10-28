@@ -12,10 +12,8 @@
 
 use crate::{
     Message, MessageState, NodeKind, Vars,
-    scheduler::core::outbox::{
-        outbox_dispatch::{DeliveryOutcome, OutboxTransport},
-        records::OutboxRecord,
-    },
+    capability::{DeliveryOutcome, OutboxTransport},
+    scheduler::core::outbox::records::OutboxRecord,
     utils::consts,
 };
 
@@ -164,40 +162,40 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
 pub(crate) struct MessageForwarder<F> {
     emit: F,
     /// The instant each `(pid, tid)` was first announced as `created`.
-    started: std::collections::HashMap<(String, String), i64>,
+    started: parking_lot::Mutex<std::collections::HashMap<(String, String), i64>>,
 }
 
 impl<F> MessageForwarder<F>
 where
-    F: FnMut(&Message),
+    F: Fn(&Message),
 {
     pub(crate) fn new(emit: F) -> Self {
         Self {
             emit,
-            started: std::collections::HashMap::new(),
+            started: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
 
 impl<F> OutboxTransport for MessageForwarder<F>
 where
-    F: FnMut(&Message) + Send + Sync,
+    F: Fn(&Message) + Send + Sync,
 {
-    fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
+    fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
         match message_from_record(record) {
             Some(mut message) => {
                 let now = crate::utils::time::time_millis();
                 let key = (message.pid.clone(), message.tid.clone());
                 if message.state == MessageState::Created {
                     message.start_time = now;
-                    self.started.insert(key, now);
+                    self.started.lock().insert(key, now);
                 } else if message.state.is_completed() {
                     // A terminal record closes the window: the first `created`
                     // this forwarder saw is the start. Without one (a message
                     // observed after a restart, or a task skipped before it was
                     // ever announced) the window is the delivery instant, which
                     // keeps `end_time` a real timestamp and `cost()` non-negative.
-                    message.start_time = self.started.remove(&key).unwrap_or(now);
+                    message.start_time = self.started.lock().remove(&key).unwrap_or(now);
                     message.end_time = now.max(message.start_time);
                 }
                 (self.emit)(&message);
@@ -427,7 +425,7 @@ mod tests {
         let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         {
             let sink = seen.clone();
-            let mut forwarder =
+            let forwarder =
                 MessageForwarder::new(move |message: &Message| sink.lock().push(message.clone()));
             forwarder.deliver(&record("message.created", &payload));
             forwarder.deliver(&record("task.completed", &payload));
@@ -544,7 +542,7 @@ mod tests {
         let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         {
             let sink = seen.clone();
-            let mut forwarder =
+            let forwarder =
                 MessageForwarder::new(move |message: &Message| sink.lock().push(message.clone()));
             forwarder.deliver(&record("task.skipped", &payload));
         }
@@ -559,8 +557,8 @@ mod tests {
     /// delivery: the lifecycle note is a success, not an error.
     #[test]
     fn a_lifecycle_note_confirms_delivery_without_a_message() {
-        use crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome;
-        let mut forwarder = MessageForwarder::new(|_: &Message| {
+        use crate::capability::DeliveryOutcome;
+        let forwarder = MessageForwarder::new(|_: &Message| {
             panic!("a lifecycle note must not reach the engine channel")
         });
         let outcome = forwarder.deliver(&record("task.started", ""));
@@ -574,9 +572,9 @@ mod tests {
     /// note: the receipt names the other outcome.
     #[test]
     fn a_payload_record_confirms_delivery_as_a_message() {
-        use crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome;
+        use crate::capability::DeliveryOutcome;
         let payload = serde_json::json!({ "nid": "s1" }).to_string();
-        let mut forwarder = MessageForwarder::new(|_: &Message| {});
+        let forwarder = MessageForwarder::new(|_: &Message| {});
         let outcome = forwarder.deliver(&record("message.created", &payload));
         match outcome {
             DeliveryOutcome::Delivered { receipt } => assert_eq!(receipt, "message"),

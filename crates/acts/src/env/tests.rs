@@ -1,5 +1,5 @@
 use crate::{
-    ActUserVar, Context, Engine, Vars, Workflow,
+    ActFunction, ActUserVar, Context, Engine, Vars, Workflow,
     env::Environment,
     utils::{consts, test::FlowFixture},
 };
@@ -148,6 +148,29 @@ fn env_eval_parse_error() {
         env.eval::<serde_json::Value>("this is not an expression")
             .is_err()
     );
+}
+
+#[test]
+fn env_eval_plugin_function() {
+    #[derive(Clone)]
+    struct Join;
+
+    impl ActFunction for Join {
+        fn name(&self) -> String {
+            "join".to_string()
+        }
+
+        fn call(&self, args: &[serde_json::Value]) -> crate::Result<serde_json::Value> {
+            let parts: Vec<&str> = args.iter().filter_map(|value| value.as_str()).collect();
+            Ok(json!(parts.join("-")))
+        }
+    }
+
+    let env = Environment::new();
+    env.register_function(&Join);
+    assert_eq!(env.eval::<String>("join('a', 'b')").unwrap(), "a-b");
+    // The first registration of a name is the one an expression calls.
+    assert!(env.eval::<String>("join('a')").is_ok());
 }
 
 #[test]

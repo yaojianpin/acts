@@ -8,7 +8,9 @@
 //! re-exported from `mod.rs`.
 
 use crate::{
-    ActError, Action, Config, Package, Result, Vars, Workflow, data,
+    ActError, Action, Config, Package, Result, Vars, Workflow,
+    capability::{CapabilityKind, CapabilityProvider, CapabilityRequirement},
+    data,
     env::Environment,
     event::{Emitter, ProcessGate},
     scheduler::{
@@ -50,6 +52,21 @@ pub struct Runtime {
     /// over the aggregate documents, including the store-facing timers
     /// (`timer_guider`/`timer_guards`).
     kernel: Arc<KernelHost>,
+    /// Set by the start pass after the plugins' `on_init`, so a running
+    /// engine never changes how owners resolve mid-run.
+    participant_resolver_sealed: Arc<std::sync::atomic::AtomicBool>,
+    /// `(kind, provider key)` → provider description, advertised by plugins
+    /// from `on_init`. The model publish path resolves a requirement here; a
+    /// missing entry is a named error rather than a feature that silently does
+    /// nothing.
+    capabilities: Arc<
+        parking_lot::RwLock<
+            std::collections::BTreeMap<(CapabilityKind, String), CapabilityProvider>,
+        >,
+    >,
+    /// Set by the start pass with the resolver slot: a plugin advertises its
+    /// capabilities at startup only.
+    capabilities_sealed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Tick the periodic timers run on under test — short enough that a test can
@@ -57,6 +74,37 @@ pub struct Runtime {
 /// ticks.
 #[cfg(test)]
 pub(crate) const TEST_TICK_MS: u64 = 800;
+
+fn capability_hint(kind: CapabilityKind) -> &'static str {
+    match kind {
+        CapabilityKind::Participant => "install acts-plugin-participant (ParticipantPlugin)",
+    }
+}
+
+/// Fill an unkeyed assignment with the kind's only provider.
+fn freeze_step_capabilities(runtime: &Runtime, step: &mut crate::model::Step) -> Result<()> {
+    if let Some(assign) = &mut step.assign
+        && assign.provider.is_none()
+    {
+        let provider = runtime.resolve_capability(&CapabilityRequirement {
+            kind: CapabilityKind::Participant,
+            key: None,
+        })?;
+        assign.provider = Some(provider.key);
+    }
+    for branch in &mut step.branches {
+        for inner in &mut branch.steps {
+            freeze_step_capabilities(runtime, inner)?;
+        }
+    }
+    for catch in &mut step.catches {
+        freeze_step_capabilities(runtime, catch)?;
+    }
+    for timeout in &mut step.timeouts {
+        freeze_step_capabilities(runtime, timeout)?;
+    }
+    Ok(())
+}
 
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,6 +129,197 @@ impl std::fmt::Debug for Runtime {
 impl Runtime {
     pub(crate) fn snapshot_registry(&self) -> Arc<SnapshotRegistry> {
         self.snapshots.clone()
+    }
+
+    /// The resolver `assign.owner` currently uses, if a plugin installed one.
+    ///
+    /// `None` is the engine's default: `assign.owner` fails closed, naming the
+    /// participant plugin, because owner resolution is a participant feature.
+    pub(crate) fn participant_resolver(&self) -> Option<Arc<dyn crate::ParticipantResolver>> {
+        self.kernel.participant_resolver()
+    }
+
+    /// Install the resolver a plugin registered from `ActPlugin::on_init`.
+    ///
+    /// `key` is the plugin's provider key; it must already have a matching
+    /// `CapabilityKind::Participant` provider. Refused once the start pass has
+    /// sealed the slot: a running engine must not change how owners resolve
+    /// between an act's start and its decision.
+    pub(crate) fn register_participant_resolver(
+        &self,
+        key: impl Into<String>,
+        resolver: Arc<dyn crate::ParticipantResolver>,
+    ) -> Result<()> {
+        if self
+            .participant_resolver_sealed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ActError::Runtime(
+                "the participant resolver is sealed once the engine has started: register it from ActPlugin::on_init, not after EngineBuilder::start returns"
+                    .to_string(),
+            ));
+        }
+        let key = key.into();
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(ActError::Config(
+                "a participant resolver needs a non-empty provider key".to_string(),
+            ));
+        }
+        if !self
+            .capabilities
+            .read()
+            .contains_key(&(CapabilityKind::Participant, key.to_string()))
+        {
+            return Err(ActError::Config(format!(
+                "participant resolver key '{key}' has no registered capability provider: call Engine::register_capability_provider first"
+            )));
+        }
+        self.kernel.attach_participant_resolver(key, resolver)
+    }
+
+    /// Close the resolver slot after the plugins' `on_init` (the start pass's
+    /// last chance to install one).
+    pub(crate) fn seal_participant_resolver(&self) {
+        self.participant_resolver_sealed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Advertise one capability provider. Called from `ActPlugin::on_init`;
+    /// refused once the start pass has sealed the registry.
+    ///
+    /// Several providers may serve one kind under distinct keys. A model that
+    /// does not name a provider may use the kind's only provider; with several
+    /// providers the publish/start path requires an explicit key.
+    pub(crate) fn register_capability_provider(&self, provider: CapabilityProvider) -> Result<()> {
+        if self
+            .capabilities_sealed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ActError::Runtime(
+                "plugin capabilities are sealed once the engine has started: register them from ActPlugin::on_init"
+                    .to_string(),
+            ));
+        }
+        let key = provider.key.trim();
+        if key.is_empty() {
+            return Err(ActError::Config(
+                "a capability provider needs a non-empty provider key".to_string(),
+            ));
+        }
+        let plugin = provider.plugin.trim();
+        if plugin.is_empty() {
+            return Err(ActError::Config(format!(
+                "capability provider '{key}' needs a non-empty plugin name"
+            )));
+        }
+        let version = provider.version.trim();
+        if version.is_empty() {
+            return Err(ActError::Config(format!(
+                "capability provider '{key}' needs a non-empty version"
+            )));
+        }
+        let provider = CapabilityProvider {
+            kind: provider.kind,
+            key: key.to_string(),
+            plugin: plugin.to_string(),
+            version: version.to_string(),
+        };
+        let mut registered = self.capabilities.write();
+        if let Some(existing) = registered.get(&(provider.kind, provider.key.clone())) {
+            return Err(ActError::Config(format!(
+                "capability '{}' provider '{}' is already registered by plugin '{}'; '{}' cannot replace it",
+                provider.kind.as_str(),
+                provider.key,
+                existing.plugin,
+                provider.plugin
+            )));
+        }
+        registered.insert((provider.kind, provider.key.clone()), provider);
+        Ok(())
+    }
+
+    /// Resolve one model requirement to its provider description.
+    ///
+    /// A requirement that names a key must match that exact provider; an
+    /// unkeyed requirement uses the kind's only provider. A missing or
+    /// ambiguous provider is a model error naming the attribute and key.
+    pub(crate) fn resolve_capability(
+        &self,
+        requirement: &CapabilityRequirement,
+    ) -> Result<CapabilityProvider> {
+        let registered = self.capabilities.read();
+        if let Some(key) = &requirement.key {
+            return registered
+                .get(&(requirement.kind, key.clone()))
+                .cloned()
+                .ok_or_else(|| {
+                    ActError::Model(format!(
+                        "the model attribute '{}' (kind '{}') declares provider '{key}', but no installed plugin registered it",
+                        requirement.kind.attribute(),
+                        requirement.kind.as_str()
+                    ))
+                });
+        }
+        let mut providers = registered
+            .values()
+            .filter(|provider| provider.kind == requirement.kind);
+        let Some(provider) = providers.next() else {
+            return Err(ActError::Model(format!(
+                "the model requires capability '{}' (kind '{}') but no installed plugin provides it: {}",
+                requirement.kind.attribute(),
+                requirement.kind.as_str(),
+                capability_hint(requirement.kind)
+            )));
+        };
+        if providers.next().is_some() {
+            return Err(ActError::Model(format!(
+                "the model attribute '{}' (kind '{}') has multiple providers; declare a provider key",
+                requirement.kind.attribute(),
+                requirement.kind.as_str()
+            )));
+        }
+        Ok(provider.clone())
+    }
+
+    /// The participant resolver registered under provider `key`, if any.
+    pub(crate) fn participant_resolver_for(
+        &self,
+        key: &str,
+    ) -> Option<Arc<dyn crate::ParticipantResolver>> {
+        self.kernel.participant_resolver_for(key)
+    }
+
+    /// Resolve and freeze every capability a model requires.
+    ///
+    /// An unkeyed assignment is filled with the kind's only provider; an
+    /// explicit key must name a registered provider. The model is then
+    /// validated against the provider's implementation (the participant
+    /// resolver port). The filled model is what the caller persists and what a
+    /// run carries, so a restart never silently falls back to another
+    /// provider.
+    pub(crate) fn resolve_model_capabilities(&self, model: &mut Workflow) -> Result<()> {
+        for step in &mut model.steps {
+            freeze_step_capabilities(self, step)?;
+        }
+        for requirement in model.required_capabilities() {
+            let provider = self.resolve_capability(&requirement)?;
+            if requirement.kind == CapabilityKind::Participant
+                && self.participant_resolver_for(&provider.key).is_none()
+            {
+                return Err(ActError::Model(format!(
+                    "the model declares assign.owner with participant provider '{}', but no resolver is registered for it: install a plugin that registers both from ActPlugin::on_init",
+                    provider.key
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Close the capability registry after the plugins' `on_init`.
+    pub(crate) fn seal_capabilities(&self) {
+        self.capabilities_sealed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// The pid → lane mapping, so the timers' cleanup can release a swept
@@ -312,6 +551,13 @@ impl Runtime {
         // targets, triggers, `rn`) rather than seed an aggregate.
         model.valid()?;
 
+        // Freeze the capability selection into the run's model. A model
+        // persisted by `model:deploy` already carries its provider keys; a
+        // direct caller gets the same fill here, so the assignment path and a
+        // restart both read one explicit key.
+        let mut model = model.clone();
+        self.resolve_model_capabilities(&mut model)?;
+
         // The process directory root comes from the engine config, never from
         // the request: a caller can neither name the directory nor place a
         // run outside it. The directory lives exactly as long as the
@@ -329,7 +575,7 @@ impl Runtime {
         let package = self.package.clone();
         let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
         // An unimportable model is refused here, not silently skipped.
-        let spec = crate::scheduler::shell::ProcessSpec::from_workflow(&proc_id, model, &run_as)?
+        let spec = crate::scheduler::shell::ProcessSpec::from_workflow(&proc_id, &model, &run_as)?
             .with_owner(owner.clone().unwrap_or_default())
             .with_vars(&options);
         self.kernel.start_process(&spec).await?;
@@ -587,6 +833,9 @@ impl Runtime {
         // effects, messages). Its serve loop also ticks the runtime's
         // store-facing timers once the guider is attached below, so ONE
         // background task owns every store-reaching pass.
+        let participant_resolver_sealed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let capabilities = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
+        let capabilities_sealed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let schedule = shell_timers::kernel_schedule(config);
         let (kernel, wake_rx) = KernelHost::new_with_caps(
             store.kv(),
@@ -618,6 +867,9 @@ impl Runtime {
             schema_cache,
             snapshots,
             kernel,
+            participant_resolver_sealed,
+            capabilities,
+            capabilities_sealed,
         });
 
         // The driver seams: the host serves, so the effect runner (Func
@@ -633,10 +885,10 @@ impl Runtime {
             move |msg: &crate::Message| emitter.emit_message(msg),
         )));
         let emitter = runtime.emitter.clone();
-        host.attach_lifecycle_sink(Box::new(move |msg, event| match event {
-            crate::scheduler::shell::ProcessEvent::Started => emitter.emit_start_event(msg),
-            crate::scheduler::shell::ProcessEvent::Completed => emitter.emit_complete_event(msg),
-            crate::scheduler::shell::ProcessEvent::Errored => emitter.emit_error(msg),
+        host.attach_lifecycle_sink(Arc::new(move |msg, event| match event {
+            crate::capability::ProcessEvent::Started => emitter.emit_start_event(msg),
+            crate::capability::ProcessEvent::Completed => emitter.emit_complete_event(msg),
+            crate::capability::ProcessEvent::Errored => emitter.emit_error(msg),
         }));
         // The read model: every commit re-materializes the legacy
         // proc/task/vars rows from the aggregate, so the row-reading APIs

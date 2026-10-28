@@ -6,7 +6,9 @@
 //! authorization; this crate owns the part that talks to the business system.
 //!
 //! Register the plugin: its `on_init` registers the `acts.core.owner` package
-//! with the engine, and P3 installs the participant resolver there too.
+//! and the participant resolver with the engine. The default resolver is this
+//! crate's `LocalParticipantResolver`; `ParticipantPlugin::with_resolver`
+//! installs a replacement.
 //!
 //! ```rust,no_run
 //! # use acts::Engine;
@@ -21,9 +23,11 @@
 
 mod package;
 mod plugin;
+mod resolver;
 
 #[cfg(test)]
 mod tests;
 
 pub use package::OwnerPackage;
-pub use plugin::ParticipantPlugin;
+pub use plugin::{PROVIDER, ParticipantPlugin};
+pub use resolver::LocalParticipantResolver;

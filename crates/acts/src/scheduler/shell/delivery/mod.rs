@@ -68,18 +68,18 @@ fn delivery_events(claim: &DeliveryClaim, outcome: DeliveryOutcome, now: i64) ->
 /// [`message::MessageForwarder`] so records reach the engine channel.
 pub(crate) struct ShadowTransport;
 
-impl crate::scheduler::core::outbox::outbox_dispatch::OutboxTransport for ShadowTransport {
+impl crate::capability::OutboxTransport for ShadowTransport {
     fn deliver(
-        &mut self,
+        &self,
         record: &crate::scheduler::core::outbox::records::OutboxRecord,
-    ) -> crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome {
+    ) -> crate::capability::DeliveryOutcome {
         tracing::debug!(
             pid = %record.id.process_id,
             key = %record.id.key,
             topic = %record.topic,
             "kernel outbox delivered (shadow)"
         );
-        crate::scheduler::core::outbox::outbox_dispatch::DeliveryOutcome::Delivered {
+        crate::capability::DeliveryOutcome::Delivered {
             receipt: "shadow".into(),
         }
     }
@@ -110,7 +110,12 @@ impl KernelHost {
         let now = SystemClock.now_ms();
         let mut confirmations = Vec::with_capacity(ids.len());
         {
-            let mut transport = self.transport.write();
+            let transport = self
+                .ports
+                .read()
+                .delivery
+                .default_port()
+                .expect("the kernel host installs a default outbox transport");
             for id in ids {
                 let Some(record) = snapshot.outbox.get(id) else {
                     continue;
@@ -207,7 +212,13 @@ impl KernelHost {
         };
         drop(lane);
         let event = {
-            let outcome = self.transport.write().deliver(&claimed);
+            let transport = self
+                .ports
+                .read()
+                .delivery
+                .default_port()
+                .expect("the kernel host installs a default outbox transport");
+            let outcome = transport.deliver(&claimed);
             outcome_event(&claim, outcome, now)
         };
         let delivered = matches!(&event, OutboxEvent::ConfirmDelivered { .. });

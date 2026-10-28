@@ -35,6 +35,7 @@ acts-plugin-web = { workspace = true }
 acts-plugin-nats = { workspace = true }
 acts-store = { workspace = true, features = ["sled", "sqlite", "postgres"] }
 [dev-dependencies]
+acts = { workspace = true, features = ["test-utils"] }
 async-nats = { workspace = true }
 async-trait = { workspace = true }
 toml = { workspace = true }

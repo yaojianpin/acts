@@ -180,7 +180,11 @@ fn resolve_context(ctx: &Context, var: &ContextVar) -> Result<OwnerExpr> {
         return Ok(OwnerExpr::Context { var: var.clone() });
     }
     let node = OwnerExpr::Context { var: var.clone() };
-    let participants = ctx.resolve_owners(&node)?;
+    // The package's local half is the kernel's deterministic local evaluation.
+    // It is not the `assign.owner` provider path: with several participant
+    // providers, the package must not depend on whichever resolver happens to
+    // be the default. Provider selection belongs to `assign.owner`.
+    let participants = ctx.resolve_local_owners(&node)?;
     Ok(participants_to_expr(&participants))
 }
 

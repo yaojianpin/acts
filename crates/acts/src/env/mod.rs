@@ -7,6 +7,7 @@ use acts_expr::{Context as ExprContext, Expr};
 use core::fmt;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
 /// User var trait
@@ -40,6 +41,42 @@ pub trait ActUserVar: Send + Sync {
     }
 }
 
+/// A method an expression can call, registered by a plugin or embedder.
+///
+/// The name is what the expression writes: `owner_of(...)` or, by the
+/// engine's convention for built-ins, `$owner_of(...)`. A method that needs
+/// the acting task reads it through
+/// [`Context::try_with_current`](crate::Context::try_with_current) (the
+/// evaluation runs on the task's scope); the engine passes no separate
+/// context, so a method is also usable from a plain [`Environment::eval`].
+///
+/// ```rust
+/// use acts::{ActFunction, Result};
+/// use serde_json::{Value as JsonValue, json};
+///
+/// #[derive(Clone)]
+/// struct Doubled;
+///
+/// impl ActFunction for Doubled {
+///     fn name(&self) -> String {
+///         "doubled".to_string()
+///     }
+///
+///     fn call(&self, args: &[JsonValue]) -> Result<JsonValue> {
+///         let value = args.first().and_then(JsonValue::as_i64).unwrap_or(0);
+///         Ok(json!(value * 2))
+///     }
+/// }
+/// ```
+pub trait ActFunction: Send + Sync {
+    /// The name the expression calls.
+    fn name(&self) -> String;
+
+    /// Call the method with the expression's argument values. The returned
+    /// JSON value is converted back into the expression's value.
+    fn call(&self, args: &[JsonValue]) -> Result<JsonValue>;
+}
+
 /// The built-in `secrets` user var: reads the task's `secrets` data.
 #[derive(Clone)]
 struct SecretsVar;
@@ -53,6 +90,9 @@ impl ActUserVar for SecretsVar {
 #[derive(Clone)]
 pub struct Environment {
     pub(crate) user_vars: ShareLock<Vec<Box<dyn ActUserVar>>>,
+    /// Plugin-registered expression methods, in registration order. A name is
+    /// answered by the first registration, exactly like a user var.
+    functions: ShareLock<Vec<Arc<dyn ActFunction>>>,
 }
 
 impl fmt::Debug for Environment {
@@ -71,6 +111,7 @@ impl Environment {
     pub fn new() -> Self {
         Environment {
             user_vars: Arc::new(RwLock::new(vec![Box::new(SecretsVar)])),
+            functions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -82,6 +123,21 @@ impl Environment {
     pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) {
         let mut user_envs = self.user_vars.write();
         user_envs.push(Box::new(module.clone()));
+    }
+
+    /// Register an expression method. The first registration of a name wins;
+    /// a later duplicate is kept but never resolved.
+    pub fn register_function<T: ActFunction + Clone + 'static>(&self, function: &T) {
+        self.functions.write().push(Arc::new(function.clone()));
+    }
+
+    /// The first registered method under `name`.
+    pub(crate) fn function(&self, name: &str) -> Option<Arc<dyn ActFunction>> {
+        self.functions
+            .read()
+            .iter()
+            .find(|function| function.name() == name)
+            .cloned()
     }
 
     /// One user var's data — `default_data` overlaid with what the current
