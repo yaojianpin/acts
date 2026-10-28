@@ -60,6 +60,122 @@
 
 嵌套容器中，`value` / `index` 位于 item 的祖先作用域，内层 `block` 的叶子也能读取；顶层 `block` 只能读 `$root`、`$parent` 和步骤变量。
 
+## OwnerExpr（参与人表达式）
+
+`assign.owner` 除了字符串，还接受结构化的 `OwnerExpr`。字符串形式保持原语义
+（用户 id，或 `${{ }}` 表达式）；对象形式用 `kind` 区分：
+
+```yml
+assign:
+  owner:
+    kind: owners_of
+    resource: { resource: department, name: 研发部 }
+    duty: principal
+```
+
+| `kind` | 含义 |
+| --- | --- |
+| `user` / `role` / `group` | 静态用户、角色、组 |
+| `owners_of` | 资源的负责人；`resource` 为 `project`/`department`/`unit`，`duty` 为 `all`（默认）/`principal`/`deputy`/`member` |
+| `context` | 运行时上下文变量 |
+| `relate` | 关系变换，如 `department_of`、`manager_of`；关系可写成字符串或 `{ rel, value }` |
+| `any_of` / `all_of` / `except` | 并集 / 交集 / 差集 |
+
+上下文变量：
+
+```json
+{ "kind": "context", "var": { "type": "initiator" } }
+{ "kind": "context", "var": { "type": "current_actor" } }
+{ "kind": "context", "var": { "type": "previous_approver" } }
+{ "kind": "context", "var": { "type": "previous_approver_nth", "back": 1 } }
+{ "kind": "context", "var": { "type": "var", "name": "owner_unit", "ty": "unit", "duty": "principal" } }
+```
+
+- `initiator`：流程发起人。
+- `current_actor`：最近一次决策的操作人；还没有决策时等于发起人。
+- `previous_approver`：当前操作人之前的那次决策；按决策次数计数，不按人去重。
+- `var`：工作流变量。`ty` 为 `user`/`users`/`role`/`group`/`project`/
+  `department`/`unit`；资源类型按 `duty` 查负责人。
+
+表达式也可以写成 `$initiator`、`$actor`、`$previous_approver(n)`。
+
+**一个活动只有一个 owner。** 表达式解析为空或多于一个参与人时活动失败：
+
+```text
+assign.owner resolved to 2 participants (u1, u2); a human act has exactly one
+owner — use the acts.core.owner package with block/parallel/sequence for a
+multi-approver step
+```
+
+多人审批用 `acts.core.owner` 先算参与人，再交给 `block`/`sequence`/
+`parallel`：
+
+```yml
+- id: owners
+  uses: acts.core.owner
+  params:
+    kind: any_of
+    operands:
+      - { kind: context, var: { type: current_actor } }
+      - { kind: role, name: reviewer }
+
+- id: approve
+  uses: acts.core.parallel
+  params:
+    in: "${{ owners.participants }}"
+    join: any
+    steps:
+      - uses: acts.core.irq
+        assign:
+          owner: "${{ value.id }}"
+```
+
+`acts.core.owner` 是 **IRQ 活动**：引擎把表达式作为请求发给业务系统，业务系统用
+自己的用户目录（角色、组、资源负责人、关系）解析，完成活动并返回。请求发出前，
+引擎会把表达式里的本地上下文原子（`initiator`、`current_actor`、
+`previous_approver`、`user`/`users` 变量）替换成解析出的 `user` 节点，业务系统
+只需要解析自己的目录数据：
+
+```json
+{
+  "participants": [{ "id": "u1", "code": "alice", "name": "Alice" }],
+  "ids": ["u1"],
+  "count": 1
+}
+```
+
+只需要 fan-out 时也可以只返回 `ids`，工作流用 `in: "${{ owners.ids }}"` 和
+`assign.owner: "${{ value }}"`。引擎不维护业务目录，也没有 `[owner]` 配置；
+业务系统是唯一的解析方。
+
+`assign.owner` 只解析本地原子（用户、上下文变量、普通用户变量、集合运算）。
+出现 `role`/`group`/`owners_of`/`relate` 时活动失败并提示先走
+`acts.core.owner`：
+
+```text
+owner atom 'role' ('reviewer') names business data; resolve it through the
+acts.core.owner IRQ package — pass this expression as the package's params,
+let the business system return the participants, and assign from the returned ids
+```
+
+这样做是因为 `assign` 在活动启动时必须立即得到唯一 owner，不应在启动路径上做
+业务 I/O。需要业务数据的单个 owner，先走 `acts.core.owner`，再取唯一结果：
+
+```yml
+- id: owner
+  uses: acts.core.owner
+  params:
+    kind: relate
+    from: { kind: context, var: { type: current_actor } }
+    rel: { rel: resource, value: department_of }
+    duty: principal
+
+- id: approve
+  uses: acts.core.irq
+  assign:
+    owner: "${{ owner.participants[0].id }}"
+```
+
 ## 承办关系
 
 活动启动后，承办关系持久化在任务的私有变量 `__assignment` 中：

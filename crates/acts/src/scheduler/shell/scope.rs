@@ -201,6 +201,28 @@ impl Scope {
             .unwrap_or_default()
     }
 
+    /// The server-attributed subjects of the decisions that led to `task_id`,
+    /// newest decision first.
+    ///
+    /// The durable action facts are private `__action@<sequence>` variables on
+    /// the execution they decided. The flow history is the predecessor graph
+    /// (a top-level step's parent is the run root, not the previous step), so
+    /// the walk follows predecessors first and falls back to the tree parent
+    /// for an execution with none. A decision without a subject (an engine
+    /// rule, a replay from before subjects were recorded) contributes nothing.
+    pub(crate) fn decision_subjects(
+        &self,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    ) -> Vec<String> {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Vec::new();
+        };
+        let mut subjects = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        collect_decision_subjects(snapshot, task_id, &mut visited, &mut subjects);
+        subjects
+    }
+
     /// The process's own directory (`<workdir>/<pid>`), or `None` when the
     /// engine config declares no workdir root.
     pub fn workdir(&self) -> Option<std::path::PathBuf> {
@@ -227,6 +249,49 @@ impl Scope {
             Some(snapshot) => super::facts::root_scope_object(snapshot),
             None => self.special.get_value("$root").cloned(),
         }
+    }
+}
+
+/// Walk one execution's decision history: its own action facts (newest
+/// first), then the executions that preceded it, falling back to the tree
+/// parent when it has no predecessor (the root of a nested flow).
+fn collect_decision_subjects(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    visited: &mut std::collections::HashSet<crate::scheduler::core::model::task_graph::TaskId>,
+    subjects: &mut Vec<String>,
+) {
+    if !visited.insert(task_id.clone()) {
+        return;
+    }
+    let mut facts: Vec<(u64, &str)> = snapshot
+        .variables
+        .iter()
+        .filter_map(|((scope, name), raw)| {
+            if scope != task_id {
+                return None;
+            }
+            let sequence = name.strip_prefix("__action@")?.parse::<u64>().ok()?;
+            Some((sequence, raw.as_str()))
+        })
+        .collect();
+    facts.sort_unstable_by_key(|(sequence, _)| std::cmp::Reverse(*sequence));
+    for (_, raw) in facts {
+        if let Ok((_, _, Some(subject))) = super::action::decode_action_fact(raw) {
+            subjects.push(subject);
+        }
+    }
+
+    let Some(task) = snapshot.tasks.get(task_id) else {
+        return;
+    };
+    for predecessor in &task.predecessors {
+        collect_decision_subjects(snapshot, predecessor, visited, subjects);
+    }
+    if task.predecessors.is_empty()
+        && let Some(parent) = &task.parent
+    {
+        collect_decision_subjects(snapshot, parent, visited, subjects);
     }
 }
 
@@ -307,6 +372,12 @@ impl ScopeTask {
 
     pub fn node(&self) -> &Arc<ScopeNode> {
         &self.node
+    }
+
+    /// The execution's durable identity, which is the anchor of the parent →
+    /// root lookup a context variable walks.
+    pub(crate) fn task_id(&self) -> &crate::scheduler::core::model::task_graph::TaskId {
+        &self.task_id
     }
 
     pub fn data(&self) -> Vars {

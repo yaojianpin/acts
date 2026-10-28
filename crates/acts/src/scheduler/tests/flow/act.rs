@@ -1075,7 +1075,7 @@ async fn sch_act_assign_is_refused_on_non_human_nodes() {
         ],
     );
     container.steps[0].assign = Some(crate::model::Assign {
-        owner: "alice".to_string(),
+        owner: Box::new(crate::model::OwnerExpr::Value("alice".to_string())),
     });
 
     let mut func = Workflow::new().with_id("flow-act-assign-func");
@@ -1110,6 +1110,193 @@ async fn sch_act_assign_is_refused_on_non_human_nodes() {
         fixture.wait_error().await;
         fixture.close().await;
     }
+}
+
+/// A structured `assign.owner` resolves its local atoms and projects the
+/// single result.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_resolves_a_structured_owner() {
+    let workflow = Workflow::new()
+        .with_id("flow-act-assign-expr")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new())
+                .with_assign_expr(crate::OwnerExpr::AnyOf {
+                    operands: vec![
+                        crate::OwnerExpr::User {
+                            name: "u1".to_string(),
+                        },
+                        crate::OwnerExpr::User {
+                            name: "u1".to_string(),
+                        },
+                    ],
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("s1").await;
+    assert_eq!(created.owner.as_deref(), Some("u1"));
+    assert_eq!(created.assignee.as_deref(), Some("u1"));
+    fixture.close().await;
+}
+
+/// A business-data atom is sent to the business system by `acts.core.owner`;
+/// `assign` refuses it and names the package instead of inventing an owner.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_business_atom_is_refused() {
+    let workflow = Workflow::new()
+        .with_id("flow-act-assign-business-atom")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new())
+                .with_assign_expr(crate::OwnerExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let failed = fixture.wait_message("s1", MessageState::Error).await;
+    let message = failed
+        .outputs
+        .get::<String>(consts::ACT_ERR_MESSAGE)
+        .unwrap_or_default();
+    assert!(
+        message.contains("acts.core.owner") && message.contains("reviewers"),
+        "the failure must name the IRQ package and the role: {message}"
+    );
+    fixture.wait_error().await;
+    fixture.close().await;
+}
+
+/// A multi-participant expression cannot own one human act.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_rejects_multiple_participants() {
+    let workflow = Workflow::new()
+        .with_id("flow-act-assign-multi")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new())
+                .with_assign_expr(crate::OwnerExpr::AnyOf {
+                    operands: vec![
+                        crate::OwnerExpr::User {
+                            name: "u1".to_string(),
+                        },
+                        crate::OwnerExpr::User {
+                            name: "u2".to_string(),
+                        },
+                    ],
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let failed = fixture.wait_message("s1", MessageState::Error).await;
+    let message = failed
+        .outputs
+        .get::<String>(consts::ACT_ERR_MESSAGE)
+        .unwrap_or_default();
+    assert!(
+        message.contains("exactly one owner") && message.contains("u1") && message.contains("u2"),
+        "the failure must name the multi-owner resolution: {message}"
+    );
+    fixture.wait_error().await;
+    fixture.close().await;
+}
+
+/// On a fresh run nothing has been decided, so the current actor is the
+/// initiator sealed by the caller.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_current_actor_falls_back_to_the_initiator() {
+    let workflow = Workflow::new()
+        .with_id("flow-act-assign-actor")
+        .with_rn("flow-act-assign-actor")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new())
+                .with_assign_expr(crate::OwnerExpr::Context {
+                    var: crate::ContextVar::CurrentActor,
+                })
+        });
+    let fixture = FlowFixture::deploy(&workflow).await;
+    let starter = Principal::from_policy(&UserPolicy {
+        name: "starter".to_string(),
+        enabled: true,
+        allow: vec!["model:deploy".to_string(), "proc:start".to_string()],
+        patterns: vec!["flow-act-assign-actor".to_string()],
+        ..Default::default()
+    })
+    .unwrap();
+    fixture
+        .engine()
+        .executor(&starter)
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+
+    let created = fixture.wait_created("s1").await;
+    assert_eq!(created.owner.as_deref(), Some("starter"));
+    fixture.close().await;
+}
+
+/// `previous_approver` walks the decision history across top-level steps:
+/// after u1 decides s1 and u2 decides s2, s3's owner is u1.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_assign_previous_approver_follows_the_chain() {
+    let workflow = Workflow::new()
+        .with_id("flow-act-assign-previous")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new())
+                .with_assign("u1")
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_uses(USES_IRQ, Vars::new())
+                .with_assign("u2")
+        })
+        .with_step(|step| {
+            step.with_id("s3")
+                .with_uses(USES_IRQ, Vars::new())
+                .with_assign_expr(crate::OwnerExpr::Context {
+                    var: crate::ContextVar::PreviousApprover,
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let s1 = fixture.wait_created("s1").await;
+    fixture
+        .engine()
+        .executor(&approved_user("u1"))
+        .act()
+        .complete(fixture.pid(), &s1.tid, Vars::new())
+        .await
+        .unwrap();
+    let s2 = fixture.wait_created("s2").await;
+    assert_eq!(s2.owner.as_deref(), Some("u2"));
+    fixture
+        .engine()
+        .executor(&approved_user("u2"))
+        .act()
+        .complete(fixture.pid(), &s2.tid, Vars::new())
+        .await
+        .unwrap();
+
+    let s3 = fixture.wait_created("s3").await;
+    assert_eq!(
+        s3.owner.as_deref(),
+        Some("u1"),
+        "the approver before u2 is u1"
+    );
+    fixture.close().await;
 }
 
 /// A declared assignment admits only its owner/assignee, and a decision's

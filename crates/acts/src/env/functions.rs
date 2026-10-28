@@ -101,6 +101,39 @@ fn builtin(name: &str) -> Option<Value> {
         // the engine's private keys; `WORK_DIR` is answered from the process.
         "$env" => from_json(JsonValue::from(env_map())),
         "$os" => Value::from(std::env::consts::OS),
+        // The owner context variables, readable outside an owner expression
+        // too: `${{ $actor }}` in a param is the same fact
+        // `{ "kind": "context", "var": { "type": "current_actor" } }` names.
+        "$initiator" => Context::try_with_current(|ctx| ctx.initiator())
+            .ok()
+            .flatten()
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+        "$actor" => Context::try_with_current(|ctx| ctx.current_actor())
+            .ok()
+            .flatten()
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+        "$previous_approver" => Value::function(|args| {
+            arity("$previous_approver", args, 0, 1)?;
+            let back = match args.first() {
+                Some(value) => {
+                    u32::try_from(value.as_u64().ok_or_else(|| ExprError::Function {
+                        name: "$previous_approver".to_string(),
+                        message: "argument 1 must be a non-negative integer".to_string(),
+                    })?)
+                    .map_err(|_| ExprError::Function {
+                        name: "$previous_approver".to_string(),
+                        message: "argument 1 is too large".to_string(),
+                    })?
+                }
+                None => 0,
+            };
+            let value = Context::try_with_current(|ctx| ctx.previous_approver(back))
+                .ok()
+                .flatten();
+            Ok(value.map(Value::from).unwrap_or(Value::Null))
+        }),
 
         "$get" => Value::function(|args| {
             arity("$get", args, 1, 1)?;

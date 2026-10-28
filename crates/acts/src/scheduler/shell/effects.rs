@@ -179,6 +179,18 @@ impl EffectRunner for PackageEffectRunner {
         ctx.prepare().await?;
         let params = task.params(&ctx);
         definition.validate(&params)?;
+        let params = match self.runtime.package().get(definition.id()) {
+            Some(_) => {
+                let package = self
+                    .runtime
+                    .package()
+                    .create(definition.id(), self.runtime.config())?;
+                package.prepare_params(&ctx, params).await?
+            }
+            // Published metadata without a runtime instance: nothing can
+            // normalize the params, so the request carries the declared ones.
+            None => params,
+        };
         Ok(ResolvedEffect {
             params,
             options: serde_json::to_value(task.options()).unwrap_or(serde_json::Value::Null),
@@ -216,6 +228,7 @@ impl EffectRunner for PackageEffectRunner {
             .runtime
             .package()
             .create(definition.id(), self.runtime.config())?;
+        let params = package.prepare_params(&ctx, params).await?;
         // A package that panics is a failed act, not a dead engine: the panic
         // is contained here and reported through the ordinary package-error
         // path (the execution `Failed`, its error walk carries it), exactly

@@ -175,6 +175,68 @@ impl Context {
         self.proc.workdir()
     }
 
+    /// The run's initiator: the subject sealed into the process's scope
+    /// policy when the run started. `None` when no caller was sealed — an
+    /// engine-internal start, a schedule trigger, or a policy without a
+    /// subject.
+    ///
+    /// This is the `initiator` context variable of an owner expression.
+    pub fn initiator(&self) -> Option<String> {
+        let subject = self.proc.owner_scope().subject;
+        (!subject.trim().is_empty()).then_some(subject)
+    }
+
+    /// The subject whose decision led to the acting execution: the most
+    /// recent decision recorded on the execution itself or on its nearest
+    /// ancestor, falling back to the run's initiator while nothing has been
+    /// decided yet.
+    ///
+    /// This is the `current_actor` context variable of an owner expression.
+    /// A decision that the engine made without a caller (a step rule, a
+    /// shutdown resume) carries no subject and is skipped.
+    pub fn current_actor(&self) -> Option<String> {
+        self.decision_subjects()
+            .first()
+            .cloned()
+            .or_else(|| self.initiator())
+    }
+
+    /// The approver before the current actor: `back = 0` is the decision
+    /// immediately preceding [`Self::current_actor`], `back = 1` the one
+    /// before that, and so on. `None` when the run has no older decision.
+    ///
+    /// This is the `previous_approver` / `previous_approver_nth` context
+    /// variable of an owner expression. Decisions are counted, not people:
+    /// the same user approving twice is two entries.
+    pub fn previous_approver(&self, back: u32) -> Option<String> {
+        let subjects = self.decision_subjects();
+        // The newest subject is the current actor; skip it. When the chain is
+        // empty the current actor is the initiator and no decision precedes
+        // it.
+        let start = usize::from(!subjects.is_empty());
+        subjects.get(start.saturating_add(back as usize)).cloned()
+    }
+
+    /// Evaluate the local atoms of one owner expression against this scope.
+    ///
+    /// `assign.owner` uses this and then requires exactly one participant.
+    /// Business-data atoms (roles, groups, resource owners, relations) are
+    /// not resolved here: the `acts.core.owner` IRQ package sends the
+    /// expression to the business system, and the workflow assigns from the
+    /// ids the business system returns.
+    pub fn resolve_owners(
+        &self,
+        expr: &crate::model::OwnerExpr,
+    ) -> crate::Result<Vec<crate::model::Participant>> {
+        super::owner::evaluate(self, expr)
+    }
+
+    /// The decision subjects recorded on the acting execution and its
+    /// ancestors, newest first.
+    fn decision_subjects(&self) -> Vec<String> {
+        self.proc.decision_subjects(self.task().task_id())
+    }
+
     /// A token that fires once this act should stop the work it started: the
     /// engine is shutting down, or the task was overridden while it ran (an
     /// `abort`/`cancel`/`skip`/`remove`/`next` action, or an error — see

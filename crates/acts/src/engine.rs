@@ -245,9 +245,10 @@ impl Engine {
         for package_register in packages {
             let meta = (package_register.meta)();
             executor.ext().register_package(&meta).await?;
-            if meta.run_as == crate::ActRunAs::Func {
-                self.runtime.package().register(meta.id, &package_register);
-            }
+            // Every run bound keeps its instance: `Func` executes it, and an
+            // `Irq` act still asks it to prepare its params before the request
+            // is sent to the client (`ActPackage::prepare_params`).
+            self.runtime.package().register(meta.id, &package_register);
         }
 
         Ok(())

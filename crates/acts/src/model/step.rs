@@ -1,7 +1,7 @@
 use crate::JoinRule;
 use crate::ValidationRule;
 use crate::Variant;
-use crate::{ModelBase, Vars, model::Branch};
+use crate::{ModelBase, Vars, model::Branch, model::OwnerExpr};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
@@ -9,12 +9,19 @@ use serde_json::{Value as JsonValue, json};
 /// resolves at start into its persisted `__assignment` task state. Only a
 /// human decision leaf (`ActRunAs::Irq`) may declare one; the kernel refuses
 /// an `assign` on a container or a `Func`/`Msg` leaf when the act starts.
+///
+/// `owner` is an [`OwnerExpr`]. The legacy string form (a user id or a
+/// `${{ … }}` expression) deserializes unchanged; the object forms name a
+/// user/role/group, a resource's owners, a context variable, a relation, or a
+/// set combination of those. The resolved set must contain exactly one
+/// participant — a human act has one owner. Multi-approver steps use the
+/// `acts.core.owner` package with `block`/`parallel`/`sequence` instead.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Assign {
-    /// The owner expression, resolved through the same `fill_params` path as
-    /// the act's `params`. An empty resolution fails the act.
+    /// The owner expression. An empty resolution fails the act; so does a
+    /// resolution with more than one participant.
     #[serde(default)]
-    pub owner: String,
+    pub owner: Box<OwnerExpr>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -183,10 +190,20 @@ impl Step {
         self
     }
 
-    /// Declare the act's owner expression (see [`Assign`]).
+    /// Declare the act's owner expression as the legacy string form (see
+    /// [`Assign`]): a literal user id or a `${{ … }}` expression.
     pub fn with_assign(mut self, owner: &str) -> Self {
         self.assign = Some(Assign {
-            owner: owner.to_string(),
+            owner: Box::new(OwnerExpr::Value(owner.to_string())),
+        });
+        self
+    }
+
+    /// Declare the act's owner as a structured [`OwnerExpr`] (a resource's
+    /// owners, a context variable, a relation, or a set combination).
+    pub fn with_assign_expr(mut self, owner: OwnerExpr) -> Self {
+        self.assign = Some(Assign {
+            owner: Box::new(owner),
         });
         self
     }

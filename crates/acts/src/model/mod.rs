@@ -2,6 +2,7 @@ mod branch;
 mod catch;
 mod info;
 mod join;
+mod owner;
 mod step;
 mod timeout;
 mod trigger;
@@ -18,6 +19,11 @@ pub use info::{
     EventInfo, GraphNode, MessageInfo, ModelInfo, PackageInfo, ProcInfo, ProcessGraph, TaskInfo,
 };
 pub use join::{JoinRule, PartialThreshold};
+pub(crate) use owner::participants_from_json;
+pub use owner::{
+    ContextVar, Duty, OwnerExpr, Participant, Relation, RelationName, RelationRef, ResourceRef,
+    VarType,
+};
 pub use step::{Assign, Step};
 pub use timeout::{Timeout, TimeoutLimit, TimeoutUnit};
 pub use trigger::{

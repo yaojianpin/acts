@@ -87,6 +87,23 @@ pub trait ActPackage: Send + Sync {
     {
         false
     }
+    /// Normalize the resolved params before they are sent to the client (an
+    /// `Irq` act) or handed to [`Self::execute`] (a `Func` act). The default
+    /// returns them unchanged.
+    ///
+    /// A package uses this when a param is a document whose local parts the
+    /// engine can fill in: `acts.core.owner` replaces the owner expression's
+    /// context atoms with the users they resolved to, so the business system
+    /// receives a self-contained request. Validation runs on the declared
+    /// params, before this hook.
+    async fn prepare_params(
+        &self,
+        _ctx: &Context,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(params)
+    }
+
     /// executing with task context
     async fn execute(&self, _ctx: &Context, _params: &serde_json::Value) -> Result<Option<Vars>> {
         Ok(None)

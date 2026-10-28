@@ -9,6 +9,7 @@
 //! unowned approval.
 
 use super::*;
+use crate::model::OwnerExpr;
 
 /// The private execution variable carrying one human act's assignment:
 /// `{"owner","assignee","rev","transferred_from","updated_by",
@@ -474,7 +475,7 @@ pub(super) fn declared_expression(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task_id: &crate::scheduler::core::model::task_graph::TaskId,
     model_node: &crate::scheduler::core::model::model_graph::NodeId,
-) -> Result<Option<String>> {
+) -> Result<Option<Box<OwnerExpr>>> {
     let Some(model) = model_of(snapshot)? else {
         return Ok(None);
     };
@@ -529,7 +530,7 @@ pub(super) fn declared_expression(
 fn pushed_declared_expression(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task_id: &crate::scheduler::core::model::task_graph::TaskId,
-) -> Result<Option<String>> {
+) -> Result<Option<Box<OwnerExpr>>> {
     let Some(act) = crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)? else {
         return Ok(None);
     };
@@ -586,13 +587,13 @@ pub(super) fn options_with_assignment(
 /// scope and through the same `fill_params` path a package's params use.
 #[async_trait::async_trait]
 pub(crate) trait AssignmentResolver: Send + Sync {
-    /// The expression's value when it is a non-empty string; `None` for an
-    /// empty or non-string resolution (the act must fail rather than run
-    /// unowned).
+    /// The single owner the expression resolves to; `None` for an empty
+    /// resolution (the act must fail rather than run unowned). A resolution
+    /// with more than one participant is an error: a human act has one owner.
     async fn resolve_owner(
         &self,
         scope: super::scope::ScopeSpec,
-        expr: &str,
+        expr: &OwnerExpr,
     ) -> Result<Option<String>>;
 }
 
@@ -613,18 +614,27 @@ impl AssignmentResolver for RuntimeAssignmentResolver {
     async fn resolve_owner(
         &self,
         scope: super::scope::ScopeSpec,
-        expr: &str,
+        expr: &OwnerExpr,
     ) -> Result<Option<String>> {
         let (_, _, ctx) = super::scope::headless_scope(&self.runtime, &scope)?;
         // The same prepare the effect runner performs before it resolves the
         // act's params: seed the declared vars and seal the snapshot data the
         // expression may read.
         ctx.prepare().await?;
-        let value = crate::utils::fill_params(&serde_json::Value::String(expr.to_string()), &ctx);
-        Ok(match value {
-            serde_json::Value::String(owner) if !owner.trim().is_empty() => Some(owner),
-            _ => None,
-        })
+        let participants = ctx.resolve_owners(expr)?;
+        match participants.as_slice() {
+            [] => Ok(None),
+            [owner] => Ok(Some(owner.id.clone())),
+            participants => Err(ActError::Action(format!(
+                "assign.owner resolved to {} participants ({}); a human act has exactly one owner — use the acts.core.owner package with block/parallel/sequence for a multi-approver step",
+                participants.len(),
+                participants
+                    .iter()
+                    .map(|participant| participant.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
     }
 }
 
@@ -645,7 +655,7 @@ impl KernelHost {
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         shared: Option<&Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
-        expr: &str,
+        expr: &OwnerExpr,
     ) -> Result<Option<String>> {
         let Some(model) = model_of(snapshot)? else {
             return Ok(None);
