@@ -93,7 +93,7 @@ validator = { version = "0.21.0", features = ["derive"] }
 # `realfs` feature is what lets the interpreter's root be the run's own
 # directory; the default features (the LLM tool contract, tz data) are not used
 # here.
-bashkit = { version = "0.18", default-features = false, features = ["realfs"] }
+bashkit = { version = "0.20", default-features = false, features = ["realfs"] }
 # system metrics (the engine's `sys:status` action reports the host process's
 # memory and cpu usage). `system` alone: memory, cpu and processes — no disks,
 # networks, components or users.
