@@ -26,6 +26,9 @@
 //!     - if: "amount <= limit"   # under the limit: approve automatically
 //!       action: next
 //! ```
+//!
+//! The design, evaluation order and durability rules are documented in
+//! `doc/design/rules.md`.
 
 use crate::event::EventAction;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
