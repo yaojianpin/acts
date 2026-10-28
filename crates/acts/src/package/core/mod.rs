@@ -3,7 +3,6 @@ mod block;
 mod decide;
 mod irq;
 mod msg;
-mod owner;
 mod parallel;
 mod sequence;
 mod subflow;

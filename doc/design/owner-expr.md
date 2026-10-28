@@ -118,8 +118,8 @@ let the business system return the participants, and assign from the returned id
   语言解析；引擎只定义表达式文档和应答字段。没有插件配置，没有目录副本，
   没有新的 shell 能力。
 
-因此 `acts.core.owner` 放在核心包里（与 `acts.core.irq` 同层），只定义请求
-契约；业务系统是唯一的解析方。
+因此 `acts.core.owner` 是一个 IRQ 包（P2 起由参与人插件提供，与
+`acts.core.irq` 同一运行方式），只定义请求契约；业务系统是唯一的解析方。
 
 ### 3.4 调度器影响
 
@@ -325,7 +325,7 @@ pub enum OwnerExpr {
 | 本地求值器 + 集合运算 | `crates/acts/src/scheduler/shell/owner.rs` | ~200 行 | 低：无 I/O |
 | 上下文变量 | `Context` + `Scope` | ~120 行 | 中：决策链是前驱图，不是父子链 |
 | `assign` 集成 | `assign/mod.rs`、`operation/task.rs` | ~60 行改动 | 低：沿用现有解析阶段 |
-| `acts.core.owner` 包 | `package/core/owner.rs` | ~100 行 | 低：纯 IRQ 定义 |
+| `acts.core.owner` 包 | `plugins/acts-plugin-participant/src/package.rs` | ~100 行 | 低：纯 IRQ 定义 |
 | 文档 + 测试 | 本目录 + 各 crate | ~400 行 | 中：端到端审批链 |
 
 总计约 1,300 行（含测试和文档），且没有插件目录、没有 `[owner]` 配置、没有

@@ -288,6 +288,16 @@ impl Package {
         self.packages.get(id).map(|entry| entry.register.clone())
     }
 
+    /// Every registration the runtime holds. The start pass uses it to
+    /// publish the packages plugins registered from `on_init` (the registry
+    /// itself is the record; no second queue exists).
+    pub(crate) fn registers(&self) -> Vec<ActPackageRegister> {
+        self.packages
+            .iter()
+            .map(|entry| entry.value().register.clone())
+            .collect()
+    }
+
     /// Return the cached instance for a registration, creating it on first use.
     ///
     /// Package constructors are intended to initialize reusable resources (or

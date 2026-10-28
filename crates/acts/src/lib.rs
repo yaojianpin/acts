@@ -36,6 +36,8 @@ mod scheduler;
 mod signal;
 mod snapshot;
 mod store;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testing;
 mod utils;
 mod validator;
 

@@ -1,6 +1,6 @@
 # 参与人插件设计（assignment + owner）
 
-- 状态：方案（首批已落地：`OwnerExpr`/`assign`/IRQ 包在核心；P2 把包迁入插件）
+- 状态：P2 已落地（`OwnerExpr`/`assign` 在内核；`acts.core.owner` 在参与人插件，由插件 `on_init` 注册；P3 待执行）
 - 日期：2026-10-28
 - 范围：`crates/acts`、`plugins/acts-plugin-participant`、`crates/acts-server`
 
@@ -42,7 +42,7 @@
 
 ## 3. 插件组成
 
-### 3.1 `acts-plugin-participant` crate（P2 目标）
+### 3.1 `acts-plugin-participant` crate（P2 已落地）
 
 ```text
 plugins/acts-plugin-participant/
@@ -56,10 +56,11 @@ plugins/acts-plugin-participant/
   - `prepare_params` 把本地 context 原子替换成解析出的 `user`，业务原子原样
     发给客户端。
   - 客户端应答 `{ participants: [{id, code, name}], ids, count }`。
-- `ParticipantPlugin`：`ActPlugin::on_init` 注册参与人解析端口（默认实现）；
-  将来可以在这里注册参与人命令/策略。
-- 包通过 `EngineBuilder::add_package::<OwnerPackage>()` 注册（发布包定义是
-  async，`on_init` 是同步的）。
+- `ParticipantPlugin`：`ActPlugin::on_init` 注册 `acts.core.owner` 包
+  （`Engine::add_package` 直接写 runtime 包注册表，引擎在 `start` 期间发布定义）；
+  P3 在同一个 `on_init` 注册参与人解析端口，将来还可以注册参与人命令/策略。
+- 只安装插件即可获得包；没有插件的嵌入方仍用
+  `EngineBuilder::add_package::<OwnerPackage>()`。
 
 ### 3.2 内核端口
 
@@ -81,9 +82,10 @@ pub trait ParticipantResolver: Send + Sync {
 `acts-server` 注册：
 
 ```rust
-.add_package::<acts_plugin_participant::OwnerPackage>()
 .add_plugin(&acts_plugin_participant::ParticipantPlugin::new())
 ```
+
+`ParticipantPlugin::on_init` 注册 `acts.core.owner` 包。
 
 没有 `[owner]` 配置；业务系统是目录的唯一来源。
 
@@ -165,8 +167,9 @@ act:undelegate {pid,tid}
 - **授权不能下沉**：插件替换解析器只影响“谁被解析出来”，不影响“谁可以
   决策”。`__assignment` 仍是唯一授权源。
 - **启动路径不做 I/O**：`ParticipantResolver` 是同步的；业务解析走 IRQ 活动。
-- **包注册时机**：`ActPlugin::on_init` 同步，包定义发布异步；服务端必须同时
-  `add_package` 和 `add_plugin`。
+- **包注册时机**：`ActPlugin::on_init` 同步，包定义发布异步；插件通过
+  `Engine::add_package` 直接注册 runtime，引擎在 `start` 中发布定义后再返回，
+  所以只安装插件即可，不会出现“包未发布就开始工作流”的窗口。
 - **没有配置目录**：不引入 `[owner]`，避免目录副本漂移。
 - **公开 API**：`ParticipantResolver`/`Context::resolve_owners` 一旦公开就是
   semver 契约；默认实现保证行为不变。

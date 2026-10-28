@@ -1,5 +1,5 @@
 use crate::{
-    AccessControl, ActPlugin, ChannelOptions, Config, Principal, Signal, Vars,
+    AccessControl, ActPackage, ActPlugin, ChannelOptions, Config, Principal, Signal, Vars,
     builder::EngineBuilder,
     export::{Channel, Executor},
     package::{self, ActPackageRegister},
@@ -89,6 +89,25 @@ impl Engine {
     pub fn add_snapshot(&self, name: &str, options: SnapshotOptions) -> crate::Result<()> {
         self.runtime.register_snapshot(name, options)?;
         Ok(())
+    }
+
+    /// Register a package from [`ActPlugin::on_init`].
+    ///
+    /// This writes the package into the runtime registry directly. The start
+    /// pass publishes every definition registered this way before
+    /// [`EngineBuilder::start`] returns, because `on_init` is synchronous while
+    /// publishing is not. Call it from `on_init` only: a call after the start
+    /// pass installs the runtime instance but nothing publishes its definition.
+    /// An embedding application with no plugin registers packages with
+    /// [`EngineBuilder::add_package`] instead.
+    pub fn add_package<T>(&self)
+    where
+        T: ActPackage + 'static,
+    {
+        let id = T::definition().id;
+        self.runtime
+            .package()
+            .register(id, &ActPackageRegister::new::<T>());
     }
 
     /// The engine's operations, bound to `principal`.
@@ -236,12 +255,21 @@ impl Engine {
             plugin.on_init(self)?;
         }
 
-        package::init(self).await?;
-
         // Publishing a built-in package is the engine's own operation, not a
         // request: it runs as the unrestricted `system` principal, whatever
         // policy the deployment configured for its callers.
         let executor = self.executor(&Principal::unrestricted());
+
+        // A plugin registers its package into the runtime registry from
+        // `on_init`; at this point the registry holds exactly those packages,
+        // so publish their definitions before the built-ins join it.
+        for register in self.runtime.package().registers() {
+            let meta = (register.meta)();
+            executor.ext().register_package(&meta).await?;
+        }
+
+        package::init(self).await?;
+
         for package_register in packages {
             let meta = (package_register.meta)();
             executor.ext().register_package(&meta).await?;

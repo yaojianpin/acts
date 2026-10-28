@@ -4,7 +4,7 @@
   - [`doc/design/participant-plugin.md`](../design/participant-plugin.md)
   - [`doc/design/owner-expr.md`](../design/owner-expr.md)
   - [`doc/design/shell-extensibility.md`](../design/shell-extensibility.md)
-- 状态：P1 已落地，P2 待执行
+- 状态：P2 已落地，P3 待执行
 - 执行方式：一次只执行一个阶段；上一阶段验收通过后，才生成并执行下一阶段。
 
 ## 1. 阶段总览
@@ -12,7 +12,7 @@
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P1 | `OwnerExpr` + 本地原子 + 上下文变量 + `assign` 集成 | 已落地（owner/assign 测试通过） |
-| P2 | `acts.core.owner` IRQ 包迁入参与人插件 + `prepare_params` | 待执行 |
+| P2 | `acts.core.owner` IRQ 包迁入参与人插件 + `prepare_params` | 已落地（插件测试/内核/服务端全绿） |
 | P3 | `ParticipantResolver` 端口 + 插件注册 | 待执行 |
 | P4 | `acts-server` 注册 + 文档 + 端到端验证 | 待执行 |
 | P5 | 参与人命令/审计端口（transfer/delegate 的扩展点） | 待设计 |
@@ -84,7 +84,7 @@ P1 先在内核落地，因为 `OwnerExpr` 是工作流模型的一部分；P2/P
   同样构造）。
 - 最终 gate：`cargo test -p acts --lib` 全量。
 
-## 4. P2：`acts.core.owner` 迁入参与人插件
+## 4. P2：`acts.core.owner` 迁入参与人插件（已落地）
 
 ### 4.1 目标
 
@@ -98,12 +98,19 @@ P1 先在内核落地，因为 `OwnerExpr` 是工作流模型的一部分；P2/P
   - `Cargo.toml`（依赖 `acts`、`async-trait`、`serde`、`serde_json`）。
   - `src/lib.rs`：导出 `OwnerPackage`、`ParticipantPlugin`。
   - `src/package.rs`：IRQ 包定义、`prepare_params`（本地 context 原子替换）。
-  - `src/plugin.rs`：`ActPlugin`；P3 注册解析器，P2 可为空实现。
-  - `src/tests.rs`：包契约、context 准备、IRQ 应答、fan-out。
+  - `src/plugin.rs`：`ActPlugin`；`on_init` 通过 `Engine::add_package` 注册
+    `OwnerPackage`（直接写 runtime 注册表，引擎在 `start` 中发布定义）；P3 在
+    同一钩子注册解析器。
+  - `src/tests.rs`：包契约、context 准备、IRQ 应答、fan-out；用
+    `acts::testing::FlowFixture`（`test-utils`）复用内核的测试夹具。
 - 删除 `crates/acts/src/package/core/owner.rs` 和 `package/core/mod.rs` 的
   `mod owner;`；从内核 `package/tests` 移除 owner 测试。
-- 根 `Cargo.toml`/`Cargo.lock` 增加 workspace 依赖。
-- `crates/acts-server` 增加依赖，`engine_builder` 注册包（插件在 P3/P4 接入）。
+- 根 `Cargo.toml`/`Cargo.lock` 增加 workspace 依赖；`Engine` 增加同步的
+  `add_package` 启动钩子（直接写 runtime 注册表，`start` 时发布定义）。
+- `acts` 新增 `test-utils` feature，导出 `acts::testing::FlowFixture`，让
+  包/插件测试复用同一套夹具（不再各自复制消息收集与等待逻辑）。
+- `crates/acts-server` 增加依赖，`engine_builder` 只安装 `ParticipantPlugin`；
+  包由插件的 `on_init` 注册。
 
 ### 4.3 验收
 
@@ -115,9 +122,37 @@ P1 先在内核落地，因为 `OwnerExpr` 是工作流模型的一部分；P2/P
 ### 4.4 验证
 
 ```sh
+cargo fmt --check
 cargo test -p acts-plugin-participant --lib
-cargo test -p acts --lib pack_owner
+cargo test -p acts --lib
+cargo test -p acts-server --lib
+cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
+rg -n "acts.core.owner" crates plugins doc CHANGELOG.md
 ```
+
+已执行（2026-10-28）：
+
+- `cargo fmt --check`：通过。
+- `cargo test -p acts-plugin-participant --lib`：5 passed（包定义 2；运行时 3：
+  文档表达式/IRQ 请求、context 准备、客户端应答 + fan-out）。
+- `cargo test -p acts --lib`：1711 passed。
+- `cargo test -p acts-server --lib`：21 passed。
+- `cargo clippy --all-targets --all-features --workspace --locked -- -D warnings`：
+  通过。
+- `rg`：`crates/acts/src/package/core` 已无 owner 包/测试；
+  `plugins/acts-plugin-participant` 有 `OwnerPackage` + `ParticipantPlugin`；
+  `acts-server` 只安装插件（包由 `on_init` 注册）。剩余引用是文档、错误提示
+  和模型注释。
+
+验收项：
+
+- 包定义仍是 `ActRunAs::Irq`，id/schema/描述与迁移前一致。
+- `prepare_params` 仍把 `initiator` 换成 `user`；业务原子与
+  `{ owner: … }` 包装按原语义处理。
+- 客户端返回 `participants`/`ids`/`count` 后，`parallel` 展开两个 IRQ 子活动，
+  子活动 params 的 `value` 分别为 u1/u2。
+- 插件测试用 `acts::testing::FlowFixture`（`test-utils`）复用公开 API 夹具。
+- P3 未开始；`ParticipantResolver` 端口未实现。
 
 ## 5. P3：`ParticipantResolver` 端口
 
@@ -152,7 +187,8 @@ cargo test -p acts --lib pack_owner
 
 ### 6.1 范围
 
-- `acts-server` 注册 `OwnerPackage` + `ParticipantPlugin`。
+- `acts-server` 安装 `ParticipantPlugin`（`on_init` 注册 `OwnerPackage`；P2
+  已接入，P4 补文档与端到端）。
 - 文档：
   - `doc/src/model/assign.md`（已写 IRQ 版本，补插件注册说明）。
   - `doc/design/participant-plugin.md`（状态更新）。

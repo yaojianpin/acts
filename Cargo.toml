@@ -118,6 +118,7 @@ acts-package-state = { path = "./packages/acts-package-state", version = "0.25.0
 acts-package-nats = { path = "./packages/acts-package-nats", version = "0.25.0" }
 acts-package-javascript = { path = "./packages/acts-package-javascript", version = "0.25.0" }
 acts-plugin-grpc = { path = "./plugins/acts-plugin-grpc", version = "0.25.0" }
+acts-plugin-participant = { path = "./plugins/acts-plugin-participant", version = "0.25.0" }
 acts-plugin-web = { path = "./plugins/acts-plugin-web", version = "0.25.0" }
 acts-plugin-nats = { path = "./plugins/acts-plugin-nats", version = "0.25.0" }
 

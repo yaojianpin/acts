@@ -15,7 +15,6 @@ pub(crate) mod action;
 pub(crate) mod block;
 pub(crate) mod irq;
 pub(crate) mod msg;
-pub(crate) mod owner;
 pub(crate) mod parallel;
 pub(crate) mod sequence;
 pub(crate) mod set;
@@ -26,7 +25,6 @@ pub(crate) const USES_BLOCK: &str = "acts.core.block";
 pub(crate) const USES_PARALLEL: &str = "acts.core.parallel";
 pub(crate) const USES_SEQUENCE: &str = "acts.core.sequence";
 pub(crate) const USES_SUBFLOW: &str = "acts.core.subflow";
-pub(crate) const USES_OWNER: &str = "acts.core.owner";
 
 pub(crate) use crate::utils::test::{USES_IRQ, USES_MSG, USES_SET};
 

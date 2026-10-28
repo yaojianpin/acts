@@ -45,6 +45,13 @@ tokio-util = "0.7.18"
 parking_lot = { workspace = true }
 bitflags = { version = "2.13.1", features = ["serde"] }
 
+[features]
+# The functional-test harness (`acts::testing::FlowFixture`) for downstream
+# crates: a package or plugin enables it in dev-dependencies and drives its
+# tests through the same public engine API the kernel's own cells use.
+default = []
+test-utils = []
+
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async_tokio", "async_futures"] }
 serial_test = { workspace = true }

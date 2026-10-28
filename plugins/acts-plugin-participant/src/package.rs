@@ -2,7 +2,7 @@
 //! into participants.
 //!
 //! The package is an IRQ act, not an evaluator: its params *are* the
-//! [`OwnerExpr`](crate::OwnerExpr) document (raw, or wrapped as
+//! [`OwnerExpr`](acts::OwnerExpr) document (raw, or wrapped as
 //! `{ "owner": … }`), and the engine sends it to the client exactly like any
 //! other request. The client knows its user directory — roles, groups,
 //! resource owners, relations — and answers with the participants:
@@ -28,10 +28,9 @@
 //! The package has no `execute`: an `ActRunAs::Irq` act waits for its client,
 //! so there is nothing for the engine to evaluate.
 
-use crate::{
-    Context, OwnerExpr, Participant,
-    model::{ContextVar, VarType},
-    package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs},
+use acts::{
+    ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Config, Context,
+    ContextVar, OwnerExpr, Participant, Result, VarType,
 };
 use serde_json::{Value as JsonValue, json};
 
@@ -43,9 +42,9 @@ impl OwnerPackage {
     /// documented form; `{ "owner": … }` is accepted so a step can name the
     /// expression the same way `assign.owner` does; a plain string keeps the
     /// legacy string form.
-    fn expression(params: &JsonValue) -> crate::Result<OwnerExpr> {
+    fn expression(params: &JsonValue) -> Result<OwnerExpr> {
         let invalid = |detail: &str| {
-            crate::ActError::Package(format!(
+            ActError::Package(format!(
                 "invalid ActPackage(acts.core.owner) params: {detail}"
             ))
         };
@@ -116,7 +115,7 @@ impl ActPackage for OwnerPackage {
         }
     }
 
-    fn new(_config: &crate::Config) -> crate::Result<Self> {
+    fn new(_config: &Config) -> Result<Self> {
         Ok(Self)
     }
 
@@ -129,7 +128,7 @@ impl ActPackage for OwnerPackage {
     /// here keeps the request self-contained and leaves only business atoms
     /// for the client. The request always carries the raw expression, whether
     /// the act declared it raw or wrapped as `{ "owner": … }`.
-    async fn prepare_params(&self, ctx: &Context, params: JsonValue) -> crate::Result<JsonValue> {
+    async fn prepare_params(&self, ctx: &Context, params: JsonValue) -> Result<JsonValue> {
         let expression = Self::expression(&params)?;
         let expression = resolve_local(ctx, &expression)?;
         Ok(serde_json::to_value(expression)?)
@@ -137,7 +136,7 @@ impl ActPackage for OwnerPackage {
 }
 
 /// An [`OwnerExpr`] with its local context atoms replaced.
-fn resolve_local(ctx: &Context, expr: &OwnerExpr) -> crate::Result<OwnerExpr> {
+fn resolve_local(ctx: &Context, expr: &OwnerExpr) -> Result<OwnerExpr> {
     Ok(match expr {
         OwnerExpr::Value(_)
         | OwnerExpr::User { .. }
@@ -154,13 +153,13 @@ fn resolve_local(ctx: &Context, expr: &OwnerExpr) -> crate::Result<OwnerExpr> {
             operands: operands
                 .iter()
                 .map(|operand| resolve_local(ctx, operand))
-                .collect::<crate::Result<Vec<_>>>()?,
+                .collect::<Result<Vec<_>>>()?,
         },
         OwnerExpr::AllOf { operands } => OwnerExpr::AllOf {
             operands: operands
                 .iter()
                 .map(|operand| resolve_local(ctx, operand))
-                .collect::<crate::Result<Vec<_>>>()?,
+                .collect::<Result<Vec<_>>>()?,
         },
         OwnerExpr::Except { base, minus } => OwnerExpr::Except {
             base: Box::new(resolve_local(ctx, base)?),
@@ -174,7 +173,7 @@ fn resolve_local(ctx: &Context, expr: &OwnerExpr) -> crate::Result<OwnerExpr> {
 /// atom becomes the users it resolved to. A local atom the scope cannot
 /// answer (an unknown variable) fails the request: the engine already knows
 /// the value is absent, so sending it on would only hide the mistake.
-fn resolve_context(ctx: &Context, var: &ContextVar) -> crate::Result<OwnerExpr> {
+fn resolve_context(ctx: &Context, var: &ContextVar) -> Result<OwnerExpr> {
     if let ContextVar::Var { ty, .. } = var
         && !matches!(ty, VarType::User | VarType::Users)
     {
@@ -206,12 +205,9 @@ fn participants_to_expr(participants: &[Participant]) -> OwnerExpr {
     }
 }
 
-inventory::submit!(ActPackageRegister::new::<OwnerPackage>());
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ActPackage;
 
     #[test]
     fn the_owner_package_is_an_irq_request() {
@@ -221,9 +217,13 @@ mod tests {
         assert_eq!(meta.catalog, ActPackageCatalog::Core);
     }
 
+    /// The definition's schema accepts the documented object expressions and
+    /// the legacy string form; the runtime cells exercise the same forms
+    /// through the engine's schema validation.
     #[test]
-    fn the_owner_package_schema_accepts_the_documented_forms() {
+    fn the_owner_package_accepts_the_documented_forms() {
         let meta = OwnerPackage::definition();
+        assert_eq!(meta.schema["type"], json!(["object", "string"]));
         for params in [
             json!({ "kind": "context", "var": { "type": "current_actor" } }),
             json!({ "kind": "owners_of",
@@ -232,7 +232,12 @@ mod tests {
             json!({ "owner": { "kind": "role", "name": "reviewer" } }),
             json!("${{ reviewer }}"),
         ] {
-            jsonschema::validate(&meta.schema, &params).unwrap();
+            assert!(
+                OwnerPackage::expression(&params).is_ok(),
+                "the package must accept {params}"
+            );
         }
+        assert!(OwnerPackage::expression(&json!(null)).is_err());
+        assert!(OwnerPackage::expression(&json!(1)).is_err());
     }
 }

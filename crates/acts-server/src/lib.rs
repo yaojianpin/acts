@@ -845,6 +845,7 @@ pub fn engine_builder(
     if plugins.nats && config.has("nats") {
         builder = builder.add_plugin(&acts_plugin_nats::NatsPlugin::new());
     }
+    builder = builder.add_plugin(&acts_plugin_participant::ParticipantPlugin::new());
     Ok(builder)
 }
 

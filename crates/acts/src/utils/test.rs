@@ -7,7 +7,7 @@ pub const USES_BLOCK: &str = "acts.core.block";
 pub const USES_PARALLEL: &str = "acts.core.parallel";
 pub const USES_SEQUENCE: &str = "acts.core.sequence";
 
-/// The crate-wide functional-test harness. It lives with the scheduler tests
-/// that first needed it, but every test module — packages, the expression
-/// environment, integration cells — reaches it through this one path.
-pub(crate) use crate::scheduler::tests::flow::FlowFixture;
+/// The crate-wide functional-test harness. It lives in [`crate::testing`] —
+/// exported to downstream tests behind the `test-utils` feature — and every
+/// crate-local test module reaches it through this one path.
+pub(crate) use crate::testing::FlowFixture;
