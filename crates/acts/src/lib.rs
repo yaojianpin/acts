@@ -24,6 +24,16 @@ mod acl;
 mod builder;
 pub mod capability;
 
+/// The stable read surface of a running evaluation.
+///
+/// A port or package receives these values from the kernel; an embedder reads
+/// them, but the kernel remains their only constructor. The surface is
+/// deliberately narrower than the shell: it names the run/scope/task types a
+/// port may inspect, not the internal handles they are built over.
+pub mod runtime {
+    pub use crate::scheduler::{Context, Scope, ScopeNode, ScopeSpec, ScopeTask, TaskState};
+}
+
 mod config;
 mod engine;
 mod env;

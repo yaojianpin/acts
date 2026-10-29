@@ -51,23 +51,21 @@ pub(crate) mod tests;
 pub use self::core::decision::RunOutcome;
 pub(crate) use self::core::decision::run_outcome;
 pub use self::core::health::{HealthState, SchedulerHealth};
-pub use self::shell::Context;
+pub use self::shell::{Context, Scope, ScopeNode, ScopeSpec, ScopeTask};
 
 #[cfg(test)]
 pub(crate) use self::core::commit::aggregate::ProcessSnapshot;
 pub(crate) use self::core::model::effect::EffectKey;
-pub(crate) use self::core::model::{
-    task_graph::TaskState,
-    view::{NodeContent, NodeData, NodeKind, assign_ids},
-};
+pub use self::core::model::task_graph::TaskState;
+pub(crate) use self::core::model::view::{NodeContent, NodeData, NodeKind, assign_ids};
 pub(crate) use self::core::outbox::records::OutboxRecord;
 pub(crate) use self::core::plan::branch::PredicateValue;
 pub(crate) use self::core::plan::cron::Cron;
 pub(crate) use self::runtime::Runtime;
+pub(crate) use self::shell::DeferredAction;
 /// The container package ids the model layer's rule validation reads (the
 /// shell owns the import; the model only needs the names).
 pub(crate) use self::shell::model::{BLOCK_PACKAGE, PARALLEL_PACKAGE, SEQUENCE_PACKAGE};
-pub(crate) use self::shell::{DeferredAction, Scope, ScopeSpec, ScopeTask};
 #[cfg(test)]
 pub(crate) use self::shell::{ProcRead, TaskRow, headless_scope, read_context};
 

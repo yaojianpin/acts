@@ -28,7 +28,12 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// The variable space one headless scope sees.
-pub(crate) struct ScopeSpec {
+///
+/// This is part of the runtime read surface: a port implementation receives
+/// one from the kernel but does not construct it. The fields stay private so
+/// the kernel can change how the scope is seeded without changing the port
+/// contract.
+pub struct ScopeSpec {
     pub(crate) process_id: String,
     /// The acting node id (the model node the execution runs).
     pub(crate) node: String,
@@ -45,8 +50,8 @@ pub(crate) struct ScopeSpec {
     /// every declared node.
     pub(crate) pushed: Option<crate::model::Step>,
     /// Explicit local seed/overlay variables as JSON strings. Production
-    /// effects leave this empty and resolve parent/root values from
-    /// [`Self::snapshot`]; tests, read-model contexts and branch-predicate
+    /// effects leave this empty and resolve parent/root values from the
+    /// shared aggregate; tests, read-model contexts and branch-predicate
     /// overlays use it as a local override.
     pub(crate) vars: Vec<(String, String)>,
     /// The shared aggregate the scope resolves parent/root values from on
@@ -61,6 +66,43 @@ pub(crate) struct ScopeSpec {
     /// headless scope seals snapshot data under it (a run nobody sealed
     /// carries `deny_all`, so it reads nothing).
     pub(crate) owner: ScopePolicy,
+}
+
+impl ScopeSpec {
+    /// The run id this evaluation belongs to.
+    pub fn process_id(&self) -> &str {
+        &self.process_id
+    }
+
+    /// The model node the acting execution runs.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    /// The declaring model.
+    pub fn model(&self) -> &Workflow {
+        &self.model
+    }
+
+    /// The pushed act's synthetic step, if this evaluation is for one.
+    pub fn pushed(&self) -> Option<&crate::model::Step> {
+        self.pushed.as_ref()
+    }
+
+    /// Explicit local seed/overlay variables as JSON strings.
+    pub fn vars(&self) -> &[(String, String)] {
+        &self.vars
+    }
+
+    /// The run's declared env map.
+    pub fn env(&self) -> &[(String, serde_json::Value)] {
+        &self.env
+    }
+
+    /// The run's caller authority.
+    pub fn owner(&self) -> &ScopePolicy {
+        &self.owner
+    }
 }
 
 /// The lightweight process-side view a headless scope needs.

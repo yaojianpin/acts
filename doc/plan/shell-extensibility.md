@@ -1,7 +1,7 @@
 # scheduler/shell 扩展性实施计划
 
 - 设计文档：[`doc/design/shell-extensibility.md`](../design/shell-extensibility.md)
-- 状态：P0 生效；P1 待执行；P2 能力契约已定，participant 原型暂停
+- 状态：P0 生效；P1 已落地（内部装配 + 外部 participant 端口）；P2 participant 已落地（provider key/发布启动检查）；P3 进行中（runtime 读取面已公开）
 - 执行方式：一次只执行一个阶段；上一阶段验收通过后，才生成并执行下一阶段。
 
 ## 1. 阶段总览
@@ -9,9 +9,9 @@
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 | 冻结 shell 增长（评审规则 + 参与人包走 IRQ） | 生效中 |
-| P1 | 类型化端口 + `PortSet` + `KernelPorts` 装配 | 待执行 |
-| P2 | 能力类型/属性映射/提供者 key + 发布/启动检查；participant 首个外部能力 | 契约已定，原型暂停 |
-| P3 | 抽出效果运行器 + `acts-runtime-api` | 待执行 |
+| P1 | 类型化端口 + `PortSet` + `KernelPorts` 装配 | 已落地（默认实现仍在 shell） |
+| P2 | 能力类型/属性映射/提供者 key + 发布/启动检查；participant 首个外部能力 | participant 已落地（version 仅元数据） |
+| P3 | 抽出效果运行器 + `acts-runtime-api` | 进行中（`acts::runtime` 读取面已公开；效果运行器外移待执行） |
 | P4 | 谓词、投递、包 schema 默认实现外移 | 待执行 |
 | P5 | 定时器注册（schedule 触发端口化） | 待执行 |
 | P6 | 投影目标端口 | 待执行 |

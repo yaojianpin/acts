@@ -153,7 +153,7 @@ pub(crate) use read_model::{ProcRead, load as load_proc_rows};
 pub(crate) use read_model::{TaskRow, context as read_context};
 #[cfg(test)]
 pub(crate) use scope::headless_scope;
-pub(crate) use scope::{Scope, ScopeSpec, ScopeTask};
+pub use scope::{Scope, ScopeNode, ScopeSpec, ScopeTask};
 pub(crate) use snapshot::SnapshotRegistry;
 pub(crate) use timers::TimerGuider;
 
