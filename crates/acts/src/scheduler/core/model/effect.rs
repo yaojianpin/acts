@@ -15,7 +15,7 @@
 use super::{operation::OperationId, task_graph::TaskId};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct EffectKey {
+pub struct EffectKey {
     pub(crate) process_id: String,
     pub(crate) task: TaskId,
     pub(crate) sequence: u64,
@@ -34,7 +34,7 @@ impl EffectKey {
     }
 
     /// The stable external form: `<instance wire>-<sequence>`.
-    pub(crate) fn wire(&self) -> String {
+    pub fn wire(&self) -> String {
         format!("{}-{}", self.task.wire(&self.process_id), self.sequence)
     }
 }

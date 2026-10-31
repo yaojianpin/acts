@@ -7,7 +7,7 @@
 //! two depend on the operation's kind:
 //!
 //! 1. **Prepare** ([`prepare`]): the parked fast path, the slot policy
-//!    ([`KernelHost::place_run`]), the kind's own pre-claim policy
+//!    ([`Workers::place_run`]), the kind's own pre-claim policy
 //!    ([`ActOperation::precheck`]) and the claim, as one atomic
 //!    `ClaimAndPrepare` event. The snapshot that commit hands back is the
 //!    authoritative state the rest of the operation is formed from.
@@ -35,7 +35,6 @@ mod action;
 mod cascade;
 mod dispatch;
 mod fold;
-mod join;
 mod prepare;
 mod propagate;
 mod reentry;
@@ -68,7 +67,7 @@ pub(super) enum Precheck {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Slot {
     /// The driver's own operations: the parked fast path and the slot policy
-    /// ([`KernelHost::place_run`]) decide whether this run may operation at all.
+    /// ([`Workers::place_run`]) decide whether this run may operation at all.
     Policy,
     /// The client action path: the decision is already durable — the intent was
     /// committed before the operation — so the operation is claimed directly. The
@@ -91,14 +90,14 @@ pub(super) enum Slot {
 /// the lane cannot see — a crash between claim and commit, a lease expiry,
 /// another instance — stays fenced by the aggregate's revision guards.
 pub(super) struct CommandLane {
-    host: KernelHost,
+    host: Workers,
     process_id: String,
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl CommandLane {
     /// Acquire the pid's command lane and hold it.
-    pub(super) async fn hold(host: &KernelHost, process_id: &str) -> Self {
+    pub(super) async fn hold(host: &Workers, process_id: &str) -> Self {
         let guard = host.lock_command_lane(process_id).await;
         Self {
             host: host.clone(),
@@ -112,7 +111,7 @@ impl CommandLane {
     /// `fold_internal`) and they never run an effect, so they hold no lane of
     /// their own. `release`/`resume` on it would be a bug — only `run` uses
     /// those, and the fold never calls `run`.
-    pub(super) fn detached(host: &KernelHost) -> Self {
+    pub(super) fn detached(host: &Workers) -> Self {
         Self {
             host: host.clone(),
             process_id: String::new(),
@@ -299,17 +298,17 @@ impl Outcome {
 pub(super) trait ActOperation: Send + Sync {
     /// Phase 1's kind-specific half, decided before the claim consumes
     /// anything.
-    async fn precheck(&self, host: &KernelHost, pending: &Pending<'_>) -> Result<Precheck>;
+    async fn precheck(&self, host: &Workers, pending: &Pending<'_>) -> Result<Precheck>;
 
     /// Phase 2: the operation's own work, reported as the outcome phase 3
     /// folds into the operation's plan.
-    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome>;
+    async fn run(&self, host: &Workers, operation: &mut Operation<'_>) -> Result<Outcome>;
 
     /// Phase 3: the durable next plan of one outcome. [`Outcome::Nothing`]
     /// never reaches here — that operation has no plan at all.
     async fn next(
         &self,
-        host: &KernelHost,
+        host: &Workers,
         operation: &Operation<'_>,
         outcome: Outcome,
     ) -> Result<TransitionPlan>;
@@ -334,7 +333,7 @@ pub(super) fn driver(kind: OperationKind) -> Option<&'static dyn ActOperation> {
     }
 }
 
-impl KernelHost {
+impl Workers {
     /// One durable operation, in the four phases above. Returns `Ok(false)` when the
     /// operation needed nothing — a wake redelivered for an already-terminal
     /// operation, a run parked by the slot cap, or a timer with nothing due.
@@ -407,16 +406,17 @@ impl KernelHost {
     pub(in crate::scheduler::shell) async fn converge_observed_effect(
         &self,
         id: &OperationId,
-        observation: effects::EffectObservation,
+        observation: crate::scheduler::shell::caps::effect::EffectObservation,
     ) -> Result<bool> {
         let effect = match observation {
-            effects::EffectObservation::Applied(outcome) => {
+            crate::scheduler::shell::caps::effect::EffectObservation::Applied(outcome) => {
                 action::Effect::Completed(Some(outcome))
             }
-            effects::EffectObservation::Failed(message) => {
+            crate::scheduler::shell::caps::effect::EffectObservation::Failed(message) => {
                 action::Effect::Failed(ActError::Package(message))
             }
-            effects::EffectObservation::NotApplied | effects::EffectObservation::Unknown => {
+            crate::scheduler::shell::caps::effect::EffectObservation::NotApplied
+            | crate::scheduler::shell::caps::effect::EffectObservation::Unknown => {
                 return Ok(false);
             }
         };
@@ -483,8 +483,8 @@ mod tests {
         task_graph::{TaskId, TaskState},
     };
 
-    fn host() -> std::sync::Arc<KernelHost> {
-        KernelHost::in_memory().0
+    fn host() -> std::sync::Arc<Workers> {
+        Workers::in_memory().0
     }
 
     fn op(node: &str, sequence: u64, kind: OperationKind) -> OperationId {
@@ -497,7 +497,7 @@ mod tests {
         id
     }
 
-    async fn persist(host: &KernelHost, snapshot: &ProcessSnapshot) {
+    async fn persist(host: &Workers, snapshot: &ProcessSnapshot) {
         host.processes
             .create(snapshot, SystemClock.now_ms(), host.timer_poll_ms())
             .await
@@ -585,8 +585,8 @@ mod tests {
     async fn unproven_observations_are_ignored() {
         let host = host();
         for observation in [
-            crate::scheduler::shell::effects::EffectObservation::NotApplied,
-            crate::scheduler::shell::effects::EffectObservation::Unknown,
+            crate::scheduler::shell::caps::effect::EffectObservation::NotApplied,
+            crate::scheduler::shell::caps::effect::EffectObservation::Unknown,
         ] {
             assert!(
                 !host
@@ -605,7 +605,7 @@ mod tests {
             !host
                 .converge_observed_effect(
                     &op("a", 0, OperationKind::ApplyAction),
-                    crate::scheduler::shell::effects::EffectObservation::Failed("boom".into()),
+                    crate::scheduler::shell::caps::effect::EffectObservation::Failed("boom".into()),
                 )
                 .await
                 .unwrap()
@@ -635,7 +635,7 @@ mod tests {
         assert!(
             host.converge_observed_effect(
                 &id,
-                crate::scheduler::shell::effects::EffectObservation::Failed("boom".into()),
+                crate::scheduler::shell::caps::effect::EffectObservation::Failed("boom".into()),
             )
             .await
             .unwrap()
@@ -658,8 +658,8 @@ mod tests {
         assert!(
             host.converge_observed_effect(
                 &id,
-                crate::scheduler::shell::effects::EffectObservation::Applied(
-                    crate::scheduler::shell::effects::EffectOutcome {
+                crate::scheduler::shell::caps::effect::EffectObservation::Applied(
+                    crate::scheduler::shell::caps::effect::EffectOutcome {
                         outputs: None,
                         decision: None,
                     },
@@ -777,7 +777,7 @@ mod tests {
         let error = host
             .converge_observed_effect(
                 &id,
-                crate::scheduler::shell::effects::EffectObservation::Failed("boom".into()),
+                crate::scheduler::shell::caps::effect::EffectObservation::Failed("boom".into()),
             )
             .await
             .unwrap_err();

@@ -16,18 +16,18 @@ pub(super) struct ReenterTask;
 #[async_trait::async_trait]
 impl ActOperation for ReenterTask {
     /// Nothing to check before the claim: a rewind always has its work.
-    async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
+    async fn precheck(&self, _host: &Workers, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
     }
 
     /// Nothing runs: the plan is the whole operation.
-    async fn run(&self, _host: &KernelHost, _operation: &mut Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, _host: &Workers, _operation: &mut Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 
     async fn next(
         &self,
-        _host: &KernelHost,
+        _host: &Workers,
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
@@ -68,7 +68,7 @@ mod tests {
     /// a `Cancel` closes the execution and names it as the target.
     #[tokio::test]
     async fn the_source_node_is_the_default_reenter_target() {
-        let (host, _wake) = KernelHost::in_memory();
+        let (host, _wake) = Workers::in_memory();
         let mut snapshot = ProcessSpec::linear("p", "root", &["a"])
             .seed_snapshot()
             .unwrap();

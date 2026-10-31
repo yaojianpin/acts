@@ -270,18 +270,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "acts-plugin-participant"
-version = "0.25.0"
-dependencies = [
- "acts",
- "async-trait",
- "serde",
- "serde_json",
- "tokio",
- "toml",
-]
-
-[[package]]
 name = "acts-plugin-web"
 version = "0.25.0"
 dependencies = [
@@ -326,7 +314,6 @@ dependencies = [
  "acts-package-state",
  "acts-plugin-grpc",
  "acts-plugin-nats",
- "acts-plugin-participant",
  "acts-plugin-web",
  "acts-store",
  "anyhow",

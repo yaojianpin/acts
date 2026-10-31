@@ -1,5 +1,10 @@
 \# scheduler(内核)重构设计笔记(2026-10-15)
 
+> 注(2026-10-29)：本文中的 `KernelHost` 已更名为 `Workers`，其 `ports` 字段
+> 更名 `caps`（`CapServices`）；能力模型见 `design/caps.md`。本文其余内容
+> 为历史决策记录，按当时名称阅读。
+
+
 
 
 > \*\*状态:D1-D4 已全部拍定(C1-C8c 已落地;D4 = 暂不挪,2026-10-17)。\*\* 决策记录见 §2.2;
@@ -1640,27 +1645,29 @@ A11 的存储目标是“恢复所需的最小状态”,不是历史归档;终�
 
 
 
-\*\*事实(代码位置,实现前)\*\*
+\*\*事实(代码位置)\*\*
 
 
 
 \- 写入点:`scheduler/shell/operation/action.rs::param\_fanout\_children` 为每个 `in` 项写
 
-&#x20; `index`/`value`(与模板 vars 一起)到 `<step>#item` 这一代的 scope。
+&#x20; `__fanout_index`/`__fanout_value`(与模板 vars 一起)到 `<step>#item` 这一代的 scope。
 
 \- 求值:act params / predicate / effect 的变量空间来自 `scheduler/shell/facts.rs::scope\_vars`
 
-&#x20; (scope 链,nearer wins);`${{ value }}`/`${{ index }}` 因此可用。
+&#x20; (scope 链,nearer wins);`env/functions.rs` 的 `$item` 内建从这两个私有变量组装
+
+&#x20; `{ index, value }`,因此 `${{ $item.value }}`/`${{ $item.index }}` 可用;裸 `value`/`index` 不是变量。
 
 \- 上浮:`scheduler/shell/operation/propagate.rs` 在 completed execution 上把自身 scope 的
 
-&#x20; 非引擎变量折进 parent(过滤 `is\_engine\_fact`: `\_\_` 私有名与 `auto`)。`index`/`value` 不在过滤表里,
+&#x20; 非引擎变量折进 parent(过滤 `is\_engine\_fact`: `\_\_` 私有名与 `auto`)。私有绑定不在过滤表外,
 
-&#x20; 所以折进祖先 scope;`exposes` 为空时 `process\_message` 又把根 scope 的整份变量空间当 outputs。
+&#x20; 所以不会折进祖先 scope;`exposes` 为空时 `process\_message` 又把根 scope 的整份变量空间当 outputs。
 
-\- 行投影:`projection.rs::scope\_data` 过滤私有名与 `auto`,所以 public 的 `index`/`value` 也进 vars 行。
+\- 行投影:`projection.rs::scope\_data` 过滤私有名与 `auto`,所以绑定不进 vars 行。
 
-\- 消息:act payload 的 `inputs` 来自 `facts.rs::input\_vars`(同样过滤私有名与 `auto`),所以也见过它们。
+\- 消息:act payload 的 `inputs` 来自 `facts.rs::input\_vars`(同样过滤私有名与 `auto`),所以也不见它们。
 
 
 
@@ -1672,29 +1679,25 @@ A11 的存储目标是“恢复所需的最小状态”,不是历史归档;终�
 
 &#x20; fan-out 只写这两个名字;它们不是 run data。
 
-\- `scope\_vars` 在每一层 scope 处理完 public 变量后,把私有绑定作为 `index`/`value` 的\*\*回退\*\*别名加入
+\- `$item` 内建读取这两个私有绑定,返回 `{ index, value }`;不在 fan-out 内的执行读到 `null`。于是:
 
-&#x20; (同层或更近层的同名 workflow 变量优先)。于是:
-
-&#x20; - `${{ index }}`/`${{ value }}`、predicate、effect params 的求值路径不变;
+&#x20; - `${{ $item.index }}`/`${{ $item.value }}`、predicate、effect params 的求值走同一条表达式路径;
 
 &#x20; - `is\_private\_key` 让 `PropagateTask` 的折叠、`scope\_data` 行投影、`input\_vars` 消息 `inputs`、
 
 &#x20;   `root\_variables` outputs 全部自动跳过它们;
 
-&#x20; - `$data()`/`$inputs()` 在 item 自己的 scope 内仍看到 `index`/`value`(headless scope 由 `scope\_vars` 构建),
-
-&#x20;   但那是该次求值的内存视图,不会写回聚合。
+&#x20; - `$data()`/`$inputs()` 也不会把 item 绑定当成 run 数据。
 
 \- 与 legacy 的差异:legacy 把两者放在 act 的 \*\*options\*\*,不在 task data;本实现放在私有的 scope 变量并
 
-&#x20; 以同名别名求值,因此读面效果相同(不是 run data、不上浮),但没有把它们塞进 `options`
+&#x20; 由 `$item` 读取,因此读面效果相同(不是 run data、不上浮),但没有把它们塞进 `options`
 
 &#x20; —— per-item options 需要按实例持久化 options,而 options 目前是模型节点级、由 start 一次解析并 pin 在
 
 &#x20; `\_\_options`;每代一份 options 会新增持久化形状,而收益只是 `$options().index` 这种 legacy 读法。
 
-&#x20; 逐项绑定仍可通过 `${{ index }}`/`${{ value }}` 读取(模板 acts 的实际用法)。
+&#x20; 逐项绑定通过 `${{ $item.value }}`/`${{ $item.index }}` 读取(模板 acts 的实际用法)。
 
 
 
@@ -1704,7 +1707,7 @@ A11 的存储目标是“恢复所需的最小状态”,不是历史归档;终�
 
 \- 绑定随 fan-out 的 transition 写入 run 的聚合(`ProcessSnapshot.variables`),是普通字符串值;
 
-&#x20; 重启后 `scope\_vars` 从同一聚合重建别名,恢复的 start/propagate 操作读到同一对值。
+&#x20; 重启后 `$item` 从同一聚合重建,恢复的 start/propagate 操作读到同一对值。
 
 \- 不需要 codec/upcast 或行格式变更:私有名只是变量 key 的取值,持久化形状不变;
 

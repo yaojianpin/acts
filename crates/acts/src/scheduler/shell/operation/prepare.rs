@@ -9,7 +9,7 @@
 use super::*;
 use crate::scheduler::shell::*;
 
-impl KernelHost {
+impl Workers {
     /// Phase 1: whether this operation may be driven, and the claimed operation it
     /// drives. `Ok(None)` is the "nothing to do" answer — a run parked by the
     /// slot cap, an operation that already moved past the claimable states, or
@@ -202,8 +202,8 @@ mod tests {
         task_graph::{TaskId, TaskState},
     };
 
-    fn host() -> std::sync::Arc<KernelHost> {
-        KernelHost::in_memory().0
+    fn host() -> std::sync::Arc<Workers> {
+        Workers::in_memory().0
     }
 
     fn id(sequence: u64) -> OperationId {
@@ -222,7 +222,7 @@ mod tests {
         }
     }
 
-    async fn persist(host: &KernelHost, snapshot: &ProcessSnapshot) {
+    async fn persist(host: &Workers, snapshot: &ProcessSnapshot) {
         host.processes
             .create(snapshot, SystemClock.now_ms(), host.timer_poll_ms())
             .await

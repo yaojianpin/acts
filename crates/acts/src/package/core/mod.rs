@@ -1,5 +1,6 @@
 mod action;
 mod block;
+mod candidates;
 mod decide;
 mod irq;
 mod msg;

@@ -102,7 +102,7 @@ async fn finish_chain(engine: &Engine, pid: &str) {
         || async {
             if engine
                 .runtime()
-                .kernel()
+                .workers()
                 .process_completed(pid)
                 .await
                 .unwrap_or(false)
@@ -136,7 +136,7 @@ async fn process_snapshot(
 ) -> crate::scheduler::core::commit::aggregate::ProcessSnapshot {
     engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -394,7 +394,7 @@ async fn a_store_fault_under_the_completed_acts_row_keeps_the_decision_and_sweep
     let reloaded = restart(&engine, store.clone()).await;
     if reloaded
         .runtime()
-        .kernel()
+        .workers()
         .exists(&pid)
         .await
         .unwrap_or(false)
@@ -694,7 +694,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
         let recovered = engine_on(store.clone()).await;
         let scan = recovered
             .runtime()
-            .kernel()
+            .workers()
             .tick(SystemClock.now_ms())
             .await
             .unwrap();
@@ -742,7 +742,7 @@ async fn a_crash_at_each_write_boundary_of_the_completion_keeps_the_decision_onc
                 // surfaced for reconciliation; nothing is applied.
                 let shifted = recovered
                     .runtime()
-                    .kernel()
+                    .workers()
                     .tick(SystemClock.now_ms() + 120_000)
                     .await
                     .unwrap();
@@ -888,7 +888,7 @@ async fn a_crash_after_the_chain_propagated_keeps_one_child_per_node_inner() {
     // for reconciliation — only the client's decision is left to re-derive.
     let scan = recovered
         .runtime()
-        .kernel()
+        .workers()
         .tick(SystemClock.now_ms())
         .await
         .unwrap();

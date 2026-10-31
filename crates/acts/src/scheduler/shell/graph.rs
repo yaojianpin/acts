@@ -23,7 +23,7 @@ use crate::scheduler::core::commit::aggregate::ProcessSnapshot;
 use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
 use std::collections::{HashMap, HashSet};
 
-impl KernelHost {
+impl Workers {
     /// The run's graph with its execution instances and states.
     pub(crate) async fn graph(&self, pid: &str) -> Result<crate::ProcessGraph> {
         let snapshot = self

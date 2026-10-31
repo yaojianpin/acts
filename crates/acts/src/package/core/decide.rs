@@ -3,8 +3,8 @@ use crate::package::{
 };
 use serde_json::json;
 
-/// The join-decision request a container with `rule: { action, params }`
-/// sends its client.
+/// The join-decision request a container with a delegated rule
+/// (`join: { params, uses }`) sends its client.
 ///
 /// The engine creates one request execution per child settlement (the
 /// delegated rule asks on every vote that lands, so the client can decide as
@@ -15,11 +15,13 @@ use serde_json::json;
 /// - `skip` — defer: the request settles skipped and the next settlement (or
 ///   an idle re-ask once every child settled) asks again.
 ///
-/// The request's params carry the `action` key, the rule's own `params`, and
-/// the `outcomes` census: every counted child with its node, generation,
-/// state and outputs. A dedicated package (rather than `acts.core.irq`)
-/// constrains that contract and lets a client route the request by its
-/// `uses`; the transport underneath is the same interrupt-and-answer flow.
+/// The request's params carry the rule's own `params` — where this package
+/// expects an `action` key naming the client's business handler — and the
+/// `outcomes` census: every counted child with its node, generation, state
+/// and outputs. A dedicated package (rather than `acts.core.irq`) constrains
+/// that contract and lets a client route the request by its `uses`; the
+/// transport underneath is the same interrupt-and-answer flow. A model that
+/// names its own package on the rule replaces this contract wholesale.
 #[derive(Debug, Clone)]
 pub struct JoinDecidePackage;
 
@@ -36,19 +38,21 @@ impl ActPackage for JoinDecidePackage {
             schema: json!({
                 "type": "object",
                 "title": "Parameters",
-                "description": "The join-decision request: the action to invoke, the rule's params, and the children's outcomes",
-                "required": ["action"],
+                "description": "The join-decision request: the rule's params and the children's outcomes",
+                "required": ["params", "outcomes"],
                 "properties": {
-                    "action": {
-                        "type": "string",
-                        "title": "Action",
-                        "description": "The key the client's handler is registered under"
-                    },
                     "params": {
-                        "type": ["object", "null"],
+                        "type": "object",
                         "title": "Params",
-                        "description": "The rule's own params, resolved against the container scope",
-                        "default": {}
+                        "description": "The rule's own params, resolved against the container scope; the `action` key names the client's business handler",
+                        "required": ["action"],
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "title": "Action",
+                                "description": "The key the client's handler is registered under"
+                            }
+                        }
                     },
                     "outcomes": {
                         "type": "array",
@@ -80,8 +84,8 @@ mod tests {
     #[test]
     fn pack_rule_parse() {
         let params = r#"
-            action: countersign
             params:
+              action: countersign
               chair: chair
             outcomes:
               - node: "s1#act0"
@@ -97,7 +101,7 @@ mod tests {
 
     #[test]
     fn pack_rule_requires_the_action() {
-        let value = serde_yaml::from_str::<serde_json::Value>("params: {}").unwrap();
+        let value = serde_yaml::from_str::<serde_json::Value>("params: {}\noutcomes: []").unwrap();
         let meta = super::JoinDecidePackage::definition();
         assert!(jsonschema::validate(&meta.schema, &value).is_err());
     }

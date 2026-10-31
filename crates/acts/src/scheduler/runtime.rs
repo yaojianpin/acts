@@ -8,15 +8,13 @@
 //! re-exported from `mod.rs`.
 
 use crate::{
-    ActError, Action, Config, Package, Result, Vars, Workflow,
-    capability::{CapabilityKind, CapabilityProvider, CapabilityRequirement},
-    data,
+    ActError, Action, Config, Package, Result, Vars, Workflow, data,
     env::Environment,
     event::{Emitter, ProcessGate},
     scheduler::{
         core::health::{CleanupMetrics, SchedulerHealth},
         shell::{
-            KernelHost, ProcRead, SnapshotRegistry, TimerGuider, timers as shell_timers,
+            ProcRead, SnapshotRegistry, TimerGuider, Workers, timers as shell_timers,
             validation::SchemaCache,
         },
     },
@@ -51,22 +49,7 @@ pub struct Runtime {
     /// started process (start, actions, effects, messages) and drives the operations
     /// over the aggregate documents, including the store-facing timers
     /// (`timer_guider`/`timer_guards`).
-    kernel: Arc<KernelHost>,
-    /// Set by the start pass after the plugins' `on_init`, so a running
-    /// engine never changes how owners resolve mid-run.
-    participant_resolver_sealed: Arc<std::sync::atomic::AtomicBool>,
-    /// `(kind, provider key)` → provider description, advertised by plugins
-    /// from `on_init`. The model publish path resolves a requirement here; a
-    /// missing entry is a named error rather than a feature that silently does
-    /// nothing.
-    capabilities: Arc<
-        parking_lot::RwLock<
-            std::collections::BTreeMap<(CapabilityKind, String), CapabilityProvider>,
-        >,
-    >,
-    /// Set by the start pass with the resolver slot: a plugin advertises its
-    /// capabilities at startup only.
-    capabilities_sealed: Arc<std::sync::atomic::AtomicBool>,
+    workers: Arc<Workers>,
 }
 
 /// Tick the periodic timers run on under test — short enough that a test can
@@ -74,37 +57,6 @@ pub struct Runtime {
 /// ticks.
 #[cfg(test)]
 pub(crate) const TEST_TICK_MS: u64 = 800;
-
-fn capability_hint(kind: CapabilityKind) -> &'static str {
-    match kind {
-        CapabilityKind::Participant => "install acts-plugin-participant (ParticipantPlugin)",
-    }
-}
-
-/// Fill an unkeyed assignment with the kind's only provider.
-fn freeze_step_capabilities(runtime: &Runtime, step: &mut crate::model::Step) -> Result<()> {
-    if let Some(assign) = &mut step.assign
-        && assign.provider.is_none()
-    {
-        let provider = runtime.resolve_capability(&CapabilityRequirement {
-            kind: CapabilityKind::Participant,
-            key: None,
-        })?;
-        assign.provider = Some(provider.key);
-    }
-    for branch in &mut step.branches {
-        for inner in &mut branch.steps {
-            freeze_step_capabilities(runtime, inner)?;
-        }
-    }
-    for catch in &mut step.catches {
-        freeze_step_capabilities(runtime, catch)?;
-    }
-    for timeout in &mut step.timeouts {
-        freeze_step_capabilities(runtime, timeout)?;
-    }
-    Ok(())
-}
 
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -131,195 +83,10 @@ impl Runtime {
         self.snapshots.clone()
     }
 
-    /// The resolver `assign.owner` currently uses, if a plugin installed one.
-    ///
-    /// `None` is the engine's default: `assign.owner` fails closed, naming the
-    /// participant plugin, because owner resolution is a participant feature.
-    pub(crate) fn participant_resolver(&self) -> Option<Arc<dyn crate::ParticipantResolver>> {
-        self.kernel.participant_resolver()
-    }
-
-    /// Install the resolver a plugin registered from `ActPlugin::on_init`.
-    ///
-    /// `key` is the plugin's provider key; it must already have a matching
-    /// `CapabilityKind::Participant` provider. Refused once the start pass has
-    /// sealed the slot: a running engine must not change how owners resolve
-    /// between an act's start and its decision.
-    pub(crate) fn register_participant_resolver(
-        &self,
-        key: impl Into<String>,
-        resolver: Arc<dyn crate::ParticipantResolver>,
-    ) -> Result<()> {
-        if self
-            .participant_resolver_sealed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(ActError::Runtime(
-                "the participant resolver is sealed once the engine has started: register it from ActPlugin::on_init, not after EngineBuilder::start returns"
-                    .to_string(),
-            ));
-        }
-        let key = key.into();
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(ActError::Config(
-                "a participant resolver needs a non-empty provider key".to_string(),
-            ));
-        }
-        if !self
-            .capabilities
-            .read()
-            .contains_key(&(CapabilityKind::Participant, key.to_string()))
-        {
-            return Err(ActError::Config(format!(
-                "participant resolver key '{key}' has no registered capability provider: call Engine::register_capability_provider first"
-            )));
-        }
-        self.kernel.attach_participant_resolver(key, resolver)
-    }
-
-    /// Close the resolver slot after the plugins' `on_init` (the start pass's
-    /// last chance to install one).
-    pub(crate) fn seal_participant_resolver(&self) {
-        self.participant_resolver_sealed
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Advertise one capability provider. Called from `ActPlugin::on_init`;
-    /// refused once the start pass has sealed the registry.
-    ///
-    /// Several providers may serve one kind under distinct keys. A model that
-    /// does not name a provider may use the kind's only provider; with several
-    /// providers the publish/start path requires an explicit key.
-    pub(crate) fn register_capability_provider(&self, provider: CapabilityProvider) -> Result<()> {
-        if self
-            .capabilities_sealed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(ActError::Runtime(
-                "plugin capabilities are sealed once the engine has started: register them from ActPlugin::on_init"
-                    .to_string(),
-            ));
-        }
-        let key = provider.key.trim();
-        if key.is_empty() {
-            return Err(ActError::Config(
-                "a capability provider needs a non-empty provider key".to_string(),
-            ));
-        }
-        let plugin = provider.plugin.trim();
-        if plugin.is_empty() {
-            return Err(ActError::Config(format!(
-                "capability provider '{key}' needs a non-empty plugin name"
-            )));
-        }
-        let version = provider.version.trim();
-        if version.is_empty() {
-            return Err(ActError::Config(format!(
-                "capability provider '{key}' needs a non-empty version"
-            )));
-        }
-        let provider = CapabilityProvider {
-            kind: provider.kind,
-            key: key.to_string(),
-            plugin: plugin.to_string(),
-            version: version.to_string(),
-        };
-        let mut registered = self.capabilities.write();
-        if let Some(existing) = registered.get(&(provider.kind, provider.key.clone())) {
-            return Err(ActError::Config(format!(
-                "capability '{}' provider '{}' is already registered by plugin '{}'; '{}' cannot replace it",
-                provider.kind.as_str(),
-                provider.key,
-                existing.plugin,
-                provider.plugin
-            )));
-        }
-        registered.insert((provider.kind, provider.key.clone()), provider);
-        Ok(())
-    }
-
-    /// Resolve one model requirement to its provider description.
-    ///
-    /// A requirement that names a key must match that exact provider; an
-    /// unkeyed requirement uses the kind's only provider. A missing or
-    /// ambiguous provider is a model error naming the attribute and key.
-    pub(crate) fn resolve_capability(
-        &self,
-        requirement: &CapabilityRequirement,
-    ) -> Result<CapabilityProvider> {
-        let registered = self.capabilities.read();
-        if let Some(key) = &requirement.key {
-            return registered
-                .get(&(requirement.kind, key.clone()))
-                .cloned()
-                .ok_or_else(|| {
-                    ActError::Model(format!(
-                        "the model attribute '{}' (kind '{}') declares provider '{key}', but no installed plugin registered it",
-                        requirement.kind.attribute(),
-                        requirement.kind.as_str()
-                    ))
-                });
-        }
-        let mut providers = registered
-            .values()
-            .filter(|provider| provider.kind == requirement.kind);
-        let Some(provider) = providers.next() else {
-            return Err(ActError::Model(format!(
-                "the model requires capability '{}' (kind '{}') but no installed plugin provides it: {}",
-                requirement.kind.attribute(),
-                requirement.kind.as_str(),
-                capability_hint(requirement.kind)
-            )));
-        };
-        if providers.next().is_some() {
-            return Err(ActError::Model(format!(
-                "the model attribute '{}' (kind '{}') has multiple providers; declare a provider key",
-                requirement.kind.attribute(),
-                requirement.kind.as_str()
-            )));
-        }
-        Ok(provider.clone())
-    }
-
-    /// The participant resolver registered under provider `key`, if any.
-    pub(crate) fn participant_resolver_for(
-        &self,
-        key: &str,
-    ) -> Option<Arc<dyn crate::ParticipantResolver>> {
-        self.kernel.participant_resolver_for(key)
-    }
-
-    /// Resolve and freeze every capability a model requires.
-    ///
-    /// An unkeyed assignment is filled with the kind's only provider; an
-    /// explicit key must name a registered provider. The model is then
-    /// validated against the provider's implementation (the participant
-    /// resolver port). The filled model is what the caller persists and what a
-    /// run carries, so a restart never silently falls back to another
-    /// provider.
-    pub(crate) fn resolve_model_capabilities(&self, model: &mut Workflow) -> Result<()> {
-        for step in &mut model.steps {
-            freeze_step_capabilities(self, step)?;
-        }
-        for requirement in model.required_capabilities() {
-            let provider = self.resolve_capability(&requirement)?;
-            if requirement.kind == CapabilityKind::Participant
-                && self.participant_resolver_for(&provider.key).is_none()
-            {
-                return Err(ActError::Model(format!(
-                    "the model declares assign.owner with participant provider '{}', but no resolver is registered for it: install a plugin that registers both from ActPlugin::on_init",
-                    provider.key
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Close the capability registry after the plugins' `on_init`.
-    pub(crate) fn seal_capabilities(&self) {
-        self.capabilities_sealed
-            .store(true, std::sync::atomic::Ordering::Release);
+    /// The installed capabilities' keys (see [`crate::scheduler::shell::caps::Capability`]):
+    /// what `sys:status` reports as the engine's `caps` list.
+    pub fn caps(&self) -> Vec<String> {
+        self.workers.caps()
     }
 
     /// The pid → lane mapping, so the timers' cleanup can release a swept
@@ -387,7 +154,7 @@ impl Runtime {
     /// aggregate; a failure to project it is logged, never turned into a
     /// refusal of a transfer that already committed.
     async fn settle_transfer_deliveries(&self, pid: &str, tid: &str) {
-        let rev = match self.kernel.assignment_rev(pid, tid).await {
+        let rev = match self.workers.assignment_rev(pid, tid).await {
             Ok(Some(rev)) => rev,
             Ok(None) => return,
             Err(error) => {
@@ -425,34 +192,34 @@ impl Runtime {
     /// being re-sent. The kernel host owns every loop's guard — the four
     /// driver passes and the four timers — so it answers the whole state.
     pub fn scheduler_health(&self) -> SchedulerHealth {
-        self.kernel.scheduler_health()
+        self.workers.scheduler_health()
     }
 
     /// The ready/timer pass's backlog and age gauges (A10).
     pub fn ready_metrics(&self) -> crate::scheduler::shell::ReadyMetrics {
-        self.kernel.ready_metrics()
+        self.workers.ready_metrics()
     }
 
     /// The outbox retry pass's backlog and age gauges (A10).
     pub fn outbox_metrics(&self) -> crate::scheduler::shell::OutboxMetrics {
-        self.kernel.outbox_metrics()
+        self.workers.outbox_metrics()
     }
 
     /// The recovery scanner's backlog and counters (A10).
     pub fn recovery_metrics(&self) -> crate::scheduler::shell::RecoveryMetrics {
-        self.kernel.recovery_metrics()
+        self.workers.recovery_metrics()
     }
 
     /// The terminal-run cleanup's counters (see [`CleanupMetrics`]).
     pub fn cleanup_metrics(&self) -> CleanupMetrics {
-        self.kernel.cleanup_metrics()
+        self.workers.cleanup_metrics()
     }
 
     /// The read model's counters and repair backlog (A5): rows applied,
     /// writes refused as stale, projection failures, repaired runs, and the
     /// gauge of runs whose rows are currently behind their aggregate.
     pub fn projection_metrics(&self) -> crate::scheduler::shell::ProjectionMetrics {
-        self.kernel.projection_metrics()
+        self.workers.projection_metrics()
     }
 
     pub fn config(&self) -> &Arc<Config> {
@@ -518,8 +285,8 @@ impl Runtime {
         // new run cannot be created in the middle of the old run's residue
         // removal. No row family — and in particular no legacy `ops` row,
         // which L1 removes — participates in pid existence.
-        let _lifecycle = self.kernel.lock_lifecycle(&proc_id).await;
-        let occupied = self.kernel.exists(&proc_id).await? || self.kernel.is_reclaiming(&proc_id);
+        let _lifecycle = self.workers.lock_lifecycle(&proc_id).await;
+        let occupied = self.workers.exists(&proc_id).await? || self.workers.is_reclaiming(&proc_id);
         if occupied {
             return Err(ActError::Action(format!(
                 "proc_id({proc_id}) is duplicated in running process list"
@@ -549,14 +316,8 @@ impl Runtime {
         // the legacy start validated it while loading its process, and the
         // kernel import must refuse the same malformed models (ids, `next`
         // targets, triggers, `rn`) rather than seed an aggregate.
+        let model = model.clone();
         model.valid()?;
-
-        // Freeze the capability selection into the run's model. A model
-        // persisted by `model:deploy` already carries its provider keys; a
-        // direct caller gets the same fill here, so the assignment path and a
-        // restart both read one explicit key.
-        let mut model = model.clone();
-        self.resolve_model_capabilities(&mut model)?;
 
         // The process directory root comes from the engine config, never from
         // the request: a caller can neither name the directory nor place a
@@ -578,7 +339,7 @@ impl Runtime {
         let spec = crate::scheduler::shell::ProcessSpec::from_workflow(&proc_id, &model, &run_as)?
             .with_owner(owner.clone().unwrap_or_default())
             .with_vars(&options);
-        self.kernel.start_process(&spec).await?;
+        self.workers.start_process(&spec).await?;
         info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
         Ok(proc_id)
     }
@@ -587,8 +348,8 @@ impl Runtime {
     /// aggregate; the serving paths hold the field directly, and the public
     /// reconciliation API (`Engine::effect_unknowns`/`resolve_effect`) needs
     /// the same aggregate view.
-    pub(crate) fn kernel(&self) -> &Arc<crate::scheduler::shell::KernelHost> {
-        &self.kernel
+    pub(crate) fn workers(&self) -> &Arc<crate::scheduler::shell::Workers> {
+        &self.workers
     }
 
     /// The read model for one process. There is no resident object — a
@@ -619,15 +380,15 @@ impl Runtime {
     /// (the declaration declares no such node), which the tree display folds
     /// into its parent step.
     pub(crate) async fn graph(&self, pid: &str) -> Result<crate::ProcessGraph> {
-        self.kernel.graph(pid).await
+        self.workers.graph(pid).await
     }
 
     /// The on-demand half of the projection protocol (see [`Self::read_proc`]).
     async fn refresh_read_model(&self, pid: &str) {
-        let Some(projector) = self.kernel.projector() else {
+        let Some(projector) = self.workers.projector() else {
             return;
         };
-        let snapshot = match self.kernel.snapshot(pid).await {
+        let snapshot = match self.workers.snapshot(pid).await {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => return,
             Err(error) => {
@@ -667,7 +428,7 @@ impl Runtime {
     pub async fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         // The kernel serves the action: the aggregate is the record and
         // `apply_action` re-plans against its authoritative snapshot.
-        let result = Self::kernel_action(&self.kernel, action).await;
+        let result = Self::workers_action(&self.workers, action).await;
         if result.is_ok() && matches!(&action.event, crate::event::EventAction::Transfer) {
             self.settle_transfer_deliveries(&action.pid, &action.tid)
                 .await;
@@ -696,12 +457,20 @@ impl Runtime {
     /// lands while the target is still propagating is refused with
     /// `ActionNotAllowed` and the client retries, exactly as the legacy
     /// resident check refused a non-resident process.
-    async fn kernel_action(
-        host: &Arc<crate::scheduler::shell::KernelHost>,
+    async fn workers_action(
+        host: &Arc<crate::scheduler::shell::Workers>,
         action: &Action,
     ) -> Result<()> {
         let kind = Self::kernel_kind(action)?;
         let inputs = Self::kernel_inputs(&action.options);
+        // The business actor is a caller-declared option, separate from the
+        // ACL subject: `$initiator`/`$actor` and the payload attribution read
+        // it, while authorization keeps the authenticated subject.
+        let actor = action
+            .options
+            .get::<String>(consts::ACT_ACTOR)
+            .map(|actor| actor.trim().to_string())
+            .filter(|actor| !actor.is_empty());
         host.apply_action_as(
             &action.pid,
             &action.tid,
@@ -709,6 +478,7 @@ impl Runtime {
             inputs,
             crate::scheduler::shell::ActionAttribution {
                 subject: action.subject.as_deref(),
+                actor: actor.as_deref(),
                 rev: action.rev,
                 can_assign: action.can_assign,
             },
@@ -790,6 +560,11 @@ impl Runtime {
     pub(crate) fn kernel_inputs(options: &Vars) -> Vec<(String, String)> {
         options
             .iter()
+            // The business actor is attribution, not act data: it rides the
+            // durable action fact and never lands on the act's scope, where a
+            // completing act would fold it into the parent and overwrite the
+            // run's `$initiator`.
+            .filter(|(key, _)| key.as_str() != consts::ACT_ACTOR)
             .map(|(key, value)| match value {
                 serde_json::Value::String(text) => (key.clone(), text.clone()),
                 other => (key.clone(), other.to_string()),
@@ -833,20 +608,17 @@ impl Runtime {
         // effects, messages). Its serve loop also ticks the runtime's
         // store-facing timers once the guider is attached below, so ONE
         // background task owns every store-reaching pass.
-        let participant_resolver_sealed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let capabilities = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
-        let capabilities_sealed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let schedule = shell_timers::kernel_schedule(config);
-        let (kernel, wake_rx) = KernelHost::new_with_caps(
+        let (workers, wake_rx) = Workers::new_with_admissions(
             store.kv(),
-            KernelHost::caps_from_config(config),
+            Workers::caps_from_config(config),
             config.max_node_run_times() as u64,
             // A timer's idle round is deferred by the ready/timer interval,
             // not by the recovery or outbox cadence (A10).
             schedule.ready.as_millis() as i64,
         );
         {
-            let driver = kernel.clone();
+            let driver = workers.clone();
             let driver_shutdown = shutdown.clone();
             // Each control-plane loop runs on its own interval (A10); under
             // test every unset interval follows the short test tick, so a test
@@ -866,30 +638,38 @@ impl Runtime {
             shutdown,
             schema_cache,
             snapshots,
-            kernel,
-            participant_resolver_sealed,
-            capabilities,
-            capabilities_sealed,
+            workers,
         });
 
         // The driver seams: the host serves, so the effect runner (Func
         // packages execute for real) and the outbox transport (records become
         // engine messages) are attached to the serving host. The
         // process-lifecycle sink mirrors the legacy `on_proc` events.
-        let host = &runtime.kernel;
+        let host = &runtime.workers;
         host.attach_effect_runner(Arc::new(crate::scheduler::shell::PackageEffectRunner::new(
             runtime.clone(),
         )));
         let emitter = runtime.emitter.clone();
-        host.attach_outbox_transport(Box::new(crate::scheduler::shell::MessageForwarder::new(
+        host.attach_outbox_transport(Arc::new(crate::scheduler::shell::MessageForwarder::new(
             move |msg: &crate::Message| emitter.emit_message(msg),
         )));
         let emitter = runtime.emitter.clone();
-        host.attach_lifecycle_sink(Arc::new(move |msg, event| match event {
-            crate::capability::ProcessEvent::Started => emitter.emit_start_event(msg),
-            crate::capability::ProcessEvent::Completed => emitter.emit_complete_event(msg),
-            crate::capability::ProcessEvent::Errored => emitter.emit_error(msg),
-        }));
+        host.attach_lifecycle_sink(Arc::new(
+            crate::scheduler::shell::caps::lifecycle::FnLifecycleSink::new(
+                "kernel.lifecycle",
+                move |msg, event| match event {
+                    crate::scheduler::shell::caps::lifecycle::ProcessEvent::Started => {
+                        emitter.emit_start_event(msg)
+                    }
+                    crate::scheduler::shell::caps::lifecycle::ProcessEvent::Completed => {
+                        emitter.emit_complete_event(msg)
+                    }
+                    crate::scheduler::shell::caps::lifecycle::ProcessEvent::Errored => {
+                        emitter.emit_error(msg)
+                    }
+                },
+            ),
+        ));
         // The read model: every commit re-materializes the legacy
         // proc/task/vars rows from the aggregate, so the row-reading APIs
         // (`proc:get`/`task:get`/`msg:ls`, `Runtime::read_proc`) and the sweeper
@@ -1120,11 +900,11 @@ mod cleanup_tests {
     async fn a_reclaim_mark_without_rows_is_cleared() {
         let runtime = Runtime::new(&Config::default(), None).unwrap();
         let pid = format!("ghost-{}", crate::utils::longid());
-        runtime.kernel().begin_reclaim(&pid);
-        assert!(runtime.kernel().is_reclaiming(&pid));
+        runtime.workers().begin_reclaim(&pid);
+        assert!(runtime.workers().is_reclaiming(&pid));
         assert_eq!(runtime.sweep_removable().await.unwrap(), 0);
         assert!(
-            !runtime.kernel().is_reclaiming(&pid),
+            !runtime.workers().is_reclaiming(&pid),
             "the mark is cleared once the rows are provably gone"
         );
         runtime.close().await;
@@ -1188,12 +968,12 @@ mod scope_tests {
     #[serial_test::serial]
     async fn the_sweep_finishes_a_reclaiming_pid_without_rows() {
         let runtime = Runtime::new(&Config::default(), None).unwrap();
-        runtime.kernel().begin_reclaim("never-existed");
-        assert!(runtime.kernel().is_reclaiming("never-existed"));
+        runtime.workers().begin_reclaim("never-existed");
+        assert!(runtime.workers().is_reclaiming("never-existed"));
 
         assert_eq!(runtime.sweep_removable().await.unwrap(), 0);
         assert!(
-            !runtime.kernel().is_reclaiming("never-existed"),
+            !runtime.workers().is_reclaiming("never-existed"),
             "the sweep must clear a mark whose rows are gone"
         );
 

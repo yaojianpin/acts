@@ -1,18 +1,18 @@
-# 承办人、转办与代办
+# 承办人、候选人与转办代办
 
-人类审批活动可以声明承办人（`owner`），并在运行期把承办关系转办给另一个业务用户，或让另一个业务用户代办。转办和代办都只改变“谁可以决策这个活动”，不改变活动实例、状态机或流程走向。
+人类审批活动可以声明承办人（`owner`），在运行期把承办关系转办给另一个业务用户，
+或让另一个业务用户代办；多人审批的候选池由 `assign.candidates` 声明。转办和代办
+都只改变“谁可以决策这个活动”，不改变活动实例、状态机或流程走向。
 
 ## 声明承办人
 
-`assign.owner` 是模型层的参与人原语，**解析由参与人插件提供**：安装
-`acts_plugin_participant::ParticipantPlugin` 后使用默认
-`LocalParticipantResolver`，或用 `ParticipantPlugin::with_resolver` 替换。
-没有安装插件（且未通过 `Engine::register_capability_provider` 广播能力、再用
-`Engine::register_participant_resolver(key, ...)` 注册解析器）时，
-发布含 `assign.owner` 的模型会直接失败并点名插件；活动启动路径也会 fail
-closed。`__assignment`/`__delegation` 和决策授权仍在引擎内核。
+`assign.owner` 是模型层的责任人原语，**由内核本地解析**：一个字符串——用户 id，
+或 `${{ }}` 表达式（`$initiator` / `$actor` / `$previous_approver(n)`、工作流
+变量等，与 `params` 同一条表达式路径）。`__assignment`/`__delegation` 和
+决策授权都在引擎内核；没有插件、没有 provider 配置。
 
-`assign` 只允许写在人类决策叶子上（`ActRunAs::Irq` 的包，如 `acts.core.irq`、`acts.core.decide`，以及自定义 IRQ 包）。
+`assign.owner` 只允许写在人类决策叶子上（`ActRunAs::Irq` 的包，如
+`acts.core.irq`、`acts.core.decide`，以及自定义 IRQ 包）。
 
 ```yml
 - id: approve
@@ -22,12 +22,9 @@ closed。`__assignment`/`__delegation` 和决策授权仍在引擎内核。
     key: approve
   assign:
     owner: "${{ reviewer }}"
-    provider: "acme.participant" # optional
 ```
 
-`assign.provider` 选择解析该活动的参与人提供者：
 
-- 省略时使用该能力类型唯一的已安装提供者；
 - 注册了多个提供者时必须显式声明，否则发布失败；
 - 发布时把 key 固化到存储的模型，活动启动和重启都使用该 key；
 - 同一个 provider key 在任一时刻只有一个活动实现；`version` 只用于能力表诊断和
@@ -55,7 +52,7 @@ closed。`__assignment`/`__delegation` 和决策授权仍在引擎内核。
         assign:
           owner: "$root.cfo"
 
-# parallel：按 item 的 value 解析
+# parallel：按 item 的 $item.value 解析
 - uses: acts.core.parallel
   params:
     in: "${{ reviewers }}"
@@ -63,7 +60,7 @@ closed。`__assignment`/`__delegation` 和决策授权仍在引擎内核。
     steps:
       - uses: acts.core.irq
         assign:
-          owner: "${{ value }}"
+          owner: "${{ $item.value }}"
 
 # sequence：逐项解析
 - uses: acts.core.sequence
@@ -72,22 +69,23 @@ closed。`__assignment`/`__delegation` 和决策授权仍在引擎内核。
     steps:
       - uses: acts.core.irq
         assign:
-          owner: "${{ value }}"
+          owner: "${{ $item.value }}"
 ```
 
-嵌套容器中，`value` / `index` 位于 item 的祖先作用域，内层 `block` 的叶子也能读取；顶层 `block` 只能读 `$root`、`$parent` 和步骤变量。
+嵌套容器中，`$item.value` / `$item.index` 位于 item 的祖先作用域，内层 `block` 的叶子也能读取；顶层 `block` 没有 item 绑定，只能读 `$root`、`$parent` 和步骤变量。
 
-## OwnerExpr（参与人表达式）
+## CandidateExpr（候选人表达式）
 
-`assign.owner` 除了字符串，还接受结构化的 `OwnerExpr`。字符串形式保持原语义
-（用户 id，或 `${{ }}` 表达式）；对象形式用 `kind` 区分：
+`assign.candidates.params` 是一个结构化的 `CandidateExpr` 文档（也接受字符串
+形式——用户 id 或 `${{ }}` 表达式），对象形式用 `kind` 区分：
 
 ```yml
 assign:
-  owner:
-    kind: owners_of
-    resource: { resource: department, name: 研发部 }
-    duty: principal
+  candidates:
+    params:
+      kind: owners_of
+      resource: { resource: department, name: 研发部 }
+      duty: principal
 ```
 
 | `kind` | 含义 |
@@ -108,38 +106,39 @@ assign:
 { "kind": "context", "var": { "type": "var", "name": "owner_unit", "ty": "unit", "duty": "principal" } }
 ```
 
-- `initiator`：流程发起人。
-- `current_actor`：最近一次决策的操作人；还没有决策时等于发起人。
+- `initiator`：流程发起人：启动参数里的业务变量 `actor`；未传时为空。不是 ACL 用户。
+- `current_actor`：最近一次决策的业务 actor（`act:*` 请求的 `actor` option）；还没有决策时等于发起人。
 - `previous_approver`：当前操作人之前的那次决策；按决策次数计数，不按人去重。
 - `var`：工作流变量。`ty` 为 `user`/`users`/`role`/`group`/`project`/
   `department`/`unit`；资源类型按 `duty` 查负责人。
 
-表达式也可以写成 `$initiator`、`$actor`、`$previous_approver(n)`。
+表达式也可以写成 `$initiator`、`$actor`、`$previous_approver(n)`。它们的值来自
+**业务变量 `actor`**（启动参数或 `act:*` 的 options），与 ACL 用户无关。
 
 **一个活动只有一个 owner。** 表达式解析为空或多于一个参与人时活动失败：
 
 ```text
 assign.owner resolved to 2 participants (u1, u2); a human act has exactly one
-owner — use the acts.core.owner package with block/parallel/sequence for a
-multi-approver step
+owner — declare assign.candidates and fan out with block/parallel/sequence for
+a multi-approver step
 ```
 
-多人审批用 `acts.core.owner` 先算参与人，再交给 `block`/`sequence`/
-`parallel`：
+多人审批用 `assign.candidates` 声明候选池，`uses` 包（默认
+`acts.core.candidates`）计算，容器再按结果展开：
 
 ```yml
-- id: owners
-  uses: acts.core.owner
-  params:
-    kind: any_of
-    operands:
-      - { kind: context, var: { type: current_actor } }
-      - { kind: role, name: reviewer }
-
 - id: approve
   uses: acts.core.parallel
+  assign:
+    candidates:
+      params:
+        kind: any_of
+        operands:
+          - { kind: context, var: { type: current_actor } }
+          - { kind: role, name: reviewer }
+      uses: acts.core.candidates   # 默认值，可省略；可指向自己的包
   params:
-    in: "${{ owners.participants }}"
+    in: "${{ candidates }}"
     join: any
     steps:
       - uses: acts.core.irq
@@ -147,11 +146,12 @@ multi-approver step
           owner: "${{ value.id }}"
 ```
 
-`acts.core.owner` 是 **IRQ 活动**：引擎把表达式作为请求发给业务系统，业务系统用
-自己的用户目录（角色、组、资源负责人、关系）解析，完成活动并返回。请求发出前，
-引擎会把表达式里的本地上下文原子（`initiator`、`current_actor`、
-`previous_approver`、`user`/`users` 变量）替换成解析出的 `user` 节点，业务系统
-只需要解析自己的目录数据：
+`acts.core.candidates` 是 **IRQ 活动**：引擎把表达式作为请求发给业务系统，业务
+系统用自己的用户目录（角色、组、资源负责人、关系）解析，完成活动并返回。请求
+发出前，表达式里引擎能算的部分先在本地算好——上下文原子（`initiator`、
+`current_actor`、`previous_approver`、`user`/`users` 变量）替换成解析出的
+`user` 节点，`${{ }}` 字符串替换成解析出的用户——业务系统只需要解析自己的目录
+数据：
 
 ```json
 {
@@ -161,36 +161,48 @@ multi-approver step
 }
 ```
 
-只需要 fan-out 时也可以只返回 `ids`，工作流用 `in: "${{ owners.ids }}"` 和
-`assign.owner: "${{ value }}"`。引擎不维护业务目录，也没有 `[owner]` 配置；
-业务系统是唯一的解析方。
+只需要 fan-out 时也可以只返回 `ids`，工作流用 `in: "${{ candidates }}"` 和
+`assign.owner: "${{ $item.value }}"`。引擎不维护业务目录，也没有 `[owner]`
+配置；业务系统是唯一的解析方。
 
-`assign.owner` 只解析本地原子（用户、上下文变量、普通用户变量、集合运算）。
-出现 `role`/`group`/`owners_of`/`relate` 时活动失败并提示先走
-`acts.core.owner`：
+**候选池的计算顺序：先本地，后 uses。** 活动启动时先检查 `params` 是否可以
+直接计算——表达式全部为本地原子（用户、上下文变量、用户变量、集合运算、
+`${{ }}` 字符串）时，内核直接算出候选池，不发起任何请求；含业务原子时通过
+`uses` 包计算。全本地但解析失败（未知变量等）时活动启动失败，不会伪造空池，
+也不会把引擎已知不存在的值发给业务系统。无论哪条路，发送给 `uses` 包的参数
+里，`Candidates` 的变量参数都已在本地计算完成。
 
-```text
-owner atom 'role' ('reviewer') names business data; resolve it through the
-acts.core.owner IRQ package — pass this expression as the package's params,
-let the business system return the participants, and assign from the returned ids
-```
-
-这样做是因为 `assign` 在活动启动时必须立即得到唯一 owner，不应在启动路径上做
-业务 I/O。需要业务数据的单个 owner，先走 `acts.core.owner`，再取唯一结果：
+`owner` 是字符串，表达不了业务原子（`role`/`group`/`owners_of`/`relate`）。
+需要业务数据的单个 owner，先在候选池里算出参与人，再取唯一结果：
 
 ```yml
 - id: owner
-  uses: acts.core.owner
-  params:
-    kind: relate
-    from: { kind: context, var: { type: current_actor } }
-    rel: { rel: resource, value: department_of }
-    duty: principal
+  uses: acts.core.irq
+  assign:
+    candidates:
+      params:
+        kind: relate
+        from: { kind: context, var: { type: current_actor } }
+        rel: { rel: resource, value: department_of }
+        duty: principal
 
 - id: approve
   uses: acts.core.irq
   assign:
     owner: "${{ owner.participants[0].id }}"
+```
+
+不走 `assign.candidates` 也可以直接把池计算做成一个普通步骤：
+`uses: acts.core.candidates` + `params`（CandidateExpr 文档）。这是一个普通
+IRQ 活动——参数在本地准备好（`${{ }}` 与上下文原子已解析）后发给业务系统，
+应答作为活动自己的输出落地，引擎不做本地折叠、也没有 `__candidates` 标记：
+
+```yml
+- id: pool
+  uses: acts.core.candidates
+  params:
+    kind: role
+    name: reviewers
 ```
 
 ## 承办关系
@@ -275,6 +287,43 @@ act:undelegate {pid,tid}
 
 `act:undelegate` 清空 `__delegation`，`assignee` 恢复为 `owner`，`rev + 1`。
 
+## 读取承办关系（`$assign`）
+
+表达式可以只读地读取当前执行及其祖先的承办事实：
+
+| 字段 | 来源 |
+| --- | --- |
+| `$assign.owner` / `$assign.assignee` | 最近一个持 `__assignment` 的执行 |
+| `$assign.delegator` / `$assign.delegatee` | 该执行自己的 `__delegation`；无有效代办为 `null` |
+| `$assign.candidates` / `$assign.ids` | 最近一个已算出候选池（`__candidates`）的执行的 ids 列表 |
+| `$assign.participants` / `$assign.count` | 同一池的参与人对象与数量 |
+| `$assign.at("<step-id>")` | 显式指定执行：node id 取该节点最新 generation，也接受 wire `tid`；只读该执行自身的事实 |
+
+身份字段与候选池**各自**沿 scope 链就近解析：容器生成的子活动
+（`<id>#item` / `<id>#act{i}`）通常有自己的 `owner`，`$assign.candidates`
+仍命中生成它的容器的池。
+
+```yml
+- id: approve
+  uses: acts.core.parallel
+  assign:
+    candidates:
+      params: { kind: role, name: reviewers }
+  params:
+    in: "${{ $assign.candidates }}"     # 本容器算出的池
+    steps:
+      - uses: acts.core.irq
+        assign:
+          owner: "${{ $item.value }}"
+        params:
+          peers: "${{ $assign.candidates }}"            # 父容器的池
+          peers_explicit: "${{ $assign.at('approve').ids }}"
+```
+
+没有 assign 事实时读取不会报错：身份字段为 `null`，`candidates`/`ids`/
+`participants` 为空列表，`count` 为 `null`。表达式语言的对象不可调用，
+显式形式因此写作 `$assign.at("<step-id>")`。
+
 ## 决策授权
 
 | 场景 | owner | assignee | delegation | 谁可以决策 |
@@ -307,26 +356,31 @@ act:undelegate {pid,tid}
 
 ## 或签 / 会签
 
-多人审批只使用 `join` 语义，不引入 `candidates` 候选池：
+"人从哪来"由 `assign.candidates` 回答，"怎么算完成"由 `join` 回答：
 
 ```yml
 - uses: acts.core.parallel
+  assign:
+    candidates:
+      params: { kind: role, name: reviewers }
   params:
-    in: "${{ approvers }}"
+    in: "${{ candidates }}"
     join: any          # 或签：第一票通过即撤销其余票
     steps:
       - uses: acts.core.irq
         assign:
-          owner: "${{ value }}"
+          owner: "${{ $item.value }}"
 ```
 
 - `join: any`：或签，任一活动完成即可。
 - `join: all`：会签，全部活动完成才继续。
 - `join: partial(n)`：达到阈值即通过。
+- `join: { params, uses }`：委托给 `uses` 包裁决（默认 `acts.core.decide`），
+  适合主持人裁定的会签形态。
 
-每个审批人是一个独立活动，拥有独立的 `owner`、消息和投递；不要用候选池表达多人审批。
-
-加签/减签仍使用 `act:push` / `act:remove`；新加的 IRQ 叶子可以在 payload 中携带自己的 `assign`。
+每个审批人是一个独立活动，拥有独立的 `owner`、消息和投递。顺签用
+`acts.core.sequence` + `in: "${{ candidates }}"`；加签/减签仍使用
+`act:push` / `act:remove`，新加的 IRQ 叶子在 payload 中携带自己的 `assign`。
 
 ## 业务用户与 ACL 用户
 
@@ -340,6 +394,7 @@ act:undelegate {pid,tid}
 - `assign` 能力独立于 `@execute`：能执行流程不代表能转办别人的审批。
 - 目标业务用户的 `enabled`、岗位权限、业务规则由业务系统校验；引擎只校验目标非空、活动存在、活动非终态和 `rev`。
 - 客户端提交的 `owner` / `assignee` / `delegator` / `delegatee` / `granted_by` / `subject` / `rev` 不被信任；主体由服务端认证后写入，人员字段以任务状态为准。
+- 业务 `actor`（启动参数里的 `actor` 与 `act:*` 的 `actor` option）是业务归属，驱动 `$initiator`/`$actor` 与 owner 表达式；它不是 ACL 主体，也不参与命令/转办授权。
 - `snapshot` / `profile` 是业务数据，不是授权源。
 
 ## 客户端

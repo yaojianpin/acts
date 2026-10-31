@@ -175,25 +175,31 @@ impl Context {
         self.proc.workdir()
     }
 
-    /// The run's initiator: the subject sealed into the process's scope
-    /// policy when the run started. `None` when no caller was sealed — an
-    /// engine-internal start, a schedule trigger, or a policy without a
-    /// subject.
+    /// The run's initiator: the business actor named by the run's `actor`
+    /// start variable (a workflow var seeded onto the root scope). `None`
+    /// when the start carried none — the ACL subject is deliberately *not*
+    /// consulted: an ACL user and a business user are different concepts.
     ///
-    /// This is the `initiator` context variable of an owner expression.
+    /// This is the `initiator` context variable of an owner expression and
+    /// the `$initiator` builtin.
     pub fn initiator(&self) -> Option<String> {
-        let subject = self.proc.owner_scope().subject;
-        (!subject.trim().is_empty()).then_some(subject)
+        let actor = self
+            .proc
+            .root_variable::<String>(consts::ACT_ACTOR)
+            // A scope without a shared aggregate (the read model, the
+            // predicate fallback) carries the root's vars eagerly instead.
+            .or_else(|| self.task().find::<String>(&self.proc, consts::ACT_ACTOR))?;
+        (!actor.trim().is_empty()).then_some(actor)
     }
 
-    /// The subject whose decision led to the acting execution: the most
-    /// recent decision recorded on the execution itself or on its nearest
-    /// ancestor, falling back to the run's initiator while nothing has been
-    /// decided yet.
+    /// The business actor whose decision led to the acting execution: the
+    /// most recent decision recorded on the execution itself or on its
+    /// nearest ancestor, falling back to the run's initiator while nothing
+    /// has been decided yet.
     ///
     /// This is the `current_actor` context variable of an owner expression.
-    /// A decision that the engine made without a caller (a step rule, a
-    /// shutdown resume) carries no subject and is skipped.
+    /// A decision that the engine made without a business actor (a step
+    /// rule, a shutdown resume) carries none and is skipped.
     pub fn current_actor(&self) -> Option<String> {
         self.decision_subjects()
             .first()
@@ -217,45 +223,23 @@ impl Context {
         subjects.get(start.saturating_add(back as usize)).cloned()
     }
 
-    /// Evaluate the local atoms of one owner expression against this scope.
+    /// Evaluate the local atoms of one candidate expression against this
+    /// scope.
     ///
-    /// This is the deterministic local evaluation — literal users, the context
-    /// variables, user-valued variables and the set operations — that the
-    /// participant plugin's default resolver delegates to. `assign.owner` does
-    /// not call it directly: it goes through [`Self::resolve_owners`] and the
-    /// installed [`ParticipantResolver`](crate::ParticipantResolver).
+    /// This is the deterministic local evaluation — literal users, the
+    /// context variables, user-valued variables and the set operations. It
+    /// computes an `assign.candidates` pool whose every atom is local, and
+    /// the `acts.core.candidates` package's `prepare_params` for the atoms
+    /// that ride its request.
     ///
     /// Business-data atoms (roles, groups, resource owners, relations) are
-    /// refused here with a message naming the `acts.core.owner` IRQ package.
+    /// refused here: they resolve in the business system, through the
+    /// `assign.candidates` spec and its `acts.core.candidates` IRQ package.
     pub fn resolve_local_owners(
         &self,
-        expr: &crate::model::OwnerExpr,
+        expr: &crate::model::CandidateExpr,
     ) -> crate::Result<Vec<crate::model::Participant>> {
-        super::owner::evaluate(self, expr)
-    }
-
-    /// Evaluate one owner expression against this scope through the engine's
-    /// current [`ParticipantResolver`](crate::ParticipantResolver).
-    ///
-    /// `assign.owner` uses this and then requires exactly one participant.
-    /// The participant plugin installs its default resolver from
-    /// `ActPlugin::on_init`; a deployment that declares an assignment without
-    /// one fails closed here, naming the plugin, rather than producing an
-    /// unowned approval. Business-data atoms (roles, groups, resource owners,
-    /// relations) are not resolved here: the `acts.core.owner` IRQ package
-    /// sends the expression to the business system, and the workflow assigns
-    /// from the ids the business system returns.
-    pub fn resolve_owners(
-        &self,
-        expr: &crate::model::OwnerExpr,
-    ) -> crate::Result<Vec<crate::model::Participant>> {
-        let Some(resolver) = self.runtime.participant_resolver() else {
-            return Err(ActError::Runtime(
-                "assign.owner requires a participant resolver: install acts-plugin-participant (ParticipantPlugin) or register one with Engine::register_participant_resolver from ActPlugin::on_init"
-                    .to_string(),
-            ));
-        };
-        resolver.resolve(self, expr)
+        super::caps::assign::evaluate(self, expr)
     }
 
     /// The decision subjects recorded on the acting execution and its

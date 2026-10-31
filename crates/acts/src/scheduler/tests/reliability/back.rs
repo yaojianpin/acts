@@ -98,7 +98,7 @@ async fn finish_by_hand(engine: &Engine, pid: &str) {
     loop {
         if engine
             .runtime()
-            .kernel()
+            .workers()
             .process_completed(pid)
             .await
             .unwrap_or(false)
@@ -130,7 +130,7 @@ async fn finish_by_hand(engine: &Engine, pid: &str) {
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -155,7 +155,7 @@ async fn generation_state(
 ) -> Option<TaskState> {
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -173,7 +173,7 @@ async fn generation_state(
 async fn has_unsettled_operation(engine: &Engine, pid: &str, tid: &str) -> bool {
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -192,7 +192,7 @@ async fn has_unsettled_operation(engine: &Engine, pid: &str, tid: &str) -> bool 
 async fn pure_operations(engine: &Engine, pid: &str) -> usize {
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()

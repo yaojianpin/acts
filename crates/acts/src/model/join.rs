@@ -11,9 +11,10 @@
 //! - [`JoinRule::Partial`]: a count or a percentage of completions decides
 //!   (`partial(3)`, `partial(40%)`). `partial(1)` is `any`,
 //!   `partial(100%)` is `all`.
-//! - [`JoinRule::Action`]: the engine asks the client — one
-//!   `acts.core.decide` request per child settlement — and the client's verdict
-//!   (complete/fail) decides the container; a skipped request defers.
+//! - [`JoinRule::Action`]: the rule is delegated — on every child settlement
+//!   the engine asks the package the rule names ([`DECIDE_PACKAGE`] by
+//!   default) and the answer's verdict (complete/fail) decides the container;
+//!   a skipped request defers.
 //!
 //! The declaration is one field with a string or an object shape:
 //!
@@ -22,13 +23,20 @@
 //! rule: any
 //! rule: partial(3)           # count
 //! rule: partial(40%)         # percentage
-//! rule:                      # delegated to the client
-//!   action: countersign
-//!   params: {}               # free-form, resolved against the container scope
+//! rule:                      # delegated to a package
+//!   params:                  # free-form, resolved against the container scope
+//!     action: countersign
+//!   uses: acts.core.decide   # the deciding package; this is the default
 //! ```
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+
+/// The core package that answers a delegated join rule — [`JoinRule::Action`]'s
+/// default `uses`. A model may name its own deciding package instead; the
+/// kernel only defines the request envelope (`params` + the children's
+/// outcomes) and the verdict vocabulary.
+pub const DECIDE_PACKAGE: &str = "acts.core.decide";
 
 /// The number of counted children a rule needs before it decides.
 ///
@@ -89,14 +97,20 @@ pub enum JoinRule {
     Any,
     /// A threshold of completions decides the container.
     Partial(PartialThreshold),
-    /// The client decides: one `acts.core.decide` request per child settlement,
-    /// answered `complete` (pass), `fail` (reject) or `skip` (defer).
+    /// The rule is delegated: on every child settlement the engine asks the
+    /// package `uses` names — the request carries the rule's `params` and the
+    /// children's outcomes census — answered `complete` (pass), `fail`
+    /// (reject) or `skip` (defer).
     Action {
-        /// The key the client's handler is registered under.
-        action: String,
         /// Free-form parameters the request carries, resolved against the
-        /// container's scope (`${{ }}` templates included).
+        /// container's scope (`${{ }}` templates included). The deciding
+        /// package gives them their meaning; the default
+        /// [`DECIDE_PACKAGE`] reads an `action` key naming the client's
+        /// business handler.
         params: serde_json::Value,
+        /// The package that decides. Defaults to [`DECIDE_PACKAGE`]; a model
+        /// names its own extension package here.
+        uses: String,
     },
 }
 
@@ -159,7 +173,7 @@ impl fmt::Display for JoinRule {
             Self::All => f.write_str("all"),
             Self::Any => f.write_str("any"),
             Self::Partial(threshold) => write!(f, "partial({})", threshold.text()),
-            Self::Action { action, .. } => write!(f, "action({action})"),
+            Self::Action { uses, .. } => write!(f, "action({uses})"),
         }
     }
 }
@@ -175,18 +189,18 @@ impl Serialize for JoinRule {
             Self::Partial(threshold) => {
                 serializer.serialize_str(&format!("partial({})", threshold.text()))
             }
-            Self::Action { action, params } => {
+            Self::Action { params, uses } => {
                 use serde::ser::SerializeStruct;
                 let mut map = serializer.serialize_struct("JoinRule", 2)?;
-                map.serialize_field("action", action)?;
                 map.serialize_field("params", params)?;
+                map.serialize_field("uses", uses)?;
                 map.end()
             }
         }
     }
 }
 
-/// The serde visitor: a string rule or an `{ action, params }` object.
+/// The serde visitor: a string rule or a `{ params, uses }` object.
 struct JoinRuleVisitor;
 
 impl<'de> serde::de::Visitor<'de> for JoinRuleVisitor {
@@ -194,7 +208,7 @@ impl<'de> serde::de::Visitor<'de> for JoinRuleVisitor {
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
-            "a join rule: 'all', 'any', 'partial(n)', 'partial(n%)' or an object with an 'action' key",
+            "a join rule: 'all', 'any', 'partial(n)', 'partial(n%)' or an object with 'params' and 'uses' keys",
         )
     }
 
@@ -210,23 +224,24 @@ impl<'de> serde::de::Visitor<'de> for JoinRuleVisitor {
         A: serde::de::MapAccess<'de>,
     {
         use serde::de::Error;
-        let mut action: Option<String> = None;
+        let mut uses: Option<String> = None;
         let mut params = serde_json::Value::Null;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "action" => action = Some(map.next_value()?),
+                "uses" => uses = Some(map.next_value()?),
                 "params" => params = map.next_value()?,
                 other => {
                     return Err(A::Error::custom(format!(
-                        "unknown rule field '{other}': expected 'action' or 'params'"
+                        "unknown rule field '{other}': expected 'uses' or 'params'"
                     )));
                 }
             }
         }
-        let action = action
-            .filter(|action| !action.trim().is_empty())
-            .ok_or_else(|| A::Error::custom("a join object needs a non-empty 'action'"))?;
-        Ok(JoinRule::Action { action, params })
+        let uses = uses
+            .map(|uses| uses.trim().to_string())
+            .filter(|uses| !uses.is_empty())
+            .unwrap_or_else(|| crate::model::join::DECIDE_PACKAGE.to_string());
+        Ok(JoinRule::Action { params, uses })
     }
 }
 
@@ -290,8 +305,8 @@ mod tests {
             JoinRule::Partial(PartialThreshold::Count(3)),
             JoinRule::Partial(PartialThreshold::Percent(40)),
             JoinRule::Action {
-                action: "countersign".into(),
                 params: serde_json::json!({ "chair": "chair" }),
+                uses: DECIDE_PACKAGE.to_string(),
             },
         ] {
             let text = serde_json::to_string(&rule).unwrap();
@@ -307,11 +322,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(JoinRule::Action {
-                action: "sign".into(),
-                params: serde_json::Value::Null,
+                params: serde_json::json!({ "action": "sign" }),
+                uses: DECIDE_PACKAGE.to_string(),
             })
             .unwrap(),
-            serde_json::json!({ "action": "sign", "params": null })
+            serde_json::json!({ "params": { "action": "sign" }, "uses": DECIDE_PACKAGE })
         );
     }
 
@@ -319,8 +334,15 @@ mod tests {
     fn refuses_unknown_or_empty_action_objects() {
         let bad: Result<JoinRule, _> = serde_json::from_value(serde_json::json!({ "key": "sign" }));
         assert!(bad.unwrap_err().to_string().contains("unknown rule field"));
-        let bad: Result<JoinRule, _> = serde_json::from_value(serde_json::json!({}));
-        assert!(bad.unwrap_err().to_string().contains("non-empty 'action'"));
+        // An object without 'uses' falls back to the core deciding package.
+        let empty: JoinRule = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(
+            empty,
+            JoinRule::Action {
+                params: serde_json::Value::Null,
+                uses: DECIDE_PACKAGE.to_string()
+            }
+        );
     }
 
     #[test]
@@ -349,8 +371,8 @@ mod tests {
         assert!(JoinRule::Partial(PartialThreshold::Count(2)).tolerates_failure(),);
         assert!(
             JoinRule::Action {
-                action: "sign".into(),
                 params: serde_json::Value::Null,
+                uses: DECIDE_PACKAGE.to_string(),
             }
             .tolerates_failure()
         );
@@ -365,11 +387,11 @@ mod tests {
         );
         assert_eq!(
             JoinRule::Action {
-                action: "sign".into(),
                 params: serde_json::Value::Null,
+                uses: "acme.countersign".to_string(),
             }
             .to_string(),
-            "action(sign)"
+            "action(acme.countersign)"
         );
     }
 }

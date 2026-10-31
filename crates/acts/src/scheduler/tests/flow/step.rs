@@ -5,9 +5,9 @@
 use serial_test::serial;
 
 use crate::{
-    MessageState, Vars, Workflow,
+    MessageState, Step, Vars, Workflow,
     scheduler::core::model::task_graph::TaskState,
-    utils::test::{USES_IRQ, USES_MSG, USES_SET},
+    utils::test::{USES_IRQ, USES_MSG, USES_PARALLEL, USES_SET},
 };
 
 use super::{FlowFixture, Terminal};
@@ -309,5 +309,73 @@ async fn sch_step_uses_packages_announce_and_settle() {
     fixture.wait_message("irq1", MessageState::Completed).await;
     fixture.wait_completed().await;
     assert_eq!(fixture.state("irq1").await, TaskState::Completed);
+    fixture.close().await;
+}
+
+/// The param fan-out binds each item as the `$item` object: a container's
+/// child reads `$item.value`/`$item.index`, and an act outside a fan-out
+/// reads `null` — the bare `value`/`index` aliases are gone.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_step_item_binding_binds_fanout_items_only() {
+    let workflow = Workflow::new()
+        .with_id("flow-step-item")
+        .with_step(|step| {
+            step.with_id("fan").with_uses(
+                USES_PARALLEL,
+                Vars::new().with("in", ["a", "b"]).with(
+                    "steps",
+                    vec![
+                        Step::new().with_id("item").with_uses(
+                            USES_IRQ,
+                            Vars::new()
+                                .with("key", "item")
+                                .with("value", "${{ $item.value }}")
+                                .with("index", "${{ $item.index }}"),
+                        ),
+                    ],
+                ),
+            )
+        })
+        .with_step(|step| {
+            step.with_id("plain").with_uses(
+                USES_IRQ,
+                Vars::new()
+                    .with("key", "plain")
+                    .with("item", "${{ $item }}"),
+            )
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created_uses(USES_IRQ, 2).await;
+    let mut items: Vec<(String, u64)> = created
+        .iter()
+        .map(|message| {
+            let params = message.params().expect("the resolved item params");
+            (
+                params.get::<String>("value").expect("the item value"),
+                params.get::<u64>("index").expect("the item index"),
+            )
+        })
+        .collect();
+    items.sort();
+    assert_eq!(
+        items,
+        vec![("a".to_string(), 0), ("b".to_string(), 1)],
+        "the item binds both its value and its position"
+    );
+    for message in &created {
+        fixture.next(&message.pid, &message.tid).await.unwrap();
+    }
+
+    let plain = fixture.wait_created("plain").await;
+    assert_eq!(
+        plain.params().unwrap().get::<serde_json::Value>("item"),
+        Some(serde_json::Value::Null),
+        "an act outside a fan-out has no item binding"
+    );
+    fixture.next(&plain.pid, &plain.tid).await.unwrap();
+    fixture.wait_completed().await;
     fixture.close().await;
 }

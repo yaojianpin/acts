@@ -73,7 +73,7 @@ fn parent_link(
 }
 
 /// The parent act's state, by the instance wire the child carries.
-async fn parent_state(host: &KernelHost, link: &ParentLink) -> Result<ParentState> {
+async fn parent_state(host: &Workers, link: &ParentLink) -> Result<ParentState> {
     let Some(loaded) = host.load(&link.pid).await? else {
         return Ok(ParentState::Done);
     };
@@ -165,7 +165,7 @@ pub(super) struct ReturnToParent;
 impl ActOperation for ReturnToParent {
     /// The hand-back only has work once the child settled and the parent is
     /// waiting for it. Anything else defers without consuming the operation.
-    async fn precheck(&self, host: &KernelHost, pending: &Pending<'_>) -> Result<Precheck> {
+    async fn precheck(&self, host: &Workers, pending: &Pending<'_>) -> Result<Precheck> {
         if run_outcome(pending.snapshot).is_none() {
             return Ok(Precheck::Ignore);
         }
@@ -188,7 +188,7 @@ impl ActOperation for ReturnToParent {
         })
     }
 
-    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, host: &Workers, operation: &mut Operation<'_>) -> Result<Outcome> {
         let snapshot = operation.snapshot();
         if run_outcome(snapshot).is_none() {
             return Ok(Outcome::Nothing);
@@ -227,7 +227,7 @@ impl ActOperation for ReturnToParent {
 
     async fn next(
         &self,
-        host: &KernelHost,
+        host: &Workers,
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
@@ -245,7 +245,7 @@ impl ActOperation for ReturnToParent {
     }
 }
 
-impl KernelHost {
+impl Workers {
     /// Ensure the child aggregate carries its durable hand-back. Called once
     /// the committed snapshot reports the child terminal; the existing
     /// operation (completed or not) is the idempotency marker, so a replayed
@@ -415,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn return_to_parent_is_recorded_once_for_a_settled_child() {
-        let (host, _wake) = KernelHost::in_memory();
+        let (host, _wake) = Workers::in_memory();
         let snapshot = settled(TaskState::Completed);
         host.processes
             .create(&snapshot, 0, 10)
@@ -439,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn return_to_parent_records_nothing_for_a_live_child() {
-        let (host, _wake) = KernelHost::in_memory();
+        let (host, _wake) = Workers::in_memory();
         let snapshot = settled(TaskState::Running);
         host.processes
             .create(&snapshot, 0, 10)

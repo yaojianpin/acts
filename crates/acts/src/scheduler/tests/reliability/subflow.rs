@@ -137,7 +137,7 @@ async fn deploy(engine: &Engine, workflow: &Workflow) {
 /// still there — the durable truth, immune to the read model's lag and to the
 /// sweeper.
 async fn legacy_task_state(engine: &Engine, pid: &str, node: &str) -> Option<TaskState> {
-    let snapshot = engine.runtime().kernel().snapshot(pid).await.ok()??;
+    let snapshot = engine.runtime().workers().snapshot(pid).await.ok()??;
     snapshot
         .tasks
         .iter()
@@ -152,7 +152,14 @@ async fn legacy_task_state(engine: &Engine, pid: &str, node: &str) -> Option<Tas
 /// window where the parent's own effect commit is still in flight.
 async fn wait_parent_effect_retired(engine: &Engine, pid: &str, node: &str) {
     poll_until("the parent subflow effect to retire", || async {
-        let Some(snapshot) = engine.runtime().kernel().snapshot(pid).await.ok().flatten() else {
+        let Some(snapshot) = engine
+            .runtime()
+            .workers()
+            .snapshot(pid)
+            .await
+            .ok()
+            .flatten()
+        else {
             return false;
         };
         snapshot.operations.iter().any(|(id, operation)| {
@@ -583,7 +590,7 @@ async fn a_store_that_refuses_the_child_start_degrades_the_parent_and_heals_inne
     assert!(
         !engine
             .runtime()
-            .kernel()
+            .workers()
             .process_completed(&pid2)
             .await
             .unwrap_or(false),
@@ -669,7 +676,7 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
     assert!(
         !engine
             .runtime()
-            .kernel()
+            .workers()
             .process_completed(&pid)
             .await
             .unwrap_or(false),
@@ -705,7 +712,7 @@ async fn a_restart_between_the_child_start_and_its_completion_recovers_both_once
     assert!(
         !engine
             .runtime()
-            .kernel()
+            .workers()
             .process_completed(&pid)
             .await
             .unwrap_or(false),
@@ -922,7 +929,7 @@ async fn two_subflow_branches_start_two_children_and_the_parent_completes_once_i
     assert!(
         !engine
             .runtime()
-            .kernel()
+            .workers()
             .process_completed(&pid)
             .await
             .unwrap_or(false),
@@ -1017,7 +1024,7 @@ async fn a_child_error_fails_the_waiting_parent_inner() {
     );
     let parent = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(&pid)
         .await
         .unwrap()
@@ -1116,7 +1123,7 @@ async fn a_fast_child_returns_without_an_effect_unknown_parent_inner() {
     );
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(&pid)
         .await
         .unwrap()

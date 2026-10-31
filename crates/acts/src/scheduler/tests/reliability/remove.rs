@@ -65,7 +65,7 @@ async fn removed(engine: &Engine, pid: &str, tid: &str) {
     poll_until(&what, || async {
         let snapshot = engine
             .runtime()
-            .kernel()
+            .workers()
             .snapshot(pid)
             .await
             .unwrap()
@@ -96,7 +96,7 @@ struct Durable {
 async fn durable_shape(engine: &Engine, pid: &str) -> Durable {
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -167,7 +167,7 @@ async fn settled_shape(engine: &Engine, pid: &str) -> Durable {
 async fn generations(engine: &Engine, pid: &str, tid: &str) -> Vec<u64> {
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -272,7 +272,7 @@ async fn a_removed_act_survives_a_reload_and_runs_forward_once_inner() {
     wait_waiting_task(&reloaded, &pid, "step2").await;
     let snapshot = reloaded
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(&pid)
         .await
         .unwrap()

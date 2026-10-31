@@ -81,7 +81,7 @@ impl TimerGuider {
 pub(crate) async fn sweep_removable(runtime: &Arc<Runtime>) -> Result<usize> {
     let limit = runtime.config().cleanup_batch();
     for pid in runtime.store().unmarked_settled_procs(limit).await? {
-        runtime.kernel().refresh_projection(&pid).await;
+        runtime.workers().refresh_projection(&pid).await;
     }
     let rows = runtime.store().terminal_proc_rows(limit).await?;
     let now = crate::utils::time::time_millis();
@@ -120,13 +120,13 @@ pub(crate) async fn sweep_removable(runtime: &Arc<Runtime>) -> Result<usize> {
     // A failed pass leaves a pid marked until its residue is gone. If the
     // rows disappeared anyway (the batch applied, an operator cleaned up),
     // clear the mark so the pid is not blocked forever.
-    for pid in runtime.kernel().reclaiming_pids() {
+    for pid in runtime.workers().reclaiming_pids() {
         if let Ok(None) = runtime.store().procs().find_opt(&pid).await {
-            runtime.kernel().finish_reclaim(&pid);
+            runtime.workers().finish_reclaim(&pid);
             runtime.router().forget(&pid);
         }
     }
-    runtime.kernel().timer_guards().fold_cleanup(&pass);
+    runtime.workers().timer_guards().fold_cleanup(&pass);
     match failure {
         Some(error) => Err(error),
         None => Ok(removed),
@@ -150,12 +150,12 @@ async fn cleanup_process(
     // removal: `Runtime::start` checks the aggregate under the same lock,
     // so it can never observe "aggregate gone, rows still there" and
     // create a new run whose rows the old cleanup would then delete.
-    let _lifecycle = runtime.kernel().lock_lifecycle(pid).await;
+    let _lifecycle = runtime.workers().lock_lifecycle(pid).await;
     // Projection and cleanup are ordered per pid: an in-flight projection
     // of the old run finishes before the aggregate is judged (its rows
     // cannot be written behind the removal), and the tombstone the
     // reclamation leaves blocks every later one.
-    let _projection = runtime.kernel().lock_projection(pid).await;
+    let _projection = runtime.workers().lock_projection(pid).await;
     runtime.writer().flush_pid(pid).await?;
     if runtime.store().has_unsettled_deliveries(pid).await? {
         return Ok(false);
@@ -170,8 +170,8 @@ async fn cleanup_process(
     // Set before the batch: if the batch succeeds and the row removal
     // fails, a start must keep refusing the pid until a later pass
     // finishes the residue. Cleared only after the rows are gone.
-    runtime.kernel().begin_reclaim(pid);
-    let outcome = runtime.kernel().reclaim_process(pid).await;
+    runtime.workers().begin_reclaim(pid);
+    let outcome = runtime.workers().reclaim_process(pid).await;
     let (document_bytes, orphan_indexes) = match outcome {
         Ok(crate::scheduler::durable::async_document_store::ReclaimOutcome::Reclaimed {
             document_bytes,
@@ -182,7 +182,7 @@ async fn cleanup_process(
             orphan_indexes,
         }) => (document_bytes, orphan_indexes),
         Ok(crate::scheduler::durable::async_document_store::ReclaimOutcome::Retained) => {
-            runtime.kernel().finish_reclaim(pid);
+            runtime.workers().finish_reclaim(pid);
             tracing::debug!(
                 pid,
                 "terminal cleanup retained a run for recovery/reconciliation"
@@ -209,7 +209,7 @@ async fn cleanup_process(
         // keep the mark only when residue may still be there.
         match runtime.store().procs().find_opt(pid).await {
             Ok(None) => {
-                runtime.kernel().finish_reclaim(pid);
+                runtime.workers().finish_reclaim(pid);
                 runtime.router().forget(pid);
                 return Ok(true);
             }
@@ -217,6 +217,6 @@ async fn cleanup_process(
         }
     }
     runtime.router().forget(pid);
-    runtime.kernel().finish_reclaim(pid);
+    runtime.workers().finish_reclaim(pid);
     Ok(true)
 }

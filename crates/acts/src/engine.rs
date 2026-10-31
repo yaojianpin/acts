@@ -111,48 +111,6 @@ impl Engine {
             .register(id, &ActPackageRegister::new::<T>());
     }
 
-    /// Install the resolver that `assign.owner` uses for its local atoms.
-    ///
-    /// `key` is the plugin's provider key and must have been registered with
-    /// [`Self::register_capability_provider`] for
-    /// [`CapabilityKind::Participant`](crate::capability::CapabilityKind::Participant).
-    /// There is no built-in resolver: owner resolution is a participant
-    /// feature, and an engine without one fails a declared assignment closed
-    /// with a message naming `acts-plugin-participant`.
-    ///
-    /// Call it from [`ActPlugin::on_init`], where the start pass can still
-    /// change the engine's wiring; a call after [`EngineBuilder::start`] has
-    /// returned is refused with [`ActError::Runtime`](crate::ActError::Runtime).
-    /// A parked or running act therefore never has its owner resolution
-    /// swapped underneath it.
-    pub fn register_participant_resolver(
-        &self,
-        key: impl Into<String>,
-        resolver: Arc<dyn crate::ParticipantResolver>,
-    ) -> crate::Result<()> {
-        self.runtime.register_participant_resolver(key, resolver)
-    }
-
-    /// Advertise one capability provider.
-    ///
-    /// `key` is the plugin's own external provider key; the kernel defines
-    /// only the capability type. Publishing a model whose required capability
-    /// no plugin advertises is refused with an error naming the attribute and
-    /// provider key. The registry is sealed after the start pass; a call after
-    /// [`EngineBuilder::start`] returns is refused with
-    /// [`ActError::Runtime`](crate::ActError::Runtime).
-    ///
-    /// Several providers may serve one kind under distinct keys. A model that
-    /// does not declare `assign.provider` may use the kind's only provider;
-    /// with several providers the model must declare one, otherwise publish
-    /// fails rather than silently choosing.
-    pub fn register_capability_provider(
-        &self,
-        provider: crate::capability::CapabilityProvider,
-    ) -> crate::Result<()> {
-        self.runtime.register_capability_provider(provider)
-    }
-
     /// Register a user var module into the engine's expression environment.
     ///
     /// Call it from [`ActPlugin::on_init`] (or an embedder that owns the
@@ -214,7 +172,7 @@ impl Engine {
     /// not-applied (or the effect is not idempotent), i.e. while it needs a
     /// human.
     pub async fn effect_unknowns(&self, pid: &str) -> crate::Result<Vec<EffectUnknown>> {
-        self.runtime.kernel().effect_unknowns(pid).await
+        self.runtime.workers().effect_unknowns(pid).await
     }
 
     /// Resolve one unknown effect with a durable operator decision (A1c).
@@ -231,7 +189,7 @@ impl Engine {
         resolution: EffectResolution,
     ) -> crate::Result<()> {
         self.runtime
-            .kernel()
+            .workers()
             .resolve_effect_by_key(pid, key, resolution)
             .await
     }
@@ -316,12 +274,6 @@ impl Engine {
         for plugin in plugins {
             plugin.on_init(self)?;
         }
-
-        // The plugin hooks are the only window in which the resolver may be
-        // replaced; from here on every assignment resolves through the one
-        // installed above.
-        self.runtime.seal_participant_resolver();
-        self.runtime.seal_capabilities();
 
         // Publishing a built-in package is the engine's own operation, not a
         // request: it runs as the unrestricted `system` principal, whatever

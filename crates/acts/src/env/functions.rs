@@ -126,9 +126,24 @@ fn builtin(name: &str) -> Option<Value> {
         // the engine's private keys; `WORK_DIR` is answered from the process.
         "$env" => from_json(JsonValue::from(env_map())),
         "$os" => Value::from(std::env::consts::OS),
+        // `$assign`: the read-only assignment projection of the acting
+        // execution — `$assign.owner`/`assignee`/`delegator`/`delegatee`
+        // and the computed pool (`candidates`/`ids`/`participants`/`count`),
+        // resolved along the scope chain; `$assign.at("<step-id>")` names an
+        // execution explicitly. A flow without assign facts answers nulls
+        // and an empty pool, never an error.
+        "$assign" => {
+            Context::try_with_current(|ctx| ctx.proc.assign_projection(ctx.task().task_id()))
+                .ok()
+                .unwrap_or_else(|| {
+                    crate::scheduler::shell::caps::assign::Assign::empty_projection()
+                })
+        }
         // The owner context variables, readable outside an owner expression
-        // too: `${{ $actor }}` in a param is the same fact
-        // `{ "kind": "context", "var": { "type": "current_actor" } }` names.
+        // too: `$initiator` is the run's business `actor` start variable and
+        // `$actor` the newest decision's actor — the same facts
+        // `{ "kind": "context", "var": { "type": ... } }` names. The ACL
+        // subject is never consulted.
         "$initiator" => Context::try_with_current(|ctx| ctx.initiator())
             .ok()
             .flatten()
@@ -160,6 +175,16 @@ fn builtin(name: &str) -> Option<Value> {
             Ok(value.map(Value::from).unwrap_or(Value::Null))
         }),
 
+        // `$item`: the parameter fan-out's binding of the acting execution —
+        // the item a `acts.core.parallel`/`acts.core.sequence` generated this
+        // child for, as `{ index, value }`; null outside a fan-out. The
+        // private storage variables never leave the engine (see
+        // `FANOUT_INDEX_VAR`/`FANOUT_VALUE_VAR`).
+        "$item" => Context::try_with_current(|ctx| ctx.task().fanout_item(&ctx.proc))
+            .ok()
+            .flatten()
+            .map(from_json)
+            .unwrap_or(Value::Null),
         "$get" => Value::function(|args| {
             arity("$get", args, 1, 1)?;
             let name = str_arg("$get", args, 0)?;

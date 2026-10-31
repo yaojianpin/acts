@@ -11,7 +11,7 @@
 use super::*;
 use crate::scheduler::shell::*;
 
-impl KernelHost {
+impl DispatchTimeout {
     /// The declared timeout branches of one model node, in declaration order.
     ///
     /// An empty list means the node's step declares no `timeouts`: the timer
@@ -19,7 +19,6 @@ impl KernelHost {
     /// dispatch needs; its guard stays in the model and is evaluated by the
     /// round.
     pub(super) fn timeout_branches(
-        &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Vec<crate::scheduler::core::plan::timeout::TimeoutBranch>> {
@@ -50,7 +49,7 @@ impl KernelHost {
     /// without a guard fires as soon as the round reaches it — a legacy branch
     /// whose `Step::init` had nothing to test.
     fn timeout_guard(
-        &self,
+        _host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         branch: &str,
     ) -> Result<Option<String>> {
@@ -68,7 +67,7 @@ impl KernelHost {
     /// task's creation stamp); it is frozen into the branch's evaluation as the
     /// `__cost` task datum `$cost()`/`$cost_in(...)` read.
     async fn timeout_round(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         owner: &crate::scheduler::core::model::task_graph::TaskId,
         task: Option<&crate::scheduler::core::commit::aggregate::TaskSnapshot>,
@@ -86,7 +85,7 @@ impl KernelHost {
         }) else {
             return Ok(TimeoutRound::Retire);
         };
-        let branches = self.timeout_branches(snapshot, &task.model_node)?;
+        let branches = Self::timeout_branches(snapshot, &task.model_node)?;
         if branches.is_empty() {
             return Ok(TimeoutRound::Retire);
         }
@@ -115,14 +114,14 @@ impl KernelHost {
             }
             crate::scheduler::core::plan::timeout::TimeoutCandidate::Branch(index) => {
                 let branch = branches[index].clone();
-                let guard = match self.timeout_guard(snapshot, &branch.node)? {
+                let guard = match Self::timeout_guard(host, snapshot, &branch.node)? {
                     None => TimeoutGuard::Fire,
                     Some(expr) => {
                         // The window is decided on the engine's own
                         // environment (the legacy branch task's `init`), with
                         // the frozen cost the legacy `on_timeout` wrote into
                         // the task data.
-                        let predicate = self
+                        let predicate = host
                             .evaluate_branch_predicate(
                                 snapshot,
                                 owner,
@@ -174,7 +173,7 @@ impl KernelHost {
     /// replacement intent, so a later window still fires.
     #[allow(clippy::too_many_arguments)]
     fn timeout_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -223,7 +222,7 @@ impl KernelHost {
                     sequence,
                 },
                 kind: OperationKind::DispatchTimeout,
-                ready_at_ms: Some(now_ms.saturating_add(self.timer_poll_ms())),
+                ready_at_ms: Some(now_ms.saturating_add(host.timer_poll_ms())),
             });
         }
         plan.validate().map_err(runtime)?;
@@ -260,13 +259,12 @@ impl ActOperation for DispatchTimeout {
     /// with nothing due must not consume its own operation, so the pre-claim
     /// verdict is the same round the operation would decide — an [`Precheck::Ignore`]
     /// leaves the operation `Pending` for the next tick.
-    async fn precheck(&self, host: &KernelHost, pending: &Pending<'_>) -> Result<Precheck> {
+    async fn precheck(&self, host: &Workers, pending: &Pending<'_>) -> Result<Precheck> {
         let id = pending.id;
         let task_id = id.task.clone();
         let task = pending.snapshot.tasks.get(&task_id);
         let idle = matches!(
-            host.timeout_round(pending.snapshot, &task_id, task, pending.now_ms)
-                .await?,
+            Self::timeout_round(host, pending.snapshot, &task_id, task, pending.now_ms).await?,
             TimeoutRound::Idle
         );
         Ok(if idle {
@@ -279,16 +277,16 @@ impl ActOperation for DispatchTimeout {
     /// The round, decided again against the authoritative post-claim snapshot:
     /// a decision that landed between the preflight and the claim leaves the
     /// timer with nothing to do, and the operation then has nothing to commit.
-    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, host: &Workers, operation: &mut Operation<'_>) -> Result<Outcome> {
         Ok(
-            match host
-                .timeout_round(
-                    operation.snapshot(),
-                    &operation.task_id,
-                    operation.task(),
-                    operation.now_ms,
-                )
-                .await?
+            match Self::timeout_round(
+                host,
+                operation.snapshot(),
+                &operation.task_id,
+                operation.task(),
+                operation.now_ms,
+            )
+            .await?
             {
                 TimeoutRound::Idle => Outcome::Nothing,
                 round => Outcome::Timeout(round),
@@ -298,7 +296,7 @@ impl ActOperation for DispatchTimeout {
 
     async fn next(
         &self,
-        host: &KernelHost,
+        host: &Workers,
         operation: &Operation<'_>,
         outcome: Outcome,
     ) -> Result<TransitionPlan> {
@@ -318,7 +316,8 @@ impl ActOperation for DispatchTimeout {
                 guard,
                 cost_ms,
                 declared,
-            } => host.timeout_plan(
+            } => Self::timeout_plan(
+                host,
                 snapshot,
                 id,
                 task_id,
@@ -333,7 +332,7 @@ impl ActOperation for DispatchTimeout {
             // Nothing can fire any more: the owner is decided or its node
             // declares no timeouts. The operation's own commit is its whole
             // remainder.
-            TimeoutRound::Retire => KernelHost::empty_remainder(snapshot, id, claim),
+            TimeoutRound::Retire => Self::empty_remainder(snapshot, id, claim),
             // The idle round is [`Outcome::Nothing`], which never reaches a
             // plan.
             TimeoutRound::Idle => {
@@ -354,8 +353,8 @@ mod tests {
         plan::timeout::TimeoutCandidate,
     };
 
-    fn host() -> std::sync::Arc<KernelHost> {
-        KernelHost::in_memory().0
+    fn host() -> std::sync::Arc<Workers> {
+        Workers::in_memory().0
     }
 
     fn id(node: &str, sequence: u64) -> OperationId {
@@ -435,7 +434,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_model_declares_no_branches() {
-        let host = host();
         let mut snapshot = ProcessSpec::linear("p", "root", &["a"])
             .seed_snapshot()
             .unwrap();
@@ -444,7 +442,7 @@ mod tests {
             .variables
             .remove(&(root, crate::scheduler::shell::model::MODEL_VAR.to_string()));
         assert!(
-            host.timeout_branches(
+            DispatchTimeout::timeout_branches(
                 &snapshot,
                 &crate::scheduler::core::model::model_graph::NodeId::parse("root").unwrap()
             )
@@ -455,12 +453,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_node_outside_the_model_declares_no_branches() {
-        let host = host();
         let snapshot = ProcessSpec::linear("p", "root", &["a"])
             .seed_snapshot()
             .unwrap();
         assert!(
-            host.timeout_branches(
+            DispatchTimeout::timeout_branches(
                 &snapshot,
                 &crate::scheduler::core::model::model_graph::NodeId::parse("ghost").unwrap()
             )
@@ -476,7 +473,7 @@ mod tests {
         let mut snapshot = running(None);
         let owner = TaskId::new("s1", 0).unwrap();
         assert!(matches!(
-            host.timeout_round(&snapshot, &owner, None, 1_000)
+            DispatchTimeout::timeout_round(&host, &snapshot, &owner, None, 1_000)
                 .await
                 .unwrap(),
             TimeoutRound::Retire
@@ -484,7 +481,7 @@ mod tests {
         snapshot.tasks.get_mut(&owner).unwrap().state = TaskState::Completed;
         let task = snapshot.tasks.get(&owner).unwrap().clone();
         assert!(matches!(
-            host.timeout_round(&snapshot, &owner, Some(&task), 1_000)
+            DispatchTimeout::timeout_round(&host, &snapshot, &owner, Some(&task), 1_000)
                 .await
                 .unwrap(),
             TimeoutRound::Retire
@@ -502,7 +499,7 @@ mod tests {
         snapshot.tasks.get_mut(&owner).unwrap().state = TaskState::Running;
         let task = snapshot.tasks.get(&owner).unwrap().clone();
         assert!(matches!(
-            host.timeout_round(&snapshot, &owner, Some(&task), 1_000)
+            DispatchTimeout::timeout_round(&host, &snapshot, &owner, Some(&task), 1_000)
                 .await
                 .unwrap(),
             TimeoutRound::Retire
@@ -524,7 +521,7 @@ mod tests {
         );
         let task = snapshot.tasks.get(&owner).unwrap().clone();
         assert!(matches!(
-            host.timeout_round(&snapshot, &owner, Some(&task), 1_000)
+            DispatchTimeout::timeout_round(&host, &snapshot, &owner, Some(&task), 1_000)
                 .await
                 .unwrap(),
             TimeoutRound::Retire
@@ -538,8 +535,7 @@ mod tests {
         let snapshot = running(None);
         let owner = TaskId::new("s1", 0).unwrap();
         let task = snapshot.tasks.get(&owner).unwrap().clone();
-        match host
-            .timeout_round(&snapshot, &owner, Some(&task), 1_000)
+        match DispatchTimeout::timeout_round(&host, &snapshot, &owner, Some(&task), 1_000)
             .await
             .unwrap()
         {
@@ -566,7 +562,7 @@ mod tests {
         let owner = TaskId::new("s1", 0).unwrap();
         let task = snapshot.tasks.get(&owner).unwrap().clone();
         assert!(matches!(
-            host.timeout_round(&snapshot, &owner, Some(&task), 1_000)
+            DispatchTimeout::timeout_round(&host, &snapshot, &owner, Some(&task), 1_000)
                 .await
                 .unwrap(),
             TimeoutRound::Idle
@@ -581,8 +577,7 @@ mod tests {
             let snapshot = running(Some(expr));
             let owner = TaskId::new("s1", 0).unwrap();
             let task = snapshot.tasks.get(&owner).unwrap().clone();
-            match host
-                .timeout_round(&snapshot, &owner, Some(&task), 1_000)
+            match DispatchTimeout::timeout_round(&host, &snapshot, &owner, Some(&task), 1_000)
                 .await
                 .unwrap()
             {
@@ -605,8 +600,7 @@ mod tests {
         let snapshot = running(Some("true"));
         let owner = TaskId::new("s1", 0).unwrap();
         let task = snapshot.tasks.get(&owner).unwrap().clone();
-        match host
-            .timeout_round(&snapshot, &owner, Some(&task), 1_000)
+        match DispatchTimeout::timeout_round(&host, &snapshot, &owner, Some(&task), 1_000)
             .await
             .unwrap()
         {
@@ -720,26 +714,25 @@ mod tests {
         let snapshot = running(None);
         let owner = TaskId::new("s1", 0).unwrap();
         let task = snapshot.tasks.get(&owner).unwrap().clone();
-        let branch = host
-            .timeout_branches(&snapshot, &task.model_node)
+        let branch = DispatchTimeout::timeout_branches(&snapshot, &task.model_node)
             .unwrap()
             .remove(0);
         let id = id("s1", 0);
         let claim = commit(&id);
-        let plan = host
-            .timeout_plan(
-                &snapshot,
-                &id,
-                &owner,
-                Some(&task),
-                &claim,
-                branch,
-                TimeoutGuard::Fire,
-                10,
-                1,
-                1_000,
-            )
-            .unwrap();
+        let plan = DispatchTimeout::timeout_plan(
+            &host,
+            &snapshot,
+            &id,
+            &owner,
+            Some(&task),
+            &claim,
+            branch,
+            TimeoutGuard::Fire,
+            10,
+            1,
+            1_000,
+        )
+        .unwrap();
         assert!(
             plan.task_creates
                 .iter()
@@ -767,26 +760,25 @@ mod tests {
         let snapshot = running(None);
         let owner = TaskId::new("s1", 0).unwrap();
         let task = snapshot.tasks.get(&owner).unwrap().clone();
-        let branch = host
-            .timeout_branches(&snapshot, &task.model_node)
+        let branch = DispatchTimeout::timeout_branches(&snapshot, &task.model_node)
             .unwrap()
             .remove(0);
         let id = id("s1", 0);
         let claim = commit(&id);
-        let plan = host
-            .timeout_plan(
-                &snapshot,
-                &id,
-                &owner,
-                Some(&task),
-                &claim,
-                branch,
-                TimeoutGuard::Fail("nope".into()),
-                0,
-                1,
-                1_000,
-            )
-            .unwrap();
+        let plan = DispatchTimeout::timeout_plan(
+            &host,
+            &snapshot,
+            &id,
+            &owner,
+            Some(&task),
+            &claim,
+            branch,
+            TimeoutGuard::Fail("nope".into()),
+            0,
+            1,
+            1_000,
+        )
+        .unwrap();
         assert!(
             plan.variable_writes
                 .iter()
@@ -801,26 +793,25 @@ mod tests {
         let snapshot = running(None);
         let owner = TaskId::new("s1", 0).unwrap();
         let task = snapshot.tasks.get(&owner).unwrap().clone();
-        let branch = host
-            .timeout_branches(&snapshot, &task.model_node)
+        let branch = DispatchTimeout::timeout_branches(&snapshot, &task.model_node)
             .unwrap()
             .remove(0);
         let id = id("s1", 0);
         let claim = commit(&id);
-        let error = host
-            .timeout_plan(
-                &snapshot,
-                &id,
-                &owner,
-                None,
-                &claim,
-                branch,
-                TimeoutGuard::Fire,
-                0,
-                1,
-                0,
-            )
-            .unwrap_err();
+        let error = DispatchTimeout::timeout_plan(
+            &host,
+            &snapshot,
+            &id,
+            &owner,
+            None,
+            &claim,
+            branch,
+            TimeoutGuard::Fire,
+            0,
+            1,
+            0,
+        )
+        .unwrap_err();
         assert!(format!("{error}").contains("not found"), "{error}");
     }
 
@@ -831,26 +822,25 @@ mod tests {
         let snapshot = running(None);
         let owner = TaskId::new("s1", 0).unwrap();
         let task = snapshot.tasks.get(&owner).unwrap().clone();
-        let branch = host
-            .timeout_branches(&snapshot, &task.model_node)
+        let branch = DispatchTimeout::timeout_branches(&snapshot, &task.model_node)
             .unwrap()
             .remove(0);
         let id = id("s1", 0);
         let claim = commit(&id);
-        let plan = host
-            .timeout_plan(
-                &snapshot,
-                &id,
-                &owner,
-                Some(&task),
-                &claim,
-                branch,
-                TimeoutGuard::Fire,
-                0,
-                2,
-                1_000,
-            )
-            .unwrap();
+        let plan = DispatchTimeout::timeout_plan(
+            &host,
+            &snapshot,
+            &id,
+            &owner,
+            Some(&task),
+            &claim,
+            branch,
+            TimeoutGuard::Fire,
+            0,
+            2,
+            1_000,
+        )
+        .unwrap();
         let timer = plan
             .operations
             .iter()
@@ -864,7 +854,7 @@ mod tests {
         let snapshot = running(None);
         let id = id("s1", 3);
         let claim = commit(&id);
-        let plan = KernelHost::empty_remainder(&snapshot, &id, &claim);
+        let plan = DispatchTimeout::empty_remainder(&snapshot, &id, &claim);
         assert_eq!(plan.source_operation.as_ref(), Some(&claim));
         assert_eq!(plan.expected, snapshot.version);
         assert!(plan.operations.is_empty());

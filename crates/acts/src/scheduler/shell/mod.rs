@@ -15,7 +15,7 @@
 //!
 //! - `ExecuteTask` commits `Ready → Running` (the task started) and seeds the
 //!   `ApplyAction` operation whose effect performs the task's work: the
-//!   attached [`effects::EffectRunner`] runs the step's package (the serving
+//!   attached [`caps::effect::EffectRunner`] runs the step's package (the serving
 //!   shell has [`PackageEffectRunner`]; a shell without one auto-completes).
 //! - `ApplyAction` commits `Running → Completed` (the effect is durable) and
 //!   seeds the `PropagateTask` operation in the same atomic batch — a crash
@@ -40,11 +40,7 @@
 //! the plan vocabulary every kind plans with.
 
 use crate::{
-    ActError, NodeKind, Result,
-    capability::{
-        DeliveryOutcome, EffectRequest, EffectRunner, KernelPorts, LifecycleSink, OutboxTransport,
-        ParticipantResolver, PredicateRunner,
-    },
+    ActError, Result,
     scheduler::{
         core::{
             commit::{
@@ -58,7 +54,6 @@ use crate::{
             model::{
                 clock::{Clock, SystemClock},
                 effect::EffectKey,
-                model_graph::NodeId,
                 operation::{
                     ClaimToken, OperationEvent, OperationId, OperationKind, OperationState,
                 },
@@ -96,6 +91,13 @@ use crate::{
             AsyncProcessRepository, AsyncRecoveryRepository, KvDocumentStore, ReclaimOutcome,
             TransitionCommitOutcome,
         },
+        shell::caps::{
+            CapServices,
+            delivery::OutboxTransport,
+            effect::{EffectRequest, EffectRunner},
+            lifecycle::LifecycleSink,
+            predicate::PredicateRunner,
+        },
     },
     store::KvStore,
 };
@@ -112,23 +114,16 @@ use tokio::sync::mpsc::{Receiver, Sender, channel};
 // through it.
 mod action;
 pub(crate) mod admission;
-mod assign;
+pub(crate) mod caps;
 mod context;
-pub(crate) mod delivery;
-mod effects;
+
 mod errors;
 mod facts;
 pub(crate) mod graph;
-pub(crate) mod lifecycle;
 mod liveness;
-mod message;
 pub(crate) mod model;
 mod operation;
-mod owner;
 mod planning;
-mod predicate;
-mod projection;
-mod read_model;
 pub(crate) mod recovery;
 pub(crate) mod scope;
 pub(crate) mod snapshot;
@@ -136,21 +131,26 @@ pub(crate) mod timers;
 pub(crate) mod validation;
 
 use self::model::task_graph;
-use self::{action::*, assign::*, errors::*, facts::*, planning::*};
+use self::{action::*, errors::*, facts::*, planning::*};
 pub(crate) use admission::{AdmissionCaps, Admissions};
-pub(crate) use assign::{AssignmentResolver, RuntimeAssignmentResolver};
+pub(crate) use caps::assign::{
+    ASSIGNMENT_VAR, Assign, Assignment, CANDIDATES_WAIT_VAR, DELEGATION_VAR, Delegation,
+    RuntimeAssignmentResolver, names_business_data,
+};
+pub(crate) use caps::delivery::ShadowTransport;
+pub(crate) use caps::effect::PackageEffectRunner;
+pub(crate) use caps::lifecycle::ReportedRuns;
+pub(crate) use caps::message::MessageForwarder;
+pub(crate) use caps::message::{attach_join_message, operation_message_payload, step_uses};
+pub(crate) use caps::predicate::EnginePredicateRunner;
+pub(crate) use caps::read::projection::env_map;
+pub(crate) use caps::read::read_model::{ProcRead, load as load_proc_rows};
+#[cfg(test)]
+pub(crate) use caps::read::read_model::{TaskRow, context as read_context};
+pub(crate) use caps::read::{ProjectionMetrics, RowProjector};
 pub use context::Context;
 pub(crate) use context::DeferredAction;
-pub(crate) use delivery::ShadowTransport;
-pub(crate) use effects::PackageEffectRunner;
-pub(crate) use lifecycle::ReportedRuns;
-pub(crate) use message::MessageForwarder;
 pub(crate) use model::ProcessSpec;
-pub(crate) use predicate::EnginePredicateRunner;
-pub(crate) use projection::{ProjectionMetrics, RowProjector};
-pub(crate) use read_model::{ProcRead, load as load_proc_rows};
-#[cfg(test)]
-pub(crate) use read_model::{TaskRow, context as read_context};
 #[cfg(test)]
 pub(crate) use scope::headless_scope;
 pub use scope::{Scope, ScopeNode, ScopeSpec, ScopeTask};
@@ -158,13 +158,6 @@ pub(crate) use snapshot::SnapshotRegistry;
 pub(crate) use timers::TimerGuider;
 
 const OWNER: &str = "kernel-host";
-/// Internal keys for the shell's built-in port implementations. These are not
-/// plugin provider keys: the serving assembly installs one default per port,
-/// and a later provider-selection task replaces this with plugin-chosen keys.
-const DEFAULT_EFFECT: &str = "kernel.effect";
-const DEFAULT_PREDICATE: &str = "kernel.predicate";
-const DEFAULT_DELIVERY: &str = "kernel.delivery";
-const DEFAULT_LIFECYCLE: &str = "kernel.lifecycle";
 const LEASE_MS: i64 = 60_000;
 /// How many times a client action re-plans after losing a compare-and-swap.
 /// The per-pid command lane (A4) serializes every in-process writer of one
@@ -177,21 +170,28 @@ const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
 
 /// The server-attributed facts one client action carries: the authenticated
-/// subject, the client's assignment revision, and whether its ACL grants the
-/// `assign` capability. Bundled so the action entry points keep one authority
-/// parameter instead of three loose ones.
+/// subject, the business actor, the client's assignment revision, and whether
+/// its ACL grants the `assign` capability. Bundled so the action entry points
+/// keep one authority parameter instead of four loose ones.
 pub(crate) struct ActionAttribution<'a> {
+    /// The authenticated ACL subject: the authorization gate and the audit
+    /// fields (`updated_by`/`granted_by`). Never the business actor.
     pub(crate) subject: Option<&'a str>,
+    /// The business actor the decision is attributed to (the action's
+    /// `actor` option): `$actor`, `$previous_approver`, the payload fields and
+    /// owner-expression context. Attribution only, never authorization.
+    pub(crate) actor: Option<&'a str>,
     pub(crate) rev: Option<u64>,
     pub(crate) can_assign: bool,
 }
 
 impl ActionAttribution<'_> {
-    /// The embedder/engine caller: no subject (ACL disabled or engine origin),
-    /// no revision and no assign capability.
+    /// The embedder/engine caller: no subject, no business actor, no revision
+    /// and no assign capability.
     pub(crate) fn none() -> Self {
         Self {
             subject: None,
+            actor: None,
             rev: None,
             can_assign: false,
         }
@@ -208,10 +208,10 @@ pub(crate) struct RunReport {
 }
 
 /// The engine-facing kernel host: a cloneable handle over the aggregate
-/// documents. The wake channel's receiving end is returned by [`KernelHost::new`]
-/// and belongs to exactly one driver task ([`KernelHost::serve`]).
+/// documents. The wake channel's receiving end is returned by [`Workers::new`]
+/// and belongs to exactly one driver task ([`Workers::serve`]).
 #[derive(Clone)]
-pub(crate) struct KernelHost {
+pub(crate) struct Workers {
     processes: Arc<AsyncProcessRepository>,
     recovery: Arc<AsyncRecoveryRepository>,
     wake_tx: Sender<OperationId>,
@@ -221,7 +221,7 @@ pub(crate) struct KernelHost {
     /// the host's serving assembly installs those defaults after construction.
     /// The read model and the store-facing timers are not extension points and
     /// stay as their own fields below.
-    ports: Arc<parking_lot::RwLock<KernelPorts>>,
+    caps: Arc<parking_lot::RwLock<CapServices>>,
     /// Retry delivery: a normal-path confirmation that lost its guard, or a
     /// record the transport deferred, notifies the driver so its outbox pass
     /// redelivers at once instead of waiting for the next tick. The tick stays
@@ -229,15 +229,9 @@ pub(crate) struct KernelHost {
     deliver: Arc<tokio::sync::Notify>,
     /// The read-model seam: when attached, every commit re-materializes the
     /// legacy rows (`procs`/`tasks`/`vars`) from the committed snapshot, so
-    /// the row-reading APIs and the sweeper see the run (see `projection`).
+    /// the row-reading APIs and the sweeper see the run (see `caps::read`).
     /// Without one the host keeps no read model — the kernel's own tests.
-    projection: Arc<parking_lot::RwLock<Option<Arc<projection::RowProjector>>>>,
-    /// The assignment seam: when attached, a human act's `assign.owner`
-    /// expression resolves on a headless task at start. Without one a
-    /// declared assignment fails closed (an act never runs unowned). It is the
-    /// kernel's adapter from a headless scope to the participant capability,
-    /// not a second provider-facing port.
-    assignment: Arc<parking_lot::RwLock<Option<Arc<dyn AssignmentResolver>>>>,
+    /// The projector lives in the `caps.read` slot (see `CapServices`).
     /// The runtime's store-facing timers (schedule triggers, delivery retries,
     /// terminal cleanup, snapshot purge), once attached: the driver's serve
     /// loop ticks them, so ONE background task owns every store-reaching pass.
@@ -323,7 +317,7 @@ pub(crate) struct KernelHost {
     settled: Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>>,
 }
 
-impl KernelHost {
+impl Workers {
     /// A host over the engine's key-value store, plus the wake receiver its
     /// driver task must own. `cache_cap` bounds the runs that may be in flight
     /// at once (see [`Admissions`]); tests pass
@@ -335,7 +329,7 @@ impl KernelHost {
         max_node_run_times: u64,
         timer_poll_ms: i64,
     ) -> (Arc<Self>, Receiver<OperationId>) {
-        Self::new_with_caps(
+        Self::new_with_admissions(
             kv,
             AdmissionCaps::new(cache_cap),
             max_node_run_times,
@@ -346,9 +340,9 @@ impl KernelHost {
     /// The host with explicit caps for every admission category (A8). The
     /// serving runtime builds these from [`Config`](crate::Config); tests that
     /// only exercise the execution bound keep [`Self::new`].
-    pub(crate) fn new_with_caps(
+    pub(crate) fn new_with_admissions(
         kv: Arc<dyn KvStore>,
-        caps: AdmissionCaps,
+        admissions: AdmissionCaps,
         max_node_run_times: u64,
         timer_poll_ms: i64,
     ) -> (Arc<Self>, Receiver<OperationId>) {
@@ -356,24 +350,30 @@ impl KernelHost {
         let processes = Arc::new(AsyncProcessRepository::new(store));
         let recovery = Arc::new(AsyncRecoveryRepository::new(processes.clone()));
         let (wake_tx, wake_rx) = channel(PAGE_SIZE * 8);
-        let mut ports = KernelPorts::default();
-        ports
-            .delivery
-            .install_default(DEFAULT_DELIVERY, Arc::new(ShadowTransport));
+        // The assembly defaults: no effects/predicates/lifecycle until the
+        // serving runtime attaches them, and the shadow transport (records
+        // logged, nothing sent) answering delivery.
+        let ports = CapServices {
+            effects: None,
+            predicates: None,
+            delivery: Arc::new(ShadowTransport),
+            lifecycle: None,
+            join: crate::scheduler::shell::caps::join::Join,
+            assignment: None,
+            read: None,
+        };
         (
             Arc::new(Self {
                 processes,
                 recovery,
                 wake_tx,
-                ports: Arc::new(parking_lot::RwLock::new(ports)),
+                caps: Arc::new(parking_lot::RwLock::new(ports)),
                 deliver: Arc::new(tokio::sync::Notify::new()),
-                projection: Arc::new(parking_lot::RwLock::new(None)),
-                assignment: Arc::new(parking_lot::RwLock::new(None)),
                 timer_guider: Arc::new(parking_lot::RwLock::new(None)),
                 timer_guards: Arc::new(TimerGuards::new()),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
                 max_node_run_times,
-                admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(caps))),
+                admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(admissions))),
                 timer_poll_ms: timer_poll_ms.max(1),
                 ready: Arc::new(tokio::sync::Notify::new()),
                 boot_reconciled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -453,67 +453,31 @@ impl KernelHost {
     }
 
     /// Attach the effect runner: from then on a Func package's work runs
-    /// inside the ApplyAction operation (see [`effects`]). Idempotent — the last
-    /// attach wins; attach before driving operations.
+    /// inside the ApplyAction operation (see [`effects`]). Idempotent — the
+    /// last attach wins; attach before driving operations.
     pub(crate) fn attach_effect_runner(&self, runner: Arc<dyn EffectRunner>) {
-        let mut ports = self.ports.write();
-        ports.effects.install_default(DEFAULT_EFFECT, runner);
-    }
-
-    /// Register the participant resolver under its plugin provider key.
-    ///
-    /// A duplicate key is refused; the resolver becomes the default port the
-    /// assignment path consults. The runtime seals the slot after `on_init`.
-    pub(crate) fn attach_participant_resolver(
-        &self,
-        key: &str,
-        resolver: Arc<dyn ParticipantResolver>,
-    ) -> Result<()> {
-        let mut ports = self.ports.write();
-        let first = ports.participants.default_port().is_none();
-        ports.participants.register(key, resolver)?;
-        if first {
-            ports.participants.set_default(key)?;
-        }
-        Ok(())
-    }
-
-    /// The participant capability `assign.owner` currently uses, if any.
-    pub(crate) fn participant_resolver(&self) -> Option<Arc<dyn ParticipantResolver>> {
-        self.ports.read().participants.default_port()
-    }
-
-    /// The participant resolver registered under provider `key`, if any.
-    pub(crate) fn participant_resolver_for(
-        &self,
-        key: &str,
-    ) -> Option<Arc<dyn ParticipantResolver>> {
-        self.ports.read().participants.get(key)
-    }
-
-    /// Replace the outbox transport: the shadow's logs records; the driver's
-    /// transport maps them onto engine messages (see [`message`]). Attach
-    /// before driving operations.
-    pub(crate) fn attach_outbox_transport(&self, transport: Box<dyn OutboxTransport>) {
-        let mut ports = self.ports.write();
-        ports
-            .delivery
-            .install_default(DEFAULT_DELIVERY, Arc::from(transport));
-    }
-
-    /// Attach the process-lifecycle sink: from then on a run reports one
-    /// start when it is alive and one terminal event when every execution
-    /// settled — the driver's `on_proc`. Attach before driving operations.
-    pub(crate) fn attach_lifecycle_sink(&self, sink: Arc<LifecycleSink>) {
-        let mut ports = self.ports.write();
-        ports.lifecycle.install_default(DEFAULT_LIFECYCLE, sink);
+        self.caps.write().effects = Some(runner);
     }
 
     /// Attach the read-model projector: from then on every commit
     /// re-materializes the legacy rows from the committed snapshot (see
     /// [`projection`]). Attach before driving operations.
-    pub(crate) fn attach_row_projector(&self, projector: Arc<projection::RowProjector>) {
-        *self.projection.write() = Some(projector);
+    pub(crate) fn attach_row_projector(&self, projector: Arc<RowProjector>) {
+        self.caps.write().read = Some(projector);
+    }
+
+    /// Replace the outbox transport: the shadow's logs records; the driver's
+    /// transport maps them onto engine messages (see [`message`]). Attach
+    /// before driving operations.
+    pub(crate) fn attach_outbox_transport(&self, transport: Arc<dyn OutboxTransport>) {
+        self.caps.write().delivery = transport;
+    }
+
+    /// Attach the process-lifecycle sink: from then on a run reports one
+    /// start when it is alive and one terminal event when every execution
+    /// settled — the driver's `on_proc`. Attach before driving operations.
+    pub(crate) fn attach_lifecycle_sink(&self, sink: Arc<dyn LifecycleSink>) {
+        self.caps.write().lifecycle = Some(sink);
     }
 
     /// Attach the predicate runner: from then on a branch `if` is decided on
@@ -521,8 +485,13 @@ impl KernelHost {
     /// without one the built-in subset evaluator decides. Attach before
     /// driving operations.
     pub(crate) fn attach_predicate_runner(&self, runner: Arc<dyn PredicateRunner>) {
-        let mut ports = self.ports.write();
-        ports.predicates.install_default(DEFAULT_PREDICATE, runner);
+        self.caps.write().predicates = Some(runner);
+    }
+
+    /// The installed capabilities' keys (see [`crate::scheduler::shell::caps::Capability`]):
+    /// what `sys:status` reports as the engine's `caps` list.
+    pub(crate) fn caps(&self) -> Vec<String> {
+        self.caps.read().keys()
     }
 
     /// Attach the runtime's timer guider: the serve loop then ticks the four
@@ -568,12 +537,12 @@ impl KernelHost {
         expr: &str,
         inputs: &[(String, String)],
     ) -> Result<PredicateValue> {
-        let runner = self.ports.read().predicates.default_port();
+        let runner = self.caps.read().predicates.clone();
         let (Some(runner), Some(model)) = (runner, model_of(snapshot)?) else {
             return Ok(evaluate_predicate(snapshot, task_id, expr, inputs));
         };
         match runner
-            .evaluate(predicate::PredicateRequest {
+            .evaluate(caps::predicate::PredicateRequest {
                 scope: self.scope_spec(snapshot, None, task_id, model)?,
                 expr: expr.to_string(),
                 overlay: inputs.to_vec(),
@@ -601,7 +570,7 @@ impl KernelHost {
     /// the repair pass will retry, and the outbox records stay `Pending` until
     /// it succeeds.
     async fn project(&self, snapshot: &ProcessSnapshot) -> bool {
-        let projector = self.projection.read().clone();
+        let projector = self.projector();
         let Some(projector) = projector else {
             return true;
         };
@@ -646,7 +615,7 @@ impl KernelHost {
         snapshot: &ProcessSnapshot,
         touched: &std::collections::BTreeSet<crate::scheduler::core::model::task_graph::TaskId>,
     ) -> bool {
-        let projector = self.projection.read().clone();
+        let projector = self.projector();
         let Some(projector) = projector else {
             return true;
         };
@@ -680,15 +649,13 @@ impl KernelHost {
     }
 
     /// The attached read model, if any.
-    pub(crate) fn projector(&self) -> Option<Arc<projection::RowProjector>> {
-        self.projection.read().clone()
+    pub(crate) fn projector(&self) -> Option<Arc<RowProjector>> {
+        self.caps.read().read.clone()
     }
 
     /// The read model's counters and repair backlog.
-    pub(crate) fn projection_metrics(&self) -> projection::ProjectionMetrics {
-        self.projection
-            .read()
-            .as_ref()
+    pub(crate) fn projection_metrics(&self) -> ProjectionMetrics {
+        self.projector()
             .map_or_else(Default::default, |projector| projector.metrics())
     }
 
@@ -696,7 +663,7 @@ impl KernelHost {
     /// report whether the rows are current. Returns `true` when the aggregate
     /// is gone (nothing to project).
     async fn repair_projection(&self, process_id: &str) -> bool {
-        let projector = self.projection.read().clone();
+        let projector = self.projector();
         let Some(projector) = projector else {
             return true;
         };
@@ -765,7 +732,7 @@ impl KernelHost {
     /// failed)`: a loop whose every attempt failed is the store failing, while
     /// one poisoned run among successful repairs must not degrade the loop.
     pub(crate) async fn repair_projections_batch(&self, batch: usize) -> (usize, usize) {
-        let Some(projector) = self.projection.read().clone() else {
+        let Some(projector) = self.projector() else {
             return (0, 0);
         };
         let repairs = projector.pending_repairs(batch.max(1));
@@ -788,7 +755,7 @@ impl KernelHost {
     /// aggregate's version. The scan is linear in the aggregate set, once per
     /// host — never in the tick count.
     async fn catch_up_projections(&self) -> bool {
-        let Some(projector) = self.projection.read().clone() else {
+        let Some(projector) = self.projector() else {
             return true;
         };
         let process_ids = match self.processes.process_ids().await {
@@ -890,7 +857,7 @@ impl KernelHost {
         &self,
         process_id: &str,
     ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        let projector = self.projection.read().clone();
+        let projector = self.projector();
         match projector {
             Some(projector) => Some(projector.lock_process(process_id).await),
             None => None,
@@ -910,7 +877,7 @@ impl KernelHost {
     /// Re-project one process's row only: the deliveries just settled, so the
     /// sole fact that can have changed is the sweeper's `removable` flag.
     async fn refresh_proc_row(&self, process_id: &str) {
-        let projector = self.projection.read().clone();
+        let projector = self.projector();
         let Some(projector) = projector else {
             return;
         };
@@ -1497,6 +1464,7 @@ impl KernelHost {
                     action.clone(),
                     inputs.clone(),
                     authority.subject,
+                    authority.actor,
                     authority.rev,
                     authority.can_assign,
                     &mut pinned,
@@ -1510,7 +1478,13 @@ impl KernelHost {
                     }
                     if let Some(intent) = &pinned {
                         match self
-                            .resume_action_intent(intent, &action, &inputs, authority.subject)
+                            .resume_action_intent(
+                                intent,
+                                &action,
+                                &inputs,
+                                authority.subject,
+                                authority.actor,
+                            )
                             .await?
                         {
                             ActionResume::Applied => return Ok(()),
@@ -1577,10 +1551,8 @@ impl KernelHost {
                 if task.parent.as_ref() == Some(&current) {
                     continue;
                 }
-                let package_step = !modelled
-                    || self
-                        .step_uses(snapshot, successor, &task.model_node)?
-                        .is_some();
+                let package_step =
+                    !modelled || step_uses(snapshot, successor, &task.model_node)?.is_some();
                 if package_step {
                     forward.push(task);
                 }
@@ -1610,6 +1582,10 @@ impl KernelHost {
     /// still applies to the state the other decision moved, or is legitimately
     /// refused — and never resumes an operation whose outcome another client
     /// was already told.
+    // The parameters mirror the fact being checked (decision, inputs, ACL
+    // subject, business actor); bundling them would only rename the same
+    // fields.
+    #[allow(clippy::too_many_arguments)]
     fn action_identity(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         process_id: &str,
@@ -1617,10 +1593,11 @@ impl KernelHost {
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
         subject: Option<&str>,
+        actor: Option<&str>,
         pinned: &mut Option<ActionIntent>,
     ) -> Result<ActionIntent> {
         if let Some(intent) = pinned.as_ref()
-            && Self::action_intent_is_mine(snapshot, intent, action, inputs, subject)
+            && Self::action_intent_is_mine(snapshot, intent, action, inputs, subject, actor)
         {
             return Ok(ActionIntent {
                 task: intent.task.clone(),
@@ -1700,6 +1677,7 @@ impl KernelHost {
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
         subject: Option<&str>,
+        actor: Option<&str>,
     ) -> bool {
         snapshot.operations.contains_key(&intent.operation)
             && snapshot
@@ -1708,7 +1686,7 @@ impl KernelHost {
                     intent.task.clone(),
                     action_fact_var(intent.operation.sequence),
                 ))
-                .is_some_and(|fact| fact == &action_fact(action, inputs, subject))
+                .is_some_and(|fact| fact == &action_fact(action, inputs, subject, actor))
     }
 
     /// The durable intent of one client action: the `ApplyAction` operation
@@ -1716,6 +1694,9 @@ impl KernelHost {
     /// replays. Without that fact a recovery driving the operation (a crash,
     /// an expired lease) would plan the bare operation's auto completion instead of
     /// the decision the client made.
+    // The parameters are the fact's own fields (decision, inputs, ACL subject,
+    // business actor); a wrapper struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
     fn action_intent(
         process_id: &str,
         task: &crate::scheduler::core::model::task_graph::TaskId,
@@ -1723,6 +1704,7 @@ impl KernelHost {
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
         subject: Option<&str>,
+        actor: Option<&str>,
         expected: crate::scheduler::core::model::transition_plan::ProcessVersion,
     ) -> TransitionPlan {
         TransitionPlan {
@@ -1733,7 +1715,7 @@ impl KernelHost {
             variable_writes: vec![VariableWrite {
                 scope: task.clone(),
                 name: action_fact_var(operation.sequence),
-                value: action_fact(action, inputs, subject),
+                value: action_fact(action, inputs, subject, actor),
             }],
             source_operation: None,
             operations: vec![OperationIntent {
@@ -1762,6 +1744,7 @@ impl KernelHost {
         action: &crate::scheduler::core::commit::command::ActionKind,
         inputs: &[(String, String)],
         subject: Option<&str>,
+        actor: Option<&str>,
     ) -> Result<ActionResume> {
         // A4: the release below is a command on the same pid — it takes the
         // lane; the operation revision it carries stays the fence.
@@ -1769,7 +1752,8 @@ impl KernelHost {
         let Some(snapshot) = self.load(&intent.operation.process_id).await? else {
             return Ok(ActionResume::Retry);
         };
-        if !Self::action_intent_is_mine(&snapshot.snapshot, intent, action, inputs, subject) {
+        if !Self::action_intent_is_mine(&snapshot.snapshot, intent, action, inputs, subject, actor)
+        {
             return Ok(ActionResume::Retry);
         }
         let Some(operation) = snapshot.snapshot.operations.get(&intent.operation) else {
@@ -1819,6 +1803,7 @@ impl KernelHost {
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
         subject: Option<&str>,
+        actor: Option<&str>,
         rev: Option<u64>,
         can_assign: bool,
         pinned: &mut Option<ActionIntent>,
@@ -1841,7 +1826,7 @@ impl KernelHost {
         // foreign operation would report the other client's outcome to this
         // one.
         let intent = Self::action_identity(
-            &snapshot, process_id, node, &action, &inputs, subject, pinned,
+            &snapshot, process_id, node, &action, &inputs, subject, actor, pinned,
         )?;
         let (task_id, operation_id) = (intent.task.clone(), intent.operation.clone());
         // The per-task check: a declared assignment admits only its owner or
@@ -1860,15 +1845,19 @@ impl KernelHost {
                 .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
             match &action {
                 crate::scheduler::core::commit::command::ActionKind::Transfer => {
-                    validate_transfer(&snapshot, &task_id, state, &inputs, subject, can_assign)?;
+                    Assign::validate_transfer(
+                        &snapshot, &task_id, state, &inputs, subject, can_assign,
+                    )?;
                 }
                 crate::scheduler::core::commit::command::ActionKind::Delegate => {
-                    validate_delegate(
+                    Assign::validate_delegate(
                         &snapshot, &task_id, state, &inputs, subject, can_assign, rev,
                     )?;
                 }
                 crate::scheduler::core::commit::command::ActionKind::Undelegate => {
-                    validate_undelegate(&snapshot, &task_id, state, subject, can_assign, rev)?;
+                    Assign::validate_undelegate(
+                        &snapshot, &task_id, state, subject, can_assign, rev,
+                    )?;
                 }
                 _ => unreachable!("moves_assignment names exactly the assignment actions"),
             }
@@ -1879,7 +1868,7 @@ impl KernelHost {
         ) {
             let assignment = Assignment::of(&snapshot, &task_id)?;
             let delegation = Delegation::of(&snapshot, &task_id)?;
-            authorize_decision(
+            Assign::authorize_decision(
                 assignment.as_ref(),
                 delegation.as_ref(),
                 subject,
@@ -1975,6 +1964,7 @@ impl KernelHost {
             &command.action,
             &command.inputs,
             subject,
+            actor,
         ) {
             let plan = Self::action_intent(
                 process_id,
@@ -1983,6 +1973,7 @@ impl KernelHost {
                 &command.action,
                 &command.inputs,
                 subject,
+                actor,
                 snapshot.version.clone(),
             );
             match self
@@ -2094,203 +2085,6 @@ impl KernelHost {
         })
     }
 
-    /// The `(uses, raw params, node name, model id)` of a `uses` step node,
-    /// from the durable model — the act message's and the effect seam's
-    /// package facts.
-    fn step_uses(
-        &self,
-        snapshot: &ProcessSnapshot,
-        task_id: &TaskId,
-        model_node: &crate::scheduler::core::model::model_graph::NodeId,
-    ) -> Result<Option<(String, serde_json::Value, String, String)>> {
-        let Some(model) = model_of(snapshot)? else {
-            return Ok(None);
-        };
-        let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
-            // A pushed act is not in the model: its facts ride the
-            // execution's scope (see `push_plan`).
-            let Some(act) = crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)?
-            else {
-                return Ok(None);
-            };
-            return Ok(Some((act.uses, act.params, act.name, model.id.clone())));
-        };
-        let Some(uses) = step.uses.clone().filter(|uses| !uses.trim().is_empty()) else {
-            return Ok(None);
-        };
-        Ok(Some((
-            uses,
-            step.params.clone(),
-            step.name.clone(),
-            model.id.clone(),
-        )))
-    }
-
-    /// The act message payload of one `uses` step: the fact set the driver's
-    /// transport maps onto the engine's `Message`, faithful to the legacy
-    /// `Task::create_message` — the node level (`act`), the resolved params and
-    /// options, the step and model inputs, the scope inputs the message
-    /// carries, then the operation's own outputs or its error. `facts` are the
-    /// start operation's pinned resolution
-    /// (absent for a host without a runner or an aggregate seeded before it);
-    /// `outputs` are the operation's own scope writes (`__`-private facts and the
-    /// error variables excluded); `error` is the failure the operation decided.
-    #[allow(clippy::too_many_arguments)]
-    fn act_message_payload(
-        &self,
-        snapshot: &ProcessSnapshot,
-        task_id: &TaskId,
-        node_id: &str,
-        facts: Option<&ActFacts>,
-        outputs: Option<&[VariableWrite]>,
-        error: Option<(&str, &str)>,
-    ) -> Result<Option<serde_json::Value>> {
-        let node = NodeId::parse(node_id).map_err(runtime)?;
-        let Some((uses, raw_params, name, mid)) = self.step_uses(snapshot, task_id, &node)? else {
-            return Ok(None);
-        };
-        // The resolved facts when the start operation pinned them, the raw
-        // declaration otherwise (`params` before a runner ever saw the step).
-        let params = facts
-            .map(|facts| facts.params.clone())
-            .unwrap_or(raw_params);
-        let options = facts
-            .map(|facts| facts.options.clone())
-            .unwrap_or(serde_json::Value::Null);
-        // The assignment projection: the persisted task state is the only
-        // source of these fields, never a client's inputs or options. It is
-        // merged into the payload after the inputs are built (see
-        // `inject_payload_assignment`).
-        let assignment = Assignment::of(snapshot, task_id)?;
-
-        let mut inputs = input_vars(snapshot, task_id);
-        // The act folds into its step node in the kernel, so the step the
-        // legacy message pointed at is the node itself.
-        inputs.insert(
-            crate::utils::consts::STEP_KEY.to_string(),
-            serde_json::json!({
-                crate::utils::consts::STEP_NODE_ID: node_id,
-                crate::utils::consts::STEP_NODE_NAME: name,
-                // The instance's external id — the wire since C5 (the legacy
-                // `$step.task_id` was the legacy task's own id, not the node).
-                crate::utils::consts::STEP_TASK_ID: task_id.wire(&snapshot.process_id),
-            }),
-        );
-        if let Some(model) = model_of(snapshot)? {
-            inputs.insert(
-                crate::utils::consts::WORKFLOW_MODEL_KEY.to_string(),
-                serde_json::json!({
-                    "id": model.id,
-                    "name": model.name,
-                    "options": model.options,
-                }),
-            );
-        }
-        inputs.insert(crate::utils::consts::ACT_PARAMS_KEY.to_string(), params);
-        inputs.insert(crate::utils::consts::ACT_OPTIONS_KEY.to_string(), options);
-
-        let mut payload = serde_json::json!({
-            "tid": task_id.wire(&snapshot.process_id),
-            "nid": node_id,
-            "name": name,
-            // The level is explicit since C6: the act payload used to leave
-            // `kind` to the consumer's "act" default. The word is unchanged.
-            "kind": NodeKind::Act.to_string(),
-            "uses": uses,
-            "mid": mid,
-            "inputs": serde_json::Value::Object(inputs),
-        });
-        if let Some(assignment) = &assignment {
-            inject_payload_assignment(&mut payload, assignment);
-        }
-        if let Some((code, message)) = error {
-            payload["error"] = serde_json::json!({ "code": code, "message": message });
-        } else if let Some(outputs) = outputs {
-            payload["outputs"] = message_outputs(outputs, task_id);
-        }
-        Ok(Some(payload))
-    }
-
-    /// The task-level message payload of one execution *without* a package: the
-    /// fact set the driver's transport maps onto the engine's `Message`. Every
-    /// execution announces its terminal states — skipped, completed, aborted,
-    /// failed and the rest — whatever its level, so a client can rebuild the
-    /// run's flow from the message stream alone: a package-less step and the
-    /// workflow root announce like the legacy `on_task` did, and a branch
-    /// announces too (the legacy tree kept branches silent; the kernel's
-    /// message stream is the trace, so a skipped or completed branch is a
-    /// state the client must see — its `kind` tells the two levels apart).
-    fn task_message_payload(
-        &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-        task_id: &crate::scheduler::core::model::task_graph::TaskId,
-        node: &str,
-        outputs: Option<&[VariableWrite]>,
-        error: Option<(&str, &str)>,
-    ) -> Result<Option<serde_json::Value>> {
-        let Some(model) = model_of(snapshot)? else {
-            return Ok(None);
-        };
-        let facts = node_facts(&model, node);
-        let mut inputs = input_vars(snapshot, task_id);
-        // The workflow model rides every legacy message; a package-less task
-        // carries no params and no `step` link of its own.
-        inputs.insert(
-            crate::utils::consts::WORKFLOW_MODEL_KEY.to_string(),
-            serde_json::json!({
-                "id": model.id,
-                "name": model.name,
-                "options": model.options,
-            }),
-        );
-        // The declared options (the legacy `Task::create_message` options
-        // set): a package-less step announced the options its declaration
-        // carried, which is what a channel filter's `tag` matches. A `uses`
-        // step's act payload carries the resolved options already.
-        let options = find_step_in_model(&model, node)
-            .map(|step| step.options.clone())
-            .unwrap_or_default();
-        if !options.is_empty() {
-            inputs.insert(
-                crate::utils::consts::ACT_OPTIONS_KEY.to_string(),
-                serde_json::to_value(options).unwrap_or(serde_json::Value::Null),
-            );
-        }
-        let mut payload = serde_json::json!({
-            "tid": task_id.wire(&snapshot.process_id),
-            "nid": node,
-            "name": facts.name,
-            "kind": facts.message_kind.to_string(),
-            "inputs": serde_json::Value::Object(inputs),
-        });
-        if let Some((code, message)) = error {
-            payload["error"] = serde_json::json!({ "code": code, "message": message });
-        } else if let Some(outputs) = outputs {
-            payload["outputs"] = message_outputs(outputs, task_id);
-        }
-        Ok(Some(payload))
-    }
-
-    /// The message payload of one operation's record: the act payload for a `uses`
-    /// step, the task payload otherwise. Both are the same legacy emission
-    /// (`Task::create_message`); only the fact set differs.
-    fn operation_message_payload(
-        &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-        task_id: &crate::scheduler::core::model::task_graph::TaskId,
-        node: &str,
-        facts: Option<&ActFacts>,
-        outputs: Option<&[VariableWrite]>,
-        error: Option<(&str, &str)>,
-    ) -> Result<Option<serde_json::Value>> {
-        if let Some(payload) =
-            self.act_message_payload(snapshot, task_id, node, facts, outputs, error)?
-        {
-            return Ok(Some(payload));
-        }
-        self.task_message_payload(snapshot, task_id, node, outputs, error)
-    }
-
     /// The variable space the evaluation seams see for one execution: its
     /// scope chain (nearest wins), the run's durable env and its caller
     /// authority, on the acting node of the declaring model.
@@ -2336,7 +2130,7 @@ impl KernelHost {
             pushed,
             vars,
             snapshot: shared_snapshot,
-            env: projection::env_map(snapshot)?,
+            env: env_map(snapshot)?,
             owner: owner_of(snapshot)?,
         })
     }
@@ -2350,7 +2144,7 @@ impl KernelHost {
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<(Arc<dyn EffectRunner>, EffectRequest)>> {
-        let Some(runner) = self.ports.read().effects.default_port() else {
+        let Some(runner) = self.caps.read().effects.clone() else {
             return Ok(None);
         };
         let Some(model) = model_of(snapshot)? else {
@@ -2365,7 +2159,7 @@ impl KernelHost {
             };
             return Ok(Some((
                 runner,
-                effects::EffectRequest {
+                caps::effect::EffectRequest {
                     scope: self.scope_spec(snapshot, shared, task_id, model)?,
                     package: act.uses,
                 },
@@ -2376,7 +2170,7 @@ impl KernelHost {
         };
         Ok(Some((
             runner,
-            effects::EffectRequest {
+            caps::effect::EffectRequest {
                 scope: self.scope_spec(snapshot, shared, task_id, model)?,
                 package,
             },

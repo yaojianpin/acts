@@ -157,7 +157,7 @@ async fn a_failed_projection_keeps_the_decision_and_never_resurrects_the_act_inn
     wait_completed(&engine, &pid).await;
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(&pid)
         .await
         .unwrap()
@@ -446,7 +446,7 @@ async fn a_restart_does_not_reapply_a_decided_fail_inner() {
 async fn engine_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
     engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()

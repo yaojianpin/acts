@@ -57,3 +57,15 @@ let mut options = Vars::new();
 options.set("to", "step1");
 rt.do_action2(&pid, &tid, EventAction::Back, options).unwrap();
 ```
+
+决策可以携带业务操作人 `actor`：
+
+```rust
+let mut options = Vars::new();
+options.set("actor", "u1");
+rt.do_action2(&pid, &tid, EventAction::Next, options).unwrap();
+```
+
+`actor` 只作业务归属：`$actor`、`$previous_approver(n)` 与消息里的
+owner/assignee 投影读它。它不进入活动数据，也不参与命令或转办授权。启动时把
+`actor` 放进启动变量，它就是本次流程的 `$initiator`。

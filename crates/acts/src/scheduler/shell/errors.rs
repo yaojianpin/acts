@@ -12,7 +12,7 @@ use std::task::{Context as TaskContext, Poll};
 /// leave the whole engine wedged with no owner for any operation. A package
 /// panic is contained where the package runs and reported as the ordinary
 /// package failure (the execution `Failed`, its error walk carries it); a
-/// panic anywhere else while driving is contained around `KernelHost::execute_one`
+/// panic anywhere else while driving is contained around `Workers::execute_one`
 /// so the driver survives and the operation stays open for recovery.
 pub(super) struct CatchPanic<F> {
     future: Option<F>,

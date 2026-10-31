@@ -390,7 +390,7 @@ pub(crate) async fn wait_completed(engine: &Engine, pid: &str) {
         || async {
             engine
                 .runtime()
-                .kernel()
+                .workers()
                 .process_completed(pid)
                 .await
                 .unwrap_or(false)
@@ -446,7 +446,7 @@ pub(crate) async fn dump_state(engine: &Engine, pid: &str) -> String {
     // The run's own outbox records — the family a stalled or unconfirmed
     // delivery lives in, and the one `removable` is decided from. Coarse tags
     // only (no timestamps), so a stuck state prints once.
-    if let Ok(Some(snapshot)) = engine.runtime().kernel().snapshot(pid).await {
+    if let Ok(Some(snapshot)) = engine.runtime().workers().snapshot(pid).await {
         use crate::scheduler::core::outbox::records::OutboxState;
         let mut outbox: Vec<String> = snapshot
             .outbox
@@ -478,7 +478,7 @@ async fn retained_for_reconciliation(engine: &Engine, pid: &str) -> bool {
 
     engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .ok()
@@ -527,7 +527,12 @@ pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
             "a retained run keeps its proc row"
         );
         assert!(
-            engine.runtime().kernel().exists(pid).await.unwrap_or(false),
+            engine
+                .runtime()
+                .workers()
+                .exists(pid)
+                .await
+                .unwrap_or(false),
             "a retained run keeps its aggregate"
         );
         return;
@@ -541,7 +546,7 @@ pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
         "the finished run's task rows must be removed"
     );
     assert!(
-        !engine.runtime().kernel().exists(pid).await.unwrap(),
+        !engine.runtime().workers().exists(pid).await.unwrap(),
         "the finished run's aggregate must be removed"
     );
     let vars = store.vars().query(&q).await.unwrap().rows;

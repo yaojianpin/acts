@@ -443,8 +443,8 @@ fn an_aborted_child_still_yields_the_rule_join_to_the_abort_walk() {
 fn a_delegated_rule_never_decides_by_count() {
     let (graph, snapshot, command) = join_container(
         Some(crate::JoinRule::Action {
-            action: "sign".into(),
-            params: serde_json::Value::Null,
+            params: serde_json::json!({ "action": "sign" }),
+            uses: crate::model::DECIDE_PACKAGE.to_string(),
         }),
         &[("b1", TaskState::Completed), ("b2", TaskState::Completed)],
     );

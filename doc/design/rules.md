@@ -133,9 +133,9 @@ pub struct ValidationRule {
 
 ## 5. 与 assign / 参与人的关系
 
-- `assign.owner` 在规则之前解析。因此一个声明了 assign 的活动即使随后命中
-  `skip`/`error`，owner 表达式也必须先解析成功；解析失败会以
-  `assignment_failed` 失败，而不是被规则吸收。这是当前实现的有意顺序：
+- `assign.owner`（用户 id 或 `${{ }}` 表达式）在规则之前解析。因此一个声明了
+  assign 的活动即使随后命中 `skip`/`error`，owner 也必须先解析成功；解析失败会
+  以 `assignment_failed` 失败，而不是被规则吸收。这是当前实现的有意顺序：
   assignment 是活动启动的一部分，规则不改变承办人解析的失败语义。
 - 规则不改变授权：客户端决策仍按 `__assignment`/`__delegation` 检查；规则触发
   的 `next`/`submit` 等是引擎决策，不冒充 owner 的客户端操作。

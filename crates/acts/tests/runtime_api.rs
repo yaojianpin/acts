@@ -33,3 +33,40 @@ fn runtime_types_are_publicly_nameable() {
     let _ = ScopeTask::state;
     let _ = Context::task;
 }
+
+use acts::caps::{
+    Capability, EffectKey, EffectOutcome, EffectRequest, EffectRunner, ResolvedEffect,
+};
+
+/// An external effect runner: only the public request/response vocabulary is
+/// used. The trait stays implementable outside the crate; installation is the
+/// serving assembly's job, not a registration API.
+#[derive(Clone)]
+struct DummyEffect;
+
+impl acts::caps::Capability for DummyEffect {
+    fn key(&self) -> &str {
+        "test.effect"
+    }
+}
+
+#[async_trait::async_trait]
+impl EffectRunner for DummyEffect {
+    async fn resolve(&self, _request: &EffectRequest) -> acts::Result<ResolvedEffect> {
+        Ok(ResolvedEffect {
+            params: serde_json::json!({}),
+            options: serde_json::json!({}),
+        })
+    }
+
+    async fn run(&self, _request: EffectRequest, _key: EffectKey) -> acts::Result<EffectOutcome> {
+        Ok(EffectOutcome::empty())
+    }
+}
+
+#[test]
+fn effect_runner_is_implementable_with_a_key() {
+    fn assert_capability(_: &dyn Capability) {}
+    assert_capability(&DummyEffect);
+    assert_eq!(DummyEffect.key(), "test.effect");
+}

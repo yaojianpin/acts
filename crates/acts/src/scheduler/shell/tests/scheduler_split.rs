@@ -60,7 +60,7 @@ fn schedule(
 }
 
 /// Whether the timeout branch `t1` has a committed generation.
-async fn branch_fired(host: &KernelHost, pid: &str) -> bool {
+async fn branch_fired(host: &Workers, pid: &str) -> bool {
     host.snapshot(pid)
         .await
         .unwrap()
@@ -71,7 +71,7 @@ async fn branch_fired(host: &KernelHost, pid: &str) -> bool {
 /// at an hour, a due `DispatchTimeout` still fires on the ready cadence.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_parked_recovery_interval_does_not_delay_a_timer() {
-    let (host, wake_rx) = KernelHost::in_memory();
+    let (host, wake_rx) = Workers::in_memory();
     let shutdown = CancellationToken::new();
     let driver = tokio::spawn(host.clone().serve(
         wake_rx,
@@ -138,7 +138,7 @@ async fn the_runtime_wires_the_configured_loops_independently() {
 
     let mut fired = false;
     for _ in 0..500 {
-        if branch_fired(runtime.kernel().as_ref(), &pid).await {
+        if branch_fired(runtime.workers().as_ref(), &pid).await {
             fired = true;
             break;
         }
@@ -158,7 +158,7 @@ async fn the_runtime_wires_the_configured_loops_independently() {
 /// recovery scanner; the outbox retry pass keeps its own cadence too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_short_timer_interval_does_not_multiply_recovery_scans() {
-    let (host, wake_rx) = KernelHost::in_memory();
+    let (host, wake_rx) = Workers::in_memory();
     let shutdown = CancellationToken::new();
     let driver = tokio::spawn(host.clone().serve(
         wake_rx,

@@ -2056,7 +2056,7 @@ macro_rules! gen_store_tests {
             // find goes through upcast
             let found = store.messages().find(&msg.id).await.unwrap();
             assert_eq!(found.id, msg.id);
-            assert_eq!(found.v, 2);
+            assert_eq!(found.v, 3);
 
             // query goes through upcast
             let q = Query::new()
@@ -2064,7 +2064,7 @@ macro_rules! gen_store_tests {
                 .limit(1);
             let page = store.messages().query(&q).await.unwrap();
             assert_eq!(page.rows.len(), 1);
-            assert_eq!(page.rows[0].v, 2);
+            assert_eq!(page.rows[0].v, 3);
         }
 
         #[tokio::test(flavor = "multi_thread")]

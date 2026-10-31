@@ -32,10 +32,10 @@
 //! deliberate contract of a deterministic core.
 #![allow(clippy::result_large_err)]
 
-mod core;
+pub(crate) mod core;
 mod durable;
 mod runtime;
-mod shell;
+pub(crate) mod shell;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -55,10 +55,9 @@ pub use self::shell::{Context, Scope, ScopeNode, ScopeSpec, ScopeTask};
 
 #[cfg(test)]
 pub(crate) use self::core::commit::aggregate::ProcessSnapshot;
-pub(crate) use self::core::model::effect::EffectKey;
+pub use self::core::model::effect::EffectKey;
 pub use self::core::model::task_graph::TaskState;
 pub(crate) use self::core::model::view::{NodeContent, NodeData, NodeKind, assign_ids};
-pub(crate) use self::core::outbox::records::OutboxRecord;
 pub(crate) use self::core::plan::branch::PredicateValue;
 pub(crate) use self::core::plan::cron::Cron;
 pub(crate) use self::runtime::Runtime;

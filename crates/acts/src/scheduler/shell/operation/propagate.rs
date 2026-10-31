@@ -9,7 +9,7 @@
 use super::*;
 use crate::scheduler::shell::*;
 
-impl KernelHost {
+impl PropagateTask {
     /// Where the flow goes once `execution` settled, read from the declaring
     /// model: the node the flow enters next, and whether it must be re-created
     /// because its newest generation is already terminal (`planning::flow_target`
@@ -21,7 +21,7 @@ impl KernelHost {
     /// chain, never its own `next`; a `while` step whose guard still holds
     /// after the iteration re-enters itself.
     async fn flow_of(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
     ) -> Result<Option<crate::scheduler::core::plan::propagation::FlowTarget>> {
@@ -70,7 +70,7 @@ impl KernelHost {
             && let Some(node) = find_step_in_model(&model, &node)
             && let Some(expr) = node.r#while.as_ref()
         {
-            let holds = self
+            let holds = host
                 .evaluate_branch_predicate(snapshot, task_id, expr, &[])
                 .await?;
             if holds == PredicateValue::True {
@@ -106,48 +106,6 @@ impl KernelHost {
             vars,
         }))
     }
-
-    /// The joined container's own completion message: a package-less
-    /// container speaks here (its children settled and it reached its terminal
-    /// state — the record is sequence-qualified, so a container that also
-    /// announced an act keeps both). A `uses` step's act announced itself at
-    /// the fan-out, so the join adds nothing for it: the legacy step's own
-    /// messages are suppressed once it carries an act.
-    pub(super) fn attach_join_message(
-        &self,
-        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-        plan: &mut TransitionPlan,
-        parent: &crate::scheduler::core::model::task_graph::TaskId,
-        operation: &OperationIntent,
-    ) -> Result<()> {
-        let Some(task) = snapshot.tasks.get(parent) else {
-            return Ok(());
-        };
-        if self
-            .step_uses(snapshot, parent, &task.model_node)?
-            .is_some()
-        {
-            return Ok(());
-        }
-        if let Some(payload) =
-            self.task_message_payload(snapshot, parent, parent.node.as_str(), None, None)?
-        {
-            plan.outbox.push(
-                crate::scheduler::core::model::transition_plan::OutboxIntent {
-                    key: format!(
-                        "completed:{}:{}:{}:{}",
-                        snapshot.process_id,
-                        parent.node.as_str(),
-                        parent.generation,
-                        operation.id.sequence
-                    ),
-                    topic: "task.completed".into(),
-                    payload: payload.to_string(),
-                },
-            );
-        }
-        Ok(())
-    }
 }
 
 /// The propagation operation: a settled execution carried into its successors.
@@ -157,18 +115,18 @@ pub(super) struct PropagateTask;
 impl ActOperation for PropagateTask {
     /// Nothing to check before the claim: a settled execution always
     /// propagates.
-    async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
+    async fn precheck(&self, _host: &Workers, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
     }
 
     /// Nothing runs: the plan is the whole operation.
-    async fn run(&self, _host: &KernelHost, _operation: &mut Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, _host: &Workers, _operation: &mut Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 
     async fn next(
         &self,
-        host: &KernelHost,
+        host: &Workers,
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
@@ -185,7 +143,7 @@ impl ActOperation for PropagateTask {
                 task: task_id.clone(),
                 source_operation: claim.clone(),
                 join_policy: crate::scheduler::core::plan::propagation::JoinPolicy::AllSucceeded,
-                flow: host.flow_of(snapshot, &task_id).await?,
+                flow: PropagateTask::flow_of(host, snapshot, &task_id).await?,
             };
             let mut plan = Propagate::plan((&graph, snapshot), &command).map_err(runtime)?;
             // A completed execution's own scope data folds into its parent
@@ -324,7 +282,7 @@ impl ActOperation for PropagateTask {
                         let text = task_variable(snapshot, &parent, "error.message")
                             .map(json_text)
                             .unwrap_or_default();
-                        if let Some(payload) = host.operation_message_payload(
+                        if let Some(payload) = operation_message_payload(
                             snapshot,
                             &parent,
                             parent.node.as_str(),
@@ -345,10 +303,15 @@ impl ActOperation for PropagateTask {
                         change,
                         operation,
                     )) => {
-                        host.attach_join_message(snapshot, &mut plan, &parent, &operation)?;
+                        attach_join_message(snapshot, &mut plan, &parent, &operation)?;
                         plan.state_changes.push(change);
                         plan.operations.push(operation);
                     }
+                    // A candidates request settling under an act that waits
+                    // for its pool: fold the answer in and re-enter the act's
+                    // start (a skipped request defers; a failed one is not
+                    // ours — the error walk carries it).
+                    None if Assign::settle(snapshot, &mut plan, &parent, &task_id)? => {}
                     None => {
                         // The parent's join rule, when the parent is a
                         // container parked for its children: it decides the
@@ -362,7 +325,7 @@ impl ActOperation for PropagateTask {
                             None
                         };
                         if let Some(delegated @ crate::JoinRule::Action { .. }) = join.as_ref() {
-                            host.join_settlement(
+                            crate::scheduler::shell::caps::join::Join::settlement(
                                 snapshot, &mut plan, &parent, &task_id, delegated,
                             )?;
                         }
@@ -392,7 +355,7 @@ impl ActOperation for PropagateTask {
                                         value: json_var(value),
                                     });
                                 }
-                                if let Some(payload) = host.operation_message_payload(
+                                if let Some(payload) = operation_message_payload(
                                     snapshot,
                                     &parent,
                                     parent.node.as_str(),
@@ -415,7 +378,7 @@ impl ActOperation for PropagateTask {
                                     );
                                 }
                             } else {
-                                host.attach_join_message(
+                                attach_join_message(
                                     snapshot,
                                     &mut plan,
                                     &command.parent,
@@ -482,8 +445,8 @@ mod tests {
     use super::*;
     use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
 
-    fn host() -> std::sync::Arc<KernelHost> {
-        KernelHost::in_memory().0
+    fn host() -> std::sync::Arc<Workers> {
+        Workers::in_memory().0
     }
 
     fn id(node: &str) -> TaskId {
@@ -514,7 +477,12 @@ mod tests {
         snapshot
             .variables
             .remove(&(root.clone(), super::super::model::MODEL_VAR.to_string()));
-        assert!(host.flow_of(&snapshot, &root).await.unwrap().is_none());
+        assert!(
+            PropagateTask::flow_of(&host, &snapshot, &root)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// A `while` whose guard still holds after the iteration re-enters the
@@ -528,8 +496,7 @@ mod tests {
         let mut snapshot = spec.seed_snapshot().unwrap();
         let source = id("s1");
         snapshot.tasks.get_mut(&source).unwrap().state = TaskState::Completed;
-        let target = host
-            .flow_of(&snapshot, &source)
+        let target = PropagateTask::flow_of(&host, &snapshot, &source)
             .await
             .unwrap()
             .expect("a flow");
@@ -540,7 +507,6 @@ mod tests {
     /// A join for an execution the aggregate no longer holds says nothing.
     #[tokio::test]
     async fn a_join_message_for_a_missing_parent_is_ignored() {
-        let host = host();
         let snapshot = ProcessSpec::linear("p", "root", &["a"])
             .seed_snapshot()
             .unwrap();
@@ -554,15 +520,13 @@ mod tests {
             operations: Vec::new(),
             outbox: Vec::new(),
         };
-        host.attach_join_message(&snapshot, &mut plan, &id("ghost"), &intent(3))
-            .unwrap();
+        attach_join_message(&snapshot, &mut plan, &id("ghost"), &intent(3)).unwrap();
         assert!(plan.outbox.is_empty());
     }
 
     /// A package-less container speaks its own completion at the join.
     #[tokio::test]
     async fn a_package_less_parent_announces_its_join() {
-        let host = host();
         let workflow = crate::model::Workflow::new().with_step(|step| step.with_id("a"));
         let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
         let snapshot = spec.seed_snapshot().unwrap();
@@ -576,8 +540,7 @@ mod tests {
             operations: Vec::new(),
             outbox: Vec::new(),
         };
-        host.attach_join_message(&snapshot, &mut plan, &id("a"), &intent(4))
-            .unwrap();
+        attach_join_message(&snapshot, &mut plan, &id("a"), &intent(4)).unwrap();
         assert_eq!(plan.outbox.len(), 1);
         assert_eq!(plan.outbox[0].topic, "task.completed");
     }
@@ -586,7 +549,6 @@ mod tests {
     /// nothing for it.
     #[tokio::test]
     async fn a_package_parent_suppresses_the_join_message() {
-        let host = host();
         let workflow = crate::model::Workflow::new()
             .with_step(|step| step.with_id("s1").with_uses("pkg.test", crate::Vars::new()));
         let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
@@ -601,8 +563,7 @@ mod tests {
             operations: Vec::new(),
             outbox: Vec::new(),
         };
-        host.attach_join_message(&snapshot, &mut plan, &id("s1"), &intent(5))
-            .unwrap();
+        attach_join_message(&snapshot, &mut plan, &id("s1"), &intent(5)).unwrap();
         assert!(plan.outbox.is_empty());
     }
 }

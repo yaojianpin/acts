@@ -22,7 +22,13 @@
 
 mod acl;
 mod builder;
-pub mod capability;
+pub mod caps {
+    pub use crate::scheduler::shell::caps::Capability;
+    pub use crate::scheduler::shell::caps::effect::{
+        EffectKey, EffectObservation, EffectOutcome, EffectRequest, EffectRunner, ResolvedEffect,
+    };
+    pub use crate::scheduler::shell::caps::services::CapServices;
+}
 
 /// The stable read surface of a running evaluation.
 ///
@@ -65,7 +71,7 @@ pub use acl::{
     DisabledAcl, LoginTokens, Principal, ScopePolicy, UserPolicy, UserSpec, action_catalog,
 };
 pub use builder::EngineBuilder;
-pub use capability::ParticipantResolver;
+pub use caps::Capability;
 pub use config::{Config, ConfigLog, DEFAULT_LOG_MAX_FILES, MissingParamAction};
 pub use engine::{EffectResolution, EffectUnknown, Engine};
 pub use env::{ActFunction, ActUserVar};

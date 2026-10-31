@@ -38,7 +38,7 @@ impl ActionPlanner {
             .ok_or_else(|| CommandError::TaskNotFound(command.task.clone()))?;
         // `Push` decides no state: its preflight is the admissibility guard
         // alone, and the plan that creates the pushed act is the shell's own
-        // (`KernelHost::push_plan`) — the client inputs describe the new act,
+        // (`Workers::push_plan`) — the client inputs describe the new act,
         // they are not the target's scope writes.
         if matches!(
             command.action,

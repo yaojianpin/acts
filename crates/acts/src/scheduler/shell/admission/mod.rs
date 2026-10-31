@@ -158,11 +158,11 @@ pub(crate) struct AdmissionMetrics {
 /// category never holds another category's work.
 ///
 /// The legacy resident set answered the same question through `Cache`; here
-/// the only writers are [`KernelHost::start_process`] (which reserves) and the
+/// the only writers are [`Workers::start_process`] (which reserves) and the
 /// driver's operations (which settle), so this set is the single answer to "may
 /// this run operation". Like that set it is in-memory: a restart starts it
 /// empty, and the runs still in flight take their slots again through
-/// [`KernelHost::place_run`] when the ready queue hands them their first turn.
+/// [`Workers::place_run`] when the ready queue hands them their first turn.
 /// The first `cap` of them are admitted in the order the ready index returns
 /// them rather than by `__created` (the store keeps no boot index to sort by),
 /// while every later admission is by stamp, exactly like the legacy parked
@@ -390,7 +390,7 @@ impl Admissions {
     }
 }
 
-impl KernelHost {
+impl Workers {
     /// The caps a [`Config`](crate::Config) names (A8). Public entry points
     /// that build a host without one use [`AdmissionCaps::new`]'s defaults.
     pub(crate) fn caps_from_config(config: &crate::Config) -> AdmissionCaps {

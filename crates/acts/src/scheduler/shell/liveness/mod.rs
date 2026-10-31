@@ -21,7 +21,7 @@ impl QueueWake {
     }
 }
 
-impl KernelHost {
+impl Workers {
     /// Wake one operation. A wake is an optimization over the durable ready
     /// index: a full queue drops it, the ready record remains, and the due pass
     /// is notified to pick it up before the next tick.

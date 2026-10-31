@@ -49,6 +49,7 @@ mod errors;
 mod fanout;
 mod flow;
 mod join;
+pub(crate) mod join_rules;
 #[cfg(test)]
 mod tests;
 

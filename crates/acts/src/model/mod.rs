@@ -18,13 +18,13 @@ pub use catch::Catch;
 pub use info::{
     EventInfo, GraphNode, MessageInfo, ModelInfo, PackageInfo, ProcInfo, ProcessGraph, TaskInfo,
 };
-pub use join::{JoinRule, PartialThreshold};
+pub use join::{DECIDE_PACKAGE, JoinRule, PartialThreshold};
 pub(crate) use owner::participants_from_json;
 pub use owner::{
-    ContextVar, Duty, OwnerExpr, Participant, Relation, RelationName, RelationRef, ResourceRef,
+    CandidateExpr, ContextVar, Duty, Participant, Relation, RelationName, RelationRef, ResourceRef,
     VarType,
 };
-pub use step::{Assign, Step};
+pub use step::{Assign, CANDIDATES_PACKAGE, Candidates, Step};
 pub use timeout::{Timeout, TimeoutLimit, TimeoutUnit};
 pub use trigger::{
     TRIGGER_CHAT, TRIGGER_HOOK, TRIGGER_MANUAL, TRIGGER_SCHEDULE, Trigger, TriggerKind,

@@ -62,7 +62,7 @@ pub(super) fn folds_into_plan(kind: OperationKind) -> bool {
     )
 }
 
-impl KernelHost {
+impl Workers {
     /// Run every pure-internal intent this plan creates to its own plan, in the
     /// order the durable operations would have been woken, and merge the
     /// results into one atomic transition.
@@ -408,7 +408,7 @@ mod tests {
     /// scratch snapshot is never built.
     #[tokio::test]
     async fn a_plan_without_hand_offs_is_returned_as_is() {
-        let (host, _wake) = KernelHost::in_memory();
+        let (host, _wake) = Workers::in_memory();
         let snapshot =
             crate::scheduler::core::commit::aggregate::ProcessSnapshot::empty("p").unwrap();
         let plan = TransitionPlan {
@@ -477,7 +477,7 @@ mod tests {
     /// predecessors) folds it once.
     #[tokio::test]
     async fn the_same_hand_off_twice_is_planned_once() {
-        let (host, _wake) = KernelHost::in_memory();
+        let (host, _wake) = Workers::in_memory();
         let snapshot = seeded();
         let intent = propagate(1);
         let once = host
@@ -495,7 +495,7 @@ mod tests {
     /// planning inconsistency, not a merge.
     #[tokio::test]
     async fn one_operation_planned_as_two_kinds_is_an_error() {
-        let (host, _wake) = KernelHost::in_memory();
+        let (host, _wake) = Workers::in_memory();
         let snapshot = seeded();
         let intent = propagate(1);
         let mut other = intent.clone();

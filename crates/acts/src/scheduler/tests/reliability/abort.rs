@@ -94,7 +94,7 @@ async fn waiting_first_step(engine: &Engine) -> (String, String) {
 async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<TaskState> {
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -114,7 +114,7 @@ async fn act_generations(engine: &Engine, pid: &str, tid: &str) -> Vec<TaskState
 /// The aggregate's execution state for the act `tid` names (the newest
 /// generation), if the aggregate still holds one.
 async fn act_state(engine: &Engine, pid: &str, tid: &str) -> Option<TaskState> {
-    let snapshot = engine.runtime().kernel().snapshot(pid).await.unwrap()?;
+    let snapshot = engine.runtime().workers().snapshot(pid).await.unwrap()?;
     let node = act_node(&snapshot, pid, tid);
     snapshot
         .tasks
@@ -150,7 +150,7 @@ async fn root_state(engine: &Engine, pid: &str) -> Option<TaskState> {
 async fn act_error_variables(engine: &Engine, pid: &str, tid: &str) -> Vec<String> {
     let snapshot = engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()

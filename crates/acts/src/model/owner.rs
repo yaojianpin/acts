@@ -1,13 +1,13 @@
 //! The owner expression language: who a human act is assigned to, and the
 //! participants a multi-approver step fans out to.
 //!
-//! [`OwnerExpr`] is data, not an implementation. The engine resolves its local
+//! [`CandidateExpr`] is data, not an implementation. The engine resolves its local
 //! atoms (`user`, `context`, user-valued variables, and the set operations);
 //! everything that needs business data (roles, groups, resource owners and
-//! relations) is sent to the business system by the `acts.core.owner` IRQ
-//! package, which answers with the participants. An expression that names one
-//! of those atoms in `assign` fails with a message that points at the package
-//! instead of silently assigning nobody.
+//! relations) is sent to the business system by the `assign.candidates`
+//! spec's `uses` package (`acts.core.candidates` by default), which answers
+//! with the participants. A local evaluation that meets one of those atoms
+//! fails instead of silently computing an empty pool.
 
 use crate::{ActError, Result};
 use serde::de::{self, MapAccess, Visitor};
@@ -208,7 +208,8 @@ impl Duty {
 /// The type a `ContextVar::Var` names. User/Users read the value as a person
 /// or a person list and resolve locally; Role/Group and Project/Department/Unit
 /// name business data and are resolved by the business system through the
-/// `acts.core.owner` IRQ package (they are refused in `assign`).
+/// `assign.candidates` spec's uses package (`acts.core.candidates` by
+/// default; a local evaluation refuses them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VarType {
@@ -285,10 +286,11 @@ impl Relation {
 /// The runtime variables an owner expression can read. They are resolved by
 /// the engine, not by the directory, so they need no business data:
 ///
-/// - `initiator`: the run's caller (the process's sealed subject).
-/// - `current_actor`: the subject of the most recent decision on the acting
-///   execution or its nearest ancestor; the initiator when the run has not
-///   decided anything yet.
+/// - `initiator`: the run's business actor — the `actor` start variable.
+///   The ACL subject is a different concept and is deliberately not used.
+/// - `current_actor`: the business actor of the most recent decision on the
+///   acting execution or its nearest ancestor; the initiator when the run has
+///   not decided anything yet.
 /// - `previous_approver`: the decision before the current actor;
 ///   `previous_approver_nth{back}` addresses older decisions.
 /// - `var`: a workflow variable, read through the expression environment.
@@ -328,10 +330,11 @@ pub enum ContextVar {
 /// ```
 ///
 /// Set expressions (`any_of`, `all_of`, `except`) evaluate to participant
-/// sets. `assign.owner` requires exactly one result; the `acts.core.owner`
-/// package returns the whole set for `block`/``parallel`/`sequence` fan-out.
+/// sets: an `assign.candidates` pool fans them out over
+/// `block`/`parallel`/`sequence`, while an `assign.owner` string stays a
+/// single user or a `${{ … }}` expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum OwnerExpr {
+pub enum CandidateExpr {
     /// A literal user id or an engine expression string.
     Value(String),
     User {
@@ -351,35 +354,35 @@ pub enum OwnerExpr {
         var: ContextVar,
     },
     Relate {
-        from: Box<OwnerExpr>,
+        from: Box<CandidateExpr>,
         rel: Relation,
         duty: Option<Duty>,
     },
     AnyOf {
-        operands: Vec<OwnerExpr>,
+        operands: Vec<CandidateExpr>,
     },
     AllOf {
-        operands: Vec<OwnerExpr>,
+        operands: Vec<CandidateExpr>,
     },
     Except {
-        base: Box<OwnerExpr>,
-        minus: Box<OwnerExpr>,
+        base: Box<CandidateExpr>,
+        minus: Box<CandidateExpr>,
     },
 }
 
-impl Default for OwnerExpr {
+impl Default for CandidateExpr {
     fn default() -> Self {
         Self::Value(String::new())
     }
 }
 
-impl From<&str> for OwnerExpr {
+impl From<&str> for CandidateExpr {
     fn from(value: &str) -> Self {
         Self::Value(value.to_string())
     }
 }
 
-impl From<String> for OwnerExpr {
+impl From<String> for CandidateExpr {
     fn from(value: String) -> Self {
         Self::Value(value)
     }
@@ -387,7 +390,7 @@ impl From<String> for OwnerExpr {
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum OwnerExprSer<'a> {
+enum CandidateExprSer<'a> {
     User {
         name: &'a str,
     },
@@ -405,52 +408,52 @@ enum OwnerExprSer<'a> {
         var: &'a ContextVar,
     },
     Relate {
-        from: &'a OwnerExpr,
+        from: &'a CandidateExpr,
         rel: &'a Relation,
         #[serde(skip_serializing_if = "Option::is_none")]
         duty: Option<&'a Duty>,
     },
     AnyOf {
-        operands: &'a [OwnerExpr],
+        operands: &'a [CandidateExpr],
     },
     AllOf {
-        operands: &'a [OwnerExpr],
+        operands: &'a [CandidateExpr],
     },
     Except {
-        base: &'a OwnerExpr,
-        minus: &'a OwnerExpr,
+        base: &'a CandidateExpr,
+        minus: &'a CandidateExpr,
     },
 }
 
-impl Serialize for OwnerExpr {
+impl Serialize for CandidateExpr {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match self {
             Self::Value(value) => serializer.serialize_str(value),
-            Self::User { name } => OwnerExprSer::User { name }.serialize(serializer),
-            Self::Role { name } => OwnerExprSer::Role { name }.serialize(serializer),
-            Self::Group { name } => OwnerExprSer::Group { name }.serialize(serializer),
+            Self::User { name } => CandidateExprSer::User { name }.serialize(serializer),
+            Self::Role { name } => CandidateExprSer::Role { name }.serialize(serializer),
+            Self::Group { name } => CandidateExprSer::Group { name }.serialize(serializer),
             Self::OwnersOf { resource, duty } => {
-                OwnerExprSer::OwnersOf { resource, duty }.serialize(serializer)
+                CandidateExprSer::OwnersOf { resource, duty }.serialize(serializer)
             }
-            Self::Context { var } => OwnerExprSer::Context { var }.serialize(serializer),
-            Self::Relate { from, rel, duty } => OwnerExprSer::Relate {
+            Self::Context { var } => CandidateExprSer::Context { var }.serialize(serializer),
+            Self::Relate { from, rel, duty } => CandidateExprSer::Relate {
                 from: from.as_ref(),
                 rel,
                 duty: duty.as_ref(),
             }
             .serialize(serializer),
-            Self::AnyOf { operands } => OwnerExprSer::AnyOf {
+            Self::AnyOf { operands } => CandidateExprSer::AnyOf {
                 operands: operands.as_slice(),
             }
             .serialize(serializer),
-            Self::AllOf { operands } => OwnerExprSer::AllOf {
+            Self::AllOf { operands } => CandidateExprSer::AllOf {
                 operands: operands.as_slice(),
             }
             .serialize(serializer),
-            Self::Except { base, minus } => OwnerExprSer::Except {
+            Self::Except { base, minus } => CandidateExprSer::Except {
                 base: base.as_ref(),
                 minus: minus.as_ref(),
             }
@@ -461,7 +464,7 @@ impl Serialize for OwnerExpr {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum OwnerExprDe {
+enum CandidateExprDe {
     User {
         name: String,
     },
@@ -480,74 +483,74 @@ enum OwnerExprDe {
         var: ContextVar,
     },
     Relate {
-        from: Box<OwnerExpr>,
+        from: Box<CandidateExpr>,
         rel: Relation,
         #[serde(default)]
         duty: Option<Duty>,
     },
     AnyOf {
-        operands: Vec<OwnerExpr>,
+        operands: Vec<CandidateExpr>,
     },
     AllOf {
-        operands: Vec<OwnerExpr>,
+        operands: Vec<CandidateExpr>,
     },
     Except {
-        base: Box<OwnerExpr>,
-        minus: Box<OwnerExpr>,
+        base: Box<CandidateExpr>,
+        minus: Box<CandidateExpr>,
     },
 }
 
-impl From<OwnerExprDe> for OwnerExpr {
-    fn from(value: OwnerExprDe) -> Self {
+impl From<CandidateExprDe> for CandidateExpr {
+    fn from(value: CandidateExprDe) -> Self {
         match value {
-            OwnerExprDe::User { name } => Self::User { name },
-            OwnerExprDe::Role { name } => Self::Role { name },
-            OwnerExprDe::Group { name } => Self::Group { name },
-            OwnerExprDe::OwnersOf { resource, duty } => Self::OwnersOf { resource, duty },
-            OwnerExprDe::Context { var } => Self::Context { var },
-            OwnerExprDe::Relate { from, rel, duty } => Self::Relate { from, rel, duty },
-            OwnerExprDe::AnyOf { operands } => Self::AnyOf { operands },
-            OwnerExprDe::AllOf { operands } => Self::AllOf { operands },
-            OwnerExprDe::Except { base, minus } => Self::Except { base, minus },
+            CandidateExprDe::User { name } => Self::User { name },
+            CandidateExprDe::Role { name } => Self::Role { name },
+            CandidateExprDe::Group { name } => Self::Group { name },
+            CandidateExprDe::OwnersOf { resource, duty } => Self::OwnersOf { resource, duty },
+            CandidateExprDe::Context { var } => Self::Context { var },
+            CandidateExprDe::Relate { from, rel, duty } => Self::Relate { from, rel, duty },
+            CandidateExprDe::AnyOf { operands } => Self::AnyOf { operands },
+            CandidateExprDe::AllOf { operands } => Self::AllOf { operands },
+            CandidateExprDe::Except { base, minus } => Self::Except { base, minus },
         }
     }
 }
 
-impl<'de> Deserialize<'de> for OwnerExpr {
+impl<'de> Deserialize<'de> for CandidateExpr {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct OwnerExprVisitor;
+        struct CandidateExprVisitor;
 
-        impl<'de> Visitor<'de> for OwnerExprVisitor {
-            type Value = OwnerExpr;
+        impl<'de> Visitor<'de> for CandidateExprVisitor {
+            type Value = CandidateExpr;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("an owner expression string or an object with a 'kind'")
             }
 
             fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
-                Ok(OwnerExpr::Value(value.to_string()))
+                Ok(CandidateExpr::Value(value.to_string()))
             }
 
             fn visit_string<E: de::Error>(
                 self,
                 value: String,
             ) -> std::result::Result<Self::Value, E> {
-                Ok(OwnerExpr::Value(value))
+                Ok(CandidateExpr::Value(value))
             }
 
             fn visit_map<A: MapAccess<'de>>(
                 self,
                 map: A,
             ) -> std::result::Result<Self::Value, A::Error> {
-                OwnerExprDe::deserialize(de::value::MapAccessDeserializer::new(map))
-                    .map(OwnerExpr::from)
+                CandidateExprDe::deserialize(de::value::MapAccessDeserializer::new(map))
+                    .map(CandidateExpr::from)
             }
         }
 
-        deserializer.deserialize_any(OwnerExprVisitor)
+        deserializer.deserialize_any(CandidateExprVisitor)
     }
 }
 
@@ -595,8 +598,8 @@ mod tests {
 
     #[test]
     fn a_plain_string_is_the_legacy_owner_expression() {
-        let expr: OwnerExpr = serde_json::from_value(json!("${{ reviewer }}")).unwrap();
-        assert_eq!(expr, OwnerExpr::Value("${{ reviewer }}".to_string()));
+        let expr: CandidateExpr = serde_json::from_value(json!("${{ reviewer }}")).unwrap();
+        assert_eq!(expr, CandidateExpr::Value("${{ reviewer }}".to_string()));
         assert_eq!(
             serde_json::to_value(&expr).unwrap(),
             json!("${{ reviewer }}")
@@ -623,8 +626,8 @@ mod tests {
                   "minus": { "kind": "context", "var": { "type": "current_actor" } } }
             ]
         });
-        let expr: OwnerExpr = serde_json::from_value(any_of.clone()).unwrap();
-        assert!(matches!(expr, OwnerExpr::AnyOf { .. }));
+        let expr: CandidateExpr = serde_json::from_value(any_of.clone()).unwrap();
+        assert!(matches!(expr, CandidateExpr::AnyOf { .. }));
         assert_eq!(serde_json::to_value(&expr).unwrap(), any_of);
 
         let relate = json!({
@@ -633,9 +636,9 @@ mod tests {
             "rel": { "rel": "resource", "value": "department_of" },
             "duty": "principal"
         });
-        let expr: OwnerExpr = serde_json::from_value(relate.clone()).unwrap();
+        let expr: CandidateExpr = serde_json::from_value(relate.clone()).unwrap();
         match &expr {
-            OwnerExpr::Relate { rel, duty, .. } => {
+            CandidateExpr::Relate { rel, duty, .. } => {
                 assert_eq!(rel.name(), "department_of");
                 assert_eq!(duty, &Some(Duty::Principal));
             }

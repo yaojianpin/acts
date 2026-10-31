@@ -99,6 +99,8 @@ fn render(status: &SystemStatus) -> String {
         ));
     }
 
+    ret.push_str(&format!("caps         {}\n", status.caps.join(", ")));
+
     // The config came from the server's own acts.toml; a human-readable
     // dump is the point, so one unrenderable value is reported instead of
     // failing the whole answer.
@@ -149,6 +151,12 @@ mod tests {
                 total: 7,
                 active: 2,
             },
+            caps: vec![
+                "kernel.effect".to_string(),
+                "kernel.predicate".to_string(),
+                "kernel.delivery".to_string(),
+                "kernel.lifecycle".to_string(),
+            ],
             health: HealthStatus {
                 state: "degraded".to_string(),
                 loops: vec![

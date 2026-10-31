@@ -20,6 +20,9 @@ pub struct SystemStatus {
     pub processes: ProcessCounts,
     /// The background loops' health, overall and per loop.
     pub health: HealthStatus,
+    /// The installed capabilities' keys, one entry per capability
+    /// implementation the server's assembly attached.
+    pub caps: Vec<String>,
     /// The server's effective configuration, as parsed from its config file.
     pub config: serde_json::Value,
 }

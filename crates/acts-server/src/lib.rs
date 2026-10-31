@@ -845,7 +845,6 @@ pub fn engine_builder(
     if plugins.nats && config.has("nats") {
         builder = builder.add_plugin(&acts_plugin_nats::NatsPlugin::new());
     }
-    builder = builder.add_plugin(&acts_plugin_participant::ParticipantPlugin::new());
     Ok(builder)
 }
 
@@ -963,12 +962,11 @@ ttl = "5m"
         }
     }
 
-    /// The server's builder installs the participant plugin: a model with
-    /// `assign.owner` publishes, resolves its local owner, and the resolved
-    /// user can decide the act. This is the server-side end-to-end path, not
-    /// the plugin's own fixture.
+    /// The server's builder supports `assign.owner` out of the box: the
+    /// model publishes, the local owner resolves, and the owner completes
+    /// the act. This is the server-side end-to-end path.
     #[tokio::test(flavor = "multi_thread")]
-    async fn server_engine_resolves_assign_owner_through_the_participant_plugin() {
+    async fn server_engine_resolves_assign_owner_end_to_end() {
         let (dir, path) = write_config("");
         let config = Config::create(&path).unwrap();
         let engine = engine_builder(
@@ -986,9 +984,7 @@ ttl = "5m"
             .with_step(|step| {
                 step.with_id("approve")
                     .with_uses("acts.core.irq", acts::Vars::new().with("key", "approve"))
-                    .with_assign_expr(acts::OwnerExpr::User {
-                        name: "alice".to_string(),
-                    })
+                    .with_assign("alice")
             });
         let mut fixture = acts::testing::FlowFixture::deploy_on(engine, &workflow).await;
         fixture.start(acts::Vars::new()).await;
@@ -997,7 +993,7 @@ ttl = "5m"
         assert_eq!(
             created.owner.as_deref(),
             Some("alice"),
-            "the server engine must resolve the assignment through ParticipantPlugin"
+            "the server engine must resolve the assignment locally"
         );
 
         let alice = acts::Principal::from_policy(&acts::UserPolicy {

@@ -1075,8 +1075,8 @@ async fn sch_act_assign_is_refused_on_non_human_nodes() {
         ],
     );
     container.steps[0].assign = Some(crate::model::Assign {
-        owner: Box::new(crate::model::OwnerExpr::Value("alice".to_string())),
-        provider: None,
+        owner: Some("alice".to_string()),
+        candidates: None,
     });
 
     let mut func = Workflow::new().with_id("flow-act-assign-func");
@@ -1113,29 +1113,22 @@ async fn sch_act_assign_is_refused_on_non_human_nodes() {
     }
 }
 
-/// A structured `assign.owner` resolves its local atoms and projects the
-/// single result.
+/// A string owner may resolve to a list of ids: duplicates collapse and the
+/// single result projects.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_assign_resolves_a_structured_owner() {
+async fn sch_act_assign_resolves_a_deduplicated_owner() {
     let workflow = Workflow::new()
-        .with_id("flow-act-assign-expr")
+        .with_id("flow-act-assign-dedup")
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign_expr(crate::OwnerExpr::AnyOf {
-                    operands: vec![
-                        crate::OwnerExpr::User {
-                            name: "u1".to_string(),
-                        },
-                        crate::OwnerExpr::User {
-                            name: "u1".to_string(),
-                        },
-                    ],
-                })
+                .with_assign("${{ reviewers }}")
         });
     let mut fixture = FlowFixture::deploy(&workflow).await;
-    fixture.start(Vars::new()).await;
+    fixture
+        .start(Vars::new().with("reviewers", json!(["u1", "u1"])))
+        .await;
 
     let created = fixture.wait_created("s1").await;
     assert_eq!(created.owner.as_deref(), Some("u1"));
@@ -1143,37 +1136,7 @@ async fn sch_act_assign_resolves_a_structured_owner() {
     fixture.close().await;
 }
 
-/// A business-data atom is sent to the business system by `acts.core.owner`;
-/// `assign` refuses it and names the package instead of inventing an owner.
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_act_assign_business_atom_is_refused() {
-    let workflow = Workflow::new()
-        .with_id("flow-act-assign-business-atom")
-        .with_step(|step| {
-            step.with_id("s1")
-                .with_uses(USES_IRQ, Vars::new())
-                .with_assign_expr(crate::OwnerExpr::Role {
-                    name: "reviewers".to_string(),
-                })
-        });
-    let mut fixture = FlowFixture::deploy(&workflow).await;
-    fixture.start(Vars::new()).await;
-
-    let failed = fixture.wait_message("s1", MessageState::Error).await;
-    let message = failed
-        .outputs
-        .get::<String>(consts::ACT_ERR_MESSAGE)
-        .unwrap_or_default();
-    assert!(
-        message.contains("acts.core.owner") && message.contains("reviewers"),
-        "the failure must name the IRQ package and the role: {message}"
-    );
-    fixture.wait_error().await;
-    fixture.close().await;
-}
-
-/// A multi-participant expression cannot own one human act.
+/// A multi-participant resolution cannot own one human act.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_assign_rejects_multiple_participants() {
@@ -1182,19 +1145,12 @@ async fn sch_act_assign_rejects_multiple_participants() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign_expr(crate::OwnerExpr::AnyOf {
-                    operands: vec![
-                        crate::OwnerExpr::User {
-                            name: "u1".to_string(),
-                        },
-                        crate::OwnerExpr::User {
-                            name: "u2".to_string(),
-                        },
-                    ],
-                })
+                .with_assign("${{ reviewers }}")
         });
     let mut fixture = FlowFixture::deploy(&workflow).await;
-    fixture.start(Vars::new()).await;
+    fixture
+        .start(Vars::new().with("reviewers", json!(["u1", "u2"])))
+        .await;
 
     let failed = fixture.wait_message("s1", MessageState::Error).await;
     let message = failed
@@ -1209,28 +1165,6 @@ async fn sch_act_assign_rejects_multiple_participants() {
     fixture.close().await;
 }
 
-/// Owner resolution is a participant feature. An engine with no
-/// `ParticipantResolver` refuses to publish a model that declares an
-/// assignment, naming the plugin, instead of accepting it and failing the
-/// approval later.
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_act_assign_requires_a_participant_resolver() {
-    let workflow = assigned_workflow("flow-act-assign-no-resolver", "alice");
-    let engine = crate::Engine::builder().start().await.unwrap();
-    let error = engine
-        .executor(&Principal::unrestricted())
-        .model()
-        .deploy(&workflow, None)
-        .await
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("capability 'assign.owner'")
-            && error.to_string().contains("acts-plugin-participant"),
-        "the publish refusal must name the capability and the plugin: {error}"
-    );
-}
-
 /// On a fresh run nothing has been decided, so the current actor is the
 /// initiator sealed by the caller.
 #[serial]
@@ -1242,9 +1176,7 @@ async fn sch_act_assign_current_actor_falls_back_to_the_initiator() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign_expr(crate::OwnerExpr::Context {
-                    var: crate::ContextVar::CurrentActor,
-                })
+                .with_assign("${{ $actor }}")
         });
     let fixture = FlowFixture::deploy(&workflow).await;
     let starter = Principal::from_policy(&UserPolicy {
@@ -1259,7 +1191,7 @@ async fn sch_act_assign_current_actor_falls_back_to_the_initiator() {
         .engine()
         .executor(&starter)
         .proc()
-        .start(&workflow.id, Vars::new())
+        .start(&workflow.id, Vars::new().with("actor", "starter"))
         .await
         .unwrap();
 
@@ -1288,9 +1220,7 @@ async fn sch_act_assign_previous_approver_follows_the_chain() {
         .with_step(|step| {
             step.with_id("s3")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign_expr(crate::OwnerExpr::Context {
-                    var: crate::ContextVar::PreviousApprover,
-                })
+                .with_assign("${{ $previous_approver() }}")
         });
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;
@@ -1897,7 +1827,7 @@ async fn sch_act_transfer_survives_restart() {
         .unwrap();
     let snapshot = reloaded
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(&pid)
         .await
         .unwrap()
@@ -1955,7 +1885,7 @@ async fn sch_act_transfer_survives_restart() {
     poll_until("the recovered act to complete", || async {
         reloaded
             .runtime()
-            .kernel()
+            .workers()
             .snapshot(&pid)
             .await
             .ok()
@@ -2635,7 +2565,7 @@ async fn sch_act_delegate_survives_restart() {
     ack.on_message(|_| async {});
     let snapshot = reloaded
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(&pid)
         .await
         .unwrap()
@@ -2672,7 +2602,7 @@ async fn sch_act_delegate_survives_restart() {
     poll_until("the recovered delegated act to complete", || async {
         reloaded
             .runtime()
-            .kernel()
+            .workers()
             .snapshot(&pid)
             .await
             .ok()

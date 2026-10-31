@@ -151,7 +151,7 @@ pub(crate) struct TimerGuider {
 impl TimerGuider {
     pub(crate) fn new(runtime: &Arc<Runtime>) -> Self {
         Self {
-            timers: runtime.kernel().timer_guards().clone(),
+            timers: runtime.workers().timer_guards().clone(),
             runtime: runtime.clone(),
         }
     }

@@ -12,6 +12,13 @@ pub const ACT_PARAMS_KEY: &str = "params";
 pub const ACT_ERR_MESSAGE: &str = "message";
 pub const ACT_ERR_CODE: &str = "ecode";
 
+/// The business actor variable: the run's `actor` start input names the
+/// business initiator (what `$initiator` reads), and an act action's `actor`
+/// option names its decision maker (what `$actor` reads). Business
+/// attribution only — the ACL subject stays the authorization gate, and the
+/// two are deliberately not the same concept.
+pub const ACT_ACTOR: &str = "actor";
+
 pub const TASK_COST: &str = "__cost";
 
 /// Node ids of the timeout branches that already fired for one task (the
@@ -26,10 +33,8 @@ pub const TASK_TIMEOUTS: &str = "__timeouts";
 /// They are private (`__`-prefixed) on purpose — engine facts, not run data:
 /// they never fold into an ancestor scope (`PropagateTask` skips private
 /// names), never reach a task's projected row, a run's outputs or a message's
-/// `inputs`, and a workflow variable of the same public name is therefore
-/// never shadowed by them. Expressions still read them as `index`/`value` (the
-/// names the container packages' inline acts declare), through the alias in
-/// `scheduler::shell::facts::scope_vars`.
+/// `inputs`. Expressions read them through the `$item` built-in
+/// (`$item.value`/`$item.index`), never as bare variables.
 pub(crate) const FANOUT_INDEX_VAR: &str = "__fanout_index";
 pub(crate) const FANOUT_VALUE_VAR: &str = "__fanout_value";
 

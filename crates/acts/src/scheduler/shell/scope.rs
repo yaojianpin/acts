@@ -159,12 +159,6 @@ impl Scope {
             {
                 return Some(value);
             }
-            if let Some(private) = fanout_alias(name)
-                && let Some(raw) = snapshot.variables.get(&(id.clone(), private.to_string()))
-                && let Ok(value) = serde_json::from_str::<T>(raw)
-            {
-                return Some(value);
-            }
             cursor = snapshot.tasks.get(&id).and_then(|task| task.parent.clone());
         }
         None
@@ -292,6 +286,39 @@ impl Scope {
             None => self.special.get_value("$root").cloned(),
         }
     }
+
+    /// A run-level variable on the root scope, resolved from the shared
+    /// aggregate when the scope carries one. `None` for a scope built from
+    /// eager vars only (the read model seeds those onto the task itself).
+    pub(crate) fn root_variable<T>(&self, name: &str) -> Option<T>
+    where
+        T: DeserializeOwned,
+    {
+        let snapshot = self.snapshot.as_ref()?;
+        let root = crate::scheduler::core::model::task_graph::TaskId::new(
+            crate::utils::consts::TASK_ROOT_TID,
+            0,
+        )
+        .ok()?;
+        let raw = snapshot.variables.get(&(root, name.to_string()))?;
+        serde_json::from_str(raw).ok()
+    }
+
+    /// `$assign`: the read-only assignment projection of one execution (see
+    /// [`crate::scheduler::shell::caps::assign`]): the nearest assignment and
+    /// its delegation, the nearest computed candidate pool, and the explicit
+    /// `$assign.at("<step-id>")` lookup. A scope without a shared aggregate
+    /// (a predicate fallback) answers the empty projection.
+    pub(crate) fn assign_projection(
+        &self,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    ) -> acts_expr::Value {
+        crate::scheduler::shell::caps::assign::Assign::projection(
+            self.snapshot.clone(),
+            &self.id,
+            task_id,
+        )
+    }
 }
 
 /// Walk one execution's decision history: its own action facts (newest
@@ -319,8 +346,10 @@ fn collect_decision_subjects(
         .collect();
     facts.sort_unstable_by_key(|(sequence, _)| std::cmp::Reverse(*sequence));
     for (_, raw) in facts {
-        if let Ok((_, _, Some(subject))) = super::action::decode_action_fact(raw) {
-            subjects.push(subject);
+        if let Ok((_, _, subject, actor)) = super::action::decode_action_fact(raw)
+            && let Some(actor) = actor.or(subject)
+        {
+            subjects.push(actor);
         }
     }
 
@@ -467,6 +496,31 @@ impl ScopeTask {
         scope.find_in_chain(&self.task_id, name)
     }
 
+    /// The parameter fan-out's binding of this execution (or of the nearest
+    /// ancestor holding one): `{ index, value }`, the item a
+    /// `acts.core.parallel`/`acts.core.sequence` generated it for. The two
+    /// facts are private engine data, so this reads the aggregate directly —
+    /// [`Self::find`] never answers them as variables.
+    pub fn fanout_item(&self, scope: &Arc<Scope>) -> Option<serde_json::Value> {
+        let snapshot = scope.snapshot.as_ref()?;
+        let mut cursor = Some(self.task_id.clone());
+        while let Some(id) = cursor {
+            let value = snapshot
+                .variables
+                .get(&(id.clone(), consts::FANOUT_VALUE_VAR.to_string()));
+            let index = snapshot
+                .variables
+                .get(&(id.clone(), consts::FANOUT_INDEX_VAR.to_string()));
+            if let (Some(value), Some(index)) = (value, index) {
+                let value = serde_json::from_str::<serde_json::Value>(value).ok()?;
+                let index = serde_json::from_str::<serde_json::Value>(index).ok()?;
+                return Some(serde_json::json!({ "index": index, "value": value }));
+            }
+            cursor = snapshot.tasks.get(&id).and_then(|task| task.parent.clone());
+        }
+        None
+    }
+
     /// One step's own data, resolved from the shared aggregate on demand.
     pub fn step_data(&self, scope: &Arc<Scope>, nid: &str) -> Option<Vars> {
         scope.step_data_of(nid)
@@ -583,15 +637,6 @@ impl ScopeTask {
 /// datum read by `$cost()`/`$cost_in(...)`.
 fn scope_name_visible(name: &str) -> bool {
     !consts::is_private_key(name) || name == consts::TASK_COST
-}
-
-/// The public name a private fan-out fact answers as inside an item's scope.
-fn fanout_alias(name: &str) -> Option<&'static str> {
-    match name {
-        "index" => Some(consts::FANOUT_INDEX_VAR),
-        "value" => Some(consts::FANOUT_VALUE_VAR),
-        _ => None,
-    }
 }
 
 /// The newest generation of one model node in the shared aggregate.

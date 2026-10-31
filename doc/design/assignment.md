@@ -1,9 +1,9 @@
-# 审批承办人、转办与代办设计
+# 审批承办人、候选人与转办代办设计
 
-- 状态：定稿
-- 日期：2026-10-27
+- 状态：定稿（2026-10-29 增补候选人与 caps 化；transfer/delegate 语义不变）
+- 日期：2026-10-27（2026-10-29 更新）
 - 范围：`crates/acts`、`crates/acts-channel`、`plugins/acts-plugin-web|grpc|nats`
-- 分支：`feat/trans_delegate`
+- 关联：`design/caps.md`（能力模型）、`design/owner-expr.md`（CandidateExpr）
 
 ## 1. 目标
 
@@ -16,7 +16,9 @@
 
 ### 非目标
 
-- 不引入 `candidates` 候选池。
+- ~~不引入 `candidates` 候选池~~（2026-10-29 起引入候选池，见 §7/§8 与
+  `design/caps.md`；多人审批的"人从哪来"由 candidates 回答，"怎么算完成"
+  仍由 `join` 回答）。
 - 不引入 standing delegation 或 `delegations` collection。
 - 不允许转办通过 complete 原 task、再建新 task 实现。
 - 不在引擎内实现用户目录、角色、用户组。
@@ -30,12 +32,12 @@
 | 操作人 | `assignee` | task / decision | 当前实际操作人；默认等于 owner |
 | 代理人 | `delegatee` | delegation / decision | 受托代办的人 |
 | 委托人 | `delegator` | delegation / decision | 授权代办的承办人 |
+| 候选人 | `candidates` | act 变量（列表） | `assign.candidates` 声明、`uses` 包计算出的候选池，供容器展开多人审批 |
 
 不再使用：
 
 - `on_behalf_of`：改名为 `delegator`。
 - `actor`：决策时 `assignee` 就是实际操作人；管理动作的调用者用 `by` / `granted_by` 记录。
-- `candidates`：删除；多人审批由 `join` 表达。
 
 ## 3. 现状约束
 
@@ -146,16 +148,25 @@ ref_msg_id: Option<String>,
 - id: approve
   uses: acts.core.irq
   assign:
-    owner: "${{ reviewer }}"
+    owner: "${{ reviewer }}"        # 责任人：字符串（用户 id 或 ${{ }} 表达式），可选
+    candidates:                     # 候选池：{ params, uses }，可选
+      params: { kind: role, name: reviewers }
+      uses: acts.core.candidates    # 默认值；可指向自己的计算包
 ```
 
 规则：
 
-- `assign` 只允许出现在人类决策叶子 act 上：`ActRunAs::Irq`（`acts.core.irq`、`acts.core.decide`、自定义 Irq 包）。
+- `assign.owner` 只允许出现在人类决策叶子 act 上：`ActRunAs::Irq`；它是一个
+  字符串（用户 id 或 `${{ }}` 表达式），由内核本地解析；解析为空（或多人）时
+  fail closed，任务失败，不退化成无人审批。
+- `assign.candidates` 声明在需要多人展开的 act 上（容器
+  `block`/`parallel`/`sequence` 或人类叶）；`params` 是 CandidateExpr。
+  act start 时先检查表达式能否**本地直接计算**——全部为本地原子时内核直接算出
+  候选池，不发起请求；否则以 pushed act 的形式请求 `uses` 包（模式同 join 的
+  action 请求），应答写入 act 变量。两条路发给 `uses` 包的参数都先把本地变量
+  参数（上下文原子、`${{ }}` 字符串）计算好。
 - `assignee` 不在模型中声明；初始为 `owner`，由 transfer/delegate 改变。
-- 不允许 `candidates`。
-- 不允许在 `acts.core.block` / `parallel` / `sequence` 容器自身上声明 `assign`。
-- `assign.owner` 解析为空时 fail closed，任务失败，不退化成无人审批。
+- 代办不是模型配置：`act:delegate`/`act:undelegate` 运行时移动。
 - 未声明 `assign` 的任务保持旧行为：`@execute` 可决策。
 
 ## 6. 语义
@@ -232,7 +243,11 @@ owner 自己操作时：
 
 ## 7. 容器中的 assign
 
-`assign` 只写在容器 `params.steps[]` 的叶子人类 act 上。容器本身不产生 assignment。
+`assign.owner` 只写在容器 `params.steps[]` 的叶子人类 act 上（每个叶子自己
+的 start 时解析）。容器自身可以声明 `assign.candidates`：容器 start 时先
+计算候选池（pushed act 请求 uses 包），应答变量就位后容器才展开 fan-out，
+`params` 的模板（如 `in: "${{ candidates }}"`）由此能读到候选人并生成子
+step。容器自身不产生 `__assignment`（没有单 owner），不受决策授权约束。
 
 ### 7.1 `acts.core.block`
 
@@ -263,10 +278,10 @@ owner 自己操作时：
     steps:
       - uses: acts.core.irq
         assign:
-          owner: "${{ value }}"
+          owner: "${{ $item.value }}"
 ```
 
-每个 item 的 `value` / `index` 在 item scope 中；叶子 act 按 item 解析 `owner`。
+每个 item 的 `$item.value` / `$item.index` 在 item scope 中；叶子 act 按 item 解析 `owner`。
 
 ### 7.3 `acts.core.sequence`
 
@@ -278,14 +293,14 @@ owner 自己操作时：
     steps:
       - uses: acts.core.irq
         assign:
-          owner: "${{ value }}"
+          owner: "${{ $item.value }}"
 ```
 
 逐项执行，每项解析自己的 `owner`。
 
 ### 7.4 嵌套
 
-`parallel` / `sequence` 的 `value` / `index` 在 item 的祖先 scope 中，嵌套在其中的 `block` 叶子也能读取。顶层 `block` 没有 item 变量，只能读 `$root`、`$parent`、step vars。
+`parallel` / `sequence` 的 `$item.value` / `$item.index` 在 item 的祖先 scope 中，嵌套在其中的 `block` 叶子也能读取。顶层 `block` 没有 item 绑定，只能读 `$root`、`$parent`、step vars。
 
 ### 7.5 加签/减签
 
@@ -295,36 +310,33 @@ owner 自己操作时：
 
 ## 8. 或签/会签
 
-不引入 `candidates`。多人审批只通过 act 数量和 `join` 表达：
-
-```yaml
-# 或签
-join: any
-
-# 会签
-join: all
-
-# 阈值
-join: partial(2)
-```
-
-示例：
+"人从哪来"由 candidates 回答，"怎么算完成"由 `join` 回答：
 
 ```yaml
 - id: approvals
   uses: acts.core.parallel
+  assign:
+    candidates:
+      params: { kind: role, name: reviewers }
+      uses: acts.core.candidates
   params:
-    in: "${{ approvers }}"
-    join: any
+    in: "${{ candidates }}"     # 计算后的候选池（或 ids）
+    join: any                   # 或签；all 会签；partial(2) 阈值
     steps:
       - uses: acts.core.irq
         assign:
-          owner: "${{ value }}"
+          owner: "${{ $item.value }}"
 ```
 
-每个审批人一个独立 act、独立 message/delivery、独立 owner；第一票完成时 `join: any` 撤销其余票。
-
-角色/组由业务系统或前序步骤解析为用户列表，然后 fan-out；引擎不引入 group/candidate 概念。
+- 每个审批人一个独立 act、独立 message/delivery、独立 owner；第一票完成时
+  `join: any` 撤销其余票。
+- `join` 的 delegated 规则（`{ params, uses }`，默认 `acts.core.decide`）
+  适合会签的"主持人裁决"形态：客户端拿 `{ params, outcomes }` census 自行
+  判定 complete/fail/skip。
+- 加签/减签在展开后的 children 上用 `act:push`（payload 带 `assign`）与
+  `act:remove` 表达；父容器的 join 按现有语义重算。
+- 顺签：`acts.core.sequence` + `in: "${{ candidates }}"`；减签也可通过前序
+  步骤改写 candidates 变量后重新展开。
 
 ## 9. 授权
 
@@ -395,6 +407,8 @@ Channel：
 | 转办清空代办 | A 的 delegatee 不能操作 B 的任务 |
 | 或签 | `parallel` + `join:any`，第一票完成，其余撤销 |
 | 会签 | `join:all`，所有 act 完成才继续 |
+| 候选池计算 | `assign.candidates` 的 uses 包应答写入变量；失败则 act 失败 |
+| 业务原子经候选池 | `role`/`group` 等原子由 `acts.core.candidates` 发给业务系统解析 |
 | 加签 | `act:push` + assign，新 act 独立 owner |
 | 减签 | `act:remove` 删除 child，join 重算 |
 | 并发 | transfer 与 decision 只有一个赢家 |

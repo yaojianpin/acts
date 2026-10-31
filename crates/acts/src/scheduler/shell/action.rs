@@ -175,14 +175,17 @@ pub(super) fn pushed_act_of(
 }
 
 /// The action a durable intent carries, as the JSON text its operation replays.
-/// `subject` is the server-attributed decision maker (the executor's fill): it
-/// is persisted here because a replayed decision must announce the same
-/// owner/assignee/delegator/delegatee as the original call — replay has no
-/// authenticated caller to consult. It is never read from the client.
+/// `subject` is the authenticated ACL subject (the executor's fill): the audit
+/// fields and the authorization gate use it, and it is persisted because a
+/// replayed decision must announce the same audit trail as the original call.
+/// `actor` is the business actor the client declared (`actor` option): `$actor`,
+/// `$previous_approver` and the payload attribution read it. Neither is ever
+/// read from the client's person fields.
 pub(super) fn action_fact(
     action: &crate::scheduler::core::commit::command::ActionKind,
     inputs: &[(String, String)],
     subject: Option<&str>,
+    actor: Option<&str>,
 ) -> String {
     use crate::scheduler::core::commit::command::ActionKind as A;
     let kind = match action {
@@ -206,6 +209,7 @@ pub(super) fn action_fact(
     serde_json::json!({
         "kind": kind,
         "subject": subject,
+        "actor": actor,
         "inputs": inputs
             .iter()
             .map(|(name, value)| serde_json::json!([name, value]))
@@ -214,11 +218,13 @@ pub(super) fn action_fact(
     .to_string()
 }
 
-/// A decoded durable action fact: the action, its inputs, and the
-/// server-attributed subject (absent on facts an older kernel wrote).
+/// A decoded durable action fact: the action, its inputs, the authenticated
+/// ACL subject and the business actor (both absent on facts an older kernel
+/// wrote).
 pub(super) type DecodedActionFact = (
     crate::scheduler::core::commit::command::ActionKind,
     Vec<(String, String)>,
+    Option<String>,
     Option<String>,
 );
 
@@ -261,7 +267,8 @@ pub(super) fn decode_action_fact(text: &str) -> Result<DecodedActionFact> {
         })
         .unwrap_or_default();
     let subject = fact["subject"].as_str().map(str::to_string);
-    Ok((action, inputs, subject))
+    let actor = fact["actor"].as_str().map(str::to_string);
+    Ok((action, inputs, subject, actor))
 }
 
 #[cfg(test)]
@@ -294,15 +301,17 @@ mod tests {
             ActionKind::Delegate,
             ActionKind::Undelegate,
         ] {
-            let text = action_fact(&action, &inputs, Some("alice"));
-            let (decoded, decoded_inputs, subject) = decode_action_fact(&text).unwrap();
+            let text = action_fact(&action, &inputs, Some("alice"), Some("u1"));
+            let (decoded, decoded_inputs, subject, actor) = decode_action_fact(&text).unwrap();
             assert_eq!(decoded, action);
             assert_eq!(decoded_inputs, inputs);
             assert_eq!(subject.as_deref(), Some("alice"));
-            // An unattributed fact (the engine origin) decodes without one.
-            let text = action_fact(&action, &inputs, None);
-            let (_, _, subject) = decode_action_fact(&text).unwrap();
+            assert_eq!(actor.as_deref(), Some("u1"));
+            // An unattributed fact (the engine origin) decodes without either.
+            let text = action_fact(&action, &inputs, None, None);
+            let (_, _, subject, actor) = decode_action_fact(&text).unwrap();
             assert_eq!(subject, None);
+            assert_eq!(actor, None);
         }
         assert_eq!(action_fact_var(7), "__action@7");
     }
@@ -326,8 +335,9 @@ mod tests {
     #[test]
     fn malformed_input_pairs_are_skipped() {
         let text = r#"{"kind":{"action":"fail","code":"E"},"inputs":["x",["only-name"],[1,2],["ok","1"]]}"#;
-        let (action, inputs, subject) = decode_action_fact(text).unwrap();
+        let (action, inputs, subject, actor) = decode_action_fact(text).unwrap();
         assert_eq!(subject, None);
+        assert_eq!(actor, None);
         assert_eq!(
             action,
             ActionKind::Fail {
@@ -337,9 +347,10 @@ mod tests {
         );
         assert_eq!(inputs, vec![("ok".to_string(), "1".to_string())]);
 
-        let (_, inputs, subject) =
+        let (_, inputs, subject, actor) =
             decode_action_fact(r#"{"kind":{"action":"skip"},"inputs":7}"#).unwrap();
         assert!(inputs.is_empty());
         assert_eq!(subject, None);
+        assert_eq!(actor, None);
     }
 }

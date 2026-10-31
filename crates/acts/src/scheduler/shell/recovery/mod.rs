@@ -12,10 +12,10 @@ use super::*;
 /// the normal effect planner when the decision says `ReplayEffect`.
 pub(crate) struct ObservedEffect {
     receipt: EffectReceipt,
-    observation: Option<effects::EffectObservation>,
+    observation: Option<crate::scheduler::shell::caps::effect::EffectObservation>,
 }
 
-impl KernelHost {
+impl Workers {
     /// Ask the executor for its proof about one `EffectUnknown` operation
     /// (A1c).
     ///
@@ -67,15 +67,23 @@ impl KernelHost {
             }
         };
         let receipt = match &observation {
-            effects::EffectObservation::Applied(_) => EffectReceipt::Applied,
-            effects::EffectObservation::Failed(_) => EffectReceipt::Failed,
+            crate::scheduler::shell::caps::effect::EffectObservation::Applied(_) => {
+                EffectReceipt::Applied
+            }
+            crate::scheduler::shell::caps::effect::EffectObservation::Failed(_) => {
+                EffectReceipt::Failed
+            }
             // Re-running can only be safe when the effect itself is provably
             // idempotent; the executor keeps the same key, so a duplicate
             // delivery is deduplicated on its side.
-            effects::EffectObservation::NotApplied => EffectReceipt::NotApplied {
-                idempotent: runner.idempotent(&request),
-            },
-            effects::EffectObservation::Unknown => EffectReceipt::Unknown,
+            crate::scheduler::shell::caps::effect::EffectObservation::NotApplied => {
+                EffectReceipt::NotApplied {
+                    idempotent: runner.idempotent(&request),
+                }
+            }
+            crate::scheduler::shell::caps::effect::EffectObservation::Unknown => {
+                EffectReceipt::Unknown
+            }
         };
         let observation = matches!(receipt, EffectReceipt::Applied | EffectReceipt::Failed)
             .then_some(observation);
@@ -176,9 +184,11 @@ impl KernelHost {
                 let applied = self
                     .converge_observed_effect(
                         id,
-                        effects::EffectObservation::Applied(effects::EffectOutcome::from_outputs(
-                            outputs,
-                        )),
+                        crate::scheduler::shell::caps::effect::EffectObservation::Applied(
+                            crate::scheduler::shell::caps::effect::EffectOutcome::from_outputs(
+                                outputs,
+                            ),
+                        ),
                     )
                     .await?;
                 if !applied {

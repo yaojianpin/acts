@@ -1,5 +1,6 @@
 //! `acts.core.parallel`: one act instance per item of `in`, all admitted
-//! together, with the per-item `value`/`index` aliases (`pack_parallel_*`).
+//! together, with the per-item `$item.value`/`$item.index` binding
+//! (`pack_parallel_*`).
 
 use serde_json::json;
 use serial_test::serial;
@@ -17,8 +18,8 @@ fn parallel_params(items: serde_json::Value) -> Vars {
                     USES_IRQ,
                     Vars::new()
                         .with("key", "act1")
-                        .with("value", "${{ value }}")
-                        .with("index", "${{ index }}"),
+                        .with("value", "${{ $item.value }}")
+                        .with("index", "${{ $item.index }}"),
                 )
                 .with_id("act1"),
         ],
@@ -29,8 +30,8 @@ fn parallel_workflow(id: &str, items: serde_json::Value) -> Workflow {
     one_step(id, USES_PARALLEL, parallel_params(items))
 }
 
-/// One instance per item; the per-item aliases are readable from the act's
-/// params.
+/// One instance per item; the per-item `$item` binding is readable from the
+/// act's params.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_parallel_creates_one_instance_per_item_with_value_and_index() {

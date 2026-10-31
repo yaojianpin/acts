@@ -15,18 +15,18 @@ pub(super) struct SkipTask;
 #[async_trait::async_trait]
 impl ActOperation for SkipTask {
     /// Nothing to check before the claim: a cascade operation always has its work.
-    async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
+    async fn precheck(&self, _host: &Workers, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
     }
 
     /// Nothing runs: the plan is the whole operation.
-    async fn run(&self, _host: &KernelHost, _operation: &mut Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, _host: &Workers, _operation: &mut Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 
     async fn next(
         &self,
-        host: &KernelHost,
+        host: &Workers,
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
@@ -70,7 +70,7 @@ impl ActOperation for SkipTask {
             )?;
             // A skipped act emits its Skipped message (the legacy act
             // row's own message).
-            if let Some(payload) = host.operation_message_payload(
+            if let Some(payload) = operation_message_payload(
                 snapshot,
                 &task_id,
                 id.task.node.as_str(),
@@ -107,18 +107,18 @@ pub(super) struct AbortTask;
 #[async_trait::async_trait]
 impl ActOperation for AbortTask {
     /// Nothing to check before the claim: an abort operation always has its work.
-    async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
+    async fn precheck(&self, _host: &Workers, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
     }
 
     /// Nothing runs: the plan is the whole operation.
-    async fn run(&self, _host: &KernelHost, _operation: &mut Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, _host: &Workers, _operation: &mut Operation<'_>) -> Result<Outcome> {
         Ok(Outcome::Planned)
     }
 
     async fn next(
         &self,
-        host: &KernelHost,
+        host: &Workers,
         operation: &Operation<'_>,
         _outcome: Outcome,
     ) -> Result<TransitionPlan> {
@@ -167,7 +167,7 @@ impl ActOperation for AbortTask {
                 });
                 // The aborted execution announces itself (the legacy
                 // `on_task` emitted its Aborted message like any other).
-                if let Some(payload) = host.operation_message_payload(
+                if let Some(payload) = operation_message_payload(
                     snapshot,
                     &task_id,
                     id.task.node.as_str(),
@@ -199,8 +199,8 @@ mod tests {
         task_graph::{TaskId, TaskState},
     };
 
-    fn host() -> std::sync::Arc<KernelHost> {
-        KernelHost::in_memory().0
+    fn host() -> std::sync::Arc<Workers> {
+        Workers::in_memory().0
     }
 
     fn seeded() -> ProcessSnapshot {

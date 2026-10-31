@@ -22,11 +22,13 @@
 
 pub(crate) mod act;
 pub(crate) mod branch;
+pub(crate) mod candidates;
 pub(crate) mod catch;
 pub(crate) mod graph;
 pub(crate) mod join;
 pub(crate) mod message;
 pub(crate) mod outputs;
+pub(crate) mod rules;
 pub(crate) mod runtime;
 pub(crate) mod step;
 pub(crate) mod subflow;

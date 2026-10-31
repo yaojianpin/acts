@@ -74,7 +74,7 @@ pub(super) enum RuleVerdict {
 /// The conditions run on the engine's environment (the same seam a branch
 /// guard uses), so a rule can read `$parent`/`$root` and the other built-ins.
 pub(super) async fn input_rule_verdict(
-    host: &super::KernelHost,
+    host: &super::Workers,
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task_id: &crate::scheduler::core::model::task_graph::TaskId,
     model_node: &crate::scheduler::core::model::model_graph::NodeId,
@@ -231,13 +231,11 @@ pub(super) fn msg_decision(
 /// timeout branch), so it travels with the scope — a timeout branch's effect
 /// params answer the same cost the legacy branch task did.
 ///
-/// The param fan-out's per-item bindings are the other exception, in the
-/// opposite direction: they are stored privately
-/// (`FANOUT_INDEX_VAR`/`FANOUT_VALUE_VAR`) so they can never fold into an
-/// ancestor scope or reach a row, a run's outputs or a message's `inputs`, but
-/// inside the item's own scope they answer as `index`/`value` — the names the
-/// container packages' inline acts read. The alias is a fallback: a workflow
-/// variable of the same name in this or a nearer scope wins.
+/// The param fan-out's per-item binding is private in the same way
+/// (`FANOUT_INDEX_VAR`/`FANOUT_VALUE_VAR`), so it can never fold into an
+/// ancestor scope or reach a row, a run's outputs or a message's `inputs`.
+/// Expressions read it through the `$item` built-in
+/// (`$item.value`/`$item.index`), never as bare variables.
 pub(crate) fn scope_vars(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     scope: &crate::scheduler::core::model::task_graph::TaskId,
@@ -263,23 +261,6 @@ pub(crate) fn scope_vars(
                 && !merged.iter().any(|(existing, _)| existing == name)
             {
                 merged.push((name.clone(), value.clone()));
-            }
-        }
-        // The fan-out's private item facts, under the public names the
-        // templates' acts read. Only when the name is not already answered by
-        // this or a nearer scope: an explicit workflow variable wins.
-        for (private, public) in [
-            (crate::utils::consts::FANOUT_INDEX_VAR, "index"),
-            (crate::utils::consts::FANOUT_VALUE_VAR, "value"),
-        ] {
-            if merged.iter().any(|(existing, _)| existing == public) {
-                continue;
-            }
-            if let Some(raw) = snapshot
-                .variables
-                .get(&(scope.clone(), private.to_string()))
-            {
-                merged.push((public.to_string(), raw.clone()));
             }
         }
     }
@@ -588,14 +569,14 @@ pub(super) fn task_variable<'a>(
 /// The resolved act facts of one `uses` execution.
 #[derive(Clone)]
 
-pub(super) struct ActFacts {
+pub(crate) struct ActFacts {
     pub(super) params: serde_json::Value,
     pub(super) options: serde_json::Value,
 }
 
 /// The act facts the start operation pinned on `execution`, when a runner resolved
 /// them at start.
-pub(super) fn act_facts(
+pub(crate) fn act_facts(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> Option<ActFacts> {

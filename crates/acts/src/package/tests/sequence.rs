@@ -20,7 +20,8 @@ fn sequence_workflow(id: &str) -> crate::model::Workflow {
                         USES_IRQ,
                         Vars::new()
                             .with("key", "act1")
-                            .with("value", "${{ value }}"),
+                            .with("value", "${{ $item.value }}")
+                            .with("index", "${{ $item.index }}"),
                     )
                     .with_id("act1"),
             ],
@@ -42,6 +43,11 @@ async fn pack_sequence_runs_its_items_in_order() {
         first.params().unwrap().get::<String>("value").as_deref(),
         Some("u1")
     );
+    assert_eq!(
+        first.params().unwrap().get::<u64>("index"),
+        Some(0),
+        "the item binds its position"
+    );
     fixture.next(&first.pid, &first.tid).await.unwrap();
     fixture.wait_message("act1", MessageState::Completed).await;
 
@@ -50,6 +56,11 @@ async fn pack_sequence_runs_its_items_in_order() {
         second.params().unwrap().get::<String>("value").as_deref(),
         Some("u2"),
         "the second item is admitted only after the first settles"
+    );
+    assert_eq!(
+        second.params().unwrap().get::<u64>("index"),
+        Some(1),
+        "the second item binds the next position"
     );
     fixture.next(&second.pid, &second.tid).await.unwrap();
     fixture.wait_completed().await;

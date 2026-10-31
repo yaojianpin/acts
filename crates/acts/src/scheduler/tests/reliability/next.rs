@@ -109,7 +109,7 @@ async fn finish_chain(engine: &Engine, pid: &str) {
         || async {
             if engine
                 .runtime()
-                .kernel()
+                .workers()
                 .process_completed(pid)
                 .await
                 .unwrap_or(false)
@@ -172,7 +172,7 @@ async fn process_snapshot(
 ) -> crate::scheduler::core::commit::aggregate::ProcessSnapshot {
     engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -586,7 +586,7 @@ async fn a_store_that_refuses_the_propagations_commit_surfaces_and_the_retry_lan
     let recovered = engine_on(store.clone()).await;
     let scan = recovered
         .runtime()
-        .kernel()
+        .workers()
         .tick(SystemClock.now_ms())
         .await
         .unwrap();
@@ -803,7 +803,7 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
 
     let scan = recovered
         .runtime()
-        .kernel()
+        .workers()
         .tick(SystemClock.now_ms())
         .await
         .unwrap();
@@ -838,7 +838,7 @@ async fn an_already_applied_propagation_is_not_re_run_by_recovery_inner() {
     // a repeated scan is equally a no-op
     let again = recovered
         .runtime()
-        .kernel()
+        .workers()
         .tick(SystemClock.now_ms())
         .await
         .unwrap();
@@ -1023,7 +1023,7 @@ async fn a_crash_at_each_write_boundary_of_the_propagation_converges_on_one_chil
             EFFECT_WRITE => {
                 let shifted = recovered
                     .runtime()
-                    .kernel()
+                    .workers()
                     .tick(SystemClock.now_ms() + 120_000)
                     .await
                     .unwrap();
@@ -1152,7 +1152,7 @@ async fn a_container_completes_only_after_its_last_child_settles_inner() {
     assert!(
         !engine
             .runtime()
-            .kernel()
+            .workers()
             .process_completed(&pid)
             .await
             .unwrap(),
@@ -1179,7 +1179,7 @@ async fn a_container_completes_only_after_its_last_child_settles_inner() {
         assert!(
             !engine
                 .runtime()
-                .kernel()
+                .workers()
                 .process_completed(&pid)
                 .await
                 .unwrap(),

@@ -122,7 +122,7 @@ async fn quiesce(engine: &Engine) {
     for _ in 0..32 {
         let delivered = engine
             .runtime()
-            .kernel()
+            .workers()
             .dispatch_outbox()
             .await
             .unwrap_or(0);
@@ -137,12 +137,18 @@ async fn quiesce(engine: &Engine) {
 /// longer in flight. A missing aggregate is a run A11 already reclaimed: it is
 /// settled by definition (and has no aggregate left to read).
 async fn completed(engine: &Engine, pid: &str) -> bool {
-    if !engine.runtime().kernel().exists(pid).await.unwrap_or(false) {
+    if !engine
+        .runtime()
+        .workers()
+        .exists(pid)
+        .await
+        .unwrap_or(false)
+    {
         return true;
     }
     engine
         .runtime()
-        .kernel()
+        .workers()
         .process_completed(pid)
         .await
         .unwrap_or(false)
@@ -157,7 +163,7 @@ async fn completed(engine: &Engine, pid: &str) -> bool {
 async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
     engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -246,7 +252,13 @@ fn completion_records(pid: &str, tid: &str) -> (String, String) {
 /// root, both `Completed`, and exactly one record per operation of the decision.
 async fn assert_finished_once(engine: &Engine, pid: &str, tid: &str) {
     assert!(completed(engine, pid).await, "run {pid} must settle");
-    if !engine.runtime().kernel().exists(pid).await.unwrap_or(false) {
+    if !engine
+        .runtime()
+        .workers()
+        .exists(pid)
+        .await
+        .unwrap_or(false)
+    {
         // A11 reclaimed the run (a sweep of a sibling in the same batch may
         // have done it): there is no aggregate left to read, and the reclaim
         // itself proves every execution was terminal.
@@ -367,7 +379,7 @@ async fn settled_work(engine: &Engine, pid: &str) -> bool {
 /// tick that may claim one mid-cascade.
 async fn settle_run(engine: &Engine, pid: &str) -> bool {
     if settled_work(engine, pid).await {
-        let _ = engine.runtime().kernel().dispatch_outbox().await;
+        let _ = engine.runtime().workers().dispatch_outbox().await;
     }
     fully_settled(engine, pid).await
 }
@@ -421,7 +433,7 @@ async fn engine_drivable(engine: &Engine, pid: &str) -> bool {
 /// effect boundary. The poll fails, never hangs, if nothing progresses.
 async fn drive_to_end(engine: &Engine, pid: &str, tid: &str) {
     let runtime = engine.runtime();
-    let kernel = runtime.kernel();
+    let kernel = runtime.workers();
     // Wake whatever is drivable now (a fresh boot holds nothing in flight).
     let _ = kernel.tick(SystemClock.now_ms()).await;
 
@@ -445,7 +457,7 @@ async fn drive_to_end(engine: &Engine, pid: &str, tid: &str) {
                 if nudge_due {
                     last_nudge.set(Some(Instant::now()));
                     let runtime = engine.runtime();
-                    let kernel = runtime.kernel();
+                    let kernel = runtime.workers();
                     let _ = kernel.tick(SystemClock.now_ms() + 120_000).await;
                     let _ = kernel.tick(SystemClock.now_ms()).await;
                 } else if let Some(proc) = proc_row(engine, pid).await
@@ -792,7 +804,7 @@ async fn cut_sweep_inner() {
         // a second decision.
         let _ = recovered
             .runtime()
-            .kernel()
+            .workers()
             .tick(SystemClock.now_ms() + 120_000)
             .await;
         assert_still_finished_once(&recovered, &pid, &tid).await;
@@ -860,7 +872,7 @@ async fn boot_with_recovery_cut(store: Arc<dyn KvStore>, kv: &Arc<DocCutKv>, pid
         quiesce(&engine).await;
         let refused_before = kv.refused();
         kv.arm(0);
-        let _ = engine.runtime().kernel().tick(SystemClock.now_ms()).await;
+        let _ = engine.runtime().workers().tick(SystemClock.now_ms()).await;
         let fired = poll_settle(|| async { kv.refused() > refused_before }, 150).await;
         let shapes = open_shapes(&engine, pid, "s1").await;
         if fired && matches!(shapes.as_slice(), ["pending"] | ["prepared"]) {
@@ -883,7 +895,7 @@ async fn boot_with_recovery_cut(store: Arc<dyn KvStore>, kv: &Arc<DocCutKv>, pid
 /// Legacy called the re-driver the "outbox pass", and it re-dispatched an
 /// abandoned `next` record. The kernel keeps that record inside the aggregate,
 /// so the stranded work is an *operation* left non-terminal and the pass that
-/// re-derives it is the recovery scan (`KernelHost::recover`, which the driver
+/// re-derives it is the recovery scan (`Workers::recover`, which the driver
 /// tick runs too). The cell proves the strand first — the intent is durable and
 /// `pending`, the act still waits — so it cannot pass vacuously.
 #[serial]
@@ -907,7 +919,7 @@ async fn stalled_redriven_inner() {
     kv.heal();
     let scan = {
         let runtime = engine.runtime();
-        let kernel = runtime.kernel();
+        let kernel = runtime.workers();
         kernel.tick(SystemClock.now_ms()).await.unwrap_or_default()
     };
     assert!(

@@ -26,7 +26,7 @@ pub(in crate::scheduler::shell) enum Projection {
     Whole,
 }
 
-impl KernelHost {
+impl Workers {
     /// Record that this operation crossed the external-effect boundary and its
     /// outcome can no longer be proven. Recovery will surface it for manual
     /// reconciliation and must never re-drive it automatically.
@@ -244,7 +244,7 @@ impl KernelHost {
     /// Execute Core's [`Decision`] for one committed snapshot, in the order
     /// the durability contracts require.
     ///
-    /// The normal [`KernelHost::dispatch`] and recovery's `FinalizeCommit`
+    /// The normal [`Workers::dispatch`] and recovery's `FinalizeCommit`
     /// both run this (A7): a state has one post-commit program, whichever path
     /// committed it. The order is the contract:
     ///
@@ -370,8 +370,8 @@ mod tests {
     use super::*;
     use crate::scheduler::core::model::{operation::OperationState, task_graph::TaskId};
 
-    fn host() -> std::sync::Arc<KernelHost> {
-        KernelHost::in_memory().0
+    fn host() -> std::sync::Arc<Workers> {
+        Workers::in_memory().0
     }
 
     fn seeded() -> ProcessSnapshot {
@@ -380,7 +380,7 @@ mod tests {
             .unwrap()
     }
 
-    async fn persist(host: &KernelHost, snapshot: &ProcessSnapshot) {
+    async fn persist(host: &Workers, snapshot: &ProcessSnapshot) {
         host.processes
             .create(snapshot, SystemClock.now_ms(), host.timer_poll_ms())
             .await

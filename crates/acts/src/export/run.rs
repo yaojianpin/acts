@@ -71,7 +71,7 @@ impl RunHandle {
             // Register before the re-check: `enable` puts this waiter on the
             // pid's list, so a settle between the first read and here is
             // either seen by the re-read below or wakes this future.
-            let waiter = self.runtime.kernel().run_waiter(&self.pid);
+            let waiter = self.runtime.workers().run_waiter(&self.pid);
             let notified = waiter.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -84,7 +84,7 @@ impl RunHandle {
 
     /// The durable outcome, or `None` while the run is in flight.
     async fn outcome(&self) -> Result<Option<RunOutcome>> {
-        let Some(snapshot) = self.runtime.kernel().snapshot(&self.pid).await? else {
+        let Some(snapshot) = self.runtime.workers().snapshot(&self.pid).await? else {
             return Err(ActError::Runtime(format!(
                 "process '{}' is not present (never started here, or already reclaimed)",
                 self.pid

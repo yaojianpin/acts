@@ -33,6 +33,11 @@ pub struct SystemStatus {
     pub processes: ProcessCounts,
     /// The store-facing background loops' failure state.
     pub health: HealthStatus,
+    /// The installed capabilities' keys, one entry per capability
+    /// implementation the serving assembly attached (see
+    /// [`acts::caps::Capability`]): package effects, branch predicates,
+    /// outbox delivery, process lifecycle.
+    pub caps: Vec<String>,
     /// The effective configuration, exactly as it was parsed from the
     /// config file (every section, including ones the status reader did not
     /// ask about). An embedder that built its config in code answers an
@@ -154,6 +159,7 @@ pub async fn collect(engine: &Engine) -> Result<SystemStatus> {
         storage,
         processes: ProcessCounts { total, active },
         health,
+        caps: runtime.caps(),
         config: serde_json::to_value(runtime.config().table.clone())
             .unwrap_or(serde_json::Value::Null),
     })

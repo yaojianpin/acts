@@ -29,4 +29,4 @@ steps:
 | 顺序 | `acts.core.sequence` | 子活动按顺序逐个执行，后一个等待前一个完成 |
 | 块 | `acts.core.block` | 按 `mode: sequence` 模式顺序执行嵌套 acts |
 
-引擎会自动将 `index` 和 `value` 注入到每个子活动的变量上下文中。
+引擎会把每个 item 绑定为 `$item`，子活动通过 `${{ $item.value }}` 和 `${{ $item.index }}` 读取当前项的值与位置；item 绑定是引擎事实，不会上浮到父作用域、行、运行输出或消息 `inputs`。

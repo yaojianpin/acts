@@ -1,34 +1,77 @@
 use crate::JoinRule;
 use crate::ValidationRule;
 use crate::Variant;
-use crate::{ModelBase, Vars, model::Branch, model::OwnerExpr};
+use crate::{ModelBase, Vars, model::Branch, model::CandidateExpr};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
-/// The declared owner of one human decision act: the expression the act
-/// resolves at start into its persisted `__assignment` task state. Only a
-/// human decision leaf (`ActRunAs::Irq`) may declare one; the kernel refuses
-/// an `assign` on a container or a `Func`/`Msg` leaf when the act starts.
+/// The declared assignment of one human decision act: the expression the act
+/// resolves at start into its persisted `__assignment` task state, and — for
+/// multi-approver steps — the candidate pool its `uses` package computes.
+/// Only a human decision leaf (`ActRunAs::Irq`) may declare an `owner`; a
+/// container step (`block`/`parallel`/`sequence`) may declare `candidates`
+/// for the fan-out. The kernel refuses an `assign` on a subflow or a
+/// `Func`/`Msg` leaf when the act starts.
 ///
-/// `owner` is an [`OwnerExpr`]. The legacy string form (a user id or a
-/// `${{ … }}` expression) deserializes unchanged; the object forms name a
-/// user/role/group, a resource's owners, a context variable, a relation, or a
-/// set combination of those. The resolved set must contain exactly one
-/// participant — a human act has one owner. Multi-approver steps use the
-/// `acts.core.owner` package with `block`/`parallel`/`sequence` instead.
+/// The three assignment vocabularies are separate capabilities (see
+/// `crate::scheduler::shell::caps::assign`):
+///
+/// - `owner` — the one responsible person (`assignee`); the act's decisions
+///   must come from them.
+/// - `candidates` — the list of people the container fans acts out over; each
+///   generated child carries its own owner.
+/// - delegation — runtime state (`delegator`/`delegatee`), moved with
+///   `act:delegate`/`act:undelegate`, never declared in the model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Assign {
-    /// The owner expression. An empty resolution fails the act; so does a
-    /// resolution with more than one participant.
-    #[serde(default)]
-    pub owner: Box<OwnerExpr>,
-    /// The capability provider key that resolves this assignment.
-    ///
-    /// A model may declare it explicitly; the publish path fills the only
-    /// registered provider when omitted, so the stored model carries the
-    /// frozen selection.
+    /// The owner: a literal user id, a `${{ … }}` expression, or absent. The
+    /// resolution must contain exactly one participant — a human act has one
+    /// owner; an empty or larger resolution fails the act.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    pub owner: Option<String>,
+    /// The candidate pool: a `uses` package computes it from `params` at act
+    /// start and the answer lands in the act's variables, where the
+    /// container's fan-out (`block`/`parallel`/`sequence`) reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<Box<Candidates>>,
+}
+
+/// One act's candidate-pool declaration (see [`Assign::candidates`]).
+///
+/// `uses` names the IRQ package that computes the pool — the core
+/// [`CANDIDATES_PACKAGE`] by default, or any package answering the same
+/// contract (`{ participants, ids, count }`). `params` is the package's
+/// input: a [`CandidateExpr`] the engine computes locally when every atom
+/// resolves in the kernel, and otherwise sends to the package with its
+/// local context atoms already resolved.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Candidates {
+    /// The computing package's params.
+    #[serde(default)]
+    pub params: CandidateExpr,
+    /// The package that computes the pool. Defaults to
+    /// [`CANDIDATES_PACKAGE`]; a model names its own extension here.
+    #[serde(default = "default_candidates_uses")]
+    pub uses: String,
+}
+
+impl Default for Candidates {
+    fn default() -> Self {
+        Self {
+            params: CandidateExpr::default(),
+            uses: default_candidates_uses(),
+        }
+    }
+}
+
+/// The core package that computes a candidate pool — `assign.candidates`'s
+/// default `uses`. A model may name its own computing package instead; the
+/// kernel only defines the request (the prepared `params`) and the answer
+/// contract (`{ participants, ids, count }`).
+pub const CANDIDATES_PACKAGE: &str = "acts.core.candidates";
+
+fn default_candidates_uses() -> String {
+    CANDIDATES_PACKAGE.to_string()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -115,12 +158,8 @@ impl ModelBase for Step {
 }
 
 impl Step {
-    /// Whether this step or any nested step declares `assign.owner`.
-    ///
-    /// The engine checks this when publishing a model: `assign.owner` is a
-    /// participant primitive, and without a participant resolver the model
-    /// must be refused with a message naming the plugin rather than accepted
-    /// and failing later.
+    /// Whether this step or any nested step declares an assignment (an
+    /// `owner` or a `candidates` pool).
     pub fn has_assignment(&self) -> bool {
         self.assign.is_some()
             || self
@@ -215,34 +254,32 @@ impl Step {
         self
     }
 
-    /// Declare the act's owner expression as the legacy string form (see
-    /// [`Assign`]): a literal user id or a `${{ … }}` expression.
+    /// Declare the act's owner (see [`Assign`]): a literal user id or a
+    /// `${{ … }}` expression.
     pub fn with_assign(mut self, owner: &str) -> Self {
         self.assign = Some(Assign {
-            owner: Box::new(OwnerExpr::Value(owner.to_string())),
-            provider: None,
+            owner: Some(owner.to_string()),
+            candidates: None,
         });
         self
     }
 
-    /// Declare the act's owner as a structured [`OwnerExpr`] (a resource's
-    /// owners, a context variable, a relation, or a set combination).
-    pub fn with_assign_expr(mut self, owner: OwnerExpr) -> Self {
+    /// Declare the act's candidate pool, computed by the core
+    /// [`CANDIDATES_PACKAGE`] from the expression (see [`Candidates`]).
+    pub fn with_candidates(self, params: CandidateExpr) -> Self {
+        self.with_candidates_package(CANDIDATES_PACKAGE, params)
+    }
+
+    /// Declare the act's candidate pool with an explicit computing package:
+    /// `uses` names it, `params` is its input expression (see [`Candidates`]).
+    pub fn with_candidates_package(mut self, uses: &str, params: CandidateExpr) -> Self {
         self.assign = Some(Assign {
-            owner: Box::new(owner),
-            provider: None,
+            owner: self.assign.and_then(|assign| assign.owner),
+            candidates: Some(Box::new(Candidates {
+                params,
+                uses: uses.to_string(),
+            })),
         });
-        self
-    }
-
-    /// Choose the capability provider that resolves this step's `assign.owner`.
-    ///
-    /// A no-op when the step has no assignment. The publish path validates the
-    /// key against the installed providers and freezes it into the model.
-    pub fn with_assign_provider(mut self, provider: impl Into<String>) -> Self {
-        if let Some(assign) = &mut self.assign {
-            assign.provider = Some(provider.into());
-        }
         self
     }
 

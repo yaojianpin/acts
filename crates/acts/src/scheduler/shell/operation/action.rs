@@ -16,7 +16,7 @@ use crate::scheduler::{
     shell::*,
 };
 
-impl KernelHost {
+impl ApplyAction {
     /// Phase 3 of one completion: the durable plan a decided outcome implies.
     /// A plain execution completes and propagates; a container (a branched
     /// step, or a branch over its own steps) fans its children out instead and
@@ -37,7 +37,7 @@ impl KernelHost {
     // into a struct would only rename the same eight fields.
     #[allow(clippy::too_many_arguments)]
     async fn completion_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -45,8 +45,9 @@ impl KernelHost {
         claim: &OperationCommit,
         action: Option<crate::scheduler::core::commit::command::ActionKind>,
         inputs: Vec<(String, String)>,
-        effect: Option<&effects::EffectOutcome>,
+        effect: Option<&caps::effect::EffectOutcome>,
         subject: Option<&str>,
+        actor: Option<&str>,
     ) -> Result<TransitionPlan> {
         match action {
             None => {
@@ -61,7 +62,9 @@ impl KernelHost {
                     .map(String::as_str)
                     != Some("0");
                 if !auto && effect.is_some() {
-                    return self.waiting_after_effect_plan(snapshot, id, task_id, task, claim);
+                    return Self::waiting_after_effect_plan(
+                        host, snapshot, id, task_id, task, claim,
+                    );
                 }
                 let propagate_id = OperationId {
                     process_id: id.process_id.clone(),
@@ -77,13 +80,13 @@ impl KernelHost {
                 // A container dispatches its children instead of completing —
                 // with the act's own outcome folded into the same atomic
                 // commit. A leaf completes and propagates.
-                if let Some(command) = self
-                    .fanout_command(snapshot, task_id, claim, &task.model_node, &inputs)
-                    .await?
+                if let Some(command) =
+                    Self::fanout_command(host, snapshot, task_id, claim, &task.model_node, &inputs)
+                        .await?
                 {
-                    let mut plan = self.container_fanout_plan(snapshot, &command)?;
+                    let mut plan = Self::container_fanout_plan(snapshot, &command)?;
                     if let Some(outcome) = effect {
-                        self.fold_effect_outcome(task_id, outcome, &mut plan);
+                        Self::fold_effect_outcome(task_id, outcome, &mut plan);
                         plan.validate().map_err(runtime)?;
                     }
                     return Ok(plan);
@@ -94,19 +97,19 @@ impl KernelHost {
                 // under the execution counts the same way. The act's own
                 // completion is recorded and the execution waits for them
                 // (the container join finishes it when the last one settles).
-                if self.waits_for_timeouts(snapshot, task_id, task)?
-                    || self.waits_for_pushed(snapshot, task_id)?
+                if Self::waits_for_timeouts(snapshot, task_id, task)?
+                    || Self::waits_for_pushed(snapshot, task_id)?
                 {
-                    let mut plan = self.park_for_children_plan(
-                        snapshot, id, task_id, task, claim, &inputs, None,
+                    let mut plan = Self::park_for_children_plan(
+                        host, snapshot, id, task_id, task, claim, &inputs, None,
                     )?;
                     if let Some(outcome) = effect {
-                        self.fold_effect_outcome(task_id, outcome, &mut plan);
+                        Self::fold_effect_outcome(task_id, outcome, &mut plan);
                         plan.validate().map_err(runtime)?;
                     }
                     return Ok(plan);
                 }
-                let mut plan = self.task_operation_plan(
+                let mut plan = host.task_operation_plan(
                     snapshot,
                     id,
                     task_id,
@@ -116,10 +119,10 @@ impl KernelHost {
                     "task.completed",
                 )?;
                 if let Some(outcome) = effect {
-                    self.fold_effect_outcome(task_id, outcome, &mut plan);
+                    Self::fold_effect_outcome(task_id, outcome, &mut plan);
                 }
                 // The act's Completed message rides the completion record.
-                if let Some(payload) = self.operation_message_payload(
+                if let Some(payload) = operation_message_payload(
                     snapshot,
                     task_id,
                     id.task.node.as_str(),
@@ -152,8 +155,9 @@ impl KernelHost {
                     kind,
                     crate::scheduler::core::commit::command::ActionKind::Transfer
                 ) {
-                    return self
-                        .transfer_plan(snapshot, id, task_id, task, claim, &inputs, subject);
+                    return Self::transfer_plan(
+                        host, snapshot, id, task_id, task, claim, &inputs, subject,
+                    );
                 }
                 // A client `Delegate`/`Undelegate` decides nothing either: it
                 // rewrites the act's delegation and announces the new
@@ -162,15 +166,17 @@ impl KernelHost {
                     kind,
                     crate::scheduler::core::commit::command::ActionKind::Delegate
                 ) {
-                    return self
-                        .delegate_plan(snapshot, id, task_id, task, claim, &inputs, subject);
+                    return Self::delegate_plan(
+                        host, snapshot, id, task_id, task, claim, &inputs, subject,
+                    );
                 }
                 if matches!(
                     kind,
                     crate::scheduler::core::commit::command::ActionKind::Undelegate
                 ) {
-                    return self
-                        .undelegate_plan(snapshot, id, task_id, task, claim, &inputs, subject);
+                    return Self::undelegate_plan(
+                        host, snapshot, id, task_id, task, claim, &inputs, subject,
+                    );
                 }
                 // A client `Push` decides nothing on the target: it
                 // creates the pushed act under it. The target's own flow is
@@ -179,18 +185,24 @@ impl KernelHost {
                     kind,
                     crate::scheduler::core::commit::command::ActionKind::Push
                 ) {
-                    return self.push_plan(snapshot, id, task_id, task, claim, &inputs);
+                    return Self::push_plan(host, snapshot, id, task_id, task, claim, &inputs);
                 }
                 // A client completion of a container dispatches its children
                 // instead of completing it (the legacy `Next` on a running
                 // step) — the step declaring `catches` included: the completion
                 // is its *act* completing, which then runs into its handlers.
                 if matches!(kind, ActionKind::Complete)
-                    && let Some(command) = self
-                        .fanout_command(snapshot, task_id, claim, &task.model_node, &inputs)
-                        .await?
+                    && let Some(command) = Self::fanout_command(
+                        host,
+                        snapshot,
+                        task_id,
+                        claim,
+                        &task.model_node,
+                        &inputs,
+                    )
+                    .await?
                 {
-                    return self.container_fanout_plan(snapshot, &command);
+                    return Self::container_fanout_plan(snapshot, &command);
                 }
                 // A completion of a step whose timeout branches are still in
                 // flight is its *act* completing, not the step: the execution
@@ -200,11 +212,18 @@ impl KernelHost {
                 if matches!(
                     kind,
                     crate::scheduler::core::commit::command::ActionKind::Complete
-                ) && (self.waits_for_timeouts(snapshot, task_id, task)?
-                    || self.waits_for_pushed(snapshot, task_id)?)
+                ) && (Self::waits_for_timeouts(snapshot, task_id, task)?
+                    || Self::waits_for_pushed(snapshot, task_id)?)
                 {
-                    return self.park_for_children_plan(
-                        snapshot, id, task_id, task, claim, &inputs, subject,
+                    return Self::park_for_children_plan(
+                        host,
+                        snapshot,
+                        id,
+                        task_id,
+                        task,
+                        claim,
+                        &inputs,
+                        actor.or(subject),
                     );
                 }
                 // A client's error on a step declaring `catches` is the legacy
@@ -212,16 +231,16 @@ impl KernelHost {
                 // handlers instead of being decided `Failed` here.
                 if let crate::scheduler::core::commit::command::ActionKind::Fail { code, message } =
                     &kind
-                    && let Some(plan) = self
-                        .catch_fanout(
-                            snapshot,
-                            claim,
-                            task_id,
-                            task,
-                            &Failure::new(code.clone(), message.clone()),
-                            &inputs,
-                        )
-                        .await?
+                    && let Some(plan) = Self::catch_fanout(
+                        host,
+                        snapshot,
+                        claim,
+                        task_id,
+                        task,
+                        &Failure::new(code.clone(), message.clone()),
+                        &inputs,
+                    )
+                    .await?
                 {
                     return Ok(plan);
                 }
@@ -275,7 +294,7 @@ impl KernelHost {
                 }
                 // A client action that decides a `uses` execution announces it
                 // on the act's own message, exactly like the legacy act.
-                self.attach_operation_message(snapshot, task_id, &mut plan, subject)?;
+                Self::attach_operation_message(snapshot, task_id, &mut plan, actor.or(subject))?;
                 Ok(plan)
             }
         }
@@ -288,14 +307,14 @@ impl KernelHost {
     /// the effect), because the waiting state is what tells the return
     /// operation the parent is ready for its decision.
     fn waiting_after_effect_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         task: &TaskSnapshot,
         claim: &OperationCommit,
     ) -> Result<TransitionPlan> {
-        let mut plan = self.task_operation_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -322,12 +341,11 @@ impl KernelHost {
     /// for them; the kernel parks the execution in `Waiting` (a waiting act is
     /// already parked) and the container join finishes it.
     fn waits_for_timeouts(
-        &self,
         snapshot: &ProcessSnapshot,
         task_id: &TaskId,
         task: &TaskSnapshot,
     ) -> Result<bool> {
-        let branches = self.timeout_branches(snapshot, &task.model_node)?;
+        let branches = DispatchTimeout::timeout_branches(snapshot, &task.model_node)?;
         Ok(!branches.is_empty()
             && crate::scheduler::core::plan::timeout::has_live_children(
                 snapshot, task_id, &branches,
@@ -344,13 +362,12 @@ impl KernelHost {
     /// settlement complete a step nobody answered (see
     /// [`crate::scheduler::PARK_CHILDREN`]).
     fn container_fanout_plan(
-        &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         command: &crate::scheduler::core::plan::container::ContainerFanoutCommand,
     ) -> Result<TransitionPlan> {
         // A rule whose threshold cannot be met over these children fails the
         // container here, before anything parks.
-        if let Some(plan) = self.join_fanout_failure_plan(snapshot, command)? {
+        if let Some(plan) = Self::join_fanout_failure_plan(snapshot, command)? {
             return Ok(plan);
         }
         let mut plan = Fanout::plan(snapshot, command).map_err(runtime)?;
@@ -369,11 +386,11 @@ impl KernelHost {
             .get(&command.source)
             .map(|task| task.model_node.clone());
         let source_has_package = match &source_node {
-            Some(node) => self.step_uses(snapshot, &command.source, node)?.is_some(),
+            Some(node) => step_uses(snapshot, &command.source, node)?.is_some(),
             None => false,
         };
         if source_has_package
-            && let Some(payload) = self.operation_message_payload(
+            && let Some(payload) = operation_message_payload(
                 snapshot,
                 &command.source,
                 command.source.node.as_str(),
@@ -403,16 +420,16 @@ impl KernelHost {
     /// planner's own fact wins over a client input of the same private name.
     #[allow(clippy::too_many_arguments)]
     fn park_for_children_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         task: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
         claim: &OperationCommit,
         inputs: &[(String, String)],
-        subject: Option<&str>,
+        actor: Option<&str>,
     ) -> Result<TransitionPlan> {
-        let mut plan = self.task_operation_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -444,10 +461,8 @@ impl KernelHost {
         // The act did complete: its message rides the record, exactly like a
         // leaf completion's. A package-less execution announces nothing here —
         // it is still running, and only its terminal decision is a message.
-        if self
-            .step_uses(snapshot, task_id, &task.model_node)?
-            .is_some()
-            && let Some(mut payload) = self.operation_message_payload(
+        if step_uses(snapshot, task_id, &task.model_node)?.is_some()
+            && let Some(mut payload) = operation_message_payload(
                 snapshot,
                 task_id,
                 id.task.node.as_str(),
@@ -456,7 +471,7 @@ impl KernelHost {
                 None,
             )?
         {
-            inject_decision_assignment(&mut payload, snapshot, task_id, subject)?;
+            Assign::inject_decision_assignment(&mut payload, snapshot, task_id, actor)?;
             plan.outbox[0].payload = payload.to_string();
         }
         plan.validate().map_err(runtime)?;
@@ -474,7 +489,7 @@ impl KernelHost {
     /// restart instead of being invented at delivery time.
     #[allow(clippy::too_many_arguments)]
     fn transfer_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -508,7 +523,7 @@ impl KernelHost {
                 crate::ActError::Action("cannot find 'to' in act:transfer".to_string())
             })?;
         if let Some(raw) = input("expect_rev") {
-            let expect = parse_expect_rev(raw)?;
+            let expect = Assign::parse_expect_rev(raw)?;
             if expect != assignment.rev {
                 return Err(crate::ActError::Action(format!(
                     "EASSIGNMENT_CHANGED: act '{node}' assignment rev is {}, not {expect}",
@@ -522,7 +537,7 @@ impl KernelHost {
         // had no authenticated subject to record).
         let by = subject.or_else(|| input("updated_by").filter(|by| !by.trim().is_empty()));
         let next = assignment.transferred(to, by, crate::utils::time::time_millis());
-        let mut plan = self.task_operation_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -551,16 +566,16 @@ impl KernelHost {
             });
         }
         let facts = act_facts(snapshot, task_id);
-        let mut payload = self
-            .operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
-            .ok_or_else(|| {
-                runtime(format!(
-                    "act '{node}' has no message payload for its transfer"
-                ))
-            })?;
+        let mut payload =
+            operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
+                .ok_or_else(|| {
+                    runtime(format!(
+                        "act '{node}' has no message payload for its transfer"
+                    ))
+                })?;
         payload["kind"] = serde_json::json!("assignment");
-        inject_payload_assignment(&mut payload, &next);
-        payload["ref_msg_id"] = created_message_id(snapshot, task_id)
+        Assign::inject_payload_assignment(&mut payload, &next);
+        payload["ref_msg_id"] = Assign::created_message_id(snapshot, task_id)
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null);
         // The notification's own id is pinned now, in the durable record.
@@ -591,7 +606,7 @@ impl KernelHost {
     /// revision it writes, so a replay mints the same record.
     #[allow(clippy::too_many_arguments)]
     fn delegate_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -627,7 +642,7 @@ impl KernelHost {
         let expires_at = input("expires_at")
             .map(str::trim)
             .filter(|raw| !raw.is_empty())
-            .map(parse_expires_at)
+            .map(Assign::parse_expires_at)
             .transpose()?;
         let reason = input("reason").filter(|reason| !reason.is_empty());
         let now = crate::utils::time::time_millis();
@@ -640,7 +655,7 @@ impl KernelHost {
             expires_at,
             reason,
         );
-        let mut plan = self.task_operation_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -660,17 +675,21 @@ impl KernelHost {
             value: next.value(),
         });
         let facts = act_facts(snapshot, task_id);
-        let mut payload = self
-            .operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
-            .ok_or_else(|| {
-                runtime(format!(
-                    "act '{node}' has no message payload for its delegation"
-                ))
-            })?;
+        let mut payload =
+            operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
+                .ok_or_else(|| {
+                    runtime(format!(
+                        "act '{node}' has no message payload for its delegation"
+                    ))
+                })?;
         payload["kind"] = serde_json::json!("assignment");
-        inject_payload_assignment(&mut payload, &next);
-        inject_payload_delegation(&mut payload, &delegation.delegator, &delegation.delegatee);
-        payload["ref_msg_id"] = created_message_id(snapshot, task_id)
+        Assign::inject_payload_assignment(&mut payload, &next);
+        Assign::inject_payload_delegation(
+            &mut payload,
+            &delegation.delegator,
+            &delegation.delegatee,
+        );
+        payload["ref_msg_id"] = Assign::created_message_id(snapshot, task_id)
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null);
         // The notification's own id is pinned now, in the durable record.
@@ -698,7 +717,7 @@ impl KernelHost {
     /// revoked delegatee.
     #[allow(clippy::too_many_arguments)]
     fn undelegate_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -731,7 +750,7 @@ impl KernelHost {
             ))
         })?;
         let next = assignment.revoked(subject, crate::utils::time::time_millis());
-        let mut plan = self.task_operation_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -751,16 +770,16 @@ impl KernelHost {
             value: next.value(),
         });
         let facts = act_facts(snapshot, task_id);
-        let mut payload = self
-            .operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
-            .ok_or_else(|| {
-                runtime(format!(
-                    "act '{node}' has no message payload for its undelegation"
-                ))
-            })?;
+        let mut payload =
+            operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
+                .ok_or_else(|| {
+                    runtime(format!(
+                        "act '{node}' has no message payload for its undelegation"
+                    ))
+                })?;
         payload["kind"] = serde_json::json!("assignment");
-        inject_payload_assignment(&mut payload, &next);
-        payload["ref_msg_id"] = created_message_id(snapshot, task_id)
+        Assign::inject_payload_assignment(&mut payload, &next);
+        payload["ref_msg_id"] = Assign::created_message_id(snapshot, task_id)
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null);
         payload["msg_id"] = serde_json::Value::String(crate::utils::longid());
@@ -798,7 +817,7 @@ impl KernelHost {
     /// the legacy `auto_complete` counted every child task — so the join
     /// finishes it once the pushed act settles.
     fn push_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -823,11 +842,11 @@ impl KernelHost {
         // The run-bound decisions the import built for declared nodes: the
         // pushed package's own `run_as`. An unregistered package is the `Irq`
         // default — the pushed act waits for its client.
-        let run_as = self
-            .ports
+        let run_as = host
+            .caps
             .read()
             .effects
-            .default_port()
+            .as_ref()
             .and_then(|runner| runner.run_as(&act.uses));
         let auto = matches!(run_as, Some(crate::ActRunAs::Func | crate::ActRunAs::Msg));
         let msg = run_as == Some(crate::ActRunAs::Msg);
@@ -863,7 +882,7 @@ impl KernelHost {
             });
         }
 
-        let mut plan = self.task_operation_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -901,7 +920,6 @@ impl KernelHost {
     /// branch, a timeout one — is not: a client completion of a fanned
     /// container stays the force-finish it always was.
     fn waits_for_pushed(
-        &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
     ) -> Result<bool> {
@@ -921,13 +939,12 @@ impl KernelHost {
     /// completion, so a crash before the commit re-runs the package against
     /// the same pre-state.
     fn fold_effect_outcome(
-        &self,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
-        outcome: &effects::EffectOutcome,
+        outcome: &caps::effect::EffectOutcome,
         plan: &mut TransitionPlan,
     ) {
         if let Some(outputs) = &outcome.outputs {
-            for (name, value) in effects::outputs_as_writes(outputs) {
+            for (name, value) in caps::effect::outputs_as_writes(outputs) {
                 plan.variable_writes.push(VariableWrite {
                     scope: task_id.clone(),
                     name,
@@ -946,7 +963,7 @@ impl KernelHost {
     /// running and dispatches its handlers instead.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn failure_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -954,9 +971,8 @@ impl KernelHost {
         claim: &OperationCommit,
         failure: &Failure,
     ) -> Result<TransitionPlan> {
-        if let Some(plan) = self
-            .catch_fanout(snapshot, claim, task_id, task, failure, &[])
-            .await?
+        if let Some(plan) =
+            Self::catch_fanout(host, snapshot, claim, task_id, task, failure, &[]).await?
         {
             return Ok(plan);
         }
@@ -965,7 +981,7 @@ impl KernelHost {
             task: id.task.clone(),
             sequence: id.sequence + 1,
         };
-        let mut plan = self.task_operation_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -1000,7 +1016,7 @@ impl KernelHost {
                 ready_at_ms: None,
             });
         }
-        if let Some(payload) = self.operation_message_payload(
+        if let Some(payload) = operation_message_payload(
             snapshot,
             task_id,
             id.task.node.as_str(),
@@ -1016,7 +1032,7 @@ impl KernelHost {
     /// The plan of a package/params failure: the error the effect seam
     /// reports, under the kernel's package error code.
     async fn package_failure_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -1024,8 +1040,16 @@ impl KernelHost {
         claim: &OperationCommit,
         error: &crate::ActError,
     ) -> Result<TransitionPlan> {
-        self.failure_plan(snapshot, id, task_id, task, claim, &package_failure(error))
-            .await
+        Self::failure_plan(
+            host,
+            snapshot,
+            id,
+            task_id,
+            task,
+            claim,
+            &package_failure(error),
+        )
+        .await
     }
 
     /// The plan of a caught failure: the legacy `Step::on_error`, which keeps
@@ -1043,7 +1067,7 @@ impl KernelHost {
     /// the error up instead).
     #[allow(clippy::too_many_arguments)]
     async fn catch_fanout(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         claim: &OperationCommit,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -1102,7 +1126,7 @@ impl KernelHost {
             if let Some(expr) = &catch.r#if {
                 // The handler's own selection (the legacy `Step::init`
                 // guard), evaluated with the error the step is deciding.
-                match self
+                match host
                     .evaluate_branch_predicate(snapshot, task_id, expr, &overlay)
                     .await?
                 {
@@ -1190,7 +1214,7 @@ impl KernelHost {
         // the step recovered, so the client sees the failure the handler is
         // answering. Sequence-qualified, so the step's own later decision (a
         // resumed error) carries a record of its own.
-        if let Some(payload) = self.operation_message_payload(
+        if let Some(payload) = operation_message_payload(
             snapshot,
             task_id,
             task_id.node.as_str(),
@@ -1223,11 +1247,10 @@ impl KernelHost {
     /// speak the same message. The record's topic already names the state; its
     /// opaque lifecycle payload becomes the operation's payload.
     fn attach_operation_message(
-        &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         plan: &mut TransitionPlan,
-        subject: Option<&str>,
+        actor: Option<&str>,
     ) -> Result<()> {
         let Some(change) = plan
             .state_changes
@@ -1260,7 +1283,7 @@ impl KernelHost {
             .as_ref()
             .map(|(code, message)| (code.as_str(), message.as_str()));
         let facts = act_facts(snapshot, task_id);
-        if let Some(mut payload) = self.operation_message_payload(
+        if let Some(mut payload) = operation_message_payload(
             snapshot,
             task_id,
             task_id.node.as_str(),
@@ -1271,7 +1294,7 @@ impl KernelHost {
             // The decision's actor is a durable fact: an owner's completion
             // records the owner as the assignee, a delegatee's records the
             // delegation. The payload was built from the assignment alone.
-            inject_decision_assignment(&mut payload, snapshot, task_id, subject)?;
+            Assign::inject_decision_assignment(&mut payload, snapshot, task_id, actor)?;
             match plan.outbox.first_mut() {
                 Some(record) => record.payload = payload.to_string(),
                 None => plan.outbox.push(
@@ -1301,17 +1324,16 @@ impl KernelHost {
     /// the item's index and value on its options). The count is a run-time
     /// fact, so the children share the template's model node and take
     /// successive generations of it; each carries its item on its own scope as
-    /// engine-private facts (`FANOUT_INDEX_VAR`/`FANOUT_VALUE_VAR`) that
-    /// `scope_vars` answers as `index`/`value`. They are deliberately not run
-    /// data: a completing item does not fold them into its parent, and no row,
-    /// run output or message `inputs` carries them (legacy kept the same two
-    /// on the act's options).
+    /// engine-private facts (`FANOUT_INDEX_VAR`/`FANOUT_VALUE_VAR`) that the
+    /// `$item` built-in answers as `$item.index`/`$item.value`. They are
+    /// deliberately not run data: a completing item does not fold them into
+    /// its parent, and no row, run output or message `inputs` carries them
+    /// (legacy kept the same two on the act's options).
     ///
     /// `parallel` admits its items together (`Entry`, all sourced by the
     /// container); `sequence` chains them (`Entry` then `Queued` behind the
     /// previous sibling), like the legacy `build_acts(&acts, true)`.
     fn param_fanout_children(
-        &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model: &crate::model::Workflow,
@@ -1368,11 +1390,11 @@ impl KernelHost {
             .enumerate()
             .map(|(index, item)| {
                 // Private (engine-fact) names: the binding is readable as
-                // `index`/`value` inside the item's scope (see `scope_vars`),
-                // but it is not run data — completing the template does not
-                // fold it into the parent, and no row/output/message `inputs`
-                // surface carries it. Legacy put the two on the act's options,
-                // so neither did it.
+                // `$item.index`/`$item.value` inside the item's scope (see
+                // the `$item` built-in), but it is not run data — completing
+                // the template does not fold it into the parent, and no
+                // row/output/message `inputs` surface carries it. Legacy put
+                // the two on the act's options, so neither did it.
                 let mut vars = vec![
                     (
                         crate::utils::consts::FANOUT_INDEX_VAR.to_string(),
@@ -1410,7 +1432,7 @@ impl KernelHost {
     /// own `Decide`; the inner chain of a branch is queued
     /// behind its first step.
     async fn fanout_command(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         claim: &OperationCommit,
@@ -1426,7 +1448,8 @@ impl KernelHost {
         // children are that one model node at successive generations, each
         // carrying its item as `index`/`value` on its own scope (the
         // template's acts read them through the scope chain).
-        if let Some(children) = self.param_fanout_children(snapshot, task_id, &model, model_node)? {
+        if let Some(children) = Self::param_fanout_children(snapshot, task_id, &model, model_node)?
+        {
             return Ok(Some(ContainerFanoutCommand {
                 process_id: snapshot.process_id.clone(),
                 source: task_id.clone(),
@@ -1479,7 +1502,7 @@ impl KernelHost {
                         model_node: node_id(&branch.id)?,
                         predicate: match &branch.r#if {
                             Some(expr) => {
-                                self.evaluate_branch_predicate(snapshot, task_id, expr, inputs)
+                                host.evaluate_branch_predicate(snapshot, task_id, expr, inputs)
                                     .await?
                             }
                             None => {
@@ -1688,7 +1711,6 @@ impl KernelHost {
     /// reach. An unselected branch is not in the vote, exactly as the join
     /// reads it. `None` when the rule is fine.
     fn join_fanout_failure_plan(
-        &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         command: &ContainerFanoutCommand,
     ) -> Result<Option<TransitionPlan>> {
@@ -1752,7 +1774,7 @@ impl KernelHost {
                 value: json_var(value),
             });
         }
-        if let Some(payload) = self.operation_message_payload(
+        if let Some(payload) = operation_message_payload(
             snapshot,
             &command.source,
             command.source.node.as_str(),
@@ -1799,17 +1821,20 @@ pub(in crate::scheduler::shell) enum Effect {
     /// decision landed on an execution that can no longer take it. The operation's
     /// bare remainder completes the operation.
     Nothing,
-    /// A durable client decision to replay. `subject` is the server-attributed
-    /// decision maker the fact persisted (absent for engine-originated
-    /// decisions and for facts an older kernel wrote).
+    /// A durable client decision to replay. `subject` is the authenticated
+    /// ACL subject the fact persisted (the audit trail); `actor` is the
+    /// business actor it recorded (`$actor`, `$previous_approver` and the
+    /// payload attribution). Both are absent for engine-originated decisions
+    /// and for facts an older kernel wrote.
     Decision {
         action: crate::scheduler::core::commit::command::ActionKind,
         inputs: Vec<(String, String)>,
         subject: Option<String>,
+        actor: Option<String>,
     },
     /// The auto-completion operation: the act's own package ran, or its node carries
     /// no package at all.
-    Completed(Option<effects::EffectOutcome>),
+    Completed(Option<caps::effect::EffectOutcome>),
     /// The act's package failed: the error walk takes over.
     Failed(ActError),
 }
@@ -1820,11 +1845,11 @@ pub(super) struct ApplyAction;
 #[async_trait::async_trait]
 impl ActOperation for ApplyAction {
     /// Nothing to check before the claim: a completion always has its work.
-    async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
+    async fn precheck(&self, _host: &Workers, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
     }
 
-    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, host: &Workers, operation: &mut Operation<'_>) -> Result<Outcome> {
         // Borrow the snapshot field, not the whole operation: the effect phase
         // releases the command lane below, which is a second field.
         let snapshot = operation.snapshot.as_ref();
@@ -1847,7 +1872,7 @@ impl ActOperation for ApplyAction {
             .cloned();
         let effect = match fact {
             Some(fact) => {
-                let (action, inputs, subject) = decode_action_fact(&fact)?;
+                let (action, inputs, subject, actor) = decode_action_fact(&fact)?;
                 // The step is already deciding a caught error (the sign its
                 // failure operation pinned): no later operation may complete, fail or fan
                 // it out — the catch join decides it. The client path refuses
@@ -1881,6 +1906,7 @@ impl ActOperation for ApplyAction {
                         action,
                         inputs,
                         subject,
+                        actor,
                     }
                 }
             }
@@ -1964,8 +1990,10 @@ impl ActOperation for ApplyAction {
                                                 ),
                                                 // A package's deferred decision is
                                                 // engine-originated: no client
-                                                // subject is attributed to it.
+                                                // subject or actor is attributed
+                                                // to it.
                                                 subject: None,
+                                                actor: None,
                                             }
                                         }
                                         Ok(kind) => Effect::Failed(crate::ActError::Action(
@@ -1996,7 +2024,7 @@ impl ActOperation for ApplyAction {
 
     async fn next(
         &self,
-        host: &KernelHost,
+        host: &Workers,
         operation: &Operation<'_>,
         outcome: Outcome,
     ) -> Result<TransitionPlan> {
@@ -2028,8 +2056,10 @@ impl ActOperation for ApplyAction {
                 action,
                 inputs,
                 subject,
+                actor,
             } => {
-                host.completion_plan(
+                Self::completion_plan(
+                    host,
                     snapshot,
                     id,
                     &task_id,
@@ -2039,13 +2069,15 @@ impl ActOperation for ApplyAction {
                     inputs,
                     None,
                     subject.as_deref(),
+                    actor.as_deref(),
                 )
                 .await
             }
             // The auto-completion operation has no action: the act's own outcome is
             // what the plan folds in.
             Effect::Completed(effect) => {
-                host.completion_plan(
+                Self::completion_plan(
+                    host,
                     snapshot,
                     id,
                     &task_id,
@@ -2055,25 +2087,25 @@ impl ActOperation for ApplyAction {
                     Vec::new(),
                     effect.as_ref(),
                     None,
+                    None,
                 )
                 .await
             }
             Effect::Failed(error) => {
-                if let Some(plan) = host
-                    .catch_fanout(
-                        snapshot,
-                        claim,
-                        &task_id,
-                        task,
-                        &package_failure(&error),
-                        &[],
-                    )
-                    .await?
+                if let Some(plan) = Self::catch_fanout(
+                    host,
+                    snapshot,
+                    claim,
+                    &task_id,
+                    task,
+                    &package_failure(&error),
+                    &[],
+                )
+                .await?
                 {
                     return Ok(plan);
                 }
-                host.package_failure_plan(snapshot, id, &task_id, task, claim, &error)
-                    .await
+                Self::package_failure_plan(host, snapshot, id, &task_id, task, claim, &error).await
             }
         }
     }
@@ -2089,10 +2121,10 @@ mod tests {
             task_graph::{TaskId, TaskState},
         },
     };
-    use crate::scheduler::shell::effects::EffectOutcome;
+    use crate::scheduler::shell::caps::effect::EffectOutcome;
 
-    fn host() -> std::sync::Arc<KernelHost> {
-        KernelHost::in_memory().0
+    fn host() -> std::sync::Arc<Workers> {
+        Workers::in_memory().0
     }
 
     fn task(node: &str) -> TaskId {
@@ -2159,20 +2191,21 @@ mod tests {
         snapstate(&mut snapshot, &task_id, TaskState::Waiting);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let error = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                Some(ActionKind::Back),
-                Vec::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap_err();
+        let error = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            Some(ActionKind::Back),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{error}").contains("cannot find 'to' value"),
             "{error}"
@@ -2197,20 +2230,21 @@ mod tests {
         );
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                Some(ActionKind::Back),
-                vec![(crate::utils::consts::ACT_TO.to_string(), "s1".into())],
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            Some(ActionKind::Back),
+            vec![(crate::utils::consts::ACT_TO.to_string(), "s1".into())],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             plan.variable_writes
                 .iter()
@@ -2238,20 +2272,21 @@ mod tests {
         let id = id("s1", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                Some(ActionKind::Complete),
-                Vec::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            Some(ActionKind::Complete),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             plan.task_creates
                 .iter()
@@ -2274,20 +2309,21 @@ mod tests {
         let id = id("s1", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                None,
-                Vec::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             plan.task_creates
                 .iter()
@@ -2321,20 +2357,21 @@ mod tests {
             outputs: Some(crate::Vars::new().with("answer", 42)),
             decision: None,
         };
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                None,
-                Vec::new(),
-                Some(&outcome),
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            None,
+            Vec::new(),
+            Some(&outcome),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             plan.variable_writes
                 .iter()
@@ -2368,20 +2405,21 @@ mod tests {
         let id = id("s1", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                None,
-                Vec::new(),
-                Some(&EffectOutcome::empty()),
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            None,
+            Vec::new(),
+            Some(&EffectOutcome::empty()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             plan.state_changes.is_empty(),
             "the act stays waiting: {plan:?}"
@@ -2422,20 +2460,21 @@ mod tests {
             outputs: None,
             decision: None,
         };
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                None,
-                Vec::new(),
-                Some(&outcome),
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            None,
+            Vec::new(),
+            Some(&outcome),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             plan.variable_writes
                 .iter()
@@ -2454,20 +2493,21 @@ mod tests {
         let id = id("a", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                None,
-                Vec::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(plan.state_changes[0].to, TaskState::Completed);
         assert_eq!(plan.outbox[0].topic, "task.completed");
         assert_eq!(plan.operations[0].kind, OperationKind::PropagateTask);
@@ -2483,23 +2523,24 @@ mod tests {
         let id = id("a", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                Some(ActionKind::Fail {
-                    code: "E1".into(),
-                    message: "boom".into(),
-                }),
-                Vec::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            Some(ActionKind::Fail {
+                code: "E1".into(),
+                message: "boom".into(),
+            }),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(plan.state_changes[0].to, TaskState::Failed);
         assert!(
             plan.variable_writes
@@ -2520,17 +2561,17 @@ mod tests {
         let id = id("s1", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .park_for_children_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                &[("answer".to_string(), "42".to_string())],
-                None,
-            )
-            .unwrap();
+        let plan = ApplyAction::park_for_children_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            &[("answer".to_string(), "42".to_string())],
+            None,
+        )
+        .unwrap();
         assert!(
             plan.variable_writes
                 .iter()
@@ -2565,17 +2606,17 @@ mod tests {
         let id = id("s1", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .failure_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                &Failure::new("E1", "boom"),
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::failure_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            &Failure::new("E1", "boom"),
+        )
+        .await
+        .unwrap();
         assert_eq!(plan.task_creates.len(), 5);
         assert!(
             plan.task_creates
@@ -2614,17 +2655,17 @@ mod tests {
         let id = id("a", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .failure_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                &Failure::new("E1", "boom"),
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::failure_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            &Failure::new("E1", "boom"),
+        )
+        .await
+        .unwrap();
         assert!(plan.state_changes.is_empty());
         assert!(plan.operations.is_empty());
     }
@@ -2640,17 +2681,17 @@ mod tests {
         let id = id("a", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .failure_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                &Failure::new("E1", "boom"),
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::failure_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            &Failure::new("E1", "boom"),
+        )
+        .await
+        .unwrap();
         assert_eq!(plan.state_changes[0].to, TaskState::Failed);
         assert!(
             plan.variable_writes
@@ -2670,17 +2711,17 @@ mod tests {
             OperationRecord::pending(propagate, OperationKind::PropagateTask),
         );
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .failure_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                &Failure::new("E1", "boom"),
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::failure_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            &Failure::new("E1", "boom"),
+        )
+        .await
+        .unwrap();
         assert!(plan.operations.is_empty());
     }
 
@@ -2698,10 +2739,18 @@ mod tests {
         let failure = Failure::new("E", "boom");
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
         assert!(
-            host.catch_fanout(&snapshot, &claim, &task_id, snapshot_task, &failure, &[])
-                .await
-                .unwrap()
-                .is_none(),
+            ApplyAction::catch_fanout(
+                &host,
+                &snapshot,
+                &claim,
+                &task_id,
+                snapshot_task,
+                &failure,
+                &[]
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "a settled execution has no handlers to dispatch"
         );
 
@@ -2718,7 +2767,8 @@ mod tests {
             .remove(&(root, crate::scheduler::shell::model::MODEL_VAR.to_string()));
         let snapshot_task = without_model.tasks.get(&task_id).unwrap();
         assert!(
-            host.catch_fanout(
+            ApplyAction::catch_fanout(
+                &host,
                 &without_model,
                 &claim,
                 &task_id,
@@ -2737,10 +2787,18 @@ mod tests {
             crate::scheduler::core::model::model_graph::NodeId::parse("ghost").unwrap();
         let snapshot_task = renamed.tasks.get(&task_id).unwrap();
         assert!(
-            host.catch_fanout(&renamed, &claim, &task_id, snapshot_task, &failure, &[])
-                .await
-                .unwrap()
-                .is_none()
+            ApplyAction::catch_fanout(
+                &host,
+                &renamed,
+                &claim,
+                &task_id,
+                snapshot_task,
+                &failure,
+                &[]
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -2765,7 +2823,8 @@ mod tests {
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
         assert!(
-            host.catch_fanout(
+            ApplyAction::catch_fanout(
+                &host,
                 &snapshot,
                 &claim,
                 &task_id,
@@ -2783,7 +2842,6 @@ mod tests {
     /// both record shapes.
     #[tokio::test]
     async fn an_operation_message_attaches_to_the_planned_record() {
-        let host = host();
         let workflow = crate::model::Workflow::new().with_step(|step| step.with_id("a"));
         let mut snapshot = from_workflow(&workflow);
         let task_id = task("a");
@@ -2791,8 +2849,7 @@ mod tests {
 
         // No state change for the execution.
         let mut plan = empty_plan(&snapshot);
-        host.attach_operation_message(&snapshot, &task_id, &mut plan, None)
-            .unwrap();
+        ApplyAction::attach_operation_message(&snapshot, &task_id, &mut plan, None).unwrap();
         assert!(plan.outbox.is_empty());
 
         // A change to a state that emits no message.
@@ -2802,8 +2859,7 @@ mod tests {
             from: TaskState::Running,
             to: TaskState::Running,
         });
-        host.attach_operation_message(&snapshot, &task_id, &mut plan, None)
-            .unwrap();
+        ApplyAction::attach_operation_message(&snapshot, &task_id, &mut plan, None).unwrap();
         assert!(plan.outbox.is_empty());
 
         // The planner's own record receives the payload.
@@ -2815,8 +2871,7 @@ mod tests {
                 payload: String::new(),
             },
         );
-        host.attach_operation_message(&snapshot, &task_id, &mut plan, None)
-            .unwrap();
+        ApplyAction::attach_operation_message(&snapshot, &task_id, &mut plan, None).unwrap();
         assert!(!plan.outbox[0].payload.is_empty());
 
         // A change of an execution the aggregate no longer holds.
@@ -2829,8 +2884,7 @@ mod tests {
             from: TaskState::Running,
             to: TaskState::Completed,
         });
-        host.attach_operation_message(&gone, &task_id, &mut plan, None)
-            .unwrap();
+        ApplyAction::attach_operation_message(&gone, &task_id, &mut plan, None).unwrap();
         assert!(plan.outbox.is_empty());
 
         // Without a record, the message creates one from the decided state.
@@ -2846,8 +2900,7 @@ mod tests {
             name: "error.code".into(),
             value: serde_json::json!("E1").to_string(),
         });
-        host.attach_operation_message(&snapshot, &task_id, &mut plan, None)
-            .unwrap();
+        ApplyAction::attach_operation_message(&snapshot, &task_id, &mut plan, None).unwrap();
         assert_eq!(plan.outbox[0].topic, "task.failed");
         assert!(plan.outbox[0].payload.contains("E1"));
     }
@@ -2855,7 +2908,6 @@ mod tests {
     /// A dynamic container whose template already ran does not fan out again.
     #[tokio::test]
     async fn a_param_container_that_already_fanned_out_answers_none() {
-        let host = host();
         let workflow = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1").with_uses(
                 crate::scheduler::shell::model::PARALLEL_PACKAGE,
@@ -2881,7 +2933,7 @@ mod tests {
             },
         );
         assert!(
-            host.param_fanout_children(&snapshot, &task_id, &model, &node)
+            ApplyAction::param_fanout_children(&snapshot, &task_id, &model, &node)
                 .unwrap()
                 .is_none()
         );
@@ -2914,7 +2966,7 @@ mod tests {
         let claim = commit(&id);
         let node = snapshot.tasks[&task_id].model_node.clone();
         assert!(
-            host.fanout_command(&snapshot, &task_id, &claim, &node, &[])
+            ApplyAction::fanout_command(&host, &snapshot, &task_id, &claim, &node, &[])
                 .await
                 .unwrap()
                 .is_none()
@@ -3013,6 +3065,7 @@ mod tests {
                     ("updated_by".to_string(), "manager".to_string()),
                 ],
                 None,
+                None,
             ),
         );
         let id = id("a", 0);
@@ -3081,6 +3134,7 @@ mod tests {
                     ("reason".to_string(), "holiday".to_string()),
                 ],
                 Some("alice"),
+                None,
             ),
         );
         let id = id("a", 0);
@@ -3168,7 +3222,7 @@ mod tests {
         );
         snapshot.variables.insert(
             (task_id.clone(), action_fact_var(0)),
-            action_fact(&ActionKind::Complete, &[], Some("bob")),
+            action_fact(&ActionKind::Complete, &[], Some("bob"), None),
         );
         let id = id("a", 0);
         let claim = commit(&id);
@@ -3217,7 +3271,7 @@ mod tests {
         snapstate(&mut snapshot, &task_id, TaskState::Completed);
         snapshot.variables.insert(
             (task_id.clone(), action_fact_var(0)),
-            action_fact(&ActionKind::Complete, &[], None),
+            action_fact(&ActionKind::Complete, &[], None, None),
         );
         let id = id("a", 0);
         let claim = commit(&id);
@@ -3304,7 +3358,7 @@ mod tests {
         );
         snapshot.variables.insert(
             (task_id.clone(), action_fact_var(0)),
-            action_fact(&ActionKind::Complete, &[], None),
+            action_fact(&ActionKind::Complete, &[], None, None),
         );
         let id = id("s1", 0);
         let claim = commit(&id);
@@ -3375,20 +3429,21 @@ mod tests {
         let id = id("s1", 0);
         let claim = commit(&id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .completion_plan(
-                &snapshot,
-                &id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                None,
-                Vec::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let plan = ApplyAction::completion_plan(
+            &host,
+            &snapshot,
+            &id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(plan.state_changes.is_empty());
         assert!(
             plan.variable_writes
@@ -3425,17 +3480,17 @@ mod tests {
         let operation_id = id("b1", 0);
         let claim = commit(&operation_id);
         let snapshot_task = snapshot.tasks.get(&task_id).unwrap();
-        let plan = host
-            .park_for_children_plan(
-                &snapshot,
-                &operation_id,
-                &task_id,
-                snapshot_task,
-                &claim,
-                &[],
-                None,
-            )
-            .unwrap();
+        let plan = ApplyAction::park_for_children_plan(
+            &host,
+            &snapshot,
+            &operation_id,
+            &task_id,
+            snapshot_task,
+            &claim,
+            &[],
+            None,
+        )
+        .unwrap();
         assert_eq!(plan.outbox.len(), 1);
         assert!(
             plan.outbox[0].payload.is_empty(),
@@ -3452,7 +3507,6 @@ mod tests {
     /// not fanned out for this generation yet.
     #[tokio::test]
     async fn a_param_container_with_only_created_children_fans_out() {
-        let host = host();
         let workflow = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1").with_uses(
                 crate::scheduler::shell::model::PARALLEL_PACKAGE,
@@ -3490,8 +3544,7 @@ mod tests {
                 revision: 0,
             },
         );
-        let children = host
-            .param_fanout_children(&snapshot, &task_id, &model, &node)
+        let children = ApplyAction::param_fanout_children(&snapshot, &task_id, &model, &node)
             .unwrap()
             .expect("a container with only created items fans out");
         assert_eq!(children.len(), 2);
@@ -3505,7 +3558,6 @@ mod tests {
     async fn a_container_plan_announces_no_package_less_source_message() {
         use crate::scheduler::core::plan::container::ContainerFanoutCommand;
 
-        let host = host();
         let workflow = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1")
                 .with_uses("pkg.test", crate::Vars::new())
@@ -3537,7 +3589,7 @@ mod tests {
             inputs: Vec::new(),
             source_park: TaskState::Running,
         };
-        let plan = host.container_fanout_plan(&snapshot, &command).unwrap();
+        let plan = ApplyAction::container_fanout_plan(&snapshot, &command).unwrap();
         assert!(
             plan.outbox
                 .iter()

@@ -65,6 +65,24 @@ pub(in crate::scheduler::shell) enum Start {
     /// the decision is handed to its effect operation, which resolves again and
     /// fails it — the legacy act's `run()` gate, one operation later.
     Unresolved,
+    /// The act declared `assign.candidates`: its pool is business data, one
+    /// IRQ round trip away, and the start waits for it. The plan pushes one
+    /// candidates request under the act; the settlement folds the answer into
+    /// the act's variables and re-enters this start (`first` = this is the
+    /// first entry, which writes the wait marker; a re-entry after a skipped
+    /// request asks again).
+    Waiting {
+        params: serde_json::Value,
+        uses: String,
+        first: bool,
+    },
+    /// The act's `assign.candidates` expression resolved in the kernel —
+    /// every atom was local — so the pool needs no round trip: the plan folds
+    /// the computed pool into the act's variables (the same shape a settled
+    /// answer lands in) and re-enters this start.
+    Pool {
+        participants: Vec<crate::model::Participant>,
+    },
 }
 
 /// The start operation: `Ready → Running` (auto) or `Ready → Waiting` (a waiting
@@ -75,11 +93,11 @@ pub(super) struct ExecuteTask;
 #[async_trait::async_trait]
 impl ActOperation for ExecuteTask {
     /// Nothing to check before the claim: a startable execution always starts.
-    async fn precheck(&self, _host: &KernelHost, _pending: &Pending<'_>) -> Result<Precheck> {
+    async fn precheck(&self, _host: &Workers, _pending: &Pending<'_>) -> Result<Precheck> {
         Ok(Precheck::Proceed)
     }
 
-    async fn run(&self, host: &KernelHost, operation: &mut Operation<'_>) -> Result<Outcome> {
+    async fn run(&self, host: &Workers, operation: &mut Operation<'_>) -> Result<Outcome> {
         let snapshot = operation.snapshot();
         let task_id = &operation.task_id;
         let task = operation.task();
@@ -95,7 +113,7 @@ impl ActOperation for ExecuteTask {
         // The step's own guard and its run bound, decided before anything
         // resolves or runs (the legacy `Step::init`).
         let guard = if task.is_some() {
-            host.guard_verdict(snapshot, task_id).await?
+            Self::guard_verdict(host, snapshot, task_id).await?
         } else {
             Guard::Run
         };
@@ -104,12 +122,63 @@ impl ActOperation for ExecuteTask {
             Guard::Fail(failure) => return Ok(Outcome::Start(Start::Failed(failure))),
             Guard::Run => {}
         }
+        // The act's candidate pool: local atoms compute in the kernel, one
+        // evaluation ahead of anything else; business atoms need the spec's
+        // `uses` package (one IRQ round trip) and the start waits for it.
+        // Either way the fan-out (`in: "${{ candidates }}"`) and any owner
+        // expression that reads the pool resolve on the re-entered start,
+        // with the pool in the act's scope.
+        if let Some(spec) = match task {
+            Some(task) => match Assign::declared_candidates(snapshot, task_id, &task.model_node) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    return Ok(Outcome::Start(Start::Failed(Failure::new(
+                        "invalid_assignment",
+                        error.to_string(),
+                    ))));
+                }
+            },
+            None => None,
+        } && !Assign::pool_computed(snapshot, task_id)
+        {
+            // The spec's expression decides the path: naming business data
+            // defers to the `uses` package (one IRQ round trip); an all-local
+            // expression computes here, and a local one the scope cannot
+            // answer fails the act instead of inventing an empty pool.
+            if !names_business_data(&spec.params) {
+                return Ok(
+                    match host
+                        .compute_candidates_pool(
+                            snapshot,
+                            Some(&operation.snapshot),
+                            task_id,
+                            &spec.params,
+                        )
+                        .await
+                    {
+                        Ok(participants) => Outcome::Start(Start::Pool { participants }),
+                        Err(error) => Outcome::Start(Start::Failed(Failure::new(
+                            "invalid_assignment",
+                            format!(
+                                "act '{}': assign.candidates could not be computed: {error}",
+                                task_id.node.as_str()
+                            ),
+                        ))),
+                    },
+                );
+            }
+            return Ok(Outcome::Start(Start::Waiting {
+                params: serde_json::to_value(&spec.params).unwrap_or(serde_json::Value::Null),
+                uses: spec.uses,
+                first: !Assign::pool_pending(snapshot, task_id),
+            }));
+        }
         // A declared `assign.owner` is a human decision act's owner. The
         // declaration is refused on anything else before the act can wait,
-        // and its expression must resolve to a non-empty owner: an unowned
+        // and its string must resolve to a non-empty owner: an unowned
         // approval is never produced.
-        let assignment_expr = match task {
-            Some(task) => match declared_expression(snapshot, task_id, &task.model_node) {
+        let assignment_owner = match task {
+            Some(task) => match Assign::declared_owner(snapshot, task_id, &task.model_node) {
                 Ok(assignment) => assignment,
                 Err(error) => {
                     return Ok(Outcome::Start(Start::Failed(Failure::new(
@@ -120,10 +189,10 @@ impl ActOperation for ExecuteTask {
             },
             None => None,
         };
-        let assignment = match assignment_expr {
-            Some(expr) => {
+        let assignment = match assignment_owner {
+            Some(owner) => {
                 match host
-                    .resolve_assignment_owner(snapshot, Some(&operation.snapshot), task_id, &expr)
+                    .resolve_assignment_owner(snapshot, Some(&operation.snapshot), task_id, &owner)
                     .await
                 {
                     Ok(Some(owner)) => Some(owner),
@@ -167,9 +236,7 @@ impl ActOperation for ExecuteTask {
         // exists for every package step, with or without a runner attached
         // (the payload then carries the raw declared params).
         let package = match task {
-            Some(task) => host
-                .step_uses(snapshot, task_id, &task.model_node)?
-                .is_some(),
+            Some(task) => step_uses(snapshot, task_id, &task.model_node)?.is_some(),
             None => false,
         };
         let start = if !package || announced {
@@ -257,7 +324,7 @@ impl ActOperation for ExecuteTask {
 
     async fn next(
         &self,
-        host: &KernelHost,
+        host: &Workers,
         operation: &Operation<'_>,
         outcome: Outcome,
     ) -> Result<TransitionPlan> {
@@ -294,18 +361,75 @@ impl ActOperation for ExecuteTask {
             "started",
             "task.started",
         )?;
+        // The start note is once per execution: a re-entered start (an act
+        // that waited for its candidate pool) must not re-emit it — the
+        // outbox key would already exist and refuse the whole commit.
+        let started_key = format!(
+            "started:{}:{}:{}",
+            id.process_id,
+            id.task.node.as_str(),
+            id.task.generation
+        );
+        if snapshot
+            .outbox
+            .keys()
+            .any(|outbox_id| outbox_id.key == started_key)
+        {
+            plan.outbox.clear();
+        }
         match start {
             Start::Failed(failure) => {
                 let task = task
                     .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
-                return host
-                    .failure_plan(snapshot, id, &task_id, task, claim, &failure)
-                    .await;
+                return ApplyAction::failure_plan(
+                    host, snapshot, id, &task_id, task, claim, &failure,
+                )
+                .await;
             }
             Start::Skipped => {
                 let task = task
                     .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
-                return host.guard_skip_plan(snapshot, id, &task_id, task, claim);
+                return Self::guard_skip_plan(host, snapshot, id, &task_id, task, claim);
+            }
+            Start::Pool { participants } => {
+                // The kernel computed the pool locally (every atom of the
+                // expression was local): fold it into the act's variables —
+                // the same shape a settled answer lands in — and re-enter
+                // the start, which finds the pool in scope and proceeds
+                // without a round trip.
+                Assign::settle_local_pool(snapshot, &mut plan, &task_id, &participants)?;
+                return Ok(plan);
+            }
+            Start::Waiting {
+                params,
+                uses,
+                first,
+            } => {
+                // The act parks like a waiting package (it owes the pool
+                // request, not a client): without the park the ready pass
+                // would re-drive the start and mint requests forever. The
+                // wait marker is first-entry only; a re-entry after a skipped
+                // request just asks again.
+                if first {
+                    if let Some(task) = task
+                        && task.state
+                            != crate::scheduler::core::model::task_graph::TaskState::Waiting
+                    {
+                        plan.state_changes.push(StateChange {
+                            task: task_id.clone(),
+                            expected_revision: task.revision,
+                            from: task.state,
+                            to: crate::scheduler::core::model::task_graph::TaskState::Waiting,
+                        });
+                    }
+                    plan.variable_writes.push(VariableWrite {
+                        scope: task_id.clone(),
+                        name: CANDIDATES_WAIT_VAR.to_string(),
+                        value: params.to_string(),
+                    });
+                }
+                Assign::ask(snapshot, &mut plan, &task_id, params, uses)?;
+                return Ok(plan);
             }
             Start::Unresolved => {
                 let task = task
@@ -388,7 +512,7 @@ impl ActOperation for ExecuteTask {
                     && (!has_package || !msg_decision(snapshot, id.task.node.as_str())?);
                 if !created_exists
                     && announces_created
-                    && let Some(mut payload) = host.operation_message_payload(
+                    && let Some(mut payload) = operation_message_payload(
                         snapshot,
                         &task_id,
                         id.task.node.as_str(),
@@ -400,7 +524,7 @@ impl ActOperation for ExecuteTask {
                     // The payload was built before this plan writes
                     // `__assignment`; the start's resolved owner is merged in.
                     if let Some(owner) = &assignment {
-                        inject_payload_assignment(&mut payload, &Assignment::new(owner));
+                        Assign::inject_payload_assignment(&mut payload, &Assignment::new(owner));
                     }
                     // The message id is minted with the durable record, not
                     // at delivery time: a later assignment notification
@@ -448,7 +572,7 @@ impl ActOperation for ExecuteTask {
                         plan.variable_writes.push(VariableWrite {
                             scope: task_id.clone(),
                             name,
-                            value: action_fact(kind, &[], None),
+                            value: action_fact(kind, &[], None, None),
                         });
                     }
                     if !action_exists {
@@ -486,8 +610,7 @@ impl ActOperation for ExecuteTask {
                     // fires a branch whose window opened while the host was
                     // down. Only timeout owners carry the stamp — it is a
                     // kernel fact, never a variable a model reads.
-                    if !host
-                        .timeout_branches(snapshot, &starting.model_node)?
+                    if !DispatchTimeout::timeout_branches(snapshot, &starting.model_node)?
                         .is_empty()
                     {
                         plan.variable_writes.push(
@@ -516,7 +639,7 @@ impl ActOperation for ExecuteTask {
     }
 }
 
-impl KernelHost {
+impl ExecuteTask {
     /// The step's own guard and run bound, decided at the start operation — the
     /// legacy `Step::init`, which decides whether a step runs at all before any
     /// act exists.
@@ -534,7 +657,7 @@ impl KernelHost {
     ///   `Process::create_task` bound, on the kernel's own run count (a
     ///   generation per turn).
     async fn guard_verdict(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
     ) -> Result<Guard> {
@@ -557,7 +680,7 @@ impl KernelHost {
         // declares a `next` (rejected at import), so only one of the two can
         // be the guard of a looping step.
         if let Some(expr) = step.r#while.as_ref().or(step.r#if.as_ref()) {
-            match self
+            match host
                 .evaluate_branch_predicate(snapshot, task_id, expr, &[])
                 .await?
             {
@@ -576,13 +699,13 @@ impl KernelHost {
         }
         // The run bound: `generation` *is* the count of times this node ran in
         // this run, because every turn mints a fresh generation.
-        if self.max_node_run_times > 0 && task_id.generation >= self.max_node_run_times {
+        if host.max_node_run_times > 0 && task_id.generation >= host.max_node_run_times {
             return Ok(Guard::Fail(Failure::new(
                 ELOOP_ECODE,
                 format!(
                     "node '{}' ({}) in process '{}' was executed more than {} times, \
                      a loop in the workflow is likely",
-                    step.id, step.name, snapshot.process_id, self.max_node_run_times
+                    step.id, step.name, snapshot.process_id, host.max_node_run_times
                 ),
             )));
         }
@@ -596,7 +719,7 @@ impl KernelHost {
     /// is emitted, and the propagation carries the flow into the next declared
     /// step.
     fn guard_skip_plan(
-        &self,
+        host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         id: &OperationId,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -608,7 +731,7 @@ impl KernelHost {
             task: id.task.clone(),
             sequence: id.sequence + 1,
         };
-        let mut plan = self.task_operation_plan(
+        let mut plan = host.task_operation_plan(
             snapshot,
             id,
             task_id,
@@ -625,7 +748,7 @@ impl KernelHost {
             value: serde_json::json!(true).to_string(),
         });
         // The act's own Skipped message, like the cascade's operation emits.
-        if let Some(payload) = self.operation_message_payload(
+        if let Some(payload) = operation_message_payload(
             snapshot,
             task_id,
             id.task.node.as_str(),
@@ -679,8 +802,8 @@ mod tests {
         task_graph::{TaskId, TaskState},
     };
 
-    fn host() -> std::sync::Arc<KernelHost> {
-        KernelHost::in_memory().0
+    fn host() -> std::sync::Arc<Workers> {
+        Workers::in_memory().0
     }
 
     fn id(node: &str, sequence: u64) -> OperationId {
@@ -749,7 +872,7 @@ mod tests {
             .variables
             .remove(&(root, crate::scheduler::shell::model::MODEL_VAR.to_string()));
         assert!(matches!(
-            host.guard_verdict(&snapshot, &TaskId::new("a", 0).unwrap())
+            ExecuteTask::guard_verdict(&host, &snapshot, &TaskId::new("a", 0).unwrap())
                 .await
                 .unwrap(),
             Guard::Run
@@ -762,7 +885,7 @@ mod tests {
         let host = host();
         let snapshot = snapshot();
         assert!(matches!(
-            host.guard_verdict(&snapshot, &TaskId::new("ghost", 0).unwrap())
+            ExecuteTask::guard_verdict(&host, &snapshot, &TaskId::new("ghost", 0).unwrap())
                 .await
                 .unwrap(),
             Guard::Run
@@ -780,7 +903,7 @@ mod tests {
         let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
         let snapshot = spec.seed_snapshot().unwrap();
         assert!(matches!(
-            host.guard_verdict(&snapshot, &TaskId::new("t1", 0).unwrap())
+            ExecuteTask::guard_verdict(&host, &snapshot, &TaskId::new("t1", 0).unwrap())
                 .await
                 .unwrap(),
             Guard::Run
@@ -796,7 +919,7 @@ mod tests {
         let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
         let snapshot = spec.seed_snapshot().unwrap();
         assert!(matches!(
-            host.guard_verdict(&snapshot, &TaskId::new("s1", 0).unwrap())
+            ExecuteTask::guard_verdict(&host, &snapshot, &TaskId::new("s1", 0).unwrap())
                 .await
                 .unwrap(),
             Guard::Skip
@@ -811,8 +934,7 @@ mod tests {
             crate::model::Workflow::new().with_step(|step| step.with_id("s1").with_if("null"));
         let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
         let snapshot = spec.seed_snapshot().unwrap();
-        match host
-            .guard_verdict(&snapshot, &TaskId::new("s1", 0).unwrap())
+        match ExecuteTask::guard_verdict(&host, &snapshot, &TaskId::new("s1", 0).unwrap())
             .await
             .unwrap()
         {
@@ -830,7 +952,7 @@ mod tests {
         let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
         let snapshot = spec.seed_snapshot().unwrap();
         assert!(matches!(
-            host.guard_verdict(&snapshot, &TaskId::new("s1", 0).unwrap())
+            ExecuteTask::guard_verdict(&host, &snapshot, &TaskId::new("s1", 0).unwrap())
                 .await
                 .unwrap(),
             Guard::Fail(_)
@@ -841,11 +963,16 @@ mod tests {
     #[tokio::test]
     async fn a_predicate_error_fails_the_operation() {
         struct Broken;
+        impl crate::scheduler::shell::caps::Capability for Broken {
+            fn key(&self) -> &str {
+                "test.predicate"
+            }
+        }
         #[async_trait::async_trait]
-        impl crate::scheduler::shell::predicate::PredicateRunner for Broken {
+        impl crate::scheduler::shell::caps::predicate::PredicateRunner for Broken {
             async fn evaluate(
                 &self,
-                _request: crate::scheduler::shell::predicate::PredicateRequest,
+                _request: crate::scheduler::shell::caps::predicate::PredicateRequest,
             ) -> Result<PredicateValue> {
                 Err(ActError::Runtime("predicate exploded".into()))
             }
@@ -856,8 +983,7 @@ mod tests {
             crate::model::Workflow::new().with_step(|step| step.with_id("s1").with_if("true"));
         let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
         let snapshot = spec.seed_snapshot().unwrap();
-        match host
-            .guard_verdict(&snapshot, &TaskId::new("s1", 0).unwrap())
+        match ExecuteTask::guard_verdict(&host, &snapshot, &TaskId::new("s1", 0).unwrap())
             .await
             .unwrap()
         {
@@ -881,7 +1007,10 @@ mod tests {
         let snapshot = spec.seed_snapshot().unwrap();
         let limit = host.max_node_run_times;
         let task_id = TaskId::new("s1", limit).unwrap();
-        match host.guard_verdict(&snapshot, &task_id).await.unwrap() {
+        match ExecuteTask::guard_verdict(&host, &snapshot, &task_id)
+            .await
+            .unwrap()
+        {
             Guard::Fail(failure) => assert_eq!(failure.code, ELOOP_ECODE),
             _ => panic!("a generation past the bound must fail"),
         }
@@ -898,9 +1027,8 @@ mod tests {
         let id = id("a", 0);
         let claim = commit(&id);
         let task = snapshot.tasks.get(&task_id).unwrap().clone();
-        let plan = host
-            .guard_skip_plan(&snapshot, &id, &task_id, &task, &claim)
-            .unwrap();
+        let plan =
+            ExecuteTask::guard_skip_plan(&host, &snapshot, &id, &task_id, &task, &claim).unwrap();
         assert!(plan.variable_writes.iter().any(|write| {
             write.name == crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR
         }));
@@ -930,9 +1058,8 @@ mod tests {
         );
         let claim = commit(&id);
         let task = snapshot.tasks.get(&task_id).unwrap().clone();
-        let plan = host
-            .guard_skip_plan(&snapshot, &id, &task_id, &task, &claim)
-            .unwrap();
+        let plan =
+            ExecuteTask::guard_skip_plan(&host, &snapshot, &id, &task_id, &task, &claim).unwrap();
         assert!(plan.operations.is_empty());
     }
 }

@@ -170,7 +170,7 @@ fn branch_tids(seen: &Arc<Mutex<Vec<(String, String)>>>, pid: &str) -> Vec<Strin
 async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
     engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -612,7 +612,7 @@ async fn concurrent_sibling_completions_join_the_container_exactly_once_inner() 
 /// `examples/approve`'s `in: '${{ pm }}'`). Each item instantiates the
 /// container's template step once — the legacy engine's per-item block task —
 /// and the act reads its item through the scope chain
-/// (`${{ value }}`/`${{ index }}`), exactly as the legacy options carried it.
+/// (`${{ $item.value }}`/`${{ $item.index }}`), exactly as the legacy options carried it.
 /// The two packages differ only in how the items are admitted (together vs
 /// chained), which is what [`item_predecessors`] reads back.
 fn package_items_workflow(package: &str) -> Workflow {
@@ -623,8 +623,8 @@ fn package_items_workflow(package: &str) -> Workflow {
         "in": "${{ items }}",
         "steps": [Step::new().with_uses(crate::utils::test::USES_MSG, crate::Vars::new()
             .with("key", "act1")
-            .with("value", "${{ value }}")
-            .with("index", "${{ index }}")
+            .with("value", "${{ $item.value }}")
+            .with("index", "${{ $item.index }}")
         )]
     });
     let mut workflow = workflow_with(step);
@@ -741,11 +741,12 @@ async fn item_generations(engine: &Engine, pid: &str) -> Vec<u64> {
 }
 
 /// The `(index, value)` bindings the param fan-out left on the template
-/// executions' own scopes, sorted by index: the item facts the acts read.
+/// executions' own scopes, sorted by index: the item facts the acts read
+/// through the `$item` built-in (`$item.value`/`$item.index`).
 ///
-/// They live under the engine-private names the fan-out writes: the public
-/// `index`/`value` are the alias `scope_vars` answers inside the item's scope,
-/// never aggregate data (see [`crate::utils::consts::FANOUT_INDEX_VAR`]).
+/// They live under the engine-private names the fan-out writes — never
+/// aggregate data an expression reads as a variable (see
+/// [`crate::utils::consts::FANOUT_INDEX_VAR`]).
 async fn item_bindings(engine: &Engine, pid: &str) -> Vec<(String, String)> {
     let snapshot = process_snapshot(engine, pid).await;
     let mut bindings: Vec<(String, String)> = snapshot
@@ -961,8 +962,8 @@ fn package_recovery_workflow() -> Workflow {
             "uses": "acts.core.irq",
             "params": {
                 "key": "item",
-                "index": "${{ index }}",
-                "value": "${{ value }}",
+                "index": "${{ $item.index }}",
+                "value": "${{ $item.value }}",
             },
         }],
     });
@@ -1015,7 +1016,7 @@ async fn a_param_fan_out_binding_survives_a_restart_between_items_inner() {
     );
 
     // The crash leaves the first act waiting; the second item's template is
-    // still `Created`, so its start — and its `${{ index }}`/`${{ value }}`
+    // still `Created`, so its start — and its `${{ $item.index }}`/`${{ $item.value }}`
     // resolution — happens only on the recovered engine.
     let reloaded = restart(&engine, store.clone()).await;
     let seen2 = capture_act_items(&reloaded);

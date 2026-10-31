@@ -52,7 +52,7 @@ pub(crate) const MSG_MAP_VAR: &str = "__msg";
 ///
 /// `auto` names the tasks whose execution self-completes (no waiting
 /// package); every other task stays `Running` until
-/// [`KernelHost::apply_action`] applies a client action. The set is seeded
+/// [`Workers::apply_action`] applies a client action. The set is seeded
 /// into the aggregate as the per-execution `auto` variable, so recovery
 /// replays never need the declaring spec.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,10 +84,6 @@ pub(crate) const SEQUENCE_PACKAGE: &str = "acts.core.sequence";
 /// The subflow package: its acts run an effect (they start the child run) and
 /// then wait for that run's outcome before the act completes.
 pub(crate) const SUBFLOW_PACKAGE: &str = "acts.core.subflow";
-/// The join-decision request package: the act a delegated container rule
-/// (`rule: { action, params }`) creates per child settlement, which the
-/// client answers complete/fail/skip to decide the container.
-pub(crate) const DECIDE_PACKAGE: &str = "acts.core.decide";
 
 /// Materialize the inline acts of the container packages into the model's own
 /// shape, so the kernel's fan-out machinery drives them.
@@ -517,7 +513,7 @@ impl ProcessSpec {
         if !workflow.env.is_empty() {
             seed_variables.push((
                 None,
-                crate::scheduler::shell::projection::ENV_MAP_VAR.to_string(),
+                crate::scheduler::shell::caps::read::projection::ENV_MAP_VAR.to_string(),
                 serde_json::Value::from(workflow.env()).to_string(),
             ));
         }

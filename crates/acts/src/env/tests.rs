@@ -551,13 +551,23 @@ async fn shared_context<F>(workflow: &Workflow, node: &str, mutate: F) -> (FlowF
 where
     F: FnOnce(&mut crate::scheduler::ProcessSnapshot),
 {
+    shared_context_with(workflow, node, Vars::new(), mutate).await
+}
+
+/// [`shared_context`] with the run's start vars (the business `actor` included).
+async fn shared_context_with<F>(
+    workflow: &Workflow,
+    node: &str,
+    vars: Vars,
+    mutate: F,
+) -> (FlowFixture, Context)
+where
+    F: FnOnce(&mut crate::scheduler::ProcessSnapshot),
+{
     let mut fixture = FlowFixture::deploy(workflow).await;
-    let pid = fixture
-        .start_with_pid("envshared", Vars::new())
-        .await
-        .unwrap();
+    let pid = fixture.start_with_pid("envshared", vars).await.unwrap();
     let runtime = fixture.engine().runtime();
-    let mut snapshot = runtime.kernel().snapshot(&pid).await.unwrap().unwrap();
+    let mut snapshot = runtime.workers().snapshot(&pid).await.unwrap().unwrap();
     mutate(&mut snapshot);
     let task_id = snapshot
         .tasks
@@ -706,5 +716,105 @@ async fn env_step_id_and_inputs_read_previous_execution() {
         assert!(steps.contains(&json!("s1")));
         assert!(steps.contains(&json!("s2")));
     });
+    fixture.close().await;
+}
+
+// ---- the business actor: $initiator / $actor / $previous_approver ----
+
+/// `$initiator` is the business `actor` the start carried — never the ACL
+/// subject — and `$actor` falls back to it before any decision.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_initiator_reads_the_start_actor() {
+    let env = Environment::new();
+    let workflow = Workflow::new().with_id("env-initiator").with_step(|step| {
+        step.with_id("s1")
+            .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "a"))
+    });
+    let (fixture, ctx) =
+        shared_context_with(&workflow, "s1", Vars::new().with("actor", "biz-1"), |_| {}).await;
+    Context::scope(&ctx, || {
+        assert_eq!(env.eval::<String>("$initiator").unwrap(), "biz-1");
+        assert_eq!(env.eval::<String>("$actor").unwrap(), "biz-1");
+        assert_eq!(
+            env.eval::<serde_json::Value>("$previous_approver(0)")
+                .unwrap(),
+            json!(null)
+        );
+    });
+    fixture.close().await;
+}
+
+/// Without a start `actor`, the ACL subject is not substituted: the business
+/// actor is simply absent.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_initiator_without_a_start_actor_is_absent() {
+    let env = Environment::new();
+    let workflow = Workflow::new()
+        .with_id("env-initiator-absent")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "a"))
+        });
+    let (fixture, ctx) = shared_context(&workflow, "s1", |_| {}).await;
+    Context::scope(&ctx, || {
+        assert_eq!(
+            env.eval::<serde_json::Value>("$initiator").unwrap(),
+            json!(null)
+        );
+        assert_eq!(
+            env.eval::<serde_json::Value>("$actor").unwrap(),
+            json!(null)
+        );
+    });
+    fixture.close().await;
+}
+
+/// Each act decision records its business `actor`: `$actor` is the newest
+/// decision's actor and `$previous_approver(0)` the one before it.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_actor_follows_the_business_decisions() {
+    let workflow = Workflow::new()
+        .with_id("env-actor-chain")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "a"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_uses(crate::utils::test::USES_IRQ, Vars::new().with("key", "b"))
+        })
+        .with_step(|step| {
+            step.with_id("s3").with_uses(
+                crate::utils::test::USES_IRQ,
+                Vars::new()
+                    .with("key", "c")
+                    .with("initiator", "${{ $initiator }}")
+                    .with("actor", "${{ $actor }}")
+                    .with("previous", "${{ $previous_approver(0) }}"),
+            )
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new().with("actor", "starter")).await;
+
+    let s1 = fixture.wait_created("s1").await;
+    fixture
+        .complete(&s1.pid, &s1.tid, Vars::new().with("actor", "u1"))
+        .await;
+    let s2 = fixture.wait_created("s2").await;
+    fixture
+        .complete(&s2.pid, &s2.tid, Vars::new().with("actor", "u2"))
+        .await;
+
+    let s3 = fixture.wait_created("s3").await;
+    let params = s3.params().expect("the resolved params");
+    assert_eq!(
+        params.get::<String>("initiator").as_deref(),
+        Some("starter")
+    );
+    assert_eq!(params.get::<String>("actor").as_deref(), Some("u2"));
+    assert_eq!(params.get::<String>("previous").as_deref(), Some("u1"));
     fixture.close().await;
 }

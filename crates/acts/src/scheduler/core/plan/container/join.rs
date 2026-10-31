@@ -30,35 +30,6 @@ pub(crate) struct JoinOutcome {
     pub(crate) failure: Option<(String, String)>,
 }
 
-/// One counted child's vote: the state a join rule reads.
-///
-/// `Skipped` and `Removed` are *withdrawn* — a branch its own guard skipped,
-/// or an act the client removed, was never in the vote, so neither the
-/// completions nor the threshold count it (and `all` keeps completing over
-/// one, exactly as the join always did). `Completed`/`Submitted` are
-/// completions; `Failed`/`Cancelled`/`Backed` are settled non-completions
-/// that can never pass; anything else is still in flight.
-enum Vote {
-    Completion,
-    Settled,
-    Withdrawn,
-    InFlight,
-    /// The abort walk owns the container's outcome; the join decides nothing.
-    Aborted,
-}
-
-fn vote(state: TaskState) -> Vote {
-    match state {
-        TaskState::Completed | TaskState::Submitted => Vote::Completion,
-        TaskState::Failed | TaskState::Cancelled | TaskState::Backed => Vote::Settled,
-        TaskState::Skipped | TaskState::Removed => Vote::Withdrawn,
-        TaskState::Aborted => Vote::Aborted,
-        TaskState::Created | TaskState::Ready | TaskState::Running | TaskState::Waiting => {
-            Vote::InFlight
-        }
-    }
-}
-
 /// The plain container join: decide a parked container from its children —
 /// every child terminal (the original rule), or a join rule's threshold of
 /// completions.
@@ -118,189 +89,89 @@ impl ActPlan for Join {
         if children.is_empty() {
             return Ok(None);
         }
-        match command.join.as_ref() {
-            None | Some(crate::JoinRule::All) => {
-                Self::all_children_join(snapshot, command, parent, children)
+        let census: Vec<(TaskId, TaskState)> = children
+            .iter()
+            .map(|child| {
+                let state = snapshot
+                    .tasks
+                    .get(child)
+                    .ok_or_else(|| ContainerError::TaskNotFound(child.clone()))?
+                    .state;
+                Ok((child.clone(), state))
+            })
+            .collect::<Result<_, _>>()?;
+        let decision = super::join_rules::decide(command.join.as_ref(), &census);
+        let sequence = next_sequence(snapshot, command)?;
+        match decision {
+            super::join_rules::Decision::Wait => Ok(None),
+            super::join_rules::Decision::Complete { withdraw } => {
+                let cancels = withdraw
+                    .iter()
+                    .map(|child| OperationIntent {
+                        id: OperationId {
+                            process_id: command.process_id.clone(),
+                            task: child.clone(),
+                            sequence: snapshot
+                                .next_operation_sequence(child.node.as_str(), child.generation),
+                        },
+                        kind: OperationKind::SkipTask,
+                        ready_at_ms: None,
+                    })
+                    .collect();
+                Ok(Some(JoinOutcome {
+                    change: StateChange {
+                        task: command.parent.clone(),
+                        expected_revision: parent.revision,
+                        from: TaskState::Running,
+                        to: TaskState::Completed,
+                    },
+                    operation: OperationIntent {
+                        id: OperationId {
+                            process_id: command.process_id.clone(),
+                            task: command.parent.clone(),
+                            sequence,
+                        },
+                        kind: OperationKind::PropagateTask,
+                        ready_at_ms: None,
+                    },
+                    cancels,
+                    failure: None,
+                }))
             }
-            Some(rule @ (crate::JoinRule::Any | crate::JoinRule::Partial(_))) => {
-                Self::threshold_join(snapshot, command, parent, children, rule)
-            }
-            // The delegated rule is the shell's decision: the verdicts its
-            // requests carry complete or fail the container, and the join
-            // counting completions would only race them.
-            Some(crate::JoinRule::Action { .. }) => Ok(None),
+            super::join_rules::Decision::Fail { code, message } => Ok(Some(JoinOutcome {
+                change: StateChange {
+                    task: command.parent.clone(),
+                    expected_revision: parent.revision,
+                    from: TaskState::Running,
+                    to: TaskState::Failed,
+                },
+                operation: OperationIntent {
+                    id: OperationId {
+                        process_id: command.process_id.clone(),
+                        task: command.parent.clone(),
+                        sequence,
+                    },
+                    kind: OperationKind::PropagateTask,
+                    ready_at_ms: None,
+                },
+                cancels: Vec::new(),
+                failure: Some((code, message)),
+            })),
         }
     }
 }
 
-impl Join {
-    /// The original shape: every child terminal, none aborted, then the
-    /// container completes. A child failure never decides here — the failed
-    /// child's own error walk decides the chain.
-    fn all_children_join(
-        snapshot: &ProcessSnapshot,
-        command: &ContainerJoinCommand,
-        parent: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
-        children: &[TaskId],
-    ) -> Result<Option<JoinOutcome>, ContainerError> {
-        for child in children {
-            let state = snapshot
-                .tasks
-                .get(child)
-                .ok_or_else(|| ContainerError::TaskNotFound(child.clone()))?
-                .state;
-            if !state.is_terminal() {
-                return Ok(None);
-            }
-            if state == TaskState::Aborted {
-                // The abort walk owns this container's outcome; completing it
-                // here would double-decide (legacy `auto_complete` refuses).
-                return Ok(None);
-            }
-        }
-        let sequence = Self::next_sequence(snapshot, command)?;
-        Ok(Some(JoinOutcome {
-            change: StateChange {
-                task: command.parent.clone(),
-                expected_revision: parent.revision,
-                from: TaskState::Running,
-                to: TaskState::Completed,
-            },
-            operation: OperationIntent {
-                id: OperationId {
-                    process_id: command.process_id.clone(),
-                    task: command.parent.clone(),
-                    sequence,
-                },
-                kind: OperationKind::PropagateTask,
-                ready_at_ms: None,
-            },
-            cancels: Vec::new(),
-            failure: None,
-        }))
-    }
-
-    /// A threshold rule: complete on `K` completions, fail once `K` can no
-    /// longer be reached, wait otherwise.
-    ///
-    /// A settled non-completion (`Failed`, `Cancelled`, `Backed`) is a vote
-    /// that can never pass — unlike `all`, the threshold rules do not fail
-    /// the chain on it (the error walk is gated for them); it only shrinks
-    /// what the remaining children can still reach.
-    fn threshold_join(
-        snapshot: &ProcessSnapshot,
-        command: &ContainerJoinCommand,
-        parent: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
-        children: &[TaskId],
-        rule: &crate::JoinRule,
-    ) -> Result<Option<JoinOutcome>, ContainerError> {
-        let mut completions = 0usize;
-        let mut counted = 0usize;
-        let mut inflight: Vec<TaskId> = Vec::new();
-        for child in children {
-            let state = snapshot
-                .tasks
-                .get(child)
-                .ok_or_else(|| ContainerError::TaskNotFound(child.clone()))?
-                .state;
-            match vote(state) {
-                Vote::Aborted => return Ok(None),
-                Vote::Completion => {
-                    completions += 1;
-                    counted += 1;
-                }
-                Vote::Settled => counted += 1,
-                Vote::Withdrawn => {}
-                Vote::InFlight => {
-                    counted += 1;
-                    inflight.push(child.clone());
-                }
-            }
-        }
-        let threshold = rule.threshold(counted);
-        let unreachable = completions + inflight.len() < threshold;
-        if completions < threshold && !unreachable {
-            return Ok(None);
-        }
-        let sequence = Self::next_sequence(snapshot, command)?;
-        let change = StateChange {
-            task: command.parent.clone(),
-            expected_revision: parent.revision,
-            from: TaskState::Running,
-            to: if unreachable {
-                TaskState::Failed
-            } else {
-                TaskState::Completed
-            },
-        };
-        let failure = unreachable.then(|| {
-            (
-                "join_failed".to_string(),
-                format!(
-                    "join '{rule}' unreachable: {completions} of {threshold} completions, {} of {counted} counted children settled",
-                    counted - inflight.len()
-                ),
-            )
-        });
-        // Only a completion cancels the stragglers itself: a failed
-        // container's propagation is a dead-source cascade, which already
-        // skips its live children. A `Created` child never reaches the
-        // cancel list: `SkipTask` settles admitted executions only (a
-        // container's children are admitted by its own fan-out, so the case
-        // cannot arise; the filter keeps the plan valid if it ever does).
-        let cancels = if unreachable {
-            Vec::new()
-        } else {
-            inflight
-                .iter()
-                .filter(|child| {
-                    snapshot.tasks.get(*child).is_some_and(|task| {
-                        matches!(
-                            task.state,
-                            TaskState::Ready | TaskState::Running | TaskState::Waiting
-                        )
-                    })
-                })
-                .map(|child| OperationIntent {
-                    id: OperationId {
-                        process_id: command.process_id.clone(),
-                        task: child.clone(),
-                        sequence: snapshot
-                            .next_operation_sequence(child.node.as_str(), child.generation),
-                    },
-                    kind: OperationKind::SkipTask,
-                    ready_at_ms: None,
-                })
-                .collect()
-        };
-        Ok(Some(JoinOutcome {
-            change,
-            operation: OperationIntent {
-                id: OperationId {
-                    process_id: command.process_id.clone(),
-                    task: command.parent.clone(),
-                    sequence,
-                },
-                kind: OperationKind::PropagateTask,
-                ready_at_ms: None,
-            },
-            cancels,
-            failure,
-        }))
-    }
-
-    fn next_sequence(
-        snapshot: &ProcessSnapshot,
-        command: &ContainerJoinCommand,
-    ) -> Result<u64, ContainerError> {
-        snapshot
-            .operations
-            .keys()
-            .filter(|id| id.process_id == command.process_id && id.task == command.parent)
-            .map(|id| id.sequence)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or(ContainerError::SequenceOverflow)
-    }
+fn next_sequence(
+    snapshot: &ProcessSnapshot,
+    command: &ContainerJoinCommand,
+) -> Result<u64, ContainerError> {
+    snapshot
+        .operations
+        .keys()
+        .filter(|id| id.process_id == command.process_id && id.task == command.parent)
+        .map(|id| id.sequence)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(ContainerError::SequenceOverflow)
 }

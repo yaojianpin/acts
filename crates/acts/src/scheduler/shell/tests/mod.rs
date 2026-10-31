@@ -5,12 +5,13 @@ mod tree;
 
 use super::*;
 use crate::{
-    capability::{DeliveryOutcome, ProcessEvent},
     scheduler::core::{
         commit::command::ActionKind,
         model::task_graph::TaskState,
         outbox::records::{OutboxRecord, OutboxState},
     },
+    scheduler::shell::caps::delivery::DeliveryOutcome,
+    scheduler::shell::caps::lifecycle::ProcessEvent,
     store::MemoryStore,
 };
 use std::time::Duration;
@@ -36,7 +37,13 @@ struct CountingTransport {
     delivered: Arc<parking_lot::Mutex<usize>>,
 }
 
-impl crate::capability::OutboxTransport for CountingTransport {
+impl crate::scheduler::shell::caps::Capability for CountingTransport {
+    fn key(&self) -> &str {
+        "test.delivery"
+    }
+}
+
+impl crate::scheduler::shell::caps::delivery::OutboxTransport for CountingTransport {
     fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
         *self.delivered.lock() += 1;
         DeliveryOutcome::Delivered {
@@ -50,7 +57,7 @@ impl crate::capability::OutboxTransport for CountingTransport {
 /// The driver's own tick runs the same pass, so a manual call can lose the
 /// race to it and report the conflict instead of settling. A pass that keeps
 /// failing is still a failure — this only absorbs the interleaving.
-async fn settle_outbox(host: &KernelHost) {
+async fn settle_outbox(host: &Workers) {
     let mut last_error = None;
     for _ in 0..50 {
         match host.dispatch_outbox().await {
@@ -61,7 +68,7 @@ async fn settle_outbox(host: &KernelHost) {
     panic!("the settle pass never took: {last_error:?}");
 }
 
-async fn assert_all_terminal(host: &KernelHost, pid: &str) {
+async fn assert_all_terminal(host: &Workers, pid: &str) {
     let snapshot = host.snapshot(pid).await.unwrap().expect("aggregate exists");
     assert!(!snapshot.tasks.is_empty());
     for (id, task) in &snapshot.tasks {
@@ -102,11 +109,11 @@ fn assert_no_folded_operations(
 
 #[tokio::test]
 async fn linear_process_runs_to_completion_and_delivers_outbox() {
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     // The transport is attached before the run: a hop delivers its own records
     // inside its commit, so nothing waits for a pass.
     let counter = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(CountingTransport {
+    host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: counter.clone(),
     }));
     let spec = ProcessSpec::linear("p1", "root", &["a", "b"]);
@@ -143,7 +150,7 @@ async fn linear_process_runs_to_completion_and_delivers_outbox() {
 
 #[tokio::test]
 async fn wake_loss_is_recovered_by_the_ready_queue() {
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::linear("p2", "root", &["only"]);
     // Create without waking: everything now rides on the durable ready
     // record, exactly like after a crash that lost the in-memory queue.
@@ -435,7 +442,7 @@ impl KvStore for GuardCountingKv {
 
 #[tokio::test]
 async fn a_full_wake_queue_does_not_delay_the_ready_record() {
-    let (host, _wake_rx) = KernelHost::in_memory();
+    let (host, _wake_rx) = Workers::in_memory();
     let dummy = OperationId {
         process_id: "queued-placeholder".into(),
         task: crate::scheduler::core::model::task_graph::TaskId::new("root", 0).unwrap(),
@@ -459,7 +466,7 @@ async fn a_full_wake_queue_does_not_delay_the_ready_record() {
 
 #[tokio::test]
 async fn recovery_does_not_wake_a_parked_run() {
-    let (host, _wake_rx) = KernelHost::in_memory_with_cap(0);
+    let (host, _wake_rx) = Workers::in_memory_with_cap(0);
     let spec = ProcessSpec::linear("p-parked", "root", &["only"]);
     host.start_process(&spec).await.unwrap();
     let report = host.recover(SystemClock.now_ms()).await.unwrap();
@@ -534,7 +541,7 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
     let stored = ConflictKv::new(PID);
     stored.arm(root.clone());
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
     host.start_process(&spec).await.unwrap();
 
@@ -645,7 +652,7 @@ async fn a_folded_completion_loses_its_commit_without_splitting_the_propagation(
     };
     let stored = ConflictKv::new(PID);
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
     host.start_process(&spec).await.unwrap();
     // The start commits normally and seeds the completion; the completion is
@@ -738,9 +745,9 @@ async fn a_package_effect_that_loses_its_commit_is_marked_unknown() {
     const PID: &str = "p-effect-conflict";
     let stored = ConflictKv::new(PID);
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let engine = crate::Engine::builder().start().await.unwrap();
-    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
         engine.runtime().clone(),
     )));
     let package = engine.runtime().package().clone();
@@ -839,20 +846,26 @@ async fn a_package_effect_that_loses_its_commit_is_marked_unknown() {
 struct ObservedRunner {
     calls: Arc<AtomicUsize>,
     keys: Arc<parking_lot::Mutex<Vec<String>>>,
-    observation: Arc<parking_lot::Mutex<effects::EffectObservation>>,
+    observation: Arc<parking_lot::Mutex<caps::effect::EffectObservation>>,
     /// Whether the runner publishes the applied observation. `false` models
     /// an executor that keeps none, which must leave the operation manual.
     record: bool,
     idempotent: bool,
 }
 
+impl crate::scheduler::shell::caps::Capability for ObservedRunner {
+    fn key(&self) -> &str {
+        "test.effect"
+    }
+}
+
 #[async_trait::async_trait]
-impl effects::EffectRunner for ObservedRunner {
+impl caps::effect::EffectRunner for ObservedRunner {
     async fn resolve(
         &self,
-        _request: &effects::EffectRequest,
-    ) -> crate::Result<effects::ResolvedEffect> {
-        Ok(effects::ResolvedEffect {
+        _request: &caps::effect::EffectRequest,
+    ) -> crate::Result<caps::effect::ResolvedEffect> {
+        Ok(caps::effect::ResolvedEffect {
             params: serde_json::json!({ "n": 2 }),
             options: serde_json::Value::Null,
         })
@@ -860,27 +873,27 @@ impl effects::EffectRunner for ObservedRunner {
 
     async fn run(
         &self,
-        _request: effects::EffectRequest,
+        _request: caps::effect::EffectRequest,
         key: crate::scheduler::core::model::effect::EffectKey,
-    ) -> crate::Result<effects::EffectOutcome> {
+    ) -> crate::Result<caps::effect::EffectOutcome> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.keys.lock().push(key.wire());
         let outcome =
-            effects::EffectOutcome::from_outputs(crate::Vars::new().with("observed", "once"));
+            caps::effect::EffectOutcome::from_outputs(crate::Vars::new().with("observed", "once"));
         if self.record {
-            *self.observation.lock() = effects::EffectObservation::Applied(outcome.clone());
+            *self.observation.lock() = caps::effect::EffectObservation::Applied(outcome.clone());
         }
         Ok(outcome)
     }
 
-    fn idempotent(&self, _request: &effects::EffectRequest) -> bool {
+    fn idempotent(&self, _request: &caps::effect::EffectRequest) -> bool {
         self.idempotent
     }
 
     async fn observe(
         &self,
         _key: &crate::scheduler::core::model::effect::EffectKey,
-    ) -> crate::Result<effects::EffectObservation> {
+    ) -> crate::Result<caps::effect::EffectObservation> {
         Ok(self.observation.lock().clone())
     }
 }
@@ -892,16 +905,22 @@ struct DedupingRunner {
     attempts: Arc<AtomicUsize>,
     side_effects: Arc<AtomicUsize>,
     keys: Arc<parking_lot::Mutex<Vec<String>>>,
-    seen: Arc<parking_lot::Mutex<std::collections::HashMap<String, effects::EffectOutcome>>>,
+    seen: Arc<parking_lot::Mutex<std::collections::HashMap<String, caps::effect::EffectOutcome>>>,
+}
+
+impl crate::scheduler::shell::caps::Capability for DedupingRunner {
+    fn key(&self) -> &str {
+        "test.effect"
+    }
 }
 
 #[async_trait::async_trait]
-impl effects::EffectRunner for DedupingRunner {
+impl caps::effect::EffectRunner for DedupingRunner {
     async fn resolve(
         &self,
-        _request: &effects::EffectRequest,
-    ) -> crate::Result<effects::ResolvedEffect> {
-        Ok(effects::ResolvedEffect {
+        _request: &caps::effect::EffectRequest,
+    ) -> crate::Result<caps::effect::ResolvedEffect> {
+        Ok(caps::effect::ResolvedEffect {
             params: serde_json::json!({ "n": 2 }),
             options: serde_json::Value::Null,
         })
@@ -909,9 +928,9 @@ impl effects::EffectRunner for DedupingRunner {
 
     async fn run(
         &self,
-        _request: effects::EffectRequest,
+        _request: caps::effect::EffectRequest,
         key: crate::scheduler::core::model::effect::EffectKey,
-    ) -> crate::Result<effects::EffectOutcome> {
+    ) -> crate::Result<caps::effect::EffectOutcome> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
         let wire = key.wire();
         self.keys.lock().push(wire.clone());
@@ -920,22 +939,22 @@ impl effects::EffectRunner for DedupingRunner {
         }
         self.side_effects.fetch_add(1, Ordering::SeqCst);
         let outcome =
-            effects::EffectOutcome::from_outputs(crate::Vars::new().with("observed", "once"));
+            caps::effect::EffectOutcome::from_outputs(crate::Vars::new().with("observed", "once"));
         self.seen.lock().insert(wire, outcome.clone());
         Ok(outcome)
     }
 
-    fn idempotent(&self, _request: &effects::EffectRequest) -> bool {
+    fn idempotent(&self, _request: &caps::effect::EffectRequest) -> bool {
         true
     }
 
     async fn observe(
         &self,
         _key: &crate::scheduler::core::model::effect::EffectKey,
-    ) -> crate::Result<effects::EffectObservation> {
+    ) -> crate::Result<caps::effect::EffectObservation> {
         // The deliberately lost observation: the external duplicate would
         // have been real unless the executor deduplicates the key.
-        Ok(effects::EffectObservation::NotApplied)
+        Ok(caps::effect::EffectObservation::NotApplied)
     }
 }
 
@@ -943,9 +962,9 @@ impl effects::EffectRunner for DedupingRunner {
 /// uses: one `uses` step whose `ApplyAction` crosses the effect boundary.
 fn effect_kernel(
     kv: Arc<dyn KvStore>,
-    runner: Arc<dyn effects::EffectRunner>,
-) -> (Arc<KernelHost>, tokio::sync::mpsc::Receiver<OperationId>) {
-    let (host, wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    runner: Arc<dyn caps::effect::EffectRunner>,
+) -> (Arc<Workers>, tokio::sync::mpsc::Receiver<OperationId>) {
+    let (host, wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     host.attach_effect_runner(runner);
     (host, wake_rx)
 }
@@ -953,9 +972,9 @@ fn effect_kernel(
 async fn effect_host(
     kv: Arc<dyn KvStore>,
     pid: &str,
-    runner: Arc<dyn effects::EffectRunner>,
+    runner: Arc<dyn caps::effect::EffectRunner>,
 ) -> (
-    Arc<KernelHost>,
+    Arc<Workers>,
     tokio::sync::mpsc::Receiver<OperationId>,
     crate::Engine,
 ) {
@@ -980,7 +999,7 @@ async fn effect_host(
 
 /// Drive the chain until the step's `ApplyAction` operation is the next wake.
 async fn drive_to_step_effect(
-    host: &KernelHost,
+    host: &Workers,
     wake_rx: &mut tokio::sync::mpsc::Receiver<OperationId>,
     pid: &str,
 ) -> OperationId {
@@ -1002,7 +1021,7 @@ async fn drive_to_step_effect(
 /// Run `apply` to its plan commit and lose that commit: the effect has run,
 /// the aggregate did not move.
 async fn lose_the_effect_commit(
-    host: &KernelHost,
+    host: &Workers,
     stored: &Arc<ConflictKv>,
     apply: &OperationId,
     pid: &str,
@@ -1063,7 +1082,9 @@ async fn an_observed_effect_converges_without_running_it_again() {
     let stored = ConflictKv::new(PID);
     let calls = Arc::new(AtomicUsize::new(0));
     let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let observation = Arc::new(parking_lot::Mutex::new(
+        caps::effect::EffectObservation::Unknown,
+    ));
     let runner = Arc::new(ObservedRunner {
         calls: calls.clone(),
         keys: keys.clone(),
@@ -1184,7 +1205,9 @@ async fn a_non_idempotent_effect_is_manually_reconciled_across_restarts() {
     let stored = ConflictKv::new(PID);
     let calls = Arc::new(AtomicUsize::new(0));
     let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let observation = Arc::new(parking_lot::Mutex::new(
+        caps::effect::EffectObservation::Unknown,
+    ));
     let runner = Arc::new(ObservedRunner {
         calls: calls.clone(),
         keys: keys.clone(),
@@ -1277,7 +1300,9 @@ async fn a_non_idempotent_effect_can_be_resolved_not_applied() {
     let stored = ConflictKv::new(PID);
     let calls = Arc::new(AtomicUsize::new(0));
     let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let observation = Arc::new(parking_lot::Mutex::new(
+        caps::effect::EffectObservation::Unknown,
+    ));
     let runner = Arc::new(ObservedRunner {
         calls: calls.clone(),
         keys: keys.clone(),
@@ -1317,7 +1342,9 @@ async fn a_quarantined_run_frees_its_slot_and_admits_the_parked_run() {
     let stored = ConflictKv::new(PID);
     let calls = Arc::new(AtomicUsize::new(0));
     let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let observation = Arc::new(parking_lot::Mutex::new(
+        caps::effect::EffectObservation::Unknown,
+    ));
     let runner = Arc::new(ObservedRunner {
         calls: calls.clone(),
         keys,
@@ -1380,7 +1407,9 @@ async fn manual_reconciliation_advances_while_the_execution_quota_is_full() {
     let stored = ConflictKv::new(PID);
     let calls = Arc::new(AtomicUsize::new(0));
     let keys = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let observation = Arc::new(parking_lot::Mutex::new(effects::EffectObservation::Unknown));
+    let observation = Arc::new(parking_lot::Mutex::new(
+        caps::effect::EffectObservation::Unknown,
+    ));
     let runner = Arc::new(ObservedRunner {
         calls: calls.clone(),
         keys,
@@ -1470,7 +1499,7 @@ async fn manual_reconciliation_advances_while_the_execution_quota_is_full() {
 async fn a_terminal_cancel_frees_the_slot_and_admits_the_parked_run() {
     const PID: &str = "p-cancel-slot";
     const PARKED: &str = "p-cancel-parked";
-    let (host, mut wake_rx) = KernelHost::in_memory_with_cap(1);
+    let (host, mut wake_rx) = Workers::in_memory_with_cap(1);
     let workflow = crate::model::Workflow::new()
         .with_id("wf-cancel-slot")
         .with_step(|step| step.with_id("s1"));
@@ -1511,7 +1540,7 @@ async fn concurrent_client_actions_decide_exactly_once_under_the_lane() {
     const PID: &str = "p-lane-clients";
     let stored = GuardCountingKv::new(PID);
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, usize::MAX, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, usize::MAX, MAX_NODE_RUN_TIMES, 800);
     let workflow = crate::model::Workflow::new()
         .with_id("wf-lane-clients")
         .with_step(|step| step.with_id("s1"));
@@ -1611,13 +1640,19 @@ async fn effects_of_different_runs_overlap_outside_the_lanes() {
         entered: Arc<AtomicUsize>,
         barrier: Arc<tokio::sync::Barrier>,
     }
+    impl crate::scheduler::shell::caps::Capability for BarrierRunner {
+        fn key(&self) -> &str {
+            "test.effect"
+        }
+    }
+
     #[async_trait::async_trait]
-    impl effects::EffectRunner for BarrierRunner {
+    impl caps::effect::EffectRunner for BarrierRunner {
         async fn resolve(
             &self,
-            _request: &effects::EffectRequest,
-        ) -> crate::Result<effects::ResolvedEffect> {
-            Ok(effects::ResolvedEffect {
+            _request: &caps::effect::EffectRequest,
+        ) -> crate::Result<caps::effect::ResolvedEffect> {
+            Ok(caps::effect::ResolvedEffect {
                 params: serde_json::json!({ "n": 2 }),
                 options: serde_json::Value::Null,
             })
@@ -1625,12 +1660,12 @@ async fn effects_of_different_runs_overlap_outside_the_lanes() {
 
         async fn run(
             &self,
-            _request: effects::EffectRequest,
+            _request: caps::effect::EffectRequest,
             _key: crate::scheduler::core::model::effect::EffectKey,
-        ) -> Result<effects::EffectOutcome> {
+        ) -> Result<caps::effect::EffectOutcome> {
             self.entered.fetch_add(1, Ordering::SeqCst);
             self.barrier.wait().await;
-            Ok(effects::EffectOutcome::from_outputs(crate::Vars::new()))
+            Ok(caps::effect::EffectOutcome::from_outputs(crate::Vars::new()))
         }
     }
     let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
@@ -1640,7 +1675,7 @@ async fn effects_of_different_runs_overlap_outside_the_lanes() {
     });
     // Two slots: both runs are in flight at once — the parallelism this test
     // measures (the shared effect harness caps at one run).
-    let (host, mut wake_rx) = KernelHost::new(kv, 2, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 2, MAX_NODE_RUN_TIMES, 800);
     host.attach_effect_runner(runner.clone());
     let engine = crate::Engine::builder().start().await.unwrap();
     let package = engine.runtime().package().clone();
@@ -1706,13 +1741,19 @@ async fn an_effect_releases_the_lane_for_a_concurrent_decision() {
         open: parking_lot::Mutex<bool>,
         released: tokio::sync::Notify,
     }
+    impl crate::scheduler::shell::caps::Capability for GateRunner {
+        fn key(&self) -> &str {
+            "test.effect"
+        }
+    }
+
     #[async_trait::async_trait]
-    impl effects::EffectRunner for GateRunner {
+    impl caps::effect::EffectRunner for GateRunner {
         async fn resolve(
             &self,
-            _request: &effects::EffectRequest,
-        ) -> crate::Result<effects::ResolvedEffect> {
-            Ok(effects::ResolvedEffect {
+            _request: &caps::effect::EffectRequest,
+        ) -> crate::Result<caps::effect::ResolvedEffect> {
+            Ok(caps::effect::ResolvedEffect {
                 params: serde_json::json!({ "n": 2 }),
                 options: serde_json::Value::Null,
             })
@@ -1720,9 +1761,9 @@ async fn an_effect_releases_the_lane_for_a_concurrent_decision() {
 
         async fn run(
             &self,
-            _request: effects::EffectRequest,
+            _request: caps::effect::EffectRequest,
             _key: crate::scheduler::core::model::effect::EffectKey,
-        ) -> Result<effects::EffectOutcome> {
+        ) -> Result<caps::effect::EffectOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.entered.notify_waiters();
             while !*self.open.lock() {
@@ -1732,7 +1773,7 @@ async fn an_effect_releases_the_lane_for_a_concurrent_decision() {
                 )
                 .await;
             }
-            Ok(effects::EffectOutcome::from_outputs(crate::Vars::new()))
+            Ok(caps::effect::EffectOutcome::from_outputs(crate::Vars::new()))
         }
     }
     let stored = GuardCountingKv::new(PID);
@@ -1859,7 +1900,7 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
         .with_id("wf-cap")
         .with_step(|step| step.with_id("s1"));
     let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     // The read model is what a parked run is *visible* through, so this test
     // carries the projector the serving host attaches.
     let store = Arc::new(crate::store::Store::new(kv));
@@ -1873,11 +1914,16 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
     // Which runs the driver started, in order: the FIFO the cap must respect.
     let started = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let recorded = started.clone();
-    host.attach_lifecycle_sink(Arc::new(move |message, event| {
-        if event == ProcessEvent::Started {
-            recorded.lock().push(message.pid.clone());
-        }
-    }));
+    host.attach_lifecycle_sink(Arc::new(
+        crate::scheduler::shell::caps::lifecycle::FnLifecycleSink::new(
+            "test.lifecycle",
+            move |message, event| {
+                if event == ProcessEvent::Started {
+                    recorded.lock().push(message.pid.clone());
+                }
+            },
+        ),
+    ));
 
     for pid in ["cap-a", "cap-b", "cap-c"] {
         // Strictly increasing `__created` stamps: the parked order under test
@@ -1931,7 +1977,7 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
 /// still pending, nothing reached the outbox, every execution is `Created`),
 /// and the read model's parked row — the process state `None` and a `Pending`
 /// root task, what the legacy engine wrote for a process it could not start.
-async fn assert_parked(host: &KernelHost, cache: &Arc<crate::store::Store>, pid: &str) {
+async fn assert_parked(host: &Workers, cache: &Arc<crate::store::Store>, pid: &str) {
     let snapshot = host.snapshot(pid).await.unwrap().expect("aggregate exists");
     assert_eq!(
         snapshot.operations.len(),
@@ -1987,7 +2033,7 @@ async fn assert_parked(host: &KernelHost, cache: &Arc<crate::store::Store>, pid:
 /// the shape of the legacy boot-resume overflow too.
 #[tokio::test]
 async fn a_run_already_in_flight_at_boot_waits_for_a_slot() {
-    let (host, mut wake_rx) = KernelHost::in_memory_with_cap(1);
+    let (host, mut wake_rx) = Workers::in_memory_with_cap(1);
     let mut seeds = Vec::new();
     for pid in ["boot-a", "boot-b"] {
         // Seeded directly, as a crash leaves them: no driver ever admitted
@@ -2054,7 +2100,7 @@ async fn kernel_path_runs_a_flat_chain_to_completion() {
         "s2".into(),
     ];
 
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("k-parity", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
@@ -2108,7 +2154,7 @@ async fn kernel_engine_serves_a_run_to_completion() {
     // The run's durable record is the aggregate, and the legacy rows are its
     // projection (the read model this driver serves).
     let runtime = engine.runtime();
-    let host = runtime.kernel();
+    let host = runtime.workers();
     assert!(host.process_completed(&pid).await.unwrap());
     let snapshot = host.snapshot(&pid).await.unwrap().expect("aggregate");
     let mut tasks: Vec<String> = snapshot
@@ -2164,7 +2210,7 @@ async fn kernel_engine_serves_client_actions_on_an_irq_workflow() {
         workflow
     };
     let runtime = engine.runtime();
-    let host = runtime.kernel();
+    let host = runtime.workers();
 
     // Subscribers attach BEFORE the start: the IRQ act's Created message
     // fires the moment the act runs, and a late subscriber misses it.
@@ -2267,7 +2313,7 @@ async fn kernel_engine_scopes_effects_to_the_run_workdir() {
         .await
         .expect("engine never finished");
 
-    let host = engine.runtime().kernel().clone();
+    let host = engine.runtime().workers().clone();
     let snapshot = host.snapshot(&pid).await.unwrap().unwrap();
     let s1 = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     let dir = snapshot
@@ -2376,7 +2422,7 @@ async fn kernel_engine_projects_the_legacy_read_model() {
     // the sweeper runs.
     let dir = root.join(&pid);
     assert!(dir.is_dir(), "the run's directory must exist");
-    let host = runtime.kernel().clone();
+    let host = runtime.workers().clone();
     host.dispatch_outbox().await.unwrap();
     // The message rows go through the write-behind queue: drain this
     // process's shard before reading the model, or a concurrent test's load
@@ -2482,7 +2528,7 @@ async fn kernel_engine_refuses_a_pid_until_the_run_is_reclaimed_and_then_reuses_
 
     // The run is still occupied even while only its rows are left: a start
     // races the cleanup, which deletes the aggregate before the rows.
-    let host = runtime.kernel().clone();
+    let host = runtime.workers().clone();
     host.dispatch_outbox().await.unwrap();
     runtime.flush_writer().await.unwrap();
     assert!(
@@ -2528,7 +2574,7 @@ async fn wait_until_settled(runtime: &Arc<crate::scheduler::Runtime>, pid: &str)
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         if runtime
-            .kernel()
+            .workers()
             .process_completed(pid)
             .await
             .unwrap_or(false)
@@ -2547,7 +2593,7 @@ async fn wait_until_settled(runtime: &Arc<crate::scheduler::Runtime>, pid: &str)
 /// every outbox record confirmed `Delivered`, every operation retired. Task
 /// settlement alone is not enough under A1b — the confirmation commit follows
 /// the plan commit — so cleanup tests wait on the A11 predicate.
-async fn wait_until_reclaimable(host: &KernelHost, pid: &str) {
+async fn wait_until_reclaimable(host: &Workers, pid: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let _ = host.dispatch_outbox().await;
@@ -2576,7 +2622,7 @@ async fn wait_until_reclaimable(host: &KernelHost, pid: &str) {
 /// timer retries; a test does the same with a short bound.
 async fn sweep_until_gone(runtime: &Arc<crate::scheduler::Runtime>, pid: &str) {
     for _ in 0..200 {
-        runtime.kernel().refresh_projection(pid).await;
+        runtime.workers().refresh_projection(pid).await;
         runtime.sweep_removable().await.unwrap();
         if runtime
             .store()
@@ -2590,7 +2636,7 @@ async fn sweep_until_gone(runtime: &Arc<crate::scheduler::Runtime>, pid: &str) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let snapshot = runtime.kernel().snapshot(pid).await.unwrap();
+    let snapshot = runtime.workers().snapshot(pid).await.unwrap();
     panic!("run {pid} was not reclaimed: {snapshot:?}");
 }
 
@@ -2641,7 +2687,7 @@ async fn kernel_engine_finishes_an_interrupted_terminal_cleanup() {
     let options = crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid.clone());
     runtime.start(&workflow, options.clone()).await.unwrap();
     wait_until_settled(&runtime, &pid).await;
-    let host = runtime.kernel().clone();
+    let host = runtime.workers().clone();
     wait_until_reclaimable(&host, &pid).await;
     runtime.flush_writer().await.unwrap();
 
@@ -2747,7 +2793,7 @@ async fn kernel_engine_keeps_a_run_with_an_open_delivery() {
         .unwrap();
 
     wait_until_settled(&runtime, &pid).await;
-    let host = runtime.kernel().clone();
+    let host = runtime.workers().clone();
     wait_until_reclaimable(&host, &pid).await;
     runtime.flush_writer().await.unwrap();
     host.refresh_projection(&pid).await;
@@ -2926,7 +2972,7 @@ async fn effect_outputs_are_the_only_package_write_back() {
         .await
         .expect("the run never finished");
 
-    let host = runtime.kernel().clone();
+    let host = runtime.workers().clone();
     let snapshot = host.snapshot(&pid).await.unwrap().unwrap();
     let var = |task: &str, name: &str| {
         snapshot
@@ -3109,7 +3155,7 @@ async fn kernel_task_and_act_messages_are_emitted() {
         // The driver delivers records on its tick; drain them so the
         // comparison sees the same settled stream the legacy engine
         // emitted synchronously.
-        runtime.kernel().dispatch_outbox().await.unwrap();
+        runtime.workers().dispatch_outbox().await.unwrap();
         // The rows are a write-behind projection: they lag the completion
         // event by a queue turn, and a projection landing after `close` is
         // refused (the rows would then read the state before it). Wait for
@@ -3324,7 +3370,7 @@ async fn kernel_container_messages_are_emitted() {
         // is a delivered one.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            settle_outbox(runtime.kernel()).await;
+            settle_outbox(runtime.workers()).await;
             let seen = folded.lock().clone();
             let has = |entry: &str| seen.iter().any(|seen| seen == entry);
             if has("b1|completed|false") && has("b2|completed|false") {
@@ -3470,7 +3516,7 @@ async fn the_unnamed_catch_example_runs() {
         tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
             .await
             .expect("the run never finished");
-        runtime.kernel().dispatch_outbox().await.unwrap();
+        runtime.workers().dispatch_outbox().await.unwrap();
         let mut keys = keys.lock().clone();
         keys.sort();
         engine.close().await;
@@ -3557,7 +3603,7 @@ async fn a_failed_step_waits_for_its_timeout_branch_before_the_catch_join() {
         )
         .await
         .unwrap();
-    let host = runtime.kernel().clone();
+    let host = runtime.workers().clone();
     let (pid, act1) = tokio::time::timeout(std::time::Duration::from_secs(30), act1_created.recv())
         .await
         .expect("the working act never appeared")
@@ -3717,7 +3763,7 @@ async fn kernel_cancel_refuses_a_step_whose_work_is_not_done() {
         host_state(&runtime, PID, "s1").await,
         Some(crate::scheduler::core::model::task_graph::TaskState::Waiting)
     );
-    let host = runtime.kernel();
+    let host = runtime.workers();
     let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
     assert_eq!(tasks_of(&snapshot, "s1"), vec![0]);
     engine.close().await;
@@ -3805,7 +3851,7 @@ async fn run_cancel_engine(
             .await
             .expect("the redone downstream completes");
     }
-    wait_kernel_settled(runtime.kernel(), pid).await;
+    wait_kernel_settled(runtime.workers(), pid).await;
     (engine, cancel)
 }
 
@@ -3839,7 +3885,7 @@ async fn kernel_cancel_rewinds_a_finished_step() {
     );
 
     let kernel_runtime = kernel_engine.runtime();
-    let host = kernel_runtime.kernel();
+    let host = kernel_runtime.workers();
     let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
     assert_eq!(
         state_of(&snapshot, "s1"),
@@ -3862,7 +3908,7 @@ async fn kernel_cancel_rewinds_a_finished_step() {
 /// duplicate-delivery guard), and a step with no forward work at all.
 #[tokio::test]
 async fn a_cancel_needs_a_finished_step_with_live_forward_work() {
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let workflow = crate::model::Workflow::new()
         .with_id("wf-cancel-guard")
         .with_step(|step| {
@@ -3999,7 +4045,7 @@ async fn host_state(
     pid: &str,
     node: &str,
 ) -> Option<crate::scheduler::core::model::task_graph::TaskState> {
-    let snapshot = runtime.kernel().snapshot(pid).await.ok()??;
+    let snapshot = runtime.workers().snapshot(pid).await.ok()??;
     snapshot
         .tasks
         .iter()
@@ -4325,7 +4371,7 @@ async fn kernel_env_function_predicate_decides_branches() {
     tokio::time::timeout(std::time::Duration::from_secs(30), settled.recv())
         .await
         .expect("the kernel run never settled");
-    let host = runtime.kernel().clone();
+    let host = runtime.workers().clone();
     let snapshot = host.snapshot(pid).await.unwrap().unwrap();
     assert_eq!(
         state_of(&snapshot, "b_true"),
@@ -4406,7 +4452,7 @@ async fn kernel_invalid_branch_predicate_fails_its_branch() {
     tokio::time::timeout(std::time::Duration::from_secs(30), settled.recv())
         .await
         .expect("the kernel run never settled");
-    let host = runtime.kernel().clone();
+    let host = runtime.workers().clone();
     let snapshot = host.snapshot(pid).await.unwrap().unwrap();
     // The failing branch carries the predicate error as its own failure.
     let b1 = crate::scheduler::core::model::task_graph::TaskId::new("b1", 0).unwrap();
@@ -4516,7 +4562,7 @@ async fn run_catch_engine(
 /// Wait until the kernel aggregate settled (its own completeness
 /// predicate, read from one snapshot so the returned state is the one the
 /// predicate saw), reporting the states when it never does.
-async fn wait_kernel_settled(host: &Arc<KernelHost>, pid: &str) -> Snapshot {
+async fn wait_kernel_settled(host: &Arc<Workers>, pid: &str) -> Snapshot {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let snapshot = host.snapshot(pid).await.unwrap().expect("aggregate exists");
@@ -4585,7 +4631,7 @@ async fn kernel_catch_runs_the_selected_handler_on_error() {
             })
     };
     let kernel_engine = run_catch_engine(PID, Some("err1"), &workflow()).await;
-    let host = kernel_engine.runtime().kernel().clone();
+    let host = kernel_engine.runtime().workers().clone();
     let snapshot = wait_kernel_settled(&host, PID).await;
     assert_no_folded_operations(&snapshot);
 
@@ -4668,7 +4714,7 @@ async fn kernel_catch_skips_handlers_on_success() {
             })
     };
     let kernel_engine = run_catch_engine(PID, None, &workflow()).await;
-    let host = kernel_engine.runtime().kernel().clone();
+    let host = kernel_engine.runtime().workers().clone();
     let snapshot = wait_kernel_settled(&host, PID).await;
     // The step and the run complete; no handler ever existed.
     for (node, state) in [
@@ -4725,7 +4771,7 @@ async fn kernel_catch_resumes_the_error_when_every_handler_skipped() {
             .with_step(|step| step.with_id("s2"))
     };
     let kernel_engine = run_catch_engine(PID, Some("err2"), &workflow()).await;
-    let host = kernel_engine.runtime().kernel().clone();
+    let host = kernel_engine.runtime().workers().clone();
     let snapshot = wait_kernel_settled(&host, PID).await;
     for (node, state) in [
         (
@@ -4756,7 +4802,7 @@ async fn kernel_catch_resumes_the_error_when_every_handler_skipped() {
 
 #[tokio::test]
 async fn manual_task_waits_for_the_client_action() {
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let mut spec = ProcessSpec::linear("p4", "root", &["wait", "after"]);
     // `wait` has no entry in the auto set: it is a waiting task.
     spec.auto.remove("wait");
@@ -4805,7 +4851,7 @@ async fn manual_task_waits_for_the_client_action() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
     const PID: &str = "p_timeout";
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     // An unknown package: every `uses` step waits for a client action,
     // without a runner this host has none of.
     let workflow = crate::model::Workflow::new()
@@ -4968,7 +5014,7 @@ async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_root_stays_running_until_its_seeded_chain_settled() {
     const PID: &str = "p_root_chain";
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     // An unknown package: the first step waits for the client, so the chain
     // cannot finish.
     let workflow = crate::model::Workflow::new()
@@ -5024,7 +5070,7 @@ async fn the_root_stays_running_until_its_seeded_chain_settled() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handler_container_keeps_its_role_while_parked_for_children() {
     const PID: &str = "p_handler_container";
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let workflow = crate::model::Workflow::new().with_step(|step| {
         step.with_id("s1")
             .with_uses("acts.test.wait", crate::Vars::new())
@@ -5095,7 +5141,7 @@ async fn a_handler_container_keeps_its_role_while_parked_for_children() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
     const PID: &str = "p_timeout_branch";
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let workflow = crate::model::Workflow::new().with_step(|step| {
         step.with_id("s1")
             .with_uses("acts.test.wait", crate::Vars::new())
@@ -5171,7 +5217,7 @@ async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
 
 #[tokio::test]
 async fn completing_a_terminal_task_is_rejected_without_consuming_state() {
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::linear("p5", "root", &[]);
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
@@ -5201,7 +5247,7 @@ async fn completing_a_terminal_task_is_rejected_without_consuming_state() {
 /// terminal, and the skipped task is identifiable by its state.
 #[tokio::test]
 async fn cancelled_head_cascades_skip_through_the_chain() {
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let mut spec = ProcessSpec::linear("p6", "root", &["head", "mid", "tail"]);
     spec.auto.remove("head"); // the head waits for a client action
     // … and so does the step its cancel rewinds: an auto downstream would
@@ -5315,7 +5361,7 @@ fn has_task(snapshot: &Snapshot, task: &str) -> bool {
 }
 
 async fn run_branched(workflow: &crate::model::Workflow, pid: &str) -> Snapshot {
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow(pid, workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     let report = host.run_until_quiescent(&mut wake_rx, 500).await.unwrap();
@@ -5558,7 +5604,7 @@ async fn waiting_inner_step_resumes_on_the_client_action() {
                 })
             })
         });
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-wait", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -5614,7 +5660,7 @@ async fn waiting_branched_step_fans_out_on_the_client_completion() {
                     .with_step(|step| step.with_id("s11"))
             })
     });
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-manual", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -5666,7 +5712,7 @@ async fn cancelling_a_finished_container_rewinds_its_branches() {
             step.with_id("step2")
                 .with_uses(crate::utils::test::USES_IRQ, crate::Vars::new())
         });
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-cancel-early", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -5799,7 +5845,7 @@ async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
             step.with_id("step2")
                 .with_uses(crate::utils::test::USES_IRQ, crate::Vars::new())
         });
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-cancel-mid", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
@@ -6005,7 +6051,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
             )
         })
         .with_step(|step| step.with_id("s2"));
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -6026,7 +6072,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
             .unwrap_or(0)
             + 1,
     };
-    let intent = KernelHost::action_intent(
+    let intent = Workers::action_intent(
         PID,
         &task,
         &operation,
@@ -6035,6 +6081,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
             message: "recovered".into(),
         },
         &[],
+        None,
         None,
         snapshot.version.clone(),
     );
@@ -6074,7 +6121,7 @@ async fn a_recovered_action_intent_applies_the_action_not_a_completion() {
     // The fallback stays: an `ApplyAction` operation with no action fact
     // (the inert carrier a rewind leaves behind) is the bare hop — the
     // auto completion.
-    let (bare_host, mut bare_wake) = KernelHost::in_memory();
+    let (bare_host, mut bare_wake) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-bare-action", &workflow, &|_| None).unwrap();
     bare_host.start_process(&spec).await.unwrap();
     bare_host
@@ -6159,7 +6206,7 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
                 crate::Vars::new().with("key", "act2"),
             )
         });
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -6272,7 +6319,7 @@ async fn abort_on_waiting_step_aborts_the_ancestor_chain() {
             )
         })
         .with_step(|step| step.with_id("s3"));
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-abort", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -6333,7 +6380,7 @@ async fn abort_inside_a_branch_aborts_the_container_chain() {
                         .with_step(|step| step.with_id("s21"))
                 })
         });
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-abort-branch", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
@@ -6386,7 +6433,7 @@ async fn back_redo_reruns_the_named_step_and_its_downstream() {
                 crate::Vars::new().with("key", "back-act"),
             )
         });
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-back", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -6454,7 +6501,7 @@ async fn back_without_to_is_refused_without_consuming_state() {
             crate::Vars::new().with("key", "back-no-to"),
         )
     });
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-back-no-to", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -6497,7 +6544,7 @@ async fn fail_on_waiting_step_skips_downstream_and_decides_ancestors() {
             )
         })
         .with_step(|step| step.with_id("s3"));
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("p-fail", &workflow, &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -6564,7 +6611,7 @@ async fn kernel_abort_walks_up_and_skips_downstream() {
             .with_step(|step| step.with_id("s3"))
     };
 
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("k-abort", &workflow(), &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -6608,7 +6655,7 @@ async fn kernel_fail_decides_ancestors_and_skips_downstream() {
             .with_step(|step| step.with_id("s3"))
     };
 
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let spec = ProcessSpec::from_workflow("k-fail", &workflow(), &|_| None).unwrap();
     host.start_process(&spec).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -6739,7 +6786,7 @@ async fn kernel_parent_state_stays_running_while_a_fired_branch_runs() {
         ))
         .await
         .expect("the act1 act must complete");
-    let host = kernel_engine.runtime().kernel().clone();
+    let host = kernel_engine.runtime().workers().clone();
     // The completion hop is the one that parks the step (`Waiting →
     // Running`): poll until the aggregate says so.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -6783,7 +6830,7 @@ async fn kernel_parent_state_stays_running_while_a_fired_branch_runs() {
         ))
         .await
         .expect("the branch act must complete");
-    let host = kernel_engine.runtime().kernel().clone();
+    let host = kernel_engine.runtime().workers().clone();
     let settled = wait_kernel_settled(&host, PID).await;
     assert_eq!(
         state_of(&settled, crate::utils::consts::TASK_ROOT_TID),
@@ -6876,7 +6923,7 @@ async fn run_timeout_engine(pid: &str, workflow: &crate::model::Workflow) -> cra
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
     while fired.lock().len() < 2 {
         if std::time::Instant::now() >= deadline {
-            let host = engine.runtime().kernel().clone();
+            let host = engine.runtime().workers().clone();
             let snapshot = host.snapshot(pid).await.unwrap().expect("the aggregate");
             let dump = format!(
                 "executions={:?} operations={:?} owner_vars={:?}",
@@ -6922,7 +6969,7 @@ async fn run_timeout_engine(pid: &str, workflow: &crate::model::Workflow) -> cra
     loop {
         let settled = engine
             .runtime()
-            .kernel()
+            .workers()
             .process_completed(pid)
             .await
             .unwrap();
@@ -6979,7 +7026,7 @@ async fn kernel_timeout_branches_fire_and_settle() {
     };
 
     let kernel_engine = run_timeout_engine(PID, &workflow()).await;
-    let host = kernel_engine.runtime().kernel().clone();
+    let host = kernel_engine.runtime().workers().clone();
     let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
 
     for node in ["t1", "t2"] {
@@ -7084,7 +7131,7 @@ async fn uses_steps_write_created_message_records() {
     );
     let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
 
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let workflow = crate::model::Workflow::new()
         .with_step(|step| {
             step.with_id("s1")
@@ -7103,7 +7150,13 @@ async fn uses_steps_write_created_message_records() {
     struct TopicTransport {
         topics: Arc<parking_lot::Mutex<Vec<String>>>,
     }
-    impl crate::capability::OutboxTransport for TopicTransport {
+    impl crate::scheduler::shell::caps::Capability for TopicTransport {
+        fn key(&self) -> &str {
+            "test.delivery"
+        }
+    }
+
+    impl crate::scheduler::shell::caps::delivery::OutboxTransport for TopicTransport {
         fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
             self.topics.lock().push(record.topic.clone());
             DeliveryOutcome::Delivered {
@@ -7112,7 +7165,7 @@ async fn uses_steps_write_created_message_records() {
         }
     }
     let topics = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    host.attach_outbox_transport(Box::new(TopicTransport {
+    host.attach_outbox_transport(Arc::new(TopicTransport {
         topics: topics.clone(),
     }));
     let spec = ProcessSpec::from_workflow("p-msg", &workflow, &run_as).unwrap();
@@ -7245,8 +7298,8 @@ async fn uses_steps_write_created_message_records() {
 #[serial_test::serial]
 async fn effect_params_resolve_scope_variables() {
     let engine = crate::Engine::builder().start().await.unwrap();
-    let (host, mut wake_rx) = KernelHost::in_memory();
-    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+    let (host, mut wake_rx) = Workers::in_memory();
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
         engine.runtime().clone(),
     )));
     let package = engine.runtime().package().clone();
@@ -7284,14 +7337,14 @@ async fn effect_params_resolve_scope_variables() {
 #[serial_test::serial]
 async fn outbox_records_forward_as_engine_messages() {
     let engine = crate::Engine::builder().start().await.unwrap();
-    let (host, mut wake_rx) = KernelHost::in_memory();
-    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+    let (host, mut wake_rx) = Workers::in_memory();
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
         engine.runtime().clone(),
     )));
     let collected: Arc<parking_lot::Mutex<Vec<crate::Message>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
     let sink = collected.clone();
-    host.attach_outbox_transport(Box::new(message::MessageForwarder::new(
+    host.attach_outbox_transport(Arc::new(MessageForwarder::new(
         move |msg: &crate::Message| sink.lock().push(msg.clone()),
     )));
     let package = engine.runtime().package().clone();
@@ -7396,8 +7449,8 @@ impl crate::package::ActPackage for FailingPackage {
 #[serial_test::serial]
 async fn func_package_runs_inside_the_completion_hop() {
     let engine = crate::Engine::builder().start().await.unwrap();
-    let (host, mut wake_rx) = KernelHost::in_memory();
-    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+    let (host, mut wake_rx) = Workers::in_memory();
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
         engine.runtime().clone(),
     )));
     // The auto/waiting decision reads the same registry the engine does.
@@ -7466,8 +7519,8 @@ async fn package_error_fails_the_task_and_walks_up() {
         .register_package(&<FailingPackage as crate::package::ActPackage>::definition())
         .await
         .unwrap();
-    let (host, mut wake_rx) = KernelHost::in_memory();
-    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+    let (host, mut wake_rx) = Workers::in_memory();
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
         engine.runtime().clone(),
     )));
     let package = engine.runtime().package().clone();
@@ -7595,8 +7648,8 @@ async fn effect_seals_snapshot_params() {
 
     // The kernel side: the effect runs the package inside the completion
     // hop, and its outputs (the resolved params) land on the execution.
-    let (host, mut wake_rx) = KernelHost::in_memory();
-    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+    let (host, mut wake_rx) = Workers::in_memory();
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
         engine.runtime().clone(),
     )));
     let package = engine.runtime().package().clone();
@@ -7682,8 +7735,8 @@ async fn effect_denies_a_snapshot_scope_the_owner_lacks() {
         )
     });
 
-    let (host, mut wake_rx) = KernelHost::in_memory();
-    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+    let (host, mut wake_rx) = Workers::in_memory();
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
         engine.runtime().clone(),
     )));
     let package = engine.runtime().package().clone();
@@ -7726,12 +7779,12 @@ async fn effect_denies_a_snapshot_scope_the_owner_lacks() {
 #[serial_test::serial]
 async fn a_commit_delivers_its_records_without_waiting_for_a_tick() {
     let engine = crate::Engine::builder().start().await.unwrap();
-    let (host, wake_rx) = KernelHost::in_memory();
-    host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+    let (host, wake_rx) = Workers::in_memory();
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
         engine.runtime().clone(),
     )));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::Message>();
-    host.attach_outbox_transport(Box::new(message::MessageForwarder::new(
+    host.attach_outbox_transport(Arc::new(MessageForwarder::new(
         move |msg: &crate::Message| {
             let _ = tx.send(msg.clone());
         },
@@ -8028,7 +8081,13 @@ struct OrderingTransport {
     observed: Arc<parking_lot::Mutex<Vec<bool>>>,
 }
 
-impl crate::capability::OutboxTransport for OrderingTransport {
+impl crate::scheduler::shell::caps::Capability for OrderingTransport {
+    fn key(&self) -> &str {
+        "test.delivery"
+    }
+}
+
+impl crate::scheduler::shell::caps::delivery::OutboxTransport for OrderingTransport {
     fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
         self.observed
             .lock()
@@ -8080,9 +8139,9 @@ async fn an_outbox_message_waits_for_its_aggregate_commit() {
     let stored = InstrumentedKv::new(PID);
     stored.arm_plan_commit_failure();
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let delivered = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(CountingTransport {
+    host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: delivered.clone(),
     }));
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
@@ -8116,9 +8175,9 @@ async fn one_operation_confirms_all_its_records_in_one_commit() {
     const PID: &str = "p-outbox-batch";
     let stored = InstrumentedKv::new(PID);
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let delivered = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(CountingTransport {
+    host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: delivered.clone(),
     }));
     let spec = ProcessSpec::linear(PID, "root", &["a", "b"]);
@@ -8158,9 +8217,9 @@ async fn a_commit_with_two_records_confirms_them_in_one_commit() {
     const PID: &str = "p-outbox-two";
     let stored = InstrumentedKv::new(PID);
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, _wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, _wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let delivered = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(CountingTransport {
+    host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: delivered.clone(),
     }));
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
@@ -8225,9 +8284,9 @@ async fn a_lost_confirmation_is_redelivered_without_losing_the_message() {
     let stored = InstrumentedKv::new(PID);
     stored.arm_confirmation_failure();
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let delivered = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(CountingTransport {
+    host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: delivered.clone(),
     }));
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
@@ -8277,7 +8336,13 @@ async fn partial_delivery_failures_are_persisted_and_keep_the_run() {
     struct PartialTransport {
         delivered: Arc<parking_lot::Mutex<usize>>,
     }
-    impl crate::capability::OutboxTransport for PartialTransport {
+    impl crate::scheduler::shell::caps::Capability for PartialTransport {
+        fn key(&self) -> &str {
+            "test.delivery"
+        }
+    }
+
+    impl crate::scheduler::shell::caps::delivery::OutboxTransport for PartialTransport {
         fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             match record.topic.as_str() {
@@ -8295,9 +8360,9 @@ async fn partial_delivery_failures_are_persisted_and_keep_the_run() {
         }
     }
     let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let delivered = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(PartialTransport {
+    host.attach_outbox_transport(Arc::new(PartialTransport {
         delivered: delivered.clone(),
     }));
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
@@ -8378,7 +8443,7 @@ async fn messages_are_visible_only_after_the_projection() {
     const PID: &str = "p-outbox-projection";
     let stored = InstrumentedKv::new(PID);
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     let store = Arc::new(crate::store::Store::new(kv));
     let writer = crate::store::writebehind::StoreWriter::spawn(
         store.clone(),
@@ -8388,7 +8453,7 @@ async fn messages_are_visible_only_after_the_projection() {
     );
     host.attach_row_projector(Arc::new(RowProjector::new(store, writer, None)));
     let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    host.attach_outbox_transport(Box::new(OrderingTransport {
+    host.attach_outbox_transport(Arc::new(OrderingTransport {
         kv: stored.clone(),
         proc_prefix: crate::store::StoreIden::Procs.as_ref().to_string(),
         observed: observed.clone(),
@@ -8665,7 +8730,7 @@ async fn a_restart_catches_up_only_the_rows_that_lag() {
         64,
         crate::utils::shared(1),
     );
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     host.attach_row_projector(Arc::new(RowProjector::new(
         store.clone(),
         writer.clone(),
@@ -8690,7 +8755,7 @@ async fn a_restart_catches_up_only_the_rows_that_lag() {
     store.tasks().update(&row).await.unwrap();
 
     // A fresh host over the same store: no in-process projection claims.
-    let (restarted, _wake) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (restarted, _wake) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     restarted.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
     restarted.recover(SystemClock.now_ms()).await.unwrap();
 
@@ -8782,15 +8847,20 @@ async fn a_projection_failure_is_repaired_before_the_completion_event() {
         64,
         crate::utils::shared(1),
     );
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
     let completed = Arc::new(AtomicUsize::new(0));
     let seen = completed.clone();
-    host.attach_lifecycle_sink(Arc::new(move |_, event| {
-        if event == ProcessEvent::Completed {
-            seen.fetch_add(1, Ordering::SeqCst);
-        }
-    }));
+    host.attach_lifecycle_sink(Arc::new(
+        crate::scheduler::shell::caps::lifecycle::FnLifecycleSink::new(
+            "test.lifecycle",
+            move |_, event| {
+                if event == ProcessEvent::Completed {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        ),
+    ));
     // Take the boot pass before the rows exist, so the later repair goes
     // through the repair queue rather than the boot catch-up.
     host.recover(SystemClock.now_ms()).await.unwrap();
@@ -8861,7 +8931,7 @@ async fn a_proc_read_reprojects_a_lagging_row() {
         .await
         .expect("the run never finished");
 
-    let snapshot = runtime.kernel().snapshot(&pid).await.unwrap().unwrap();
+    let snapshot = runtime.workers().snapshot(&pid).await.unwrap().unwrap();
     let current = snapshot.version.encode();
     let mut row = runtime
         .store()
@@ -9112,7 +9182,7 @@ fn admission_standings_map_onto_directives() {
 /// A spec whose seed cannot be built must not keep its reserved slot.
 #[tokio::test]
 async fn a_start_with_an_unbuildable_seed_abandons_its_slot() {
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let spec = ProcessSpec::linear("p-bad-seed", "", &[]);
     let error = host.start_process(&spec).await.unwrap_err();
     assert!(matches!(error, ActError::Runtime(_)), "{error:?}");
@@ -9122,7 +9192,7 @@ async fn a_start_with_an_unbuildable_seed_abandons_its_slot() {
 /// Without a read model, every projection seam is a no-op success.
 #[tokio::test]
 async fn a_host_without_a_projector_reports_no_projection_work() {
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     assert_eq!(host.repair_projections_batch(8).await, (0, 0));
     assert!(host.catch_up_projections().await);
     assert!(host.lock_projection("p-none").await.is_none());
@@ -9133,7 +9203,7 @@ async fn a_host_without_a_projector_reports_no_projection_work() {
 /// An absent aggregate has no unknown effects and no process completion.
 #[tokio::test]
 async fn an_absent_run_reads_as_empty() {
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     assert!(host.effect_unknowns("p-absent").await.unwrap().is_empty());
     assert!(!host.process_completed("p-absent").await.unwrap());
     assert!(!host.exists("p-absent").await.unwrap());
@@ -9149,7 +9219,7 @@ async fn effect_observation_is_bounded_to_unknown_apply_actions() {
     };
     use crate::scheduler::core::model::transition_plan::ProcessVersion;
 
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let version = ProcessVersion {
         graph: 0,
         process: 0,
@@ -9188,7 +9258,7 @@ async fn effect_observation_is_bounded_to_unknown_apply_actions() {
 /// does not stay registered.
 #[tokio::test]
 async fn a_settle_waiter_is_notified_and_taken() {
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let waiter = host.run_waiter("p-wait");
     let woken = waiter.clone();
     let task = tokio::spawn(async move { woken.notified().await });
@@ -9209,7 +9279,7 @@ async fn operation_event_outcomes_keep_committed_records_and_classify_conflicts(
     use crate::scheduler::core::model::operation::{OperationKind, OperationRecord};
     use crate::scheduler::durable::async_document_store::OperationCommitOutcome;
 
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let spec = ProcessSpec::linear("p-outcome", crate::utils::consts::TASK_ROOT_TID, &["only"]);
     host.start_process(&spec).await.unwrap();
     let loaded = host.load("p-outcome").await.unwrap().unwrap();
@@ -9226,14 +9296,13 @@ async fn operation_event_outcomes_keep_committed_records_and_classify_conflicts(
             loaded: loaded.clone(),
         },
     ] {
-        let (returned, returned_loaded) =
-            KernelHost::operation_event_outcome(&id, outcome).unwrap();
+        let (returned, returned_loaded) = Workers::operation_event_outcome(&id, outcome).unwrap();
         assert_eq!(returned.id, id);
         assert_eq!(returned_loaded.snapshot.process_id, "p-outcome");
     }
 
     let error =
-        KernelHost::operation_event_outcome(&id, OperationCommitOutcome::Conflict {}).unwrap_err();
+        Workers::operation_event_outcome(&id, OperationCommitOutcome::Conflict {}).unwrap_err();
     assert!(is_conflict(&error), "{error:?}");
 }
 
@@ -9241,7 +9310,7 @@ async fn operation_event_outcomes_keep_committed_records_and_classify_conflicts(
 /// explicit engine errors instead of panicking.
 #[tokio::test]
 async fn effect_resolution_names_missing_runs_and_operations() {
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let missing = host
         .resolve_effect_by_key("p-missing", "key", crate::EffectResolution::NotApplied)
         .await
@@ -9296,9 +9365,9 @@ async fn effect_resolution_names_missing_runs_and_operations() {
 async fn committed_outbox_delivery_skips_missing_and_settled_records() {
     use crate::scheduler::core::outbox::records::OutboxId;
 
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let counter = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(CountingTransport {
+    host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: counter.clone(),
     }));
     let spec = ProcessSpec::linear("p-outbox-skip", crate::utils::consts::TASK_ROOT_TID, &["a"]);
@@ -9373,7 +9442,7 @@ async fn a_failed_repair_is_counted_and_queued_until_the_rows_write() {
         64,
         crate::utils::shared(1),
     );
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
     // Take the boot pass while the rows do not exist yet, so the later repair
     // goes through the queue.
@@ -9414,7 +9483,7 @@ async fn a_failed_repair_is_counted_and_queued_until_the_rows_write() {
 fn a_lifecycle_decision_without_sink_root_or_directive_is_ignored() {
     use crate::scheduler::core::decision::LifecycleDirective;
 
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let root = crate::utils::consts::TASK_ROOT_TID;
     let snapshot = ProcessSpec::linear("p-lifecycle-early", root, &["only"])
         .seed_snapshot()
@@ -9424,9 +9493,14 @@ fn a_lifecycle_decision_without_sink_root_or_directive_is_ignored() {
 
     let reported = Arc::new(AtomicUsize::new(0));
     let seen = reported.clone();
-    host.attach_lifecycle_sink(Arc::new(move |_, _| {
-        seen.fetch_add(1, Ordering::SeqCst);
-    }));
+    host.attach_lifecycle_sink(Arc::new(
+        crate::scheduler::shell::caps::lifecycle::FnLifecycleSink::new(
+            "test.lifecycle",
+            move |_, _| {
+                seen.fetch_add(1, Ordering::SeqCst);
+            },
+        ),
+    ));
     // Nothing to report.
     host.report_lifecycle_decision(&snapshot, None, None);
     // No root execution to shape the message from.
@@ -9460,9 +9534,17 @@ fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
 
     // No operations: the sequence default (0) is used.
     let mut pinned = None;
-    let first =
-        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, None, &mut pinned)
-            .unwrap();
+    let first = Workers::action_identity(
+        &snapshot,
+        pid,
+        &node,
+        &action,
+        &inputs,
+        None,
+        None,
+        &mut pinned,
+    )
+    .unwrap();
     assert_eq!(first.operation.sequence, 1);
     assert!(pinned.is_some());
 
@@ -9476,15 +9558,23 @@ fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
             first.task.clone(),
             action_fact_var(first.operation.sequence),
         ),
-        action_fact(&action, &inputs, None),
+        action_fact(&action, &inputs, None, None),
     );
     pinned = Some(ActionIntent {
         task: first.task.clone(),
         operation: first.operation.clone(),
     });
-    let resumed =
-        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, None, &mut pinned)
-            .unwrap();
+    let resumed = Workers::action_identity(
+        &snapshot,
+        pid,
+        &node,
+        &action,
+        &inputs,
+        None,
+        None,
+        &mut pinned,
+    )
+    .unwrap();
     assert_eq!(resumed.operation, first.operation);
 
     // A pin whose fact is not this decision is replaced by a fresh identity.
@@ -9492,9 +9582,17 @@ fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
         task: task.clone(),
         operation: operation_id(pid, root, 99),
     });
-    let minted =
-        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, None, &mut foreign)
-            .unwrap();
+    let minted = Workers::action_identity(
+        &snapshot,
+        pid,
+        &node,
+        &action,
+        &inputs,
+        None,
+        None,
+        &mut foreign,
+    )
+    .unwrap();
     assert_eq!(minted.operation.sequence, 2);
 
     // An operation already standing at the minted sequence is skipped.
@@ -9503,9 +9601,10 @@ fn action_identity_reuses_its_pin_and_skips_taken_sequences() {
         OperationRecord::pending(minted.operation.clone(), OperationKind::SkipTask),
     );
     let mut fresh = None;
-    let next =
-        KernelHost::action_identity(&snapshot, pid, &node, &action, &inputs, None, &mut fresh)
-            .unwrap();
+    let next = Workers::action_identity(
+        &snapshot, pid, &node, &action, &inputs, None, None, &mut fresh,
+    )
+    .unwrap();
     assert_eq!(next.operation.sequence, 3);
 }
 
@@ -9530,38 +9629,39 @@ fn an_action_intent_is_ours_only_with_its_own_fact() {
     let action = ActionKind::Skip;
     let inputs: Vec<(String, String)> = Vec::new();
 
-    assert!(!KernelHost::action_intent_is_mine(
-        &snapshot, &intent, &action, &inputs, None
+    assert!(!Workers::action_intent_is_mine(
+        &snapshot, &intent, &action, &inputs, None, None
     ));
     snapshot.operations.insert(
         operation.clone(),
         OperationRecord::pending(operation.clone(), OperationKind::SkipTask),
     );
     assert!(
-        !KernelHost::action_intent_is_mine(&snapshot, &intent, &action, &inputs, None),
+        !Workers::action_intent_is_mine(&snapshot, &intent, &action, &inputs, None, None),
         "an operation without the fact is not ours"
     );
     snapshot.variables.insert(
         (task.clone(), action_fact_var(1)),
-        action_fact(&ActionKind::Complete, &inputs, None),
+        action_fact(&ActionKind::Complete, &inputs, None, None),
     );
     assert!(
-        !KernelHost::action_intent_is_mine(&snapshot, &intent, &action, &inputs, None),
+        !Workers::action_intent_is_mine(&snapshot, &intent, &action, &inputs, None, None),
         "another decision's fact is not ours"
     );
     snapshot.variables.insert(
         (task.clone(), action_fact_var(1)),
-        action_fact(&action, &inputs, None),
+        action_fact(&action, &inputs, None, None),
     );
-    assert!(KernelHost::action_intent_is_mine(
-        &snapshot, &intent, &action, &inputs, None
+    assert!(Workers::action_intent_is_mine(
+        &snapshot, &intent, &action, &inputs, None, None
     ));
     assert!(
-        !KernelHost::action_intent_is_mine(
+        !Workers::action_intent_is_mine(
             &snapshot,
             &intent,
             &action,
             &[("other".to_string(), "value".to_string())],
+            None,
             None
         ),
         "different inputs are a different decision"
@@ -9574,7 +9674,7 @@ fn an_action_intent_is_ours_only_with_its_own_fact() {
 async fn resume_action_intent_retries_absent_runs_and_foreign_pins() {
     use crate::scheduler::core::model::task_graph::TaskId;
 
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let root = crate::utils::consts::TASK_ROOT_TID;
     let task = TaskId::new(root, 0).unwrap();
     let action = ActionKind::Skip;
@@ -9585,7 +9685,7 @@ async fn resume_action_intent_retries_absent_runs_and_foreign_pins() {
         operation: operation_id("p-resume-absent", root, 0),
     };
     assert!(matches!(
-        host.resume_action_intent(&absent, &action, &inputs, None)
+        host.resume_action_intent(&absent, &action, &inputs, None, None)
             .await
             .unwrap(),
         ActionResume::Retry
@@ -9599,7 +9699,7 @@ async fn resume_action_intent_retries_absent_runs_and_foreign_pins() {
         operation: operation_id(pid, root, 7),
     };
     assert!(matches!(
-        host.resume_action_intent(&foreign, &action, &inputs, None)
+        host.resume_action_intent(&foreign, &action, &inputs, None, None)
             .await
             .unwrap(),
         ActionResume::Retry
@@ -9616,7 +9716,7 @@ async fn effect_observation_skips_missing_tasks_and_effectless_steps() {
     use crate::scheduler::core::model::transition_plan::ProcessVersion;
     use crate::scheduler::core::recovery::planner::Observed;
 
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let pid = "p-observe-task";
     let root = crate::utils::consts::TASK_ROOT_TID;
     let spec = ProcessSpec::linear(pid, root, &["only"]);
@@ -9650,14 +9750,14 @@ async fn effect_observation_skips_missing_tasks_and_effectless_steps() {
 #[tokio::test]
 async fn ready_boot_repairs_a_missing_index_once() {
     let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let (host, _wake) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, _wake) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     let root = crate::utils::consts::TASK_ROOT_TID;
     let spec = ProcessSpec::linear("p-ready-boot", root, &["only"]);
     host.start_process(&spec).await.unwrap();
     let key = crate::scheduler::durable::document_store::ready_index_key("p-ready-boot").unwrap();
     kv.delete(&key).await.unwrap();
 
-    let (restarted, _wake) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (restarted, _wake) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     restarted
         .ensure_ready_boot(SystemClock.now_ms())
         .await
@@ -9683,7 +9783,7 @@ async fn ready_boot_repairs_a_missing_index_once() {
 /// on the flag.
 #[tokio::test]
 async fn projection_boot_is_a_one_time_pass() {
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     host.ensure_projection_boot().await;
     assert!(host.projection_booted.load(Ordering::SeqCst));
     host.ensure_projection_boot().await;
@@ -9703,7 +9803,7 @@ async fn reclaiming_a_projected_run_forgets_its_projection_claims() {
         64,
         crate::utils::shared(1),
     );
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
     let spec = ProcessSpec::linear(PID, crate::utils::consts::TASK_ROOT_TID, &["only"]);
     host.start_process(&spec).await.unwrap();
@@ -9789,7 +9889,7 @@ async fn a_start_that_parked_takes_a_slot_freed_while_it_was_written() {
     const PID: &str = "p-start-race";
     let stored = SlotReleasingKv::new();
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     // A phantom holder owns the only slot, so the start decides to park.
     host.admissions.lock().activate("p-phantom-holder");
 
@@ -9815,7 +9915,7 @@ async fn a_start_that_parked_takes_a_slot_freed_while_it_was_written() {
 
 /// Seed one operation into a chosen durable state.
 async fn seed_operation_state(
-    host: &KernelHost,
+    host: &Workers,
     id: &OperationId,
     state: &str,
     now: i64,
@@ -9890,7 +9990,7 @@ async fn recovery_reclaims_observes_and_finalizes_by_directive() {
     let now = SystemClock.now_ms();
 
     // ReclaimReady: an expired `Claimed` exists.
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     host.start_process(&ProcessSpec::linear("p-rec-reclaim", root, &["only"]))
         .await
         .unwrap();
@@ -9903,7 +10003,7 @@ async fn recovery_reclaims_observes_and_finalizes_by_directive() {
 
     // ReclaimUnknown: an expired `CommitPrepared` crosses the effect boundary,
     // so it is observed and (an ExecuteTask) needs a human.
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     host.start_process(&ProcessSpec::linear("p-rec-unknown", root, &["only"]))
         .await
         .unwrap();
@@ -9916,7 +10016,7 @@ async fn recovery_reclaims_observes_and_finalizes_by_directive() {
 
     // FinalizeCommit: the completion was lost; recovery closes it and runs the
     // post-commit decision.
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     host.start_process(&ProcessSpec::linear("p-rec-finalize", root, &["only"]))
         .await
         .unwrap();
@@ -9940,7 +10040,7 @@ async fn recovery_reclaims_observes_and_finalizes_by_directive() {
 async fn a_bounded_recovery_scan_resumes_from_its_cursor() {
     let root = crate::utils::consts::TASK_ROOT_TID;
     let now = SystemClock.now_ms();
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let pids = ["p-budget-a", "p-budget-b", "p-budget-c"];
     for pid in pids {
         host.start_process(&ProcessSpec::linear(pid, root, &["only"]))
@@ -9976,7 +10076,13 @@ async fn a_record_rescheduled_for_now_wakes_the_retry_pass() {
     struct DueNowTransport {
         delivered: Arc<parking_lot::Mutex<usize>>,
     }
-    impl crate::capability::OutboxTransport for DueNowTransport {
+    impl crate::scheduler::shell::caps::Capability for DueNowTransport {
+        fn key(&self) -> &str {
+            "test.delivery"
+        }
+    }
+
+    impl crate::scheduler::shell::caps::delivery::OutboxTransport for DueNowTransport {
         fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             DeliveryOutcome::RetryAt {
@@ -9986,9 +10092,9 @@ async fn a_record_rescheduled_for_now_wakes_the_retry_pass() {
         }
     }
 
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let delivered = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(DueNowTransport {
+    host.attach_outbox_transport(Arc::new(DueNowTransport {
         delivered: delivered.clone(),
     }));
     let root = crate::utils::consts::TASK_ROOT_TID;
@@ -10016,10 +10122,10 @@ async fn the_outbox_pass_defers_wraps_and_delivers_after_repair() {
         64,
         crate::utils::shared(1),
     );
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
     let delivered = Arc::new(parking_lot::Mutex::new(0));
-    host.attach_outbox_transport(Box::new(CountingTransport {
+    host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: delivered.clone(),
     }));
     // Boot before the rows exist so the failures below go through the queue.
@@ -10079,7 +10185,7 @@ async fn a_recovery_scan_with_stale_index_entries_respects_its_budget() {
     let root = crate::utils::consts::TASK_ROOT_TID;
     let now = SystemClock.now_ms();
     let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let (host, _wake) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, _wake) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     let pids = ["p-page-a", "p-page-b", "p-page-c", "p-page-d"];
     for pid in pids {
         host.start_process(&ProcessSpec::linear(pid, root, &["only"]))
@@ -10182,7 +10288,7 @@ async fn a_lost_action_intent_cas_is_retried_and_applies() {
     const PID: &str = "p-action-retry";
     let stored = ConflictOnceKv::new();
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let mut spec = ProcessSpec::linear(PID, "root", &["wait", "after"]);
     spec.auto.remove("wait");
     host.start_process(&spec).await.unwrap();
@@ -10222,9 +10328,9 @@ async fn the_serve_loop_reports_admission_lag_and_degrades_the_projection_loop()
         64,
         crate::utils::shared(1),
     );
-    let (host, mut wake_rx) = KernelHost::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, mut wake_rx) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
     host.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
-    host.attach_outbox_transport(Box::new(CountingTransport {
+    host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: Arc::new(parking_lot::Mutex::new(0)),
     }));
     // A run whose projection failed keeps its outbox records due and
@@ -10386,7 +10492,7 @@ impl KvStore for FailingScanKv {
 async fn a_failing_scan_is_survived_by_the_serve_loop() {
     let stored = FailingScanKv::new();
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     stored.arm();
 
     let shutdown = tokio_util::sync::CancellationToken::new();
@@ -10420,7 +10526,7 @@ async fn the_serve_loop_reports_an_observed_effect_application() {
     const PID: &str = "p-serve-effect";
     let stored = ConflictKv::new(PID);
     let observation = Arc::new(parking_lot::Mutex::new(
-        effects::EffectObservation::Applied(effects::EffectOutcome::from_outputs(
+        caps::effect::EffectObservation::Applied(caps::effect::EffectOutcome::from_outputs(
             crate::Vars::new().with("observed", "once"),
         )),
     ));
@@ -10472,7 +10578,7 @@ async fn an_action_intent_that_is_already_closed_is_not_claimable() {
     use crate::scheduler::core::model::task_graph::TaskId;
 
     const PID: &str = "p-action-closed";
-    let (host, mut wake_rx) = KernelHost::in_memory();
+    let (host, mut wake_rx) = Workers::in_memory();
     let mut spec = ProcessSpec::linear(PID, "root", &["wait", "after"]);
     spec.auto.remove("wait");
     host.start_process(&spec).await.unwrap();
@@ -10483,12 +10589,13 @@ async fn an_action_intent_that_is_already_closed_is_not_claimable() {
     let action = ActionKind::Complete;
     let inputs: Vec<(String, String)> = Vec::new();
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
-    let plan = KernelHost::action_intent(
+    let plan = Workers::action_intent(
         PID,
         &task,
         &operation,
         &action,
         &inputs,
+        None,
         None,
         snapshot.version.clone(),
     );
@@ -10549,6 +10656,7 @@ async fn an_action_intent_that_is_already_closed_is_not_claimable() {
             inputs,
             None,
             None,
+            None,
             false,
             &mut pinned,
         )
@@ -10568,7 +10676,7 @@ async fn the_cancel_guard_walks_a_shared_successor_once_and_skips_child_work() {
     use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
 
     const PID: &str = "p-cancel-forward";
-    let (host, _wake) = KernelHost::in_memory();
+    let (host, _wake) = Workers::in_memory();
     let workflow = crate::model::Workflow::new()
         .with_id("wf-cancel-forward")
         .with_step(|step| step.with_id("a"))
@@ -10599,7 +10707,13 @@ async fn a_lost_outbox_claim_skips_the_record_without_failing_the_pass() {
     struct RescheduleNow {
         delivered: Arc<parking_lot::Mutex<usize>>,
     }
-    impl crate::capability::OutboxTransport for RescheduleNow {
+    impl crate::scheduler::shell::caps::Capability for RescheduleNow {
+        fn key(&self) -> &str {
+            "test.delivery"
+        }
+    }
+
+    impl crate::scheduler::shell::caps::delivery::OutboxTransport for RescheduleNow {
         fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             DeliveryOutcome::RetryAt {
@@ -10612,8 +10726,8 @@ async fn a_lost_outbox_claim_skips_the_record_without_failing_the_pass() {
     const PID: &str = "p-outbox-lost-claim";
     let stored = ConflictOnceKv::new();
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = KernelHost::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
-    host.attach_outbox_transport(Box::new(RescheduleNow {
+    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    host.attach_outbox_transport(Arc::new(RescheduleNow {
         delivered: Arc::new(parking_lot::Mutex::new(0)),
     }));
     let spec = ProcessSpec::linear(PID, crate::utils::consts::TASK_ROOT_TID, &["only"]);

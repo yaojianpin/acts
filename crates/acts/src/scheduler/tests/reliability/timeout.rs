@@ -136,7 +136,7 @@ fn delivered_count(engine: &Engine, key: &str) -> Arc<AtomicUsize> {
 async fn process_snapshot(engine: &Engine, pid: &str) -> ProcessSnapshot {
     engine
         .runtime()
-        .kernel()
+        .workers()
         .snapshot(pid)
         .await
         .unwrap()
@@ -415,9 +415,9 @@ async fn a_completion_racing_the_timeout_tick_converges_exactly_once_inner() {
         let (pid, step1, fired) = waiting_timed_run(&engine, &one_timeout_workflow("true")).await;
 
         let now = SystemClock.now_ms();
-        let due = now + engine.runtime().kernel().timer_poll_ms();
+        let due = now + engine.runtime().workers().timer_poll_ms();
         let (completed, recovered) = tokio::join!(complete_act(&engine, &pid, &step1), async {
-            engine.runtime().kernel().tick(due).await
+            engine.runtime().workers().tick(due).await
         },);
         completed.unwrap();
         recovered.unwrap();
@@ -663,7 +663,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
     assert!(
         engine
             .runtime()
-            .kernel()
+            .workers()
             .process_completed(&pid)
             .await
             .unwrap(),
@@ -683,7 +683,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
             || async {
                 !engine
                     .runtime()
-                    .kernel()
+                    .workers()
                     .process_completed(&pid)
                     .await
                     .unwrap()
@@ -706,7 +706,7 @@ async fn the_driver_leaves_a_settled_run_alone_inner() {
             || async {
                 !reloaded
                     .runtime()
-                    .kernel()
+                    .workers()
                     .process_completed(&pid)
                     .await
                     .unwrap()

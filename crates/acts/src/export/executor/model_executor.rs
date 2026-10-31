@@ -18,19 +18,17 @@ pub(crate) const RM: &str = "model:rm";
 #[derive(Clone)]
 pub struct ModelExecutor {
     store: Arc<Store>,
-    runtime: Arc<Runtime>,
     principal: Arc<Principal>,
 }
 
 impl ModelExecutor {
     pub(crate) fn new(
         store: &Arc<Store>,
-        runtime: &Arc<Runtime>,
+        _runtime: &Arc<Runtime>,
         principal: &Arc<Principal>,
     ) -> Self {
         Self {
             store: store.clone(),
-            runtime: runtime.clone(),
             principal: principal.clone(),
         }
     }
@@ -44,17 +42,9 @@ impl ModelExecutor {
         self.principal.check_rn(&model.rn)?;
         model.valid()?;
 
-        // Freeze the capability selection into the persisted model: an
-        // unkeyed assignment gets the kind's only provider, an explicit key is
-        // validated, and the participant implementation must exist. The stored
-        // model is what a later start reads, so a restart cannot silently pick
-        // a different provider.
-        let mut model = model.clone();
-        self.runtime.resolve_model_capabilities(&mut model)?;
-
         // The model row and its trigger (`events`) rows are reconciled and
         // committed as one atomic batch inside `Store::deploy`.
-        self.store.clone().deploy(&model, view).await
+        self.store.clone().deploy(model, view).await
     }
 
     #[instrument(skip(self, q))]
