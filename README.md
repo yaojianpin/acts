@@ -3,72 +3,80 @@
 [![Build](https://github.com/yaojianpin/acts/actions/workflows/rust.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=rust)
 [![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=test)
 [![Coverage](https://raw.githubusercontent.com/yaojianpin/acts/badges/coverage.svg)](https://github.com/yaojianpin/acts/actions/workflows/coverage.yml)
+[![Stress](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress.svg)](https://github.com/yaojianpin/acts/actions/workflows/stress.yml)
+[![Prof](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory.svg)](https://github.com/yaojianpin/acts/actions/workflows/prof.yml)
 
-Acts is a fast, lightweight, extensiable workflow engine that executes workflows defined in YAML format.
+Acts is a fast, lightweight, extensible workflow engine for workflows defined in YAML. It runs as an embedded Rust library or as a server, and it is durable by design: every run is a transactional aggregate, every state transition commits together with its outbox records, and an interrupted engine resumes exactly where its aggregate left off.
 
-Unlike traditional workflow engines (such as BPMN). Acts uses a message-driven architecture to execute and distribute messages. 
-
-Acts uses Step and Branch to build the workflow. Step and Branch are the workflow stucture to run in sequence or to step into different branch by condition. A step that declares a package (`uses`) is responsible for the action execution.
+Workflows are built from steps and branches. A step that declares a package (`uses`) performs the action; branch conditions select the path; joins, subflows, timers, human acts and message acts are part of the same kernel. The engine is message-driven: a run advances by claiming an operation, applying one deterministic transition, and committing the resulting aggregate and derived indexes — never by mutating an in-memory process object.
 
 ## Architecture
 
-The kernel in `scheduler` is the engine. `Engine::builder().start()` returns an
-`Engine` that owns one runtime, and the runtime owns the durable store and one
-kernel host. A started run is a durable aggregate in the store (its tasks,
-variables, operations and outbox records); the kernel loads that aggregate,
-performs the act or client step, and commits the transition together with the
-outbox records it produces. The aggregate is the authority, so a client action
-(`act:*`, `proc:*`) is always re-planned against the aggregate that is loaded,
-not against an in-memory process object.
+`Engine::builder().start()` returns an `Engine` that owns one runtime and one kernel host. The runtime is layered:
 
-The `procs`, `tasks` and `vars` rows are a read model projected from the
-aggregates; each row records the aggregate revision it was derived from.
-`proc:get` (and `proc().get(pid)`) answers from those rows, and its task read
-runs the strong-read repair: a run whose rows lag its aggregate is re-projected
-from the aggregate before its tasks are read.
+- **Kernel (`scheduler`)** — operations, claims, transition planning, outbox records and the run lifecycle (start, terminal, reclaim). One operation is one guarded commit: the aggregate, its appended log entry and the derived indexes move together or not at all.
+- **Durable layer (`scheduler/durable`)** — each run is an aggregate family (head, base snapshot, append-only log window and recovery/outbox/ready indexes) in a `KvStore`. Reads take one consistent snapshot of the family; commits are compare-and-swap batches; the log compacts online. `MemoryStore` is the default; `acts-store` adds sled, SQLite and Postgres, each with native snapshot reads.
+- **Runtime** — pid-keyed scheduler lanes, store-writer shards, and independent ready, recovery, outbox, cleanup and projection loops with bounded batches and their own health. In-memory queues are bounded and apply backpressure; the durable indexes are the overflow.
+- **Read model** — `procs`, `tasks` and `vars` are a versioned projection of the aggregate. Every row records the revision it was derived from and is written conditionally, so a slow projection cannot overwrite a newer one; `proc:get` re-projects a lagging run before answering.
 
-`cache_cap` bounds the runs in flight at once — runs started and not yet
-terminal — not a resident-process cache. A start beyond the cap is parked: its
-aggregate and process row are created (the row's state is `None`), but it runs
-no hop; when a run settles and frees a slot, the parked run with the oldest
-`__created` stamp is admitted first. The default is 1024, and a negative value
-means no bound. `EngineBuilder::cache_size` sets the same value.
+A started run is one aggregate; a client action (`act:*`, `proc:*`) is re-planned against the aggregate loaded from the store. Recovery scans the same durable indexes, the outbox delivers at least once with claims and quarantine, and terminal cleanup reclaims the aggregate, its rows and its workdir. `cache_cap` bounds runs in flight: a start beyond it is parked durably (state `None`) and admitted when a slot frees.
 
 ## Key Features
 
 ### Fast
 
-Write in Rust, No virtual machine.
-
-1. bechmark with memory store
-
-```txt,no_run
-load/from_yml           time:   [46.130 µs 46.411 µs 46.666 µs]
-                        thrpt:  [21.429 Kelem/s 21.547 Kelem/s 21.678 Kelem/s]
-deploy/model            time:   [192.09 µs 197.48 µs 204.39 µs]
-                        thrpt:  [4.8927 Kelem/s 5.0639 Kelem/s 5.2059 Kelem/s]
-start/proc              time:   [684.94 µs 794.32 µs 955.33 µs]
-                        thrpt:  [1.0468 Kelem/s 1.2589 Kelem/s 1.4600 Kelem/s]
-act/act                 time:   [1.4242 ms 1.7966 ms 2.2044 ms]
-                        thrpt:  [453.64  elem/s 556.60  elem/s 702.16  elem/s]
-
-store_mixed/proc_crud/1000
-                        time:   [44.543 µs 45.109 µs 46.292 µs]
-                        thrpt:  [21.602 Kelem/s 22.169 Kelem/s 22.450 Kelem/s]
-```
+- One operation, one commit: claim, plan, effect and derived indexes are one guarded batch.
+- Consistent snapshot loads, a bounded decode cache, and an append-only log with online compaction.
+- Pid-keyed scheduler lanes and store-writer shards run independent processes in parallel while preserving per-process order.
+- Bounded in-memory queues with a durable overflow, so overload slows intake instead of losing work.
+- Continuous measurement instead of a static table: the [performance and stress gates](#performance-and-stress-gates) publish throughput, latency and resource trends for both stores.
 
 ### Lightweight
 
-The lib size is about 4.6mb now.
+- A single Rust library with no virtual machine and no mandatory broker; `Engine::builder().start()` is the whole setup.
+- The default store is in-memory; durability is a backend choice (sled, SQLite, Postgres) behind the same `KvStore`.
+- One kernel host per engine with independent loops, bounded batches, and no resident object per completed run: finished runs are reclaimed.
+- Optional layers — server, CLI, channels, packages and plugins — are separate crates; the core does not require them.
 
-### Extensiable
+### Extensible
 
-- store extension
-  support creating an external store: implement `KvStore` and see the backends under
-  `crates/acts-store/src` (`postgres`, `sqlite`, `sled`).
+- **Stores** — implement `KvStore` (see `crates/acts-store/src`) or use the embedded and SQL backends.
+- **Packages** — declare `uses` in YAML and implement effects in Rust, JavaScript, HTTP, shell or state; see `examples/custom_package` and `packages/`.
+- **Plugins and channels** — gRPC, web and NATS integrations under `plugins/`, with delivery and transport seams in the kernel.
+- **Control** — roles and principals via `acts-acl`, snapshots and sealed values via the snapshot manager, expressions via `acts-expr`.
 
-- package extension
-  support creating a custom package, please refer to the code under `examples/custom_package`.
+## Performance and stress gates
+
+[![Stress](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress.svg)](https://github.com/yaojianpin/acts/blob/stress/report.md)
+[![Throughput](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-throughput.svg)](https://github.com/yaojianpin/acts/blob/stress/report.md)
+[![Peak RSS](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rss.svg)](https://github.com/yaojianpin/acts/blob/stress/report.md)
+[![Rows left](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rows.svg)](https://github.com/yaojianpin/acts/blob/stress/report.md)
+
+[`examples/stress`](examples/stress) is the load generator behind these numbers. The [`stress` workflow](.github/workflows/stress.yml) runs it on every pull request that touches the scheduler, the store, or the harness — a 1,000-workflow performance smoke at concurrency 16 — and on `main`/`develop`, weekly, and by manual dispatch with 5,000 workflows across concurrency 16/32/64 and a cleanup drain wait.
+
+The gate is deterministic: every measured workflow completes, the error rate is zero, no phase times out, background health never degrades, and after the drain the process-row count, residual aggregate documents, and residual index documents are zero. Throughput and peak RSS are published as a trend — a shared runner's timings move by double-digit percents between runs, so they are not a regression threshold.
+
+The latest [`report.md`](https://github.com/yaojianpin/acts/blob/stress/report.md) (with `report.json`, `metrics.csv`, and `trace.log`) is published to the `stress` branch, and every run also attaches them as the `stress-report` artifact. Manual dispatch can choose the workflow count, concurrency stages, cleanup wait, soak, and store backend (memory by default; sled/sqlite for the durable paths).
+
+Reference run (memory store, 8-core workstation, 10,000 workflows at c16/32/64): **82.4 workflows/s**, **0.24 GiB peak RSS**, **0 rows / 0 aggregate documents / 0 index documents after the cleanup wait**, 0 degraded health samples.
+
+### Completion microbenchmark (`examples/prof`)
+
+[`examples/prof`](examples/prof) is a completion-latency microbenchmark, not a load test: it parks N processes on one human act and times each `complete()` after a warmup. `--store memory` measures the in-memory engine path; `--store sled` measures the same path with the durable sled backend, so the two numbers are published separately — one never stands in for the other.
+
+| Store | Status | Avg | p99 | Throughput |
+| --- | --- | --- | --- | --- |
+| memory | [![prof memory](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory.svg)](https://github.com/yaojianpin/acts/blob/prof/report-memory.md) | [![avg memory](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory-avg.svg)](https://github.com/yaojianpin/acts/blob/prof/report-memory.md) | [![p99 memory](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory-p99.svg)](https://github.com/yaojianpin/acts/blob/prof/report-memory.md) | [![rate memory](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory-throughput.svg)](https://github.com/yaojianpin/acts/blob/prof/report-memory.md) |
+| sled | [![prof sled](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-sled.svg)](https://github.com/yaojianpin/acts/blob/prof/report-sled.md) | [![avg sled](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-sled-avg.svg)](https://github.com/yaojianpin/acts/blob/prof/report-sled.md) | [![p99 sled](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-sled-p99.svg)](https://github.com/yaojianpin/acts/blob/prof/report-sled.md) | [![rate sled](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-sled-throughput.svg)](https://github.com/yaojianpin/acts/blob/prof/report-sled.md) |
+
+The [`prof` workflow](.github/workflows/prof.yml) runs both stores on pull requests (200/100 completions) and on `main`/`develop`, weekly, and manual dispatch (2,000/500), publishing `report-memory.*` and `report-sled.*` plus the badges to the `prof` branch. The gate is zero failed completions; latency and throughput are trend data.
+
+```sh
+cargo run --release -p acts-example-prof -- --store memory --iters 2000 --warmup 20 \
+  --json report-memory.json --markdown report-memory.md
+cargo run --release -p acts-example-prof -- --store sled --store-url target/prof-sled \
+  --iters 500 --warmup 20 --json report-sled.json --markdown report-sled.md
+```
 
 ## Installation
 
@@ -571,7 +579,7 @@ acts:
 
   - [x] model (Workflow, Branch, Step)
   - [x] kernel scheduler (durable aggregates, outbox, recovery, row projection)
-  - [x] javascript runner
+  - [x] expr expression
   - [x] in-flight run cap (`cache_cap`)
   - [x] plugin register
   - [x] package register
@@ -583,7 +591,7 @@ acts:
   - [x] hook
   - [x] chat
   - [x] schedule
-  
+
 - store
   - [x] memory
   - [x] sqlite
@@ -601,15 +609,17 @@ acts:
     - [x] sequence
     - [x] subflow
     - [x] join
+    - [x] candidates
 
   - transform
     - [x] set
-    - [x] code
+
   - app
     - [ ] form (plugins/form)
     - [ ] ai (plugins/ai)
     - [x] state (packages/acts-package-state)
     - [x] http (packages/acts-package-http)
+    - [x] javascript (packages/acts-package-javascript)
     - [x] shell (packages/acts-package-shell) runs a bash script in bashkit's virtual filesystem
     - [x] pubsub (packages/acts-package-nats)
     - [ ] database (plugins/database)
