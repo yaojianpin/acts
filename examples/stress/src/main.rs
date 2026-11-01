@@ -12,7 +12,7 @@ use acts::{
     CancellationToken, CpuStatus, Engine, HealthStatus, KvStore, MemoryStatus, MemoryStore,
     Principal, ProcessCounts, RunHandle, RunOutcome, StorageStatus, SystemStatus, Vars, Workflow,
 };
-use acts_store::SledStore;
+use acts_store::{PostgresStore, SledStore, SqliteStore};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use std::{
@@ -92,9 +92,11 @@ struct Options {
     timeout_seconds: u64,
     scheduler_workers: usize,
     store_workers: usize,
-    /// `sled` (durable, `./data`) or `memory` (Engine default). Memory
-    /// isolates engine scheduling and effect cost from storage fsync cost.
+    /// `sled` (durable, `./data`), `memory`, `sqlite` or `postgres`.
     store: String,
+    /// SQLite file path or Postgres connection URL. Postgres falls back to
+    /// `DATABASE_URL`; SQLite defaults to `<output>/stress.sqlite`.
+    store_url: Option<String>,
     output: PathBuf,
     /// `EnvFilter` directives for tracing. `$ACTS_LOG` is the default (like
     /// acts-server); `--log-level` overrides it.
@@ -119,6 +121,7 @@ impl Options {
             scheduler_workers: cores,
             store_workers: cores,
             store: "sled".to_string(),
+            store_url: None,
             output: PathBuf::from("target/stress-results"),
             log_level: env::var("ACTS_LOG").unwrap_or_else(|_| "info".to_string()),
             max_error_rate_pct: DEFAULT_ERROR_LIMIT_PCT,
@@ -156,6 +159,7 @@ impl Options {
                         parse_num(&value(&mut args, "--store-workers")?, "store-workers")?;
                 }
                 "--store" => options.store = value(&mut args, "--store")?,
+                "--store-url" => options.store_url = Some(value(&mut args, "--store-url")?),
                 "--output" => options.output = PathBuf::from(value(&mut args, "--output")?),
                 "--log-level" => options.log_level = value(&mut args, "--log-level")?,
                 "--max-error-rate-pct" => {
@@ -192,8 +196,11 @@ impl Options {
         if options.concurrency.iter().any(|n| *n > 8_192) {
             return Err("a concurrency stage cannot exceed 8192 workers".into());
         }
-        if !matches!(options.store.as_str(), "memory" | "sled") {
-            return Err("--store must be 'sled' or 'memory'".into());
+        if !matches!(
+            options.store.as_str(),
+            "memory" | "sled" | "sqlite" | "postgres"
+        ) {
+            return Err("--store must be 'sled', 'memory', 'sqlite' or 'postgres'".into());
         }
         if options.log_level.trim().is_empty() {
             return Err("--log-level cannot be empty".into());
@@ -219,7 +226,10 @@ fn print_help() {
            --timeout-seconds N       Per-workflow completion timeout, default 120\n\
            --workers N               Scheduler lanes, default logical CPU count\n\
            --store-workers N         Store writer shards, default logical CPU count\n\
-           --store BACKEND           sled (default, ./data) or memory\n\
+           --store BACKEND           sled (default, ./data), memory, sqlite, postgres\n\
+           --store-url URL           SQLite file path or Postgres URL\n\
+                                     (SQLite default <output>/stress.sqlite; Postgres\n\
+                                      falls back to $DATABASE_URL)\n\
            --output DIR               Output directory, default target/stress-results\n\
            --log-level FILTER         Tracing filter, default $ACTS_LOG or 'info'\n\
            --max-error-rate-pct N    Error-rate gate, default 0.1 percent\n\
@@ -873,7 +883,7 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
         md.push('\n');
     }
     md.push_str("## Metric definitions and limitations\n\n");
-    md.push_str("- Each run's `input` varies 0–9, so the while-loop length and both branches are exercised.\n- The report keeps status metrics only; it never copies `SystemStatus.config`, so credentials in configuration cannot leak into a report.\n- start API latency: from the `proc:start` call until a durable run handle is returned.\n- end-to-end latency: from submission until `RunHandle::wait` observes a terminal outcome, including queueing and execution.\n- workflows/s: completed runs divided by the phase's wall-clock time; errored and terminated runs do not count.\n- Percentiles use nearest-rank; stddev is the sample standard deviation.\n- CPU/RSS/storage/process counts/background loop health come from the engine's `sys:status`; each CPU sample waits for sysinfo's minimum CPU delta window, so the actual sampling interval is at least `sample-ms` and the sampler itself adds some overhead. Peaks are sample points, not continuous peak values. Collection failures are counted and fail the PASS gate.\n- This is a closed-loop load: each worker submits its next run only after the previous one finished; it is not a fixed-arrival-rate open-loop model.\n- The backend is selected by `--store` (SledStore at `./data` by default; `memory` isolates engine cost from storage cost). This does not replace benchmarks for SQLite/Postgres or claim durable crash-recovery coverage.\n- PASS means the measured target was submitted and every measured/soak/post-stress phase stayed under the error-rate gate, with no wait timeouts, a complete post-stress smoke run, healthy background loops and successful metric collection. A few failures under the gate are still reported. Use `--max-error-rate-pct 0` for strict zero-failure gating. PASS is not a performance SLO claim for every workload.\n\n");
+    md.push_str("- Each run's `input` varies 0–9, so the while-loop length and both branches are exercised.\n- The report keeps status metrics only; it never copies `SystemStatus.config`, so credentials in configuration cannot leak into a report.\n- start API latency: from the `proc:start` call until a durable run handle is returned.\n- end-to-end latency: from submission until `RunHandle::wait` observes a terminal outcome, including queueing and execution.\n- workflows/s: completed runs divided by the phase's wall-clock time; errored and terminated runs do not count.\n- Percentiles use nearest-rank; stddev is the sample standard deviation.\n- CPU/RSS/storage/process counts/background loop health come from the engine's `sys:status`; each CPU sample waits for sysinfo's minimum CPU delta window, so the actual sampling interval is at least `sample-ms` and the sampler itself adds some overhead. Peaks are sample points, not continuous peak values. Collection failures are counted and fail the PASS gate.\n- This is a closed-loop load: each worker submits its next run only after the previous one finished; it is not a fixed-arrival-rate open-loop model.\n- The backend is selected by `--store`: `sled` (default, `./data`), `memory`, `sqlite` (file in `--store-url` or `<output>/stress.sqlite`), or `postgres` (URL in `--store-url` or `DATABASE_URL`; never copied into this report). Durable backends keep the engine's per-commit flush/commit semantics; `memory` isolates engine cost from storage cost.\n- PASS means the measured target was submitted and every measured/soak/post-stress phase stayed under the error-rate gate, with no wait timeouts, a complete post-stress smoke run, healthy background loops and successful metric collection. A few failures under the gate are still reported. Use `--max-error-rate-pct 0` for strict zero-failure gating. PASS is not a performance SLO claim for every workload.\n\n");
     md.push_str("## Output files\n\n- `report.json`: full structured report.\n- `metrics.csv`: system resource and background health time series.\n- `report.md`: this report.\n- `trace.log`: tracing log for this run (controlled by `--log-level` / `ACTS_LOG`, default `info`; use `acts=debug,acts_example_stress=debug` for bottleneck analysis and `acts=trace` to see every operation's worker lane. Each `scheduler lane executing operation` line is one plan transition; count them per pid to measure transitions/workflow).\n");
     fs::write(path, md)
 }
@@ -917,13 +927,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("validated concurrency list");
     let cache_cap = maximum_concurrency.saturating_mul(2).saturating_add(64);
     let queue_cap = maximum_concurrency.saturating_mul(32).max(1_024);
+    // The backend is chosen before the banner: a bad connection or SQLite
+    // path should fail before a run reports that it started. Connection URLs
+    // are never copied into the report (a Postgres URL may carry a password).
+    let (store, store_label): (Arc<dyn KvStore>, String) = match options.store.as_str() {
+        "memory" => (Arc::new(MemoryStore::new()), "memory".to_string()),
+        "sled" => (
+            Arc::new(SledStore::open("./data")?),
+            "sled (./data)".to_string(),
+        ),
+        "sqlite" => {
+            let path = options.store_url.clone().unwrap_or_else(|| {
+                options
+                    .output
+                    .join("stress.sqlite")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            let store = SqliteStore::open(&path).await?;
+            (Arc::new(store), format!("sqlite ({path})"))
+        }
+        "postgres" => {
+            let url = options
+                .store_url
+                .clone()
+                .or_else(|| env::var("DATABASE_URL").ok())
+                .ok_or("--store postgres requires --store-url or DATABASE_URL")?;
+            let store = PostgresStore::open(&url).await?;
+            (Arc::new(store), "postgres".to_string())
+        }
+        other => return Err(format!("unknown store backend: {other}").into()),
+    };
 
     println!("Acts million-run stress test");
     println!("  target:       {} workflows", options.count);
     println!("  concurrency:  {:?}", options.concurrency);
     println!("  scheduler:    {} workers", options.scheduler_workers);
     println!("  store writer: {} workers", options.store_workers);
-    println!("  store:        {}", options.store);
+    println!("  store:        {store_label}");
     println!("  cache cap:    {}", cache_cap);
     println!("  soak:         {} seconds", options.soak_seconds);
     println!("  output:       {}", options.output.display());
@@ -938,18 +979,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeout_seconds = options.timeout_seconds,
         scheduler_workers = options.scheduler_workers,
         store_workers = options.store_workers,
-        store = %options.store,
+        store = %store_label,
         cache_cap,
         queue_cap,
         output = %options.output.display(),
         log_level = %options.log_level,
         "stress run starting"
     );
-    let store: Arc<dyn KvStore> = if options.store == "memory" {
-        Arc::new(MemoryStore::new())
-    } else {
-        Arc::new(SledStore::open("./data")?)
-    };
     let engine = Engine::builder()
         .set_store(store)
         .cache_size(cache_cap as i64)
@@ -1229,17 +1265,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sample_interval_ms: options.sample_ms,
             workflow_timeout_seconds: options.timeout_seconds,
             engine_version: env!("CARGO_PKG_VERSION").into(),
-            store_backend: if options.store == "memory" {
-                "memory".into()
-            } else {
-                "sled (./data)".into()
-            },
+            store_backend: store_label,
             max_error_rate_pct: options.max_error_rate_pct,
             workload: "workflow: init + variable while-loop + expression evaluation + two-way branch + finalize".into(),
             host_os: std::env::consts::OS.into(),
             host_arch: std::env::consts::ARCH.into(),
             logical_cores,
-            note: "Backend selected by --store; closed-loop load; sampled peaks may understate instantaneous peaks. Run a release build on the target machine.".into(),
+            note: "Backend selected by --store; connection URLs are not copied into this report; closed-loop load; sampled peaks may understate instantaneous peaks. Run a release build on the target machine.".into(),
         },
         shutdown_seconds,
     };

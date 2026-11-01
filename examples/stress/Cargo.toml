@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 tokio = { features = ["full"], workspace = true }
 acts = { workspace = true }
-acts-store = { workspace = true, features = ["sled"] }
+acts-store = { workspace = true, features = ["sled", "sqlite", "postgres"] }
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
