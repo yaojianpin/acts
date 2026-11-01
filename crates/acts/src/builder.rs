@@ -147,16 +147,17 @@ impl EngineBuilder {
         self
     }
 
-    /// Set the number of serial task lanes. Independent pids can execute on
-    /// different lanes; tasks belonging to the same pid retain FIFO order.
+    /// Set the number of serial worker lanes. Each lane runs one operation at a
+    /// time; a pid hashes to one lane, so independent pids execute in parallel
+    /// while a process's operations keep FIFO order.
     pub fn scheduler_workers(mut self, workers: usize) -> Self {
         self.config_mut().data.scheduler_workers = Some(workers);
         self
     }
 
-    /// Set the maximum in-memory scheduler backlog. It is split across the task
-    /// lanes, and a lane that is full overflows its producers to the durable
-    /// outbox (`next` work spills; a fresh start fails).
+    /// Set the maximum in-memory scheduler backlog. It is split across the
+    /// worker lanes, and a full lane refuses new jobs — the durable ready index
+    /// is the overflow queue.
     pub fn scheduler_queue_cap(mut self, cap: usize) -> Self {
         self.config_mut().data.scheduler_queue_cap = Some(cap);
         self

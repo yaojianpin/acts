@@ -1,0 +1,16 @@
+[package]
+name = "acts-example-stress"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tokio = { features = ["full"], workspace = true }
+acts = { workspace = true }
+acts-store = { workspace = true, features = ["sled"] }
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { features = ["env-filter"], workspace = true }

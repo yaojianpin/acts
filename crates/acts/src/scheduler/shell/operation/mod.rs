@@ -11,6 +11,10 @@
 //!    ([`ActOperation::precheck`]) and the claim, as one atomic
 //!    `ClaimAndPrepare` event. The snapshot that commit hands back is the
 //!    authoritative state the rest of the operation is formed from.
+//!    An effectless kind ([`OperationKind::is_effectless`]) skips the claim
+//!    commit: its phase 2 is a pure decision over that snapshot, so the
+//!    operation stays `Pending` with its ready record until its plan commit
+//!    closes it, and an interrupted attempt is simply re-driven.
 //! 2. **Perform** ([`ActOperation::run`]): the operation's own work —
 //!    evaluating a step's guard and resolving its act, running a package's
 //!    effect, deciding a timer's round, or nothing at all for a claimed operation whose
@@ -361,11 +365,13 @@ impl Workers {
         let outcome = driver.run(self, &mut operation).await?;
         let effect_started = outcome.ran_external_effect();
         if matches!(outcome, Outcome::Nothing) {
-            // The work turned out to be nothing after all: the claim goes back
-            // and the release writes the ready record the driver defers to the
-            // next poll. The release is best-effort — recovery's lease expiry
-            // leads to the same record and the same "nothing happened" answer.
-            if let Err(error) = self.release_claim(&claimed, 1).await {
+            // The work turned out to be nothing after all. A claimed
+            // operation goes back (its release writes the ready record the
+            // driver defers to the next poll); an unclaimed effectless one
+            // never took a claim, so its ready record simply stays due.
+            if !claimed.claim.is_unclaimed()
+                && let Err(error) = self.release_claim(&claimed, 1).await
+            {
                 tracing::debug!(
                     id = ?claimed.id,
                     error = %error,

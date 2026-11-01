@@ -44,6 +44,7 @@ dashmap = "6.1.0"
 tokio-util = "0.7.18"
 parking_lot = { workspace = true }
 bitflags = { version = "2.13.1", features = ["serde"] }
+xxhash-rust = { workspace = true }
 
 [features]
 # The functional-test harness (`acts::testing::FlowFixture`) for downstream

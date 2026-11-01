@@ -28,8 +28,12 @@
 //! Every drive is one `commit_transition` with the operation it drives as the
 //! plan's `source_operation`, so the operation is committed *and closed* inside the
 //! same atomic batch as its business effect (the `Committed` → `Completed`
-//! pair is applied in order there). When an operation's durable remainder
-//! already exists (a wake redelivered after the commit), the drive commits an
+//! pair is applied in order there). An effectless kind skips its separate
+//! claim commit and closes directly in that same plan transition (see
+//! `operation::prepare`), halving the aggregate commits of a start/cascade
+//! hop; only `ApplyAction`, which crosses the external-effect seam, keeps the
+//! durable pre-effect claim. When an operation's durable remainder already
+//! exists (a wake redelivered after the commit), the drive commits an
 //! empty plan sourced by its own operation, which completes the operation
 //! without touching business state.
 //!
@@ -124,6 +128,7 @@ mod liveness;
 pub(crate) mod model;
 mod operation;
 mod planning;
+mod pool;
 pub(crate) mod recovery;
 pub(crate) mod scope;
 pub(crate) mod snapshot;
@@ -131,6 +136,7 @@ pub(crate) mod timers;
 pub(crate) mod validation;
 
 use self::model::task_graph;
+use self::pool::{Enqueued, JobSource, LanePool};
 use self::{action::*, errors::*, facts::*, planning::*};
 pub(crate) use admission::{AdmissionCaps, Admissions};
 pub(crate) use caps::assign::{
@@ -215,6 +221,11 @@ pub(crate) struct Workers {
     processes: Arc<AsyncProcessRepository>,
     recovery: Arc<AsyncRecoveryRepository>,
     wake_tx: Sender<OperationId>,
+    /// The fixed scheduler worker pool (see [`pool`]): one lane per configured
+    /// worker, every operation routed by its pid's hash. The receiving ends
+    /// move to the lane tasks when [`Workers::serve`] starts; a host driven
+    /// inline by the test harness keeps them unclaimed.
+    pool: Arc<LanePool>,
     /// The extensible capabilities the scheduler calls: package effects,
     /// branch predicates, outbox delivery and process lifecycle. The scheduler
     /// holds the capability traits, never the shell's default implementations;
@@ -334,22 +345,48 @@ impl Workers {
             AdmissionCaps::new(cache_cap),
             max_node_run_times,
             timer_poll_ms,
+            1,
+            PAGE_SIZE * 8,
         )
     }
 
-    /// The host with explicit caps for every admission category (A8). The
-    /// serving runtime builds these from [`Config`](crate::Config); tests that
-    /// only exercise the execution bound keep [`Self::new`].
+    /// A test host with an explicit scheduler lane count — the pool tests
+    /// that need independent pids to execute on different workers.
+    #[cfg(test)]
+    pub(crate) fn new_with_workers(
+        kv: Arc<dyn KvStore>,
+        cache_cap: usize,
+        max_node_run_times: u64,
+        timer_poll_ms: i64,
+        workers: usize,
+    ) -> (Arc<Self>, Receiver<OperationId>) {
+        Self::new_with_admissions(
+            kv,
+            AdmissionCaps::new(cache_cap),
+            max_node_run_times,
+            timer_poll_ms,
+            workers,
+            PAGE_SIZE * 8,
+        )
+    }
+
+    /// The host with explicit caps for every admission category (A8) and the
+    /// scheduler's worker-lane count and queue capacity. The serving runtime
+    /// builds these from [`Config`](crate::Config); tests that only exercise
+    /// the execution bound keep [`Self::new`].
     pub(crate) fn new_with_admissions(
         kv: Arc<dyn KvStore>,
         admissions: AdmissionCaps,
         max_node_run_times: u64,
         timer_poll_ms: i64,
+        scheduler_workers: usize,
+        scheduler_queue_cap: usize,
     ) -> (Arc<Self>, Receiver<OperationId>) {
         let store = Arc::new(KvDocumentStore::new(kv));
         let processes = Arc::new(AsyncProcessRepository::new(store));
         let recovery = Arc::new(AsyncRecoveryRepository::new(processes.clone()));
         let (wake_tx, wake_rx) = channel(PAGE_SIZE * 8);
+        let pool = Arc::new(LanePool::new(scheduler_workers, scheduler_queue_cap));
         // The assembly defaults: no effects/predicates/lifecycle until the
         // serving runtime attaches them, and the shadow transport (records
         // logged, nothing sent) answering delivery.
@@ -367,6 +404,7 @@ impl Workers {
                 processes,
                 recovery,
                 wake_tx,
+                pool,
                 caps: Arc::new(parking_lot::RwLock::new(ports)),
                 deliver: Arc::new(tokio::sync::Notify::new()),
                 timer_guider: Arc::new(parking_lot::RwLock::new(None)),
@@ -397,6 +435,12 @@ impl Workers {
             }),
             wake_rx,
         )
+    }
+
+    /// The scheduler's worker-lane count (what the serving runtime configures).
+    #[cfg(test)]
+    pub(crate) fn scheduler_lanes(&self) -> usize {
+        self.pool.lanes()
     }
 
     /// The ready/timer pass's failure state (A10).
@@ -922,15 +966,17 @@ impl Workers {
         }
     }
 
-    /// The background driver (A10): executes woken operations as they arrive,
-    /// and runs each control-plane loop on its own interval —
+    /// The background driver (A10): spawns one scheduler worker per lane and
+    /// runs each control-plane loop on its own interval —
     /// [`KernelSchedule::ready`] for the durable ready queue and timers,
     /// [`KernelSchedule::recovery`] for the exceptional scan,
     /// [`KernelSchedule::outbox`] for delivery retries, and
     /// [`KernelSchedule::projection`] for row repair — plus the runtime's
     /// store-facing timers (schedule triggers, delivery retries, terminal
-    /// cleanup, snapshot purge) once attached, on their own intervals. One
-    /// task, one store-touching background service. Notifications still
+    /// cleanup, snapshot purge) once attached, on their own intervals. The
+    /// driver routes operations to the lane whose pid hash owns them; the lane
+    /// tasks execute them, one at a time per lane. One task owns the control
+    /// plane, one store-touching background service. Notifications still
     /// accelerate the ready and outbox passes; a lost wake is only latency,
     /// never lost work. Exits when `shutdown` fires.
     pub(crate) async fn serve(
@@ -939,6 +985,10 @@ impl Workers {
         shutdown: tokio_util::sync::CancellationToken,
         schedule: KernelSchedule,
     ) {
+        // The lane tasks own every operation from here on. A host driven
+        // inline by the test harness never reaches this point, keeps its
+        // receivers unclaimed, and does not route wakes into the pool.
+        let pool_active = self.start_scheduler_workers(&shutdown);
         // Boot repair is a one-time pass, not a loop: run it before the
         // tickers so a cold database has its derived indexes even when the
         // recovery interval is long. A failure is retried by the owning loop.
@@ -973,7 +1023,10 @@ impl Workers {
                     // channel, or the boot repair rebuilt the index: drive it
                     // now, not on the next tick.
                     let now = SystemClock.now_ms();
-                    if let Err(error) = self.drive_ready(now, schedule.ready_budget).await {
+                    if let Err(error) = self
+                        .run_ready_pass(now, schedule.ready_budget, pool_active)
+                        .await
+                    {
                         tracing::warn!(error = %error, "kernel ready pass failed");
                     }
                 }
@@ -997,7 +1050,8 @@ impl Workers {
                     let now = SystemClock.now_ms();
                     let pass = async {
                         self.ensure_ready_boot(now).await?;
-                        self.drive_ready(now, schedule.ready_budget).await
+                        self.run_ready_pass(now, schedule.ready_budget, pool_active)
+                            .await
                     }
                     .await;
                     match pass {
@@ -1166,32 +1220,201 @@ impl Workers {
                 }
                 id = wake_rx.recv() => {
                     let Some(id) = id else { break };
-                    // A panic anywhere while driving must not take the driver down
-                    // with it: the engine would be left running with no owner
-                    // for any operation. The operation's own user-code boundary (a
-                    // package's `execute`) has already turned a package panic
-                    // into an ordinary failure, so what reaches here is an
-                    // engine panic — reported, and the operation is left open
-                    // for recovery.
-                    let run = match CatchPanic::new(self.execute_one(&id)).await {
-                        Ok(run) => run,
-                        Err(payload) => {
-                            let message = panic_message(&payload);
-                            tracing::error!(operation = ?id, panic = %message, "kernel operation panicked; left open for recovery");
-                            continue;
+                    if pool_active {
+                        // The durable ready record is what survives a refused
+                        // enqueue; the readiness notification makes the
+                        // coordinator re-scan once a lane reports room.
+                        if self.pool.enqueue(&id, JobSource::Wake) == Enqueued::Full {
+                            self.ready_metrics.lock().wake_failures += 1;
+                            self.ready.notify_one();
                         }
-                    };
-                    if let Err(error) = run {
-                        // The operation stays open; its durable ready record
-                        // was removed by the claim, so recovery's lease expiry
-                        // is the next owner.
-                        #[cfg(test)]
-                        eprintln!("operation {id:?} failed: {error}");
-                        tracing::debug!(operation = ?id, error = %error, "kernel operation failed; left open for recovery");
+                    } else {
+                        // No lane owns operations (a second `serve` on the
+                        // same host): drive inline, exactly as before the pool.
+                        // A panic anywhere while driving must not take the
+                        // driver down with it: the engine would be left running
+                        // with no owner for any operation. The operation's own
+                        // user-code boundary (a package's `execute`) has
+                        // already turned a package panic into an ordinary
+                        // failure, so what reaches here is an engine panic —
+                        // reported, and the operation is left open for
+                        // recovery.
+                        let run = match CatchPanic::new(self.execute_one(&id)).await {
+                            Ok(run) => run,
+                            Err(payload) => {
+                                let message = panic_message(&payload);
+                                tracing::error!(operation = ?id, panic = %message, "kernel operation panicked; left open for recovery");
+                                continue;
+                            }
+                        };
+                        if let Err(error) = run {
+                            // The operation stays open; its durable ready
+                            // record was removed by the claim, so recovery's
+                            // lease expiry is the next owner.
+                            #[cfg(test)]
+                            eprintln!("operation {id:?} failed: {error}");
+                            tracing::debug!(operation = ?id, error = %error, "kernel operation failed; left open for recovery");
+                        }
                     }
                 }
             }
         }
+        if pool_active {
+            self.pool.deactivate();
+        }
+    }
+
+    /// Spawn one task per lane and route wakes into the pool. `false` means
+    /// another `serve` already took the receivers: the caller drives inline.
+    fn start_scheduler_workers(
+        self: &Arc<Self>,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> bool {
+        let Some(receivers) = self.pool.take_receivers() else {
+            return false;
+        };
+        for (lane, receivers) in receivers.into_iter().enumerate() {
+            let host = self.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move { host.serve_lane(lane, receivers, shutdown).await });
+        }
+        self.pool.activate();
+        true
+    }
+
+    /// One lane's consumer: execute its operations in FIFO order, one at a
+    /// time — the concrete guarantee that a pid's operations never run
+    /// concurrently, whichever worker owns the lane.
+    async fn serve_lane(
+        self: Arc<Self>,
+        lane: usize,
+        mut jobs: Receiver<OperationId>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) {
+        loop {
+            let id = tokio::select! {
+                _ = shutdown.cancelled() => break,
+                id = jobs.recv() => match id {
+                    Some(id) => id,
+                    None => break,
+                },
+            };
+            let Some(source) = self.pool.take(lane, &id) else {
+                continue;
+            };
+            // Opt-in throughput forensics: `acts=trace` maps every operation
+            // (and therefore every pid) to the worker lane that ran it.
+            tracing::trace!(lane, operation = ?id, source = ?source, "scheduler lane executing operation");
+            let run = CatchPanic::new(self.execute_one(&id)).await;
+            match run {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => {
+                    // A ready-scan job that had nothing to do now (a parked
+                    // run, an idle timer round) is deferred one poll interval,
+                    // exactly as the inline driver did. A wake is not deferred:
+                    // its record keeps the schedule the plan gave it.
+                    if source == JobSource::Ready {
+                        let until = SystemClock.now_ms().saturating_add(self.timer_poll_ms);
+                        match self.processes.set_ready_at(&id, until).await {
+                            Ok(true) => self.ready_metrics.lock().deferred += 1,
+                            Ok(false) => {}
+                            Err(error) => tracing::debug!(
+                                operation = ?id,
+                                error = %error,
+                                "deferring an idle ready operation failed"
+                            ),
+                        }
+                    }
+                }
+                Ok(Err(error)) => {
+                    // The operation stays open; its durable ready record was
+                    // removed by the claim, so recovery's lease expiry is the
+                    // next owner.
+                    #[cfg(test)]
+                    eprintln!("operation {id:?} failed: {error}");
+                    tracing::debug!(operation = ?id, error = %error, "kernel operation failed; left open for recovery");
+                }
+                Err(payload) => {
+                    let message = panic_message(&payload);
+                    tracing::error!(operation = ?id, panic = %message, "kernel operation panicked; left open for recovery");
+                }
+            }
+            if self.pool.take_saturated() {
+                self.ready.notify_one();
+            }
+        }
+    }
+
+    /// The ready pass for the serving driver: `dispatch_ready` queues jobs on
+    /// the lanes; `drive_ready` remains the inline harness path.
+    async fn run_ready_pass(&self, now_ms: i64, budget: usize, pooled: bool) -> Result<usize> {
+        if pooled {
+            self.dispatch_ready(now_ms, budget).await
+        } else {
+            self.drive_ready(now_ms, budget).await
+        }
+    }
+
+    /// Queue the due records of the durable ready index onto their pid's
+    /// lanes, up to `budget` operations, and return how many were queued.
+    ///
+    /// This is normal-path liveness for the serving driver: the wake channel
+    /// is only the fast path. A record the lane refused keeps its durable
+    /// place — a full lane is the backpressure, and the next pass re-reads it.
+    pub(crate) async fn dispatch_ready(&self, now_ms: i64, budget: usize) -> Result<usize> {
+        self.ready_metrics.lock().passes += 1;
+        let mut queued = 0usize;
+        let mut cursor = None;
+        let mut observed_peak = 0usize;
+        let mut oldest: Option<i64> = None;
+        loop {
+            // A commit made by a worker in this pass stamps its successors
+            // with the wall clock. Re-read it so a full wake queue does not
+            // leave them waiting for the next tick; test callers that pass a
+            // future instant still select it.
+            let due_now = now_ms.max(SystemClock.now_ms());
+            let page = self
+                .processes
+                .due_ready_page(cursor.as_ref(), due_now, PAGE_SIZE)
+                .await
+                .map_err(runtime)?;
+            observed_peak = observed_peak.max(page.observed);
+            oldest = match (oldest, page.oldest_ready_at_ms) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (left, right) => left.or(right),
+            };
+            if page.operations.is_empty() {
+                break;
+            }
+            {
+                let mut metrics = self.ready_metrics.lock();
+                metrics.backlog = observed_peak;
+                metrics.due = page.operations.len();
+                metrics.oldest_ready_age_ms =
+                    oldest.map(|ready_at| due_now.saturating_sub(ready_at).max(0));
+                metrics.scanned += observed_peak as u64;
+            }
+            let mut refused = false;
+            for id in page.operations {
+                if queued >= budget {
+                    break;
+                }
+                match self.pool.enqueue(&id, JobSource::Ready) {
+                    Enqueued::Yes => queued += 1,
+                    // A wake already queued it; the map upgraded its source.
+                    Enqueued::AlreadyQueued => {}
+                    // The lane is full: leave the record due and keep trying
+                    // the page's other lanes, then end the pass. A worker
+                    // notifies the ready pass when it has drained room.
+                    Enqueued::Full => refused = true,
+                }
+            }
+            cursor = page.next;
+            if refused || cursor.is_none() || queued >= budget {
+                break;
+            }
+        }
+        Ok(queued)
     }
 
     /// Drive the due records of the durable ready index, up to `budget`

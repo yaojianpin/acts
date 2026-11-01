@@ -99,6 +99,77 @@ fn source_operation_is_committed_and_closed_in_same_atomic_batch() {
 }
 
 #[test]
+fn an_unclaimed_effectless_source_completes_in_the_same_commit() {
+    use crate::scheduler::core::model::transition_plan::OperationCommit;
+    let source_id = OperationId {
+        process_id: "p1".into(),
+        task: TaskId::new("t1", 0).unwrap(),
+        sequence: 0,
+    };
+    let mut snapshot = repository().load("p1").unwrap().unwrap();
+    snapshot.operations.insert(
+        source_id.clone(),
+        OperationRecord::pending(source_id.clone(), OperationKind::ExecuteTask),
+    );
+    let mut repo = MemoryProcessRepository::default();
+    repo.insert(snapshot).unwrap();
+
+    let mut p = plan();
+    p.source_operation = Some(OperationCommit::unclaimed(source_id.clone()));
+    let receipt = repo.compare_and_commit(&p).unwrap();
+    let snapshot = repo.load("p1").unwrap().unwrap();
+    let operation = &snapshot.operations[&source_id];
+    assert_eq!(operation.state, OperationState::Completed(receipt.token));
+    // No claim/commit-preparation transition was persisted: the one commit
+    // that records the plan is the operation's whole lifecycle.
+    assert_eq!(operation.revision, 1);
+}
+
+#[test]
+fn an_unclaimed_source_must_be_effectless_and_pending() {
+    use crate::scheduler::core::model::transition_plan::OperationCommit;
+    let source_id = OperationId {
+        process_id: "p1".into(),
+        task: TaskId::new("t1", 0).unwrap(),
+        sequence: 0,
+    };
+    for (kind, state) in [
+        // An effectful operation must fence its effect with a durable claim.
+        (OperationKind::ApplyAction, OperationState::Pending),
+        // A completed operation cannot be driven again.
+        (
+            OperationKind::ExecuteTask,
+            OperationState::Completed(crate::scheduler::core::model::operation::CommitToken {
+                process_version: 1,
+                digest: "digest".into(),
+            }),
+        ),
+    ] {
+        let mut snapshot = repository().load("p1").unwrap().unwrap();
+        snapshot.operations.insert(
+            source_id.clone(),
+            OperationRecord {
+                id: source_id.clone(),
+                kind,
+                state,
+                revision: 0,
+            },
+        );
+        let mut repo = MemoryProcessRepository::default();
+        repo.insert(snapshot).unwrap();
+        let mut p = plan();
+        p.source_operation = Some(OperationCommit::unclaimed(source_id.clone()));
+        assert!(
+            matches!(
+                repo.compare_and_commit(&p),
+                Err(CommitError::InvalidOperationState(_))
+            ),
+            "{kind:?} must not complete unclaimed"
+        );
+    }
+}
+
+#[test]
 fn stale_source_claim_rejects_whole_batch() {
     use crate::scheduler::core::model::operation::ClaimToken;
     use crate::scheduler::core::model::operation::OperationEvent;

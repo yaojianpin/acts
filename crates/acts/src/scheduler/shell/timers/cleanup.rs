@@ -123,7 +123,6 @@ pub(crate) async fn sweep_removable(runtime: &Arc<Runtime>) -> Result<usize> {
     for pid in runtime.workers().reclaiming_pids() {
         if let Ok(None) = runtime.store().procs().find_opt(&pid).await {
             runtime.workers().finish_reclaim(&pid);
-            runtime.router().forget(&pid);
         }
     }
     runtime.workers().timer_guards().fold_cleanup(&pass);
@@ -210,13 +209,11 @@ async fn cleanup_process(
         match runtime.store().procs().find_opt(pid).await {
             Ok(None) => {
                 runtime.workers().finish_reclaim(pid);
-                runtime.router().forget(pid);
                 return Ok(true);
             }
             _ => return Err(error),
         }
     }
-    runtime.router().forget(pid);
     runtime.workers().finish_reclaim(pid);
     Ok(true)
 }

@@ -25,7 +25,22 @@ impl Workers {
     /// Wake one operation. A wake is an optimization over the durable ready
     /// index: a full queue drops it, the ready record remains, and the due pass
     /// is notified to pick it up before the next tick.
+    ///
+    /// A serving host routes the wake straight to its pid's lane, so the
+    /// operation runs on the same worker as every other operation of that
+    /// process. A host driven inline (the test harness) has no active pool and
+    /// keeps the wake channel.
     pub(super) fn wake(&self, operation: &OperationId) -> bool {
+        if self.pool.active() {
+            return match self.pool.enqueue(operation, JobSource::Wake) {
+                Enqueued::Yes | Enqueued::AlreadyQueued => true,
+                Enqueued::Full => {
+                    self.ready_metrics.lock().wake_failures += 1;
+                    self.ready.notify_one();
+                    false
+                }
+            };
+        }
         let sent = QueueWake {
             tx: self.wake_tx.clone(),
         }

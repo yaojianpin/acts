@@ -138,13 +138,15 @@ pub struct ConfigData {
     /// unbounded task creation caused by a node self-loop / cyclic `next`.
     /// Must be at least 1 — the engine refuses to start with a smaller value.
     pub max_node_run_times: Option<i64>,
-    /// Maximum scheduler task lanes; defaults to available parallelism.
-    /// Each lane executes one task at a time.
-    /// Tasks for the same pid always hash to the same lane to preserve FIFO.
+    /// Number of scheduler worker lanes; defaults to available parallelism.
+    /// Each lane executes one operation at a time on its own worker task.
+    /// A pid always hashes (XXH3-64) to the same lane, so its operations are
+    /// serialized on one worker while independent processes run in parallel.
     pub scheduler_workers: Option<usize>,
     /// Maximum number of scheduler jobs buffered in memory, split evenly across
-    /// the task lanes: a full lane overflows its producers to the durable
-    /// outbox (or, for a fresh start, fails). Zero selects the default.
+    /// the worker lanes (at least one per lane): a full lane refuses the
+    /// enqueue and leaves the operation in the durable ready index for the
+    /// next pass. Zero selects the default.
     pub scheduler_queue_cap: Option<usize>,
     /// Number of store-writer shards; defaults to available parallelism.
     /// Each shard applies one write at a time.
@@ -443,11 +445,10 @@ impl Config {
         configured.clamp(1, 1024)
     }
 
-    /// Maximum in-memory scheduler backlog, split evenly across the task lanes
-    /// (`scheduler_workers`), so resident `Arc<Task>`/`Arc<Process>` data is
-    /// bounded by the cap — each lane keeps at least one job, so a cap below the
-    /// lane count admits one job per lane instead. The durable outbox is the
-    /// overflow queue.
+    /// Maximum in-memory scheduler backlog, split evenly across the worker
+    /// lanes (`scheduler_workers`) — each lane keeps at least one slot, so a
+    /// cap below the lane count admits one job per lane instead. A full lane
+    /// refuses new jobs; the durable ready index is the overflow queue.
     pub fn scheduler_queue_cap(&self) -> usize {
         self.data
             .scheduler_queue_cap

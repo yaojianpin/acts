@@ -92,14 +92,42 @@ impl OperationKind {
                 | Self::ReturnToParent
         )
     }
+
+    /// Whether phase 2 can run without a durable effect boundary.
+    ///
+    /// Only `ApplyAction` crosses the external-effect seam: its package's work
+    /// may touch the outside world, so its claim must be durable before the
+    /// work starts. Every other driven kind decides from the snapshot — a
+    /// start check, a propagation, a timer round, a cascade — and is safe to
+    /// re-drive from `Pending` after a crash. Those kinds therefore complete
+    /// in the same transition that records their plan instead of paying a
+    /// separate claim commit first (see
+    /// [`OperationCommit::unclaimed`](crate::scheduler::core::model::transition_plan::OperationCommit::unclaimed)).
+    pub(crate) fn is_effectless(self) -> bool {
+        matches!(
+            self,
+            Self::ExecuteTask
+                | Self::SkipTask
+                | Self::AbortTask
+                | Self::DispatchTimeout
+                | Self::PropagateTask
+                | Self::ReenterTask
+                | Self::ReturnToParent
+        )
+    }
 }
 
 /// A persisted operation has one authoritative lifecycle.
 ///
-/// `Completed` is intentionally unreachable from `Pending` or `Claimed`.
-/// Business state must first be atomically committed and identified by a
-/// commit token. This removes the old ambiguity where "completed" could mean
-/// merely dequeued, locally handled, or durably applied.
+/// `Completed` is unreachable from `Pending` or `Claimed` through the event
+/// state machine: business state must first be atomically committed and
+/// identified by a commit token. The one exception is an effectless kind's
+/// *plan* commit ([`OperationKind::is_effectless`], driven by
+/// [`OperationCommit::unclaimed`](crate::scheduler::core::model::transition_plan::OperationCommit::unclaimed)):
+/// it records the operation's plan and its completion in the same atomic
+/// batch, because re-driving a pure snapshot decision after a crash is safe.
+/// This removes the old ambiguity where "completed" could mean merely
+/// dequeued, locally handled, or durably applied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OperationState {
     Pending,

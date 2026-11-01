@@ -119,17 +119,18 @@ async fn linear_process_runs_to_completion_and_delivers_outbox() {
     let spec = ProcessSpec::linear("p1", "root", &["a", "b"]);
     host.start_process(&spec).await.unwrap();
     let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
-    // 3 nodes x (start + completion) operations. The propagation each
-    // completion implies is folded into the completion's own commit, so the
-    // run no longer claims a third operation per node: one claim and one plan
-    // commit per surviving operation.
-    assert_eq!(report.executed, 6, "six hops expected: {report:?}");
+    // The root start and then one completion per node: a successor's start is
+    // folded into the completion that propagated it, and the propagation
+    // itself is folded into that same completion. Only the effect operations
+    // remain durable, one per node.
+    assert_eq!(report.executed, 4, "four hops expected: {report:?}");
     assert_eq!(report.retried, 0);
     assert_all_terminal(&host, "p1").await;
 
     let snapshot = host.snapshot("p1").await.unwrap().unwrap();
-    // No pure-internal operation survives the fold: the chain is the starts
-    // and completions only.
+    // No pure-internal operation survives the fold, and successor starts are
+    // folded into the completion that propagated them: the root start and the
+    // effect completions are the durable chain.
     assert_no_folded_operations(&snapshot);
     // started x3 + completed x3 + propagated x3.
     assert_eq!(snapshot.outbox.len(), 9);
@@ -145,6 +146,56 @@ async fn linear_process_runs_to_completion_and_delivers_outbox() {
             .outbox
             .values()
             .all(|record| matches!(record.state, OutboxState::Delivered { .. }))
+    );
+}
+
+/// The claim commit fences the external-effect seam. The root start is the one
+/// effectless operation that becomes durable (a successor's start is folded
+/// into the completion that propagated it), and its one plan commit is its
+/// whole lifecycle: it reaches `Completed` at revision 1, never passing
+/// through `CommitPrepared`. The durable effect operations (`ApplyAction`)
+/// still pay the claim (+1) and the commit/close (+2), i.e. revision 3.
+#[tokio::test]
+async fn effectless_operations_close_in_their_plan_commit() {
+    use crate::scheduler::core::model::operation::OperationKind;
+
+    let (host, mut wake_rx) = Workers::in_memory();
+    let spec = ProcessSpec::linear("p-claimless", "root", &["a", "b"]);
+    host.start_process(&spec).await.unwrap();
+    let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+    assert_eq!(report.retried, 0, "{report:?}");
+    let snapshot = host.snapshot("p-claimless").await.unwrap().unwrap();
+    let mut starts = 0usize;
+    let mut effects = 0usize;
+    for operation in snapshot.operations.values() {
+        match operation.kind {
+            OperationKind::ExecuteTask => {
+                assert!(operation.kind.is_effectless());
+                assert_eq!(
+                    operation.revision,
+                    1,
+                    "effectless {} must complete in one commit: {:?}",
+                    operation.id.task.node.as_str(),
+                    operation.state
+                );
+                starts += 1;
+            }
+            OperationKind::ApplyAction => {
+                assert!(!operation.kind.is_effectless());
+                assert_eq!(
+                    operation.revision, 3,
+                    "the effect keeps its claim and plan commits: {:?}",
+                    operation.state
+                );
+                effects += 1;
+            }
+            other => panic!("unexpected operation kind {other:?}"),
+        }
+    }
+    assert_eq!(
+        (starts, effects),
+        (1, 3),
+        "only the root start stays durable; every successor start is folded: {snapshot:?}"
     );
 }
 
@@ -246,6 +297,10 @@ struct ConflictKv {
     /// front arm it at construction; a test that discovers the operation after
     /// the chain starts arms it through [`Self::arm`].
     operation: parking_lot::Mutex<Option<OperationId>>,
+    /// The armed operation is effectless and therefore never stands
+    /// `CommitPrepared`: its plan commit is the batch that closes it from
+    /// `Pending`/`RetryScheduled`.
+    claimless: AtomicBool,
     armed: AtomicBool,
     parks: AtomicUsize,
     parked: tokio::sync::Notify,
@@ -263,6 +318,7 @@ impl ConflictKv {
             process_key: crate::scheduler::durable::document_store::process_key(process_id)
                 .expect("a process id the aggregate key derives from"),
             operation: parking_lot::Mutex::new(None),
+            claimless: AtomicBool::new(false),
             armed: AtomicBool::new(true),
             parks: AtomicUsize::new(0),
             parked: tokio::sync::Notify::new(),
@@ -275,6 +331,15 @@ impl ConflictKv {
     /// operation's claim lands.
     fn arm(&self, operation: OperationId) {
         *self.operation.lock() = Some(operation);
+    }
+
+    /// Arm the plan commit of an effectless `operation` (no claim commit
+    /// precedes it; the operation is still `Pending` when the plan batch
+    /// arrives). Arm it after the process was created, or the create batch
+    /// would be the first `Pending` writer it sees.
+    fn arm_unclaimed(&self, operation: OperationId) {
+        self.claimless.store(true, Ordering::SeqCst);
+        self.arm(operation);
     }
 
     /// Whether this batch is the hop's plan commit: it writes the aggregate
@@ -294,13 +359,18 @@ impl ConflictKv {
         let Some(snapshot) = read_stored_snapshot(&self.inner, &self.process_id).await else {
             return false;
         };
-        matches!(
-            snapshot
-                .operations
-                .get(&operation)
-                .map(|record| &record.state),
-            Some(OperationState::CommitPrepared(_))
-        )
+        let state = snapshot
+            .operations
+            .get(&operation)
+            .map(|record| &record.state);
+        if self.claimless.load(Ordering::SeqCst) {
+            matches!(
+                state,
+                Some(OperationState::Pending | OperationState::RetryScheduled { .. })
+            )
+        } else {
+            matches!(state, Some(OperationState::CommitPrepared(_)))
+        }
     }
 
     /// Hold this batch until [`Self::release`]. The arm is spent here: the
@@ -495,43 +565,25 @@ async fn recovery_does_not_wake_a_parked_run() {
     );
 }
 
-/// A hop whose *plan* commit loses its compare-and-swap must hand its claim
-/// back to recovery — and recovery must be able to claim it again.
+/// An effectless hop whose *plan* commit loses its compare-and-swap stays
+/// `Pending` with its ready record and is re-driven — no claim to release, no
+/// recovery entry, no unknown effect.
 ///
-/// The plan commit is the commit that carries the hop's whole durable
-/// remainder (the task's start, the act's effect, the propagation); when
-/// another writer advances the aggregate between that hop's `load` and its
-/// guard, the guard refuses and *nothing* is applied — so the hop's claim is
-/// provably effect-free and must be released. This test forces exactly that
-/// window with [`ConflictKv`]: it parks the hop inside its own plan commit and
-/// commits a rival (a harmless marker variable) on the same aggregate, so the
-/// hop's compare-and-swap is lost on demand rather than by a race — the
-/// sibling-completion cell that found the defect only reproduces it
-/// intermittently.
+/// `ExecuteTask` never crosses the external-effect seam, so it is driven
+/// claimlessly: `prepare` hands phase 2 the authoritative snapshot and leaves
+/// the operation `Pending`; its plan commit is the one commit that closes it.
+/// This test forces the lost guard with [`ConflictKv`]: it parks the hop inside
+/// its own plan commit and commits a rival (a harmless marker variable) on the
+/// same aggregate, so the compare-and-swap is lost on demand rather than by a
+/// race.
 ///
-/// What it pins, and what either missing half of the fix did instead:
-///
-/// - the hop reports the conflict and the operation is `RetryScheduled`, the
-///   state the recovery scan classifies `Wake`. Without the release the hop
-///   returned the same conflict error but left the operation `CommitPrepared`:
-///   its only recovery disposition is `AwaitOwner` until the claim's lease
-///   expires, then `ReclaimExpired` — and because the conflict applied
-///   nothing, the store cannot tell a commit that did not happen from one
-///   whose external effect was interrupted, so the operation ended
-///   `EffectUnknown` and its only disposition is `ManualReconciliation`. The
-///   operation (and the run with it) was stranded for good, with nothing
-///   drivable left for the engine.
-/// - the recovery scan re-derives the released hop (`woken`, never
-///   `reconciliation_required`).
-/// - the re-drive claims cleanly and settles the run, the operation
-///   `Completed`. A released claim can only be *re*-claimed by a fenced one:
-///   the state machine requires `fence > attempt` to leave `RetryScheduled`, so
-///   the driver must claim with the operation's own attempt + 1. Without that
-///   the released operation was `RetryScheduled{attempt: 1}` and every hop
-///   refused it with `InvalidOperationState`, stranding the run exactly as the
-///   missing release did.
+/// It pins that the conflict applies nothing and leaves exactly the state the
+/// ready pass needs: the operation is still `Pending`, the recovery scan has
+/// nothing to reclaim or reconcile, and the next drive completes the run. An
+/// effectful hop's claim release is covered by
+/// [`a_folded_completion_loses_its_commit_without_splitting_the_propagation`].
 #[tokio::test]
-async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
+async fn an_effectless_hop_that_loses_its_plan_commit_stays_ready() {
     const PID: &str = "p-conflict-release";
     let root = OperationId {
         process_id: PID.into(),
@@ -539,11 +591,13 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
         sequence: 0,
     };
     let stored = ConflictKv::new(PID);
-    stored.arm(root.clone());
     let kv: Arc<dyn KvStore> = stored.clone();
     let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
     host.start_process(&spec).await.unwrap();
+    // Armed after the create batch: the claimless hop's plan commit is the
+    // first batch that writes the aggregate while the root is still Pending.
+    stored.arm_unclaimed(root.clone());
 
     // The root hop runs to its plan commit and parks there. The rival commits
     // on the same aggregate while the hop is between its load and its guard:
@@ -555,9 +609,9 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
         assert!(
             matches!(
                 current.operations.get(&root).map(|record| &record.state),
-                Some(OperationState::CommitPrepared(_))
+                Some(OperationState::Pending)
             ),
-            "the parked batch is the hop's plan commit, not its claim: {:?}",
+            "an effectless hop parks in its plan commit, still Pending: {:?}",
             current.operations.get(&root).map(|record| &record.state)
         );
         let plan = TransitionPlan {
@@ -587,22 +641,19 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
         "the hop reports its own lost compare-and-swap: {error}"
     );
 
-    // The pin: the claim went back, so the operation is drivable *now* — not
-    // left `CommitPrepared` for the lease to expire into `EffectUnknown`.
+    // The pin: the conflict applied nothing and the operation never left
+    // `Pending`, so its durable ready record alone can re-drive it.
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert!(
-        matches!(
-            snapshot.operations[&root].state,
-            OperationState::RetryScheduled { .. }
-        ),
-        "the conflicted hop must hand its claim back, not stay {:?}",
+        matches!(snapshot.operations[&root].state, OperationState::Pending),
+        "the conflicted hop must stay ready, not become {:?}",
         snapshot.operations[&root].state
     );
 
     let report = host.tick(SystemClock.now_ms()).await.unwrap();
     assert!(
         !report.reclaimed.contains(&root),
-        "the released hop is already in the ready index, not a recovery reclaim: {report:?}"
+        "the ready hop is not a recovery reclaim: {report:?}"
     );
     assert!(
         !report.reconciliation_required.contains(&root),
@@ -612,7 +663,7 @@ async fn a_hop_that_loses_its_plan_commit_releases_the_claim_for_recovery() {
     let driven = host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
     assert_eq!(
         driven.retried, 0,
-        "the released hop must claim cleanly on its next drive: {driven:?}"
+        "the ready hop must re-drive cleanly: {driven:?}"
     );
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     assert!(
@@ -1725,6 +1776,120 @@ async fn effects_of_different_runs_overlap_outside_the_lanes() {
     engine.close().await;
 }
 
+/// The scheduler worker pool: two pids whose XXH3 hashes name different lanes
+/// meet at a two-party barrier inside their step effects. One inline driver
+/// would park the first effect at the barrier forever, so both runs completing
+/// is exactly the cross-worker parallelism.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn scheduler_worker_lanes_run_independent_pids_in_parallel() {
+    const WORKERS: usize = 2;
+    struct BarrierRunner {
+        entered: Arc<AtomicUsize>,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+    impl crate::scheduler::shell::caps::Capability for BarrierRunner {
+        fn key(&self) -> &str {
+            "test.pool-effect"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl caps::effect::EffectRunner for BarrierRunner {
+        async fn resolve(
+            &self,
+            _request: &caps::effect::EffectRequest,
+        ) -> crate::Result<caps::effect::ResolvedEffect> {
+            Ok(caps::effect::ResolvedEffect {
+                params: serde_json::json!({ "n": 2 }),
+                options: serde_json::Value::Null,
+            })
+        }
+
+        async fn run(
+            &self,
+            _request: caps::effect::EffectRequest,
+            _key: crate::scheduler::core::model::effect::EffectKey,
+        ) -> Result<caps::effect::EffectOutcome> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.barrier.wait().await;
+            Ok(caps::effect::EffectOutcome::from_outputs(crate::Vars::new()))
+        }
+    }
+
+    let runner = Arc::new(BarrierRunner {
+        entered: Arc::new(AtomicUsize::new(0)),
+        barrier: Arc::new(tokio::sync::Barrier::new(2)),
+    });
+    let kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    // Enough slots for both runs to be in flight at once; the lane count is
+    // what this test measures.
+    let (host, wake_rx) = Workers::new_with_workers(kv, 2, MAX_NODE_RUN_TIMES, 800, WORKERS);
+    host.attach_effect_runner(runner.clone());
+    let engine = crate::Engine::builder().start().await.unwrap();
+    let package = engine.runtime().package().clone();
+    let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-pool-parallel")
+        .with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_SET,
+                crate::Vars::new().with("n", 2),
+            )
+        });
+    let router = crate::utils::LaneRouter::new(WORKERS);
+    let first = "p-pool-worker-a".to_string();
+    let first_lane = router.lane_of(&first);
+    let second = (0..10_000)
+        .map(|index| format!("p-pool-worker-b-{index}"))
+        .find(|pid| router.lane_of(pid) != first_lane)
+        .expect("a second pid must land on another lane");
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let serving = tokio::spawn({
+        let host = host.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            host.serve(
+                wake_rx,
+                shutdown,
+                KernelSchedule::uniform(Duration::from_secs(3600), PAGE_SIZE),
+            )
+            .await
+        }
+    });
+    for pid in [&first, &second] {
+        let spec = ProcessSpec::from_workflow(pid, &workflow, &run_as).unwrap();
+        host.start_process(&spec).await.unwrap();
+    }
+    let completed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if host.process_completed(&first).await.unwrap()
+                && host.process_completed(&second).await.unwrap()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        completed.is_ok(),
+        "both pids must reach their terminal state; one lane would deadlock at the barrier"
+    );
+    assert_eq!(
+        runner.entered.load(Ordering::SeqCst),
+        2,
+        "both effects entered the barrier concurrently"
+    );
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("the serve loop observes its shutdown")
+        .unwrap();
+    engine.close().await;
+}
+
 /// A4: the lane is released for the effect window, and what that window costs
 /// is exactly the A1a/A1c boundary. While the step's effect is in flight, a
 /// client completes the same execution (impossible if the driver held the
@@ -1936,13 +2101,13 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
         host.start_process(&spec).await.unwrap();
     }
 
-    // The only slot is `cap-a`'s: three of its four hops run here (the fourth
+    // The only slot is `cap-a`'s: two of its three hops run here (the last
     // settles the run), and the two runs behind it never move. The propagation
-    // is folded into each completion's commit, so a two-node run is four
-    // operations, not six.
-    let report = host.run_until_quiescent(&mut wake_rx, 3).await.unwrap();
+    // and the successor's start are folded into each completion's commit, so a
+    // two-node run is three operations, not six.
+    let report = host.run_until_quiescent(&mut wake_rx, 2).await.unwrap();
     assert_eq!(
-        report.executed, 3,
+        report.executed, 2,
         "only the admitted run may hop: {report:?}"
     );
     assert_eq!(*started.lock(), vec!["cap-a".to_string()]);
@@ -1956,8 +2121,8 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
     // for a tick.
     let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
     assert_eq!(
-        report.executed, 9,
-        "one hop left of `cap-a` plus four each for the two admitted runs: {report:?}"
+        report.executed, 7,
+        "one hop left of `cap-a` plus three each for the two admitted runs: {report:?}"
     );
     assert_eq!(
         *started.lock(),
@@ -2059,8 +2224,9 @@ async fn a_run_already_in_flight_at_boot_waits_for_a_slot() {
     let first = seeds[0].0.clone();
     let second = seeds[1].0.clone();
 
-    // The run over the cap is offered work and waits.
-    host.run_until_quiescent(&mut wake_rx, 2).await.unwrap();
+    // The run over the cap is offered work and waits. One more hop leaves the
+    // admitted run short of its three.
+    host.run_until_quiescent(&mut wake_rx, 1).await.unwrap();
     assert!(!host.process_completed(&first).await.unwrap());
     let waiting = host.snapshot(&second).await.unwrap().expect("aggregate");
     let seeded = &seeds
@@ -6186,10 +6352,11 @@ fn tasks_of(snapshot: &Snapshot, task: &str) -> Vec<u64> {
 
 /// A rewind is part of the decision that asks for it: the `Cancel`'s own
 /// atomic commit closes the source generation, pins the target fact and — since
-/// A3 folds the pure `ReenterTask` hand-off — creates the fresh generations and
-/// their start operation in that same commit. Recovery alone no longer has to
-/// drive a second hop; a crash before the commit loses the whole decision, and
-/// a crash after it cannot lose the rewind.
+/// the fold runs the pure `ReenterTask` and the fresh generation's start — creates
+/// the new generation already started (`Waiting` for this IRQ act), with its
+/// `Created` record in the same batch. Recovery alone no longer has to drive a
+/// second hop; a crash before the commit loses the whole decision, and a crash
+/// after it cannot lose the rewind.
 #[tokio::test]
 async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
     const PID: &str = "p-cancel-durable";
@@ -6244,18 +6411,20 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
     );
     assert_eq!(
         state_of(&snapshot, "s1"),
-        crate::scheduler::core::model::task_graph::TaskState::Ready,
-        "the re-entered generation is ready for its start"
+        crate::scheduler::core::model::task_graph::TaskState::Waiting,
+        "the same commit that re-entered the step also started it, and the IRQ act waits"
     );
-    let rewind_start = snapshot
-        .operations
-        .iter()
-        .find(|(id, _)| id.task.node.as_str() == "s1" && id.task.generation == 1)
-        .map(|(_, operation)| operation.kind);
-    assert_eq!(
-        rewind_start,
-        Some(OperationKind::ExecuteTask),
-        "the folded re-entry hands the new generation to the ordinary start"
+    assert!(
+        snapshot
+            .operations
+            .keys()
+            .all(|id| id.task.node.as_str() != "s1" || id.task.generation == 0),
+        "the folded start leaves no start operation for the re-entered generation: {:?}",
+        snapshot
+            .operations
+            .values()
+            .map(|operation| (&operation.id, operation.kind))
+            .collect::<Vec<_>>()
     );
     assert!(
         !snapshot.operations.values().any(|operation| matches!(
@@ -6273,8 +6442,8 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
             .collect::<Vec<_>>()
     );
 
-    // No wake survives from the deciding call: the rewind's start is driven by
-    // the durable ready record, exactly like a run a crash left undecided.
+    // The rewind is already started by the deciding commit; the tick and the
+    // ready drain only prove nothing else was left behind for it.
     while wake_rx.try_recv().is_ok() {}
     host.tick(SystemClock.now_ms()).await.unwrap();
     host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
@@ -8019,11 +8188,19 @@ impl KvStore for InstrumentedKv {
                 // A guard that does not hold: the batch applies nothing.
                 return Ok(false);
             }
+            // A plan commit is the version-changing batch that closes the
+            // source operation. A claim commit only moves the source to
+            // `CommitPrepared`; an effectless source is never claimed and
+            // closes straight from `Pending`, so looking for the close (not
+            // for the prepared phase) recognises both lifecycles.
             let plan_commit = old.version != new.version
-                && old
-                    .operations
-                    .values()
-                    .any(|operation| matches!(operation.state, OperationState::CommitPrepared(_)));
+                && new.operations.iter().any(|(id, operation)| {
+                    matches!(operation.state, OperationState::Completed(_))
+                        && old
+                            .operations
+                            .get(id)
+                            .is_some_and(|previous| previous.state != operation.state)
+                });
             if plan_commit && self.fail_plan_commit.swap(false, Ordering::SeqCst) {
                 self.plan_commit_failures.fetch_add(1, Ordering::SeqCst);
                 return Err(crate::ActError::Store(
@@ -8132,14 +8309,20 @@ fn two_record_plan(process_id: &str, snapshot: &ProcessSnapshot) -> TransitionPl
 
 /// A message is not visible before its aggregate commit: when the plan commit
 /// is refused, the transport is never called and no record reaches the
-/// aggregate.
+/// aggregate. The effectless hop stays `Pending`, so a later pass re-drives it;
+/// the refused attempt itself must leave no trace.
 #[tokio::test]
 async fn an_outbox_message_waits_for_its_aggregate_commit() {
     const PID: &str = "p-outbox-commit";
+    let root = OperationId {
+        process_id: PID.into(),
+        task: crate::scheduler::core::model::task_graph::TaskId::new("root", 0).unwrap(),
+        sequence: 0,
+    };
     let stored = InstrumentedKv::new(PID);
     stored.arm_plan_commit_failure();
     let kv: Arc<dyn KvStore> = stored.clone();
-    let (host, mut wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
+    let (host, _wake_rx) = Workers::new(kv, 1, MAX_NODE_RUN_TIMES, 800);
     let delivered = Arc::new(parking_lot::Mutex::new(0));
     host.attach_outbox_transport(Arc::new(CountingTransport {
         delivered: delivered.clone(),
@@ -8147,12 +8330,15 @@ async fn an_outbox_message_waits_for_its_aggregate_commit() {
     let spec = ProcessSpec::linear(PID, "root", &["only"]);
     host.start_process(&spec).await.unwrap();
 
-    let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
-    assert_eq!(stored.plan_commit_failures(), 1);
+    let error = host
+        .execute_one(&root)
+        .await
+        .expect_err("the injected plan commit must be refused");
     assert!(
-        report.retried >= 1,
-        "the refused commit must surface: {report:?}"
+        error.to_string().contains("injected plan commit failure"),
+        "{error}"
     );
+    assert_eq!(stored.plan_commit_failures(), 1);
     assert_eq!(
         *delivered.lock(),
         0,
@@ -8163,6 +8349,11 @@ async fn an_outbox_message_waits_for_its_aggregate_commit() {
         snapshot.outbox.is_empty(),
         "a failed plan commit writes no record: {:?}",
         snapshot.outbox
+    );
+    assert!(
+        matches!(snapshot.operations[&root].state, OperationState::Pending),
+        "the refused effectless hop stays ready for the next pass: {:?}",
+        snapshot.operations[&root].state
     );
 }
 

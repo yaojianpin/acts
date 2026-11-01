@@ -114,6 +114,31 @@ impl Workers {
             }
         }
 
+        // An effectless kind has nothing to fence: its phase 2 is a pure
+        // decision over the snapshot, so a crash or a lost commit leaves it
+        // `Pending`/`RetryScheduled` with its ready record intact, and the
+        // next pass re-drives it. Completing it in its plan commit therefore
+        // needs no claim commit first; `OperationCommit::unclaimed` is how the
+        // plan tells the commit layer to close it directly. Only the driver's
+        // own path takes this shortcut: a client action or recovery decision
+        // keeps the regular claim lifecycle.
+        if slot == Slot::Policy
+            && record.kind.is_effectless()
+            && matches!(
+                record.state,
+                OperationState::Pending | OperationState::RetryScheduled { .. }
+            )
+        {
+            return Ok(Some(Claimed {
+                id: id.clone(),
+                kind: record.kind,
+                claim: OperationCommit::unclaimed(id.clone()),
+                revision: record.revision,
+                loaded: Some(loaded),
+                now_ms: now,
+            }));
+        }
+
         // The claim's fence must advance past the operation's own attempt: the
         // state machine refuses a claim that does not (`RetryScheduled{attempt}`
         // and `EffectUnknown{attempt}` require `fence > attempt`), and the

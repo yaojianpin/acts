@@ -145,18 +145,33 @@ pub(crate) fn advance_transition(
         //
         // `Committed` stays a persisted state: the V2 tags decode it and
         // recovery's `FinalizeCommit` directive still finishes the aggregates a
-        // writer from before this fold left there. No operation produces it any more.
-        let committed = operation
-            .evolve(OperationEvent::Commit {
-                claim: source.claim.clone(),
-                commit: token.clone(),
-            })
-            .map_err(|_| CommitError::InvalidOperationState(operation.state.clone()))?;
-        let completed = committed
-            .evolve(OperationEvent::Complete {
-                commit: token.clone(),
-            })
-            .map_err(|_| CommitError::InvalidOperationState(committed.state.clone()))?;
+        // writer from before the fold left there. No operation produces it any more.
+        let completed = if source.is_unclaimed() {
+            // No claim phase was persisted for this effectless operation, so
+            // there are no Commit/Complete events to apply: the same commit
+            // that records its plan closes it, one operation-revision step.
+            OperationRecord {
+                id: operation.id.clone(),
+                kind: operation.kind,
+                state: OperationState::Completed(token.clone()),
+                revision: operation
+                    .revision
+                    .checked_add(1)
+                    .ok_or(CommitError::RevisionOverflow)?,
+            }
+        } else {
+            let committed = operation
+                .evolve(OperationEvent::Commit {
+                    claim: source.claim.clone(),
+                    commit: token.clone(),
+                })
+                .map_err(|_| CommitError::InvalidOperationState(operation.state.clone()))?;
+            committed
+                .evolve(OperationEvent::Complete {
+                    commit: token.clone(),
+                })
+                .map_err(|_| CommitError::InvalidOperationState(committed.state.clone()))?
+        };
         next.operations.insert(source.id.clone(), completed);
     }
     next.validate()?;
@@ -234,7 +249,21 @@ fn validate_preconditions(
             .operations
             .get(&source.id)
             .ok_or_else(|| CommitError::OperationNotFound(source.id.clone()))?;
-        if operation.state != OperationState::CommitPrepared(source.claim.clone()) {
+        if source.is_unclaimed() {
+            // Only an effectless kind may skip the durable claim: its work is
+            // a pure decision over the snapshot, so an interrupted attempt is
+            // safely re-driven from `Pending`/`RetryScheduled` by the ready
+            // index. The aggregate expected-version guard is still the fence.
+            if !operation.kind.is_effectless() {
+                return Err(CommitError::InvalidOperationState(operation.state.clone()));
+            }
+            if !matches!(
+                operation.state,
+                OperationState::Pending | OperationState::RetryScheduled { .. }
+            ) {
+                return Err(CommitError::InvalidOperationState(operation.state.clone()));
+            }
+        } else if operation.state != OperationState::CommitPrepared(source.claim.clone()) {
             return Err(CommitError::InvalidOperationState(operation.state.clone()));
         }
     }

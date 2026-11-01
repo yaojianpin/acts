@@ -235,14 +235,15 @@ max_message_retry_times = 20
 # engine start.
 max_node_run_times = 1000
 
-# Number of scheduler task lanes. Independent pids can execute concurrently;
-# tasks for the same pid are pinned to one lane and remain FIFO ordered.
+# Number of scheduler worker lanes, one consumer task each. Independent pids
+# can execute concurrently; a pid's XXH3-64 hash pins its operations to one
+# lane, where they remain FIFO ordered.
 scheduler_workers = 4
 
 # Maximum scheduler jobs buffered in memory, split evenly across the lanes
-# (at least one job each). A lane that is full spills task/next work to the
-# durable outbox instead of buffering it, so this is the real in-memory
-# backlog bound.
+# (at least one job each). A full lane refuses the enqueue and leaves the
+# operation in the durable ready index, so this is the real in-memory backlog
+# bound.
 scheduler_queue_cap = 4096
 
 # Number of concurrent store-writer shards. Independent pids are persisted

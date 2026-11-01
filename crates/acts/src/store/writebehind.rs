@@ -200,7 +200,6 @@ impl StoreWriter {
             let (tx, mut rx) = mpsc::channel::<WriteOp>(lane_capacity);
             let store = store.clone();
             let backlog = backlog.clone();
-            let router = router.clone();
             tasks.push(tokio::spawn(async move {
                 // A consumer applies its shard's ops in FIFO order. Ordering is
                 // preserved across the whole writer: every op of a process is
@@ -223,7 +222,7 @@ impl StoreWriter {
                             let _ = ack.send(failed.take().map_or(Ok(()), Err));
                             Ok(())
                         }
-                        op => Self::apply(&store, &router, op).await,
+                        op => Self::apply(&store, op).await,
                     };
                     if let Err(err) = res {
                         error!("store writer error: {}", err);
@@ -373,14 +372,13 @@ impl StoreWriter {
         self.senders.lock().clone()
     }
 
-    async fn apply(store: &Store, router: &LaneRouter, op: WriteOp) -> Result<()> {
+    async fn apply(store: &Store, op: WriteOp) -> Result<()> {
         match op {
             WriteOp::RemoveProc { pid } => {
                 store.remove_proc(&pid).await?;
-                // The removal is durable: release the pid's shard assignment.
-                // Any late write for it is a dead write and may re-register on
-                // the next shard in turn.
-                router.forget(&pid);
+                // The pid → shard mapping is a pure hash, so a removal leaves
+                // nothing to release; a late write for the dead pid simply
+                // routes to the same shard.
                 Ok(())
             }
             WriteOp::StoreDelivery {
@@ -678,12 +676,20 @@ mod tests {
         (store, kv, writer)
     }
 
-    /// Two pids a fresh `shards`-shard writer assigns to distinct shards: the
-    /// round-robin router gives the first two registered pids shards 0 and 1,
-    /// so the callers must enqueue these before any other pid.
+    /// Two pids the shard router assigns to distinct shards. The mapping is a
+    /// hash now, so the second name is searched for rather than assumed.
     fn pids_on_distinct_shards(shards: usize) -> (String, String) {
         assert!(shards > 1, "distinct shards need more than one shard");
-        ("pids-a".to_string(), "pids-b".to_string())
+        let router = LaneRouter::new(shards);
+        let first = "pids-a".to_string();
+        let lane = router.lane_of(&first);
+        for index in 0..10_000 {
+            let candidate = format!("pids-b-{index}");
+            if router.lane_of(&candidate) != lane {
+                return (first, candidate);
+            }
+        }
+        panic!("no pid landed on another shard");
     }
 
     /// The canonical-row + delivery-row pair the channel path writes — the

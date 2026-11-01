@@ -185,6 +185,13 @@ impl Workers {
                         "commit conflict after an external effect on operation {id:?}; manual reconciliation required"
                     )));
                 }
+                // An unclaimed effectless operation has no claim to release:
+                // its ready record is still durable, so re-driving it is all
+                // the retry needs.
+                if claimed.claim.is_unclaimed() {
+                    self.wake(&claimed.id);
+                    return Err(conflict(format!("commit conflict on operation {id:?}")));
+                }
                 // Other operations are effect-free: another writer advanced
                 // the aggregate and recovery can re-derive this operation
                 // against the new state. Releasing the claim here keeps a
@@ -226,13 +233,17 @@ impl Workers {
             // execution) is woken at once: that is the legacy `Step::next`
             // handing the turn to the branch declared after the one that just
             // ran.
-            if claimed.kind == OperationKind::ExecuteTask
-                && loaded
-                    .snapshot
-                    .operations
-                    .get(operation)
-                    .is_some_and(|created| created.kind == OperationKind::DispatchTimeout)
-            {
+            let timer = loaded
+                .snapshot
+                .operations
+                .get(operation)
+                .is_some_and(|created| created.kind == OperationKind::DispatchTimeout);
+            // A timer armed by a start — including a start folded into the
+            // creator's commit, where `claimed.kind` is the creator — waits
+            // for its first tick. A round that re-arms itself is woken now:
+            // that is the legacy Step::next handing the turn to the branch
+            // declared after the one that just ran.
+            if timer && claimed.kind != OperationKind::DispatchTimeout {
                 continue;
             }
             self.wake(operation);

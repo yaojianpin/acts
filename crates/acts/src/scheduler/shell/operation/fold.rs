@@ -1,14 +1,14 @@
-//! Folding the pure-internal operations into the plan that produced them.
+//! Folding the operations a creator's commit already implies.
 //!
 //! [`PropagateTask`], [`SkipTask`], [`AbortTask`] and [`ReenterTask`] run
 //! nothing of their own: phase 2 is the snapshot, and their whole work is the
 //! plan their creator's commit already implied. Creating them as durable
 //! operations therefore buys a claim, a load, a plan and a second commit for a
 //! transition the creator can compute inside its own atomic batch. This module
-//! does exactly that, and only that: before the creator commits, every
-//! pure-internal intent the plan (or a folded plan, transitively) creates is
-//! re-planned from a *scratch* snapshot that applies the pending deltas, its
-//! plan is merged into the creator's, and the intent itself is never committed.
+//! does exactly that: before the creator commits, every such intent the plan
+//! (or a folded plan, transitively) creates is re-planned from a *scratch*
+//! snapshot that applies the pending deltas, and its plan is merged into the
+//! creator's. The intent itself is never committed.
 //!
 //! The scratch snapshot keeps the folded intents as placeholders. That is what
 //! preserves identity: `next_operation_sequence`, the operation ids the folded
@@ -16,10 +16,17 @@
 //! the exact ids and keys they had when each pure operation committed on its
 //! own. Only their durable records disappear.
 //!
-//! What remains durable is the external boundary: [`ExecuteTask`] (guard
-//! evaluation, package resolution, the start of a new execution),
-//! [`ApplyAction`] (the replay of a client decision or a package effect) and
-//! [`DispatchTimeout`] (a clock wait). Their intents stay in the folded plan.
+//! A successor's start is folded too: an [`ExecuteTask`] intent the creator
+//! just committed runs its own pure entry checks (guard, package resolution,
+//! `Created` message, `Running`/`Waiting`, timer) here and contributes them to
+//! the creator's batch. The execution is therefore started by the same
+//! transition that propagated it — one transition per execution instead of a
+//! start plus a completion. Its effect operation remains durable, because the
+//! external-effect boundary is not a plan.
+//!
+//! What remains durable is the external boundary: [`ApplyAction`] (the replay
+//! of a client decision or a package effect) and [`DispatchTimeout`] (a clock
+//! wait). Their intents stay in the folded plan.
 //!
 //! A folded plan is one commit: either the effect/completion and everything the
 //! internal cascade decided lands together, or — when the merge cannot be
@@ -44,9 +51,11 @@ use crate::scheduler::core::{
 
 use std::collections::{HashMap, VecDeque};
 
-/// The kinds whose entire body is a plan derived from the state their creator
-/// just committed. They are folded into that creator's commit instead of
-/// becoming durable operations of their own.
+/// The kinds whose work a creator's commit can absorb: pure hand-offs whose
+/// body is their plan, plus `ExecuteTask`, whose start checks are a pure
+/// snapshot decision and whose durability is the creator's own transition.
+/// They are folded into that creator's commit instead of becoming durable
+/// operations of their own.
 ///
 /// The persisted vocabulary stays: an aggregate written by an earlier kernel
 /// may still carry one of these operations, and the host's own driver is what
@@ -55,11 +64,18 @@ use std::collections::{HashMap, VecDeque};
 pub(super) fn folds_into_plan(kind: OperationKind) -> bool {
     matches!(
         kind,
-        OperationKind::PropagateTask
+        OperationKind::ExecuteTask
+            | OperationKind::PropagateTask
             | OperationKind::SkipTask
             | OperationKind::AbortTask
             | OperationKind::ReenterTask
     )
+}
+
+/// Whether the folded intent runs its own phase 2 before planning. Every other
+/// folded kind's work is its plan alone.
+fn folds_after_run(kind: OperationKind) -> bool {
+    kind == OperationKind::ExecuteTask
 }
 
 impl Workers {
@@ -164,10 +180,10 @@ impl Workers {
             let local = {
                 let task_id = id.task.clone();
                 // A4: the scratch view plans inside the producing command's
-                // own lane (the fold never runs an effect), so the synthetic
-                // operation carries a detached lane of its own.
+                // own lane (the fold never runs an external effect), so the
+                // synthetic operation carries a detached lane of its own.
                 let mut detached = CommandLane::detached(self);
-                let operation = Operation {
+                let mut operation = Operation {
                     id: &id,
                     claim: &claim,
                     task_id: task_id.clone(),
@@ -176,7 +192,27 @@ impl Workers {
                     now_ms,
                     lane: &mut detached,
                 };
-                driver.next(self, &operation, Outcome::Planned).await?
+                if folds_after_run(intent.kind) {
+                    // The start checks are pure snapshot work; a panic here
+                    // must fail the fold (the creator then commits its
+                    // original plan and the start stays durable).
+                    let outcome = match CatchPanic::new(driver.run(self, &mut operation)).await {
+                        Ok(Ok(outcome)) => outcome,
+                        Ok(Err(error)) => return Err(error),
+                        Err(payload) => {
+                            let message = panic_message(&payload);
+                            return Err(runtime(format!(
+                                "folded start {id:?} panicked: {message}"
+                            )));
+                        }
+                    };
+                    if matches!(outcome, Outcome::Nothing) {
+                        continue;
+                    }
+                    driver.next(self, &operation, outcome).await?
+                } else {
+                    driver.next(self, &operation, Outcome::Planned).await?
+                }
             };
             // The local plan may itself hand a decision to another folded
             // kind (a propagation's join, a dead successor's cascade). Apply
@@ -265,22 +301,23 @@ fn merge_change(
     change: StateChange,
 ) -> Result<()> {
     if let Some(index) = created.get(&change.task) {
-        if !change.to.is_terminal() {
-            return Err(runtime(format!(
-                "folded plan settled created execution {:?} into non-terminal {:?}",
-                change.task, change.to
-            )));
-        }
+        // A state the batch itself creates is installed as that create's
+        // initial state: neither the aggregate nor the ready index observes
+        // the intermediate word. A start folded into the creator moves the
+        // execution `Ready → Running`/`Waiting`; a terminal cascade moves it
+        // straight to its final state.
         folded.task_creates[*index].initial_state = change.to;
         folded
             .state_changes
             .retain(|existing| existing.task != change.task);
-        // A start the same batch created for an execution the cascade has
-        // already decided must not stay in the ready queue: it would announce
-        // an execution that never ran (and would find nothing startable).
-        folded
-            .operations
-            .retain(|intent| intent.id.task != change.task);
+        if change.to.is_terminal() {
+            // A start the same batch created for an execution the cascade has
+            // already decided must not stay in the ready queue: it would
+            // announce an execution that never ran.
+            folded
+                .operations
+                .retain(|intent| intent.id.task != change.task);
+        }
         return Ok(());
     }
     if let Some(existing) = folded
@@ -404,8 +441,8 @@ mod tests {
         assert_eq!(folded.state_changes[0].to, TaskState::Failed);
     }
 
-    /// A plan with no pure-internal hand-off is returned untouched: the
-    /// scratch snapshot is never built.
+    /// A plan with no foldable hand-off (the effect operation is the external
+    /// boundary) is returned untouched: the scratch snapshot is never built.
     #[tokio::test]
     async fn a_plan_without_hand_offs_is_returned_as_is() {
         let (host, _wake) = Workers::in_memory();
@@ -424,7 +461,7 @@ mod tests {
                     task: task("a", 0),
                     sequence: 0,
                 },
-                kind: OperationKind::ExecuteTask,
+                kind: OperationKind::ApplyAction,
                 ready_at_ms: None,
             }],
             outbox: Vec::new(),
@@ -545,9 +582,10 @@ mod tests {
         assert_eq!(snapshot.operations[&id].kind, OperationKind::PropagateTask);
     }
 
-    /// A batch that creates an execution may only settle it terminally.
+    /// A start folded into the creating batch installs `Running`/`Waiting` as
+    /// the execution's birth state; the aggregate never observes `Ready`.
     #[test]
-    fn settling_a_created_execution_non_terminally_is_an_error() {
+    fn a_folded_start_sets_the_created_execution_state() {
         let mut folded = TransitionPlan {
             process_id: "p".into(),
             expected: version(),
@@ -555,11 +593,19 @@ mod tests {
             state_changes: Vec::new(),
             variable_writes: Vec::new(),
             source_operation: None,
-            operations: Vec::new(),
+            operations: vec![OperationIntent {
+                id: OperationId {
+                    process_id: "p".into(),
+                    task: task("b2", 0),
+                    sequence: 1,
+                },
+                kind: OperationKind::ApplyAction,
+                ready_at_ms: None,
+            }],
             outbox: Vec::new(),
         };
         let created = HashMap::from([(task("b2", 0), 0)]);
-        let error = merge_change(
+        merge_change(
             &mut folded,
             &created,
             StateChange {
@@ -569,7 +615,13 @@ mod tests {
                 to: TaskState::Running,
             },
         )
-        .unwrap_err();
-        assert!(format!("{error}").contains("non-terminal"), "{error}");
+        .unwrap();
+        assert_eq!(folded.task_creates[0].initial_state, TaskState::Running);
+        assert!(folded.state_changes.is_empty());
+        assert_eq!(
+            folded.operations.len(),
+            1,
+            "the effect operation the start created stays queued"
+        );
     }
 }

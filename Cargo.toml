@@ -6,6 +6,7 @@ members = [
     "plugins/*",
     "examples/plugins/*",
     "examples/packages/*",
+    "examples/stress",
 ]
 resolver = "3"
 
@@ -98,6 +99,10 @@ bashkit = { version = "0.18", default-features = false, features = ["realfs"] }
 # memory and cpu usage). `system` alone: memory, cpu and processes — no disks,
 # networks, components or users.
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+# pid → lane routing: the scheduler worker lanes and the store-writer shards.
+# XXH3-64 is a fast, stable, seedless hash — a pid's lane is identical in every
+# process and every restart, and independent of the order pids are first seen.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # message brokers / stores
 async-nats = "0.50"
 redis = { version = "1.7", default-features = false, features = [

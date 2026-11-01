@@ -37,9 +37,6 @@ pub struct Runtime {
     /// removals are ordered per pid and must not run inline while an operation
     /// is in flight.
     writer: writebehind::StoreWriter,
-    /// The pid → lane mapping shared with the emitter's handler gate. Held
-    /// here so a sweeper removal can release the pid's assignment.
-    router: Arc<LaneRouter>,
     emitter: Arc<Emitter>,
     package: Arc<Package>,
     shutdown: CancellationToken,
@@ -87,12 +84,6 @@ impl Runtime {
     /// what `sys:status` reports as the engine's `caps` list.
     pub fn caps(&self) -> Vec<String> {
         self.workers.caps()
-    }
-
-    /// The pid → lane mapping, so the timers' cleanup can release a swept
-    /// run's assignment.
-    pub(crate) fn router(&self) -> &Arc<LaneRouter> {
-        &self.router
     }
 
     /// The write-behind queue, for the timers' barriered removals.
@@ -584,8 +575,9 @@ impl Runtime {
         config.validate()?;
         let env = Arc::new(Environment::new());
         // The durable store, and its write-behind queue: one pid → lane
-        // mapping for the emitter's handler gate (a removal releases its
-        // assignment), and the writer's own shard router.
+        // mapping for the emitter's handler gate (the scheduler's worker pool
+        // hashes with the same function and lane count), and the writer's own
+        // shard router.
         let router = Arc::new(LaneRouter::new(config.scheduler_workers()));
         let store = Arc::new(Store::new(
             store.unwrap_or_else(|| Arc::new(crate::store::MemoryStore::new())),
@@ -616,6 +608,8 @@ impl Runtime {
             // A timer's idle round is deferred by the ready/timer interval,
             // not by the recovery or outbox cadence (A10).
             schedule.ready.as_millis() as i64,
+            config.scheduler_workers(),
+            config.scheduler_queue_cap(),
         );
         {
             let driver = workers.clone();
@@ -633,7 +627,6 @@ impl Runtime {
             env,
             store,
             writer,
-            router,
             package,
             shutdown,
             schema_cache,
@@ -802,6 +795,16 @@ mod tests {
         let _ = runtime.scheduler_health();
         let _ = runtime.config().scheduler_workers();
 
+        runtime.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn the_runtime_wires_the_configured_scheduler_lanes() {
+        let mut config = Config::default();
+        config.data.scheduler_workers = Some(4);
+        let runtime = Runtime::new(&config, None).unwrap();
+        assert_eq!(runtime.workers().scheduler_lanes(), 4);
         runtime.close().await;
     }
 

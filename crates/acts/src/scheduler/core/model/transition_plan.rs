@@ -95,6 +95,37 @@ pub(crate) struct OperationCommit {
     pub(crate) claim: ClaimToken,
 }
 
+/// The owner marker of a source operation that completes without a durable
+/// claim. It is plan-only: the aggregate never persists it.
+const UNCLAIMED_OWNER: &str = "kernel.unclaimed";
+
+impl OperationCommit {
+    /// A source operation of an effectless kind (`OperationKind::is_effectless`)
+    /// that completes in this transition. No claim was committed before phase
+    /// 2 because there is no external effect to fence: a crash leaves the
+    /// operation `Pending` with its ready record, and the next pass simply
+    /// re-drives it. The aggregate commit still closes the operation with its
+    /// commit token, exactly like a claimed one.
+    pub(crate) fn unclaimed(id: OperationId) -> Self {
+        Self {
+            id,
+            // Never persisted; only `validate_preconditions`/`advance_transition`
+            // read it, and both recognise the owner marker.
+            claim: ClaimToken {
+                owner: UNCLAIMED_OWNER.to_string(),
+                fence: 1,
+                lease_until_ms: i64::MAX,
+                heartbeat_revision: 0,
+            },
+        }
+    }
+
+    /// Whether this source completes without a durable claim.
+    pub(crate) fn is_unclaimed(&self) -> bool {
+        self.claim.owner == UNCLAIMED_OWNER
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OutboxIntent {
     pub(crate) key: String,
@@ -129,16 +160,18 @@ impl TransitionPlan {
             }
             if create.initial_state != TaskState::Created
                 && create.initial_state != TaskState::Ready
-                // A pure-internal cascade folded into the creator's own plan
-                // decides an execution the same batch creates (an unselected
-                // branch entering the skip cascade, an aborted running
+                // A plan can fold work that would otherwise be its own
+                // transition: a successor's start (Ready → Running/Waiting)
+                // and a pure-internal cascade that settles the execution in
+                // the same batch (an unselected branch, an aborted running
                 // successor). The aggregate never observes the intermediate
                 // state the separate operation would have written, so the
-                // execution is born in the state the cascade decided.
+                // execution is born in the state the folded plan decided.
                 && !matches!(
                     create.initial_state,
-                    TaskState::Skipped | TaskState::Aborted
+                    TaskState::Running | TaskState::Waiting
                 )
+                && !create.initial_state.is_terminal()
             {
                 return Err(PlanError::InvalidInitialState(
                     create.task.clone(),
@@ -434,19 +467,15 @@ mod tests {
             Err(PlanError::DuplicateTaskCreate(TaskId::new("a", 0).unwrap()))
         );
 
-        let mut p = plan();
-        p.state_changes.clear();
-        p.task_creates = vec![create("a", 0, TaskState::Running)];
-        assert_eq!(
-            p.validate(),
-            Err(PlanError::InvalidInitialState(
-                TaskId::new("a", 0).unwrap(),
-                TaskState::Running
-            ))
-        );
-
-        // A cascade may fold its decision into the create.
-        for state in [TaskState::Skipped, TaskState::Aborted] {
+        // A folded start or cascade may fold its decision into the create.
+        for state in [
+            TaskState::Running,
+            TaskState::Waiting,
+            TaskState::Completed,
+            TaskState::Failed,
+            TaskState::Skipped,
+            TaskState::Aborted,
+        ] {
             let mut p = plan();
             p.state_changes.clear();
             p.task_creates = vec![create("a", 0, state)];

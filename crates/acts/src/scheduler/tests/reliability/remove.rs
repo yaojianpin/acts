@@ -371,9 +371,11 @@ async fn an_outage_decides_nothing_half_way_and_the_retry_lands_once_inner() {
     );
 
     // healed: the retried removal lands once, the flow continues, and the run
-    // completes exactly once
-    removed(&engine, &pid, &step1).await;
+    // completes exactly once. The successor's start (and its `Created`) is
+    // folded into the removal's own commit, so the listener must be in place
+    // before the action returns.
     let created = capture_created(&engine, "act2");
+    removed(&engine, &pid, &step1).await;
     let (_, step2) = expect_created(&created).await;
     assert_eq!(
         step2,

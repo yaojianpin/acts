@@ -33,6 +33,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -151,6 +152,20 @@ dependencies = [
  "acts-plugin-web",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "acts-example-stress"
+version = "0.1.0"
+dependencies = [
+ "acts",
+ "acts-store",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

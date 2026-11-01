@@ -1,36 +1,29 @@
 //! The one pid → lane mapping, shared by every component that keeps one
 //! process's work ordered while independent processes run concurrently: the
-//! scheduler task lanes and the per-process event gate share one
-//! [`LaneRouter`] instance, the store writer shards run their own. Sharing an
-//! instance within a component family means the routing can never disagree —
-//! and a component that must keep its work serialized against another's
-//! (scheduler jobs against the event handlers of the same process) gets it
-//! for free.
+//! scheduler's worker pool and the per-process event gate share the same
+//! function, and the store writer shards run their own instance over its own
+//! lane count. Because the mapping is a pure function of the pid, separate
+//! instances with the same lane count always agree — and a component that must
+//! keep its work serialized against another's (scheduler jobs against the
+//! event handlers of the same process) gets it for free.
 //!
-//! Assignment is round-robin on first sight, not a hash. A hash distributes
-//! in expectation only: with fewer live processes than lanes, idle lanes are
-//! the norm, and a worker can starve indefinitely. Round-robin spreads the
-//! assigned processes across lanes so that the per-lane counts differ by at
-//! most one; a single hot process still pins its lane, which is the price of
-//! the per-process FIFO requirement. The mapping is stable for the process's
-//! lifetime and dropped with [`LaneRouter::forget`] when the process is
-//! removed, so the table cannot grow without bound.
+//! Assignment is XXH3-64 over the pid bytes, modulo the lane count. The hash
+//! is seedless and stable across processes and restarts, so a run lands on the
+//! same lane everywhere and the router keeps no per-pid table — there is
+//! nothing to grow and nothing to forget when a process is removed. Over a
+//! large live set the lanes are evenly loaded; with fewer live pids than lanes
+//! some lanes stay idle (the price of a stable mapping), and a single hot
+//! process still pins its lane (the price of the per-process FIFO
+//! requirement).
 
-use parking_lot::Mutex;
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::sync::Arc;
 
-/// Assigns pids to `lanes` lanes by round-robin on first sight.
+use xxhash_rust::xxh3::xxh3_64;
+
+/// Assigns pids to `lanes` lanes by their XXH3-64 hash.
 #[derive(Debug)]
 pub(crate) struct LaneRouter {
     lanes: usize,
-    next: AtomicUsize,
-    assigned: Mutex<HashMap<String, usize>>,
 }
 
 impl LaneRouter {
@@ -38,30 +31,14 @@ impl LaneRouter {
     pub(crate) fn new(lanes: usize) -> Self {
         Self {
             lanes: lanes.max(1),
-            next: AtomicUsize::new(0),
-            assigned: Mutex::new(HashMap::new()),
         }
     }
 
-    /// The lane `pid` belongs to, in `0..lanes`. First sighting takes the
-    /// next lane in turn; later calls return the same lane for the process's
-    /// lifetime (or until [`Self::forget`]).
+    /// The lane `pid` belongs to, in `0..lanes`. A pure function of the pid
+    /// and the lane count: every call — and every router instance with the
+    /// same count — returns the same lane for the same process.
     pub(crate) fn lane_of(&self, pid: &str) -> usize {
-        let mut assigned = self.assigned.lock();
-        if let Some(&lane) = assigned.get(pid) {
-            return lane;
-        }
-        let lane = self.next.fetch_add(1, Ordering::Relaxed) % self.lanes;
-        assigned.insert(pid.to_string(), lane);
-        lane
-    }
-
-    /// Drop the assignment of a removed process so the table cannot grow
-    /// without bound. A late write for the forgotten pid re-registers it on
-    /// the next lane in turn — harmless, because its rows are gone and such
-    /// writes are skipped as dead.
-    pub(crate) fn forget(&self, pid: &str) {
-        self.assigned.lock().remove(pid);
+        (xxh3_64(pid.as_bytes()) % self.lanes as u64) as usize
     }
 
     /// Number of lanes.
@@ -80,34 +57,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_robin_spreads_pids_evenly_and_stays_stable() {
-        let router = LaneRouter::new(4);
-        let lanes: Vec<usize> = (0..16)
-            .map(|i| router.lane_of(&format!("pid-{i}")))
-            .collect();
-        let mut counts = [0usize; 4];
-        for lane in &lanes {
-            counts[*lane] += 1;
-        }
-        assert!(
-            counts.iter().all(|&count| count == 4),
-            "expected an even spread, got {counts:?}"
-        );
-        // A hash mapping cannot make this guarantee: with fewer pids than
-        // lanes it routinely leaves lanes empty forever.
-        for (i, lane) in lanes.iter().enumerate() {
-            assert_eq!(router.lane_of(&format!("pid-{i}")), *lane);
+    fn a_pid_keeps_its_lane_and_independent_routers_agree() {
+        let first = LaneRouter::new(8);
+        let second = LaneRouter::new(8);
+        for pid in ["p-1", "p-2", "p-3", "process-with-a-long-name"] {
+            assert_eq!(first.lane_of(pid), first.lane_of(pid));
+            assert_eq!(first.lane_of(pid), second.lane_of(pid));
+            assert!(first.lane_of(pid) < 8);
         }
     }
 
     #[test]
-    fn forget_allows_the_pid_to_land_on_a_different_lane() {
-        let router = LaneRouter::new(2);
-        let first = router.lane_of("p1");
-        router.lane_of("p2");
-        router.lane_of("p3");
-        router.forget("p1");
-        assert_ne!(router.lane_of("p1"), first);
+    fn the_hash_spreads_many_pids_evenly_across_lanes() {
+        let router = LaneRouter::new(8);
+        let pids = 16_384usize;
+        let mut counts = [0usize; 8];
+        for index in 0..pids {
+            counts[router.lane_of(&format!("pid-{index}"))] += 1;
+        }
+        let expected = pids / 8;
+        for (lane, &count) in counts.iter().enumerate() {
+            // A deterministic hash, not a live round-robin: allow statistical
+            // skew, but every lane must carry its share and stay near it.
+            assert!(
+                count > expected / 2 && count < expected * 3 / 2,
+                "lane {lane} carries {count} of {pids}: {counts:?}"
+            );
+        }
     }
 
     #[test]
