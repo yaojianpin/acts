@@ -1,0 +1,18 @@
+[package]
+name = "acts-example-prof"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tokio = { features = ["full"], workspace = true }
+acts = { workspace = true }
+# The prof harness measures both the in-memory engine path and the durable
+# sled path; the store crate owns the backend, so the example is a package of
+# its own (an example of `acts` cannot depend on `acts-store`, which depends
+# on `acts`).
+acts-store = { workspace = true, features = ["sled"] }
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -121,9 +121,5 @@ name = "timeout"
 path = "../../examples/timeout/main.rs"
 
 [[example]]
-name = "prof"
-path = "../../examples/prof/main.rs"
-
-[[example]]
 name = "while"
 path = "../../examples/while/main.rs"
