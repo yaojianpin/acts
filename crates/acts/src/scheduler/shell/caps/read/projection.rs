@@ -102,6 +102,18 @@ pub(crate) const ENV_MAP_VAR: &str = "__env";
 /// task data.
 const AUTO_VAR: &str = "auto";
 
+/// The per-pid projection-lock registry drops idle entries once it passes this
+/// size (see `RowProjector::process_lock`). An active lock has an owner
+/// besides the map, so only finished runs are ever removed.
+const PROCESS_LOCK_PRUNE_THRESHOLD: usize = 256;
+
+/// How long a reclaimed pid's tombstone is kept. The tombstone only exists to
+/// stop a projection that was already holding the old snapshot from writing
+/// rows behind the reclamation; that projection needs the pid's process lock,
+/// which the cleanup holds until the rows are gone, so a tombstone this old
+/// can no longer be protecting an in-flight write.
+const RECLAIMED_TOMBSTONE_TTL_MS: i64 = 300_000;
+
 /// The kernel's error variables (the naming the failure operations commit).
 const ERROR_CODE_VAR: &str = "error.code";
 const ERROR_MESSAGE_VAR: &str = "error.message";
@@ -209,12 +221,17 @@ pub(crate) struct RowProjector {
     /// the map is in-process, and after a restart the first projection of a
     /// run writes (the rows are re-derived anyway).
     projected: Arc<parking_lot::Mutex<std::collections::HashMap<String, ProcessVersion>>>,
-    /// Pids whose durable aggregate was reclaimed. A projection that already
-    /// holds the old run's snapshot must not recreate its rows after the
-    /// sweeper deleted them, so every projection refuses a tombstoned pid; a
-    /// new run under the same pid clears the tombstone before it is created.
+    /// Pids whose durable aggregate was reclaimed, with the instant the
+    /// tombstone was written. A projection that already holds the old run's
+    /// snapshot must not recreate its rows after the sweeper deleted them, so
+    /// every projection refuses a tombstoned pid; a new run under the same pid
+    /// clears the tombstone before it is created. Tombstones older than
+    /// [`RECLAIMED_TOMBSTONE_TTL_MS`] are dropped by the next reclamation: a
+    /// projection cannot sit on the pid's process lock that long (the cleanup
+    /// holds the same lock while it deletes the rows), and keeping every
+    /// reclaimed pid forever grew this map with the lifetime run count.
     /// (The full generation guard belongs to the projection protocol, A5.)
-    reclaimed: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    reclaimed: Arc<parking_lot::Mutex<std::collections::HashMap<String, i64>>>,
     /// One async lock per pid, shared by the projection and the cleanup. A
     /// cleanup waits for an in-flight projection of the run before deleting its
     /// aggregate and setting the tombstone; a projection that starts afterwards
@@ -250,7 +267,7 @@ impl RowProjector {
             writer,
             workdir,
             projected: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
-            reclaimed: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
+            reclaimed: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             process_locks: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             models: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             counters: Arc::new(parking_lot::Mutex::new(ProjectionCounters::default())),
@@ -397,8 +414,13 @@ impl RowProjector {
     }
 
     fn process_lock(&self, process_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.process_locks
-            .lock()
+        let mut locks = self.process_locks.lock();
+        // An idle entry has no owner but the map; dropping it keeps this map
+        // proportional to the runs in flight, never to every run reclaimed.
+        if locks.len() > PROCESS_LOCK_PRUNE_THRESHOLD {
+            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        locks
             .entry(process_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -417,7 +439,11 @@ impl RowProjector {
         self.projected
             .lock()
             .retain(|key, _| !key.starts_with(&prefix));
-        self.reclaimed.lock().insert(process_id.to_string());
+        let now = crate::utils::time::time_millis();
+        let mut reclaimed = self.reclaimed.lock();
+        reclaimed.retain(|_, written| now.saturating_sub(*written) < RECLAIMED_TOMBSTONE_TTL_MS);
+        reclaimed.insert(process_id.to_string(), now);
+        drop(reclaimed);
         self.finish_repair(process_id);
     }
 
@@ -427,7 +453,7 @@ impl RowProjector {
     }
 
     fn is_reclaimed(&self, process_id: &str) -> bool {
-        self.reclaimed.lock().contains(process_id)
+        self.reclaimed.lock().contains_key(process_id)
     }
 
     /// Claim one row's projection version, or refuse it because a newer

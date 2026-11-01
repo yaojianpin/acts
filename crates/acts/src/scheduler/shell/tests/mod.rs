@@ -2915,6 +2915,167 @@ async fn kernel_engine_finishes_an_interrupted_terminal_cleanup() {
     runtime.close().await;
 }
 
+/// Reclaiming a finished run must return the host's own memory with its rows:
+/// the decoded aggregate leaves the load cache, and the durable aggregate
+/// family (head, base, log window, derived indexes, recovery entries) is gone.
+/// This is the invariant the "9838 runs left behind" investigation depends
+/// on — cleanup that deletes rows but pins every decoded snapshot is still a
+/// leak.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_reclaimed_run_leaves_no_decoded_aggregate_or_document() {
+    let runtime = crate::scheduler::Runtime::new(&crate::Config::default(), None).unwrap();
+    let pid = format!("reclaim_memory_{}", crate::utils::longid());
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-reclaim-memory")
+        .with_step(|step| step.with_id("s1"));
+    let options = crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid.clone());
+    runtime.start(&workflow, options).await.unwrap();
+    wait_until_settled(&runtime, &pid).await;
+    wait_until_reclaimable(runtime.workers(), &pid).await;
+    runtime.flush_writer().await.unwrap();
+
+    // A read of the run publishes its decoded aggregate to the load cache.
+    assert!(runtime.workers().snapshot(&pid).await.unwrap().is_some());
+    assert!(
+        runtime.workers().loaded_cache_len() > 0,
+        "the run must be resident before its reclamation"
+    );
+
+    sweep_until_gone(&runtime, &pid).await;
+    assert_eq!(
+        runtime.workers().loaded_cache_len(),
+        0,
+        "a reclaimed run must be forgotten by the decode cache"
+    );
+    let kv = runtime.store().kv();
+    for prefix in [
+        "kernel/aggregates/",
+        "kernel/indexes/recovery/",
+        "kernel/indexes/outbox/",
+        "kernel/indexes/ready/",
+        "kernel/indexes/recovery-entries/",
+    ] {
+        let entries = kv
+            .scan_prefix(
+                prefix,
+                crate::store::ScanOptions::new(
+                    crate::store::ScanOperation::Eq,
+                    prefix.to_string(),
+                    false,
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(
+            entries.is_empty(),
+            "{prefix} still holds {} documents: {entries:?}",
+            entries.len()
+        );
+    }
+    runtime.close().await;
+}
+
+/// A finished row the sweeper may not reclaim yet (the aggregate is retained
+/// for recovery/reconciliation, and its `removable` mark is not set) used to
+/// sit at the front of every cleanup page, so a page that was entirely
+/// retained never reached the reclaimable runs behind it. The cycle walks
+/// past it: the later run is reclaimed, the retained row stays.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_retained_run_does_not_starve_the_cleanup_cycle() {
+    let runtime = crate::scheduler::Runtime::new(&crate::Config::default(), None).unwrap();
+    // Four finished rows with no aggregate and no mark: every cleanup attempt
+    // returns "not reclaimable" and keeps them.
+    for index in 0..4 {
+        let pid = format!("aaa_retained_{index}");
+        runtime
+            .store()
+            .procs()
+            .create(&retained_proc_row(&pid))
+            .await
+            .unwrap();
+    }
+    // A real, reclaimable run whose id sorts after all of them.
+    let pid = format!("zzz_reclaimable_{}", crate::utils::longid());
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-cycle")
+        .with_step(|step| step.with_id("s1"));
+    let options = crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid.clone());
+    runtime.start(&workflow, options).await.unwrap();
+    wait_until_settled(&runtime, &pid).await;
+    wait_until_reclaimable(runtime.workers(), &pid).await;
+    runtime.flush_writer().await.unwrap();
+    runtime.workers().refresh_projection(&pid).await;
+
+    let ids = runtime.store().terminal_proc_ids().await.unwrap();
+    assert_eq!(ids.len(), 5);
+    assert_eq!(
+        ids.last().map(String::as_str),
+        Some(pid.as_str()),
+        "the retained rows sort before the reclaimable run"
+    );
+    // A page of two rows would have examined only retained rows; the cycle
+    // must still reach the run at the end.
+    let reclaimed = crate::scheduler::shell::timers::sweep_cycle(&runtime, &ids, 2)
+        .await
+        .unwrap();
+    assert_eq!(reclaimed, 1, "the reclaimable run must be reached");
+    assert!(
+        runtime
+            .store()
+            .procs()
+            .find_opt(&pid)
+            .await
+            .unwrap()
+            .is_none(),
+        "the reclaimable run's rows are gone"
+    );
+    for index in 0..4 {
+        let retained = format!("aaa_retained_{index}");
+        assert!(
+            runtime
+                .store()
+                .procs()
+                .find_opt(&retained)
+                .await
+                .unwrap()
+                .is_some(),
+            "a retained run must stay"
+        );
+    }
+    // The next cycle sees only the retained rows and reclaims nothing.
+    let ids = runtime.store().terminal_proc_ids().await.unwrap();
+    assert_eq!(ids.len(), 4);
+    assert_eq!(
+        crate::scheduler::shell::timers::sweep_cycle(&runtime, &ids, 2)
+            .await
+            .unwrap(),
+        0
+    );
+    runtime.close().await;
+}
+
+/// A finished proc row with no aggregate and no `removable` mark: the shape
+/// the cleanup must retain rather than delete.
+fn retained_proc_row(id: &str) -> crate::store::data::Proc {
+    crate::store::data::Proc {
+        id: id.to_string(),
+        state: "completed".to_string(),
+        mid: String::new(),
+        name: "retained".to_string(),
+        start_time: 1,
+        end_time: 2,
+        timestamp: 1,
+        model: String::new(),
+        env: "{}".to_string(),
+        err: None,
+        removable: false,
+        source_revision: String::new(),
+        v: 0,
+    }
+}
+
 /// An open (unsettled) delivery keeps the whole run — aggregate, indexes, rows
 /// and workdir — alive; settling it lets the next pass reclaim everything.
 #[tokio::test(flavor = "multi_thread")]
@@ -10366,6 +10527,43 @@ async fn the_outbox_pass_defers_wraps_and_delivers_after_repair() {
     let sent = host.dispatch_outbox_batch(8).await.unwrap();
     assert!(sent >= 1, "the repaired run's records are delivered");
     assert!(*delivered.lock() > before);
+}
+
+/// A poisoned pid is recorded with its error and attempt count, a clean pass
+/// clears it, and the explicit retry clears the whole set. This is the
+/// bookkeeping that keeps one bad run visible without letting it stop the
+/// outbox pass or arm the loop's backoff.
+#[tokio::test]
+async fn poisoned_outbox_pids_are_recorded_cleared_and_retryable() {
+    use crate::scheduler::core::outbox::outbox_repository::OutboxPageFailure;
+
+    let (host, _wake) = Workers::new(Arc::new(MemoryStore::new()), 1, MAX_NODE_RUN_TIMES, 800);
+    let failure = OutboxPageFailure {
+        process_id: "bad".into(),
+        error: "outbox index references missing record".into(),
+        repairable: true,
+    };
+    let attempted = std::collections::BTreeSet::from(["bad".to_string(), "good".to_string()]);
+    host.record_outbox_health(&attempted, std::slice::from_ref(&failure));
+    let poisoned = host.outbox_poisoned();
+    assert_eq!(poisoned.len(), 1);
+    assert_eq!(poisoned[0].0, "bad");
+    assert_eq!(poisoned[0].1.attempts, 1);
+    assert!(poisoned[0].1.error.contains("missing record"));
+
+    // A pass that reads the pid cleanly clears its entry.
+    host.record_outbox_health(&attempted, &[]);
+    assert!(host.outbox_poisoned().is_empty());
+
+    // Consecutive failures accumulate on the same entry.
+    host.record_outbox_health(&attempted, std::slice::from_ref(&failure));
+    host.record_outbox_health(&attempted, std::slice::from_ref(&failure));
+    let poisoned = host.outbox_poisoned();
+    assert_eq!(poisoned.len(), 1);
+    assert_eq!(poisoned[0].1.attempts, 2);
+
+    assert_eq!(host.retry_poisoned_outbox(), 1);
+    assert!(host.outbox_poisoned().is_empty());
 }
 
 /// Stale recovery-index entries (a pid whose aggregate is gone) are filtered

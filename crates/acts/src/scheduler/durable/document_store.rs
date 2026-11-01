@@ -701,12 +701,18 @@ pub(crate) fn build_create_transaction(
     })
 }
 
-/// The derived-index repair of one loaded aggregate: the normalized recovery
-/// index and ready index, guarded by the exact documents the repair read.
-/// `None` means both already match and nothing must be written.
+/// The derived-index repair of one loaded aggregate: the normalized recovery,
+/// outbox and ready indexes, guarded by the exact documents the repair read.
+/// `None` means every index already matches and nothing must be written.
+///
+/// The outbox index is part of the repair because it is derived state the
+/// aggregate fully determines: a document that no longer matches its records
+/// (an older database, an interrupted migration) is rewritten from the
+/// aggregate instead of being surfaced as a permanently poisoned run.
 pub(crate) fn build_repair_transaction(
     loaded: &LoadedProcess,
     recovery_index: Option<&[u8]>,
+    outbox_index: Option<&[u8]>,
     ready_index: Option<&[u8]>,
 ) -> Result<Option<DocumentTransaction>, DocumentRepositoryError> {
     let process_id = &loaded.snapshot.process_id;
@@ -733,6 +739,13 @@ pub(crate) fn build_repair_transaction(
         transaction = match recovery_index {
             Some(index) => transaction.put(&recovery_key, index.to_vec())?,
             None => transaction.delete(&recovery_key)?,
+        };
+        changed = true;
+    }
+    if outbox_index != loaded.original_outbox_index() {
+        transaction = match outbox_index {
+            Some(index) => transaction.put(&outbox_key, index.to_vec())?,
+            None => transaction.delete(&outbox_key)?,
         };
         changed = true;
     }
@@ -973,6 +986,59 @@ pub(crate) fn decode_loaded_process(
     original_outbox_index: Option<Vec<u8>>,
     original_ready_index: Option<Vec<u8>>,
 ) -> Result<LoadedProcess, DocumentRepositoryError> {
+    decode_loaded_process_with(
+        process_id,
+        original_document,
+        original_base,
+        log_entries,
+        original_recovery_index,
+        original_outbox_index,
+        original_ready_index,
+        false,
+    )
+}
+
+/// The derived-index repair's loader: like [`decode_loaded_process`], but a
+/// recovery or outbox document that disagrees with the aggregate is retained
+/// as the observed bytes instead of being reported as corruption.
+///
+/// The aggregate (head + base + log window) is still decoded strictly — the
+/// repair must never invent truth — while the derived indexes are exactly what
+/// the repair is about to rewrite from that aggregate. Without this, a damaged
+/// index could never be repaired: the loader that produces the guard bytes
+/// would reject the very state the repair exists to heal.
+pub(crate) fn decode_loaded_process_for_repair(
+    process_id: &str,
+    original_document: Vec<u8>,
+    original_base: Option<Vec<u8>>,
+    log_entries: &[(String, Vec<u8>)],
+    original_recovery_index: Option<Vec<u8>>,
+    original_outbox_index: Option<Vec<u8>>,
+    original_ready_index: Option<Vec<u8>>,
+) -> Result<LoadedProcess, DocumentRepositoryError> {
+    decode_loaded_process_with(
+        process_id,
+        original_document,
+        original_base,
+        log_entries,
+        original_recovery_index,
+        original_outbox_index,
+        original_ready_index,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_loaded_process_with(
+    process_id: &str,
+    original_document: Vec<u8>,
+    original_base: Option<Vec<u8>>,
+    log_entries: &[(String, Vec<u8>)],
+    original_recovery_index: Option<Vec<u8>>,
+    original_outbox_index: Option<Vec<u8>>,
+    original_ready_index: Option<Vec<u8>>,
+    allow_index_mismatch: bool,
+) -> Result<LoadedProcess, DocumentRepositoryError> {
     let envelope = ProcessEnvelope::decode(&original_document)
         .map_err(|source| corrupt_process(process_id, source.into()))?;
     let (snapshot, stored_base, stored_log, epoch, base_seq, next_seq, legacy) =
@@ -1089,20 +1155,22 @@ pub(crate) fn decode_loaded_process(
             stored: snapshot.process_id,
         });
     }
-    let expected_recovery_index = recovery_index_document(&snapshot)?;
-    let legacy_recovery_index = legacy_recovery_index_document(&snapshot)?;
-    if original_recovery_index.as_deref() != expected_recovery_index.as_deref()
-        && original_recovery_index.as_deref() != legacy_recovery_index.as_deref()
-    {
-        return Err(DocumentRepositoryError::RecoveryIndexMismatch {
-            process_id: process_id.into(),
-        });
-    }
-    let expected_outbox_index = outbox_index_document(&snapshot)?;
-    if original_outbox_index.as_deref() != expected_outbox_index.as_deref() {
-        return Err(DocumentRepositoryError::OutboxIndexMismatch {
-            process_id: process_id.into(),
-        });
+    if !allow_index_mismatch {
+        let expected_recovery_index = recovery_index_document(&snapshot)?;
+        let legacy_recovery_index = legacy_recovery_index_document(&snapshot)?;
+        if original_recovery_index.as_deref() != expected_recovery_index.as_deref()
+            && original_recovery_index.as_deref() != legacy_recovery_index.as_deref()
+        {
+            return Err(DocumentRepositoryError::RecoveryIndexMismatch {
+                process_id: process_id.into(),
+            });
+        }
+        let expected_outbox_index = outbox_index_document(&snapshot)?;
+        if original_outbox_index.as_deref() != expected_outbox_index.as_deref() {
+            return Err(DocumentRepositoryError::OutboxIndexMismatch {
+                process_id: process_id.into(),
+            });
+        }
     }
     Ok(LoadedProcess {
         snapshot: std::sync::Arc::new(snapshot),
@@ -1162,8 +1230,19 @@ pub(crate) fn is_process_head_key(key: &str) -> bool {
 
 /// The process id behind one encoded aggregate key.
 pub(crate) fn decode_process_key(key: &str) -> Result<String, DocumentRepositoryError> {
+    decode_process_key_under(PROCESS_KEY_PREFIX, key)
+}
+
+/// The process id behind one encoded key under `prefix` — the same hex codec
+/// [`encoded_process_key`] writes, for the derived index families
+/// (`kernel/indexes/outbox/`, …) whose keys carry the id without the
+/// aggregate prefix.
+pub(crate) fn decode_process_key_under(
+    prefix: &str,
+    key: &str,
+) -> Result<String, DocumentRepositoryError> {
     let encoded = key
-        .strip_prefix(PROCESS_KEY_PREFIX)
+        .strip_prefix(prefix)
         .ok_or_else(|| DocumentRepositoryError::KeyEncoding(format!("foreign key {key:?}")))?;
     if encoded.len() % 2 != 0 {
         return Err(DocumentRepositoryError::KeyEncoding(format!(
@@ -1569,9 +1648,10 @@ mod tests {
         let ready_key = ready_index_key("process").unwrap();
         let outbox_key = outbox_index_key("process").unwrap();
 
-        let transaction = build_repair_transaction(&loaded, None, None)
-            .unwrap()
-            .expect("dropping both indexes is a change");
+        let transaction =
+            build_repair_transaction(&loaded, None, loaded.original_outbox_index(), None)
+                .unwrap()
+                .expect("dropping both indexes is a change");
         assert!(
             transaction
                 .guards()
@@ -1585,10 +1665,30 @@ mod tests {
             key: ready_key.clone()
         }));
 
+        // An outbox index that no longer matches the aggregate is repaired by
+        // the same batch, guarded by the bytes the repair read.
+        let outbox_repaired = build_repair_transaction(
+            &loaded,
+            loaded.original_recovery_index(),
+            Some(b"rebuilt outbox".as_slice()),
+            loaded.original_ready_index(),
+        )
+        .unwrap()
+        .expect("rewriting the outbox index is a change");
+        assert!(
+            outbox_repaired
+                .mutations()
+                .contains(&DocumentMutation::Put {
+                    key: outbox_key.clone(),
+                    value: b"rebuilt outbox".to_vec(),
+                })
+        );
+
         assert!(
             build_repair_transaction(
                 &loaded,
                 loaded.original_recovery_index(),
+                loaded.original_outbox_index(),
                 loaded.original_ready_index(),
             )
             .unwrap()
@@ -1602,16 +1702,21 @@ mod tests {
         let transaction = build_repair_transaction(
             &empty,
             Some(b"recovery".as_slice()),
+            Some(b"outbox".as_slice()),
             Some(b"ready".as_slice()),
         )
         .unwrap()
-        .expect("installing both indexes is a change");
+        .expect("installing the indexes is a change");
         assert!(transaction.guards().iter().any(|guard| {
             guard.key == recovery_index_key("empty").unwrap() && guard.expected.is_none()
         }));
         assert!(transaction.mutations().contains(&DocumentMutation::Put {
             key: ready_index_key("empty").unwrap(),
             value: b"ready".to_vec(),
+        }));
+        assert!(transaction.mutations().contains(&DocumentMutation::Put {
+            key: outbox_index_key("empty").unwrap(),
+            value: b"outbox".to_vec(),
         }));
     }
 

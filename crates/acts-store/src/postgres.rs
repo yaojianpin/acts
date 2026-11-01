@@ -1,6 +1,7 @@
 use crate::consts;
 use acts::{
     ActError, KvStore, Result, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard,
+    StoreView,
 };
 use sqlx::{Row, postgres::PgPoolOptions};
 use std::time::Duration;
@@ -129,6 +130,62 @@ impl KvStore for PostgresStore {
             values.extend(chunk.iter().map(|key| by_key.remove(key)));
         }
         Ok(values)
+    }
+
+    /// One repeatable-read transaction over the whole key set: every value
+    /// comes from the snapshot the transaction pinned, never from a version a
+    /// concurrent commit installed after the first read.
+    async fn read_stable(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let table = consts::ACTS_STORE_NAME;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        let values = read_keys(&mut tx, table, keys)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        Ok(values)
+    }
+
+    /// The key set and the prefix walk share one repeatable-read snapshot: the
+    /// family a load reassembles is exactly one committed version.
+    async fn read_view(&self, keys: &[String], prefix: &str) -> Result<StoreView> {
+        let table = consts::ACTS_STORE_NAME;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        let values = read_keys(&mut tx, table, keys)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        let entries = sqlx::query_as::<_, (String, Vec<u8>)>(&format!(
+            "SELECT key, value FROM {} WHERE key LIKE $1 ESCAPE '\\' ORDER BY key ASC",
+            consts::ACTS_STORE_NAME
+        ))
+        .bind(like_pattern(prefix))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| ActError::Store(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        Ok(StoreView { values, entries })
     }
 
     async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
@@ -281,6 +338,34 @@ impl KvStore for PostgresStore {
             .map_err(|e| ActError::Store(e.to_string()))?;
         Ok(rows)
     }
+}
+
+/// Read every requested key through one connection (inside the caller's
+/// transaction), keeping the caller's key order and using `IN` batches of at
+/// most 500 binds.
+async fn read_keys(
+    conn: &mut sqlx::PgConnection,
+    table: &str,
+    keys: &[String],
+) -> std::result::Result<Vec<Option<Vec<u8>>>, sqlx::Error> {
+    let mut values = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(500) {
+        let placeholders = (1..=chunk.len())
+            .map(|n| format!("${n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT key, value FROM {table} WHERE key IN ({placeholders})");
+        let mut query = sqlx::query_as::<_, (String, Vec<u8>)>(&sql);
+        for key in chunk {
+            query = query.bind(key);
+        }
+        let rows = query.fetch_all(&mut *conn).await?;
+        let mut by_key = rows
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        values.extend(chunk.iter().map(|key| by_key.remove(key)));
+    }
+    Ok(values)
 }
 
 /// Turn a key prefix into a literal LIKE prefix. Values are encoded before

@@ -17,7 +17,7 @@ use crate::{
                 outbox_index::{OutboxIndexCodec, OutboxIndexState},
                 outbox_repository::{
                     OutboxBatchOutcome, OutboxConfirmation, OutboxCursor, OutboxPage,
-                    OutboxRepositoryError,
+                    OutboxPageFailure, OutboxRepositoryError,
                 },
                 records::{OutboxEvent, OutboxId, OutboxRecord},
             },
@@ -32,7 +32,8 @@ use crate::{
                 build_migration_transaction, build_orphan_reclaim_transaction,
                 build_outbox_confirm_transaction, build_reclaim_transaction,
                 build_repair_transaction, build_replace_transaction, decode_loaded_process,
-                decode_process_key, install_migration, loaded_after_write, outbox_index_key,
+                decode_loaded_process_for_repair, decode_process_key, decode_process_key_under,
+                install_migration, loaded_after_write, outbox_index_document, outbox_index_key,
                 process_base_key, process_key, process_log_prefix, ready_index_key,
                 recovery_entries, recovery_entry_process_prefix, recovery_index_document,
                 recovery_index_key,
@@ -40,18 +41,34 @@ use crate::{
             snapshot_codec::LogChanges,
         },
     },
-    store::{KvStore, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard},
+    store::{
+        KvStore, STABLE_READ_ATTEMPTS, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard,
+        StoreView,
+    },
 };
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_RECOVERY_PAGE_SIZE: usize = 1_024;
-/// How many times a load re-reads after finding an aggregate paired with its
-/// derived indexes from another version (see [`AsyncProcessRepository::load`]).
-/// Bounded: a store that keeps serving an inconsistent triple is damage, and
-/// the caller must see it.
-const LOAD_ATTEMPTS: usize = 4;
+/// How many stable samples one load may take before reporting a conflict.
+///
+/// This bounds *obtaining evidence*, not the corruption verdict: a sample is
+/// only accepted when its five documents and its log window are one committed
+/// version. A sample that decodes inconsistently is retried under the same
+/// head, and only a second failure with byte-identical head is reported as
+/// damage (see [`AsyncProcessRepository::load`]). Exhausting the bound while
+/// the head keeps moving is a conflict the caller retries — never corruption.
+const LOAD_ATTEMPTS: usize = 64;
+
+/// How many guarded-batch retries one optimistic command makes before it
+/// reports a conflict: a reclaim or a derived-index repair re-reads and
+/// re-guards after a competing writer moved the aggregate. These are lost
+/// compare-and-swap guards, not read sampling — a handful of re-reads is what
+/// a busy but healthy writer needs, and a loop as wide as [`LOAD_ATTEMPTS`]
+/// would only multiply the cost of a store that keeps refusing.
+const CAS_ATTEMPTS: usize = 8;
 
 #[async_trait::async_trait]
 pub(crate) trait AsyncDocumentStore: Send + Sync {
@@ -70,6 +87,63 @@ pub(crate) trait AsyncDocumentStore: Send + Sync {
         lower: Option<&str>,
         upper: Option<&str>,
     ) -> Result<Vec<(String, Vec<u8>)>, ActError>;
+
+    /// Read `keys` as one committed version — the cheap half of
+    /// [`Self::read_view`], for validating a cached aggregate against the
+    /// documents it was decoded from. Log entries cannot change under one head
+    /// (any commit installs a new head), so a cache hit needs no prefix scan.
+    async fn read_stable(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+        for _ in 0..STABLE_READ_ATTEMPTS {
+            let before = self.read_many(keys).await?;
+            let after = self.read_many(keys).await?;
+            if before == after {
+                return Ok(before);
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(ActError::Store(format!(
+            "document keys did not reach one stable version across \
+             {STABLE_READ_ATTEMPTS} samples"
+        )))
+    }
+
+    /// Read `keys` and every entry under `prefix` as one committed version.
+    ///
+    /// This is the read a document family is reassembled from: its head, base,
+    /// log window and derived indexes are one [`KvStore::batch`] write, so a
+    /// view that mixes two versions would make an intact family look corrupt.
+    ///
+    /// The default samples the keys around the prefix scan and repeats until
+    /// the samples agree — the head is the version token, and it changes on
+    /// every commit. A store that can serve a native snapshot overrides this
+    /// (see [`KvDocumentStore`]); exhausting
+    /// [`STABLE_READ_ATTEMPTS`] is an error the caller may retry, never a
+    /// corruption verdict.
+    async fn read_view(&self, keys: &[String], prefix: &str) -> Result<StoreView, ActError> {
+        for _ in 0..STABLE_READ_ATTEMPTS {
+            let before = self.read_many(keys).await?;
+            let entries = self.scan_prefix(prefix).await?;
+            let after = self.read_many(keys).await?;
+            if before == after {
+                // The view promises key order even from a store whose scan
+                // promises none.
+                let mut entries: Vec<(String, Vec<u8>)> = entries
+                    .into_iter()
+                    .filter(|(key, _)| key.starts_with(prefix))
+                    .collect();
+                entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                return Ok(StoreView {
+                    values: before,
+                    entries,
+                });
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(ActError::Store(format!(
+            "document view did not reach one stable version across \
+             {STABLE_READ_ATTEMPTS} samples"
+        )))
+    }
 
     /// Apply every mutation atomically if and only if all guards still match.
     /// `Ok(false)` means no mutation became visible.
@@ -134,6 +208,18 @@ impl AsyncDocumentStore for KvDocumentStore {
         Ok(entries)
     }
 
+    /// The backend's native snapshot when it has one (memory, sled, SQLite,
+    /// Postgres all do); the trait's sampling default otherwise.
+    async fn read_stable(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+        self.inner.read_stable(keys).await
+    }
+
+    /// The backend's native snapshot when it has one (memory, sled, SQLite,
+    /// Postgres all do); the trait's sampling default otherwise.
+    async fn read_view(&self, keys: &[String], prefix: &str) -> Result<StoreView, ActError> {
+        self.inner.read_view(keys, prefix).await
+    }
+
     async fn atomic_batch(
         &self,
         guards: &[DocumentGuard],
@@ -176,6 +262,36 @@ pub(crate) struct AsyncProcessRepository {
     /// decoded from. Anything that moves the aggregate — this process or
     /// another writer — misses the cache and takes the full decode path.
     cached: parking_lot::Mutex<HashMap<String, Arc<LoadedProcess>>>,
+    /// What the load path observed while the stress harness or a test drove
+    /// concurrent writers and readers (see [`Self::observations`]). The
+    /// counters are diagnostics, never decisions.
+    observations: RepositoryObservations,
+}
+
+/// Load-path counters: how often a sample was discarded because a writer
+/// moved the head, how often a derived index disagreed with its aggregate,
+/// and how often a disagreement was confirmed under one stable head.
+///
+/// A consistent view makes every one of these zero on the normal path: the
+/// family is written atomically, so a load that sees one version can only find
+/// it intact. A non-zero `recovery`/`outbox` counter is either a fallback
+/// store whose view mixed versions (a read race) or damage being confirmed.
+#[derive(Default)]
+pub(crate) struct RepositoryObservations {
+    read_races: AtomicU64,
+    recovery_index_mismatches: AtomicU64,
+    outbox_index_mismatches: AtomicU64,
+    corrupt_families: AtomicU64,
+}
+
+/// A point-in-time copy of [`RepositoryObservations`].
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ObservedLoads {
+    pub(crate) read_races: u64,
+    pub(crate) recovery_index_mismatches: u64,
+    pub(crate) outbox_index_mismatches: u64,
+    pub(crate) corrupt_families: u64,
 }
 
 /// Loaded aggregates kept resident: enough for the runs a driver works through
@@ -188,6 +304,51 @@ impl AsyncProcessRepository {
         Self {
             store,
             cached: parking_lot::Mutex::new(HashMap::new()),
+            observations: RepositoryObservations::default(),
+        }
+    }
+
+    /// A point-in-time copy of the load-path counters.
+    #[cfg(test)]
+    pub(crate) fn observations(&self) -> ObservedLoads {
+        ObservedLoads {
+            read_races: self.observations.read_races.load(Ordering::Relaxed),
+            recovery_index_mismatches: self
+                .observations
+                .recovery_index_mismatches
+                .load(Ordering::Relaxed),
+            outbox_index_mismatches: self
+                .observations
+                .outbox_index_mismatches
+                .load(Ordering::Relaxed),
+            corrupt_families: self.observations.corrupt_families.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The number of decoded aggregates currently held resident. A reclaimed
+    /// run is forgotten, so a server that reclaimed everything holds none.
+    #[cfg(test)]
+    pub(crate) fn cached_len(&self) -> usize {
+        self.cached.lock().len()
+    }
+
+    /// Count one decode failure by kind. Both derived-index disagreements are
+    /// exactly what a torn read used to manufacture; with a stable view they
+    /// can only come from a genuinely inconsistent family (before the
+    /// stable-head confirmation decides).
+    fn note_decode_failure(&self, error: &DocumentRepositoryError) {
+        match error {
+            DocumentRepositoryError::RecoveryIndexMismatch { .. } => {
+                self.observations
+                    .recovery_index_mismatches
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            DocumentRepositoryError::OutboxIndexMismatch { .. } => {
+                self.observations
+                    .outbox_index_mismatches
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 
@@ -205,7 +366,7 @@ impl AsyncProcessRepository {
         cache.insert(loaded.snapshot.process_id.clone(), Arc::new(loaded.clone()));
     }
 
-    fn forget_loaded(&self, process_id: &str) {
+    pub(crate) fn forget_loaded(&self, process_id: &str) {
         self.cached.lock().remove(process_id);
     }
 
@@ -638,11 +799,12 @@ impl AsyncProcessRepository {
         now_ms: i64,
         poll_ms: i64,
     ) -> Result<bool, AsyncRepositoryError> {
-        for _ in 0..LOAD_ATTEMPTS {
-            let Some(loaded) = self.load(process_id).await? else {
+        for _ in 0..CAS_ATTEMPTS {
+            let Some(loaded) = self.load_for_repair(process_id).await? else {
                 return Ok(false);
             };
             let recovery = recovery_index_document(&loaded.snapshot)?;
+            let outbox = outbox_index_document(&loaded.snapshot)?;
             let previous = loaded
                 .original_ready_index()
                 .and_then(|bytes| ReadyIndexCodec::decode(bytes).ok());
@@ -661,8 +823,12 @@ impl AsyncProcessRepository {
                 })
             })
             .transpose()?;
-            let Some(transaction) =
-                build_repair_transaction(&loaded, recovery.as_deref(), ready.as_deref())?
+            let Some(transaction) = build_repair_transaction(
+                &loaded,
+                recovery.as_deref(),
+                outbox.as_deref(),
+                ready.as_deref(),
+            )?
             else {
                 return Ok(false);
             };
@@ -770,10 +936,25 @@ impl AsyncProcessRepository {
         let mut observed = 0usize;
         let mut due = 0usize;
         let mut oldest_due_at_ms: Option<i64> = None;
+        let mut failures: Vec<OutboxPageFailure> = Vec::new();
         for (key, document) in documents {
-            let index = OutboxIndexCodec::decode(&document).map_err(|error| {
-                OutboxRepositoryError::CorruptData(format!("outbox index {key:?}: {error}"))
-            })?;
+            let index = match OutboxIndexCodec::decode(&document) {
+                Ok(index) => index,
+                Err(error) => {
+                    // One undecodable index document names one process. The
+                    // rest of the page still goes out; the loop records the
+                    // pid, keeps its health degraded, and the index repair
+                    // rewrites the document from the aggregate.
+                    let process_id = decode_process_key_under(OUTBOX_INDEX_KEY_PREFIX, &key)
+                        .unwrap_or_else(|_| key.clone());
+                    failures.push(OutboxPageFailure {
+                        process_id,
+                        error: format!("outbox index {key:?}: {error}"),
+                        repairable: true,
+                    });
+                    continue;
+                }
+            };
             observed += index.entries.len();
             for entry in index.entries {
                 let available_at = match entry.state {
@@ -803,44 +984,87 @@ impl AsyncProcessRepository {
             String,
             std::sync::Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>,
         > = HashMap::new();
+        // One failure per pid per page: an aggregate that cannot be read must
+        // not make every one of its entries load it again.
+        // pid -> (error, repairable). A store-level failure is not isolated
+        // here: it fails the whole pass below, because every pid on the page
+        // would fail the same way and the loop's backoff is the right answer.
+        let mut failed: HashMap<String, (String, bool)> = HashMap::new();
+        let mut attempted: Vec<String> = Vec::new();
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
             let process_id = entry.id.process_id.clone();
+            if failed.contains_key(&process_id) {
+                continue;
+            }
             let snapshot = match processes.get(&process_id) {
                 Some(snapshot) => snapshot.clone(),
                 None => {
-                    let Some(loaded) = self
-                        .load(&process_id)
-                        .await
-                        .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?
-                    else {
-                        // An interrupted cleanup left an index document whose
-                        // aggregate is already gone. There is no record to
-                        // deliver: skip it instead of failing the pass (and
-                        // every later one) on work that cannot exist. The
-                        // cleanup retry removes the document when it can name
-                        // the process from its rows.
-                        tracing::debug!(
-                            process_id,
-                            "outbox index references a missing aggregate; skipping"
-                        );
-                        continue;
-                    };
-                    processes.insert(process_id.clone(), loaded.snapshot.clone());
-                    loaded.snapshot
+                    if !attempted.contains(&process_id) {
+                        attempted.push(process_id.clone());
+                    }
+                    match self.load(&process_id).await {
+                        Ok(Some(loaded)) => {
+                            processes.insert(process_id.clone(), loaded.snapshot.clone());
+                            loaded.snapshot
+                        }
+                        Ok(None) => {
+                            // An interrupted cleanup left an index document
+                            // whose aggregate is already gone. There is no
+                            // record to deliver: skip it instead of failing
+                            // the pass (and every later one) on work that
+                            // cannot exist. The cleanup retry removes the
+                            // document when it can name the process from its
+                            // rows.
+                            tracing::debug!(
+                                process_id,
+                                "outbox index references a missing aggregate; skipping"
+                            );
+                            continue;
+                        }
+                        Err(AsyncRepositoryError::Store(error)) => {
+                            // The store itself is unavailable: no pid on the
+                            // page can be read, so this is a loop failure (the
+                            // caller backs off), not a per-pid isolation.
+                            return Err(OutboxRepositoryError::Unavailable(error.to_string()));
+                        }
+                        Err(error) => {
+                            // A per-pid integrity failure (a family that does
+                            // not agree with its own head) is recorded and
+                            // isolated: the other pids of the page still go
+                            // out. It is never swallowed — the loop logs it,
+                            // keeps its health degraded, and retries. No index
+                            // repair can invent the missing truth, so it is
+                            // not marked repairable.
+                            failed.insert(process_id.clone(), (error.to_string(), false));
+                            continue;
+                        }
+                    }
                 }
             };
-            let record = snapshot.outbox.get(&entry.id).ok_or_else(|| {
-                OutboxRepositoryError::CorruptData(format!(
-                    "outbox index references missing record {:?}",
-                    entry.id
-                ))
-            })?;
+            let Some(record) = snapshot.outbox.get(&entry.id) else {
+                failed.insert(
+                    process_id.clone(),
+                    (
+                        format!("outbox index references missing record {:?}", entry.id),
+                        true,
+                    ),
+                );
+                continue;
+            };
             if record.revision != entry.revision || !record.state.is_dispatchable(now_ms) {
-                return Err(OutboxRepositoryError::CorruptData(format!(
-                    "stale outbox index entry for {:?}",
-                    entry.id
-                )));
+                // The index document was scanned before this run's last
+                // confirmation committed, so the record moved on (delivered,
+                // claimed by another pass, or deferred) after the scan. That
+                // is a stale scan, not damage: the aggregate and its index are
+                // written in one batch, so an index entry that no longer
+                // matches its record can only be the version on the other
+                // side of a commit that landed in between. Skip it — the next
+                // pass re-reads the index — instead of failing a pass whose
+                // other entries are still deliverable. Failing here used to
+                // degrade the outbox loop, and undelivered records kept every
+                // finished run from being reclaimed.
+                continue;
             }
             records.push(record.clone());
         }
@@ -849,12 +1073,21 @@ impl AsyncProcessRepository {
         } else {
             None
         };
+        failures.extend(failed.into_iter().map(|(process_id, (error, repairable))| {
+            OutboxPageFailure {
+                process_id,
+                error,
+                repairable,
+            }
+        }));
         Ok(OutboxPage {
             records,
             next,
             observed,
             due,
             oldest_due_at_ms,
+            attempted,
+            failures,
         })
     }
 
@@ -1058,7 +1291,7 @@ impl AsyncProcessRepository {
     /// "index or row residue remains".
     ///
     /// A concurrent commit, start or another cleaner makes the guarded batch
-    /// fail; the load is then repeated. After [`LOAD_ATTEMPTS`] the outcome is
+    /// fail; the load is then repeated. After [`CAS_ATTEMPTS`] the outcome is
     /// a conflict, which the cleanup loop reports and retries on its next
     /// pass; the aggregate is never deleted on an unguarded read.
     pub(crate) async fn reclaim(
@@ -1066,7 +1299,7 @@ impl AsyncProcessRepository {
         process_id: &str,
     ) -> Result<ReclaimOutcome, AsyncRepositoryError> {
         let entry_prefix = recovery_entry_process_prefix(process_id)?;
-        for _ in 0..LOAD_ATTEMPTS {
+        for _ in 0..CAS_ATTEMPTS {
             let loaded = self.load(process_id).await?;
             match loaded {
                 Some(loaded) => {
@@ -1196,34 +1429,38 @@ impl AsyncProcessRepository {
 
     /// Load one aggregate family with its derived indexes.
     ///
-    /// The head, base and indexes are read in one `read_many` call and the log
-    /// entries in one prefix scan. A store without a native batch read serves
-    /// the batch key by key, so a commit landing between reads can pair a head
-    /// with records from another version. The head is re-read after the log
-    /// scan and compared byte for byte — any commit installs a different head
-    /// (its epoch advances) — and the derived indexes are checked against the
-    /// rebuilt snapshot; either disagreement retries the read. A mismatch that
-    /// survives the attempts is surfaced as damage.
+    /// The head, base, indexes **and** the log window are read as one
+    /// committed version ([`AsyncDocumentStore::read_view`]). The family is a
+    /// single guarded batch write, so the view can never pair a head with a
+    /// document from the version on either side of it — the mixed version a
+    /// key-by-key read used to manufacture cannot reach the decoder.
+    ///
+    /// A sample that still decodes inconsistently is not damage by itself:
+    /// only two independent stable samples with **byte-identical head** that
+    /// both disagree are confirmed as a corrupt family (the head is the
+    /// version token; a commit that could have produced the disagreement
+    /// installs different head bytes). A disagreement whose head moved is a
+    /// read race and is retried. [`LOAD_ATTEMPTS`] stops a reader under a
+    /// continuously committing writer; exhausting it reports a conflict the
+    /// caller retries, never corruption.
     pub(crate) async fn load(
         &self,
         process_id: &str,
     ) -> Result<Option<LoadedProcess>, AsyncRepositoryError> {
-        let head_key = process_key(process_id)?;
+        let keys = family_keys(process_id)?;
+        let log_prefix = process_log_prefix(process_id)?;
+        // The lock is released before the read: a parking_lot guard is not
+        // `Send` and the load future must be.
         let cached = self.cached.lock().get(process_id).cloned();
         if let Some(cached) = cached {
             // The head is the version token and the three derived documents
             // are guards of it: a hit means this process's aggregate is
             // exactly the state that was decoded, down to the documents a
-            // repair pass may have rewritten. Reading those five documents
-            // replaces decoding the base snapshot and every log entry.
-            let keys = [
-                head_key.clone(),
-                recovery_index_key(process_id)?,
-                outbox_index_key(process_id)?,
-                ready_index_key(process_id)?,
-                process_base_key(process_id)?,
-            ];
-            let mut documents = self.store.read_many(&keys).await?.into_iter();
+            // repair pass may have rewritten. Reading those five documents as
+            // one stable version replaces decoding the base snapshot and every
+            // log entry. Log entries are immutable under one head (a commit
+            // that appends one writes a new epoch), so a hit needs no scan.
+            let mut documents = self.store.read_stable(&keys).await?.into_iter();
             let head = documents.next().flatten();
             let recovery_index = documents.next().flatten();
             let outbox_index = documents.next().flatten();
@@ -1235,24 +1472,17 @@ impl AsyncProcessRepository {
                 && ready_index.as_deref() == cached.original_ready_index()
                 && base.as_deref() == cached.original_base()
             {
-                // The head, base and every derived document are the exact
-                // bytes this aggregate was decoded from. Log entries are
-                // immutable for a head (a commit that appends one writes a
-                // new epoch), so the cached replay is still the authoritative
-                // snapshot and the decode/verify pass can be skipped.
                 return Ok(Some((*cached).clone()));
             }
         }
-        let keys = vec![
-            head_key,
-            recovery_index_key(process_id)?,
-            outbox_index_key(process_id)?,
-            ready_index_key(process_id)?,
-            process_base_key(process_id)?,
-        ];
-        let log_prefix = process_log_prefix(process_id)?;
+        // The head bytes of the last sample whose decode disagreed. A second
+        // disagreement with the same head confirms damage; a different head
+        // means a writer moved the aggregate, so the first disagreement was a
+        // race (or a repair landing) and the new sample is decoded instead.
+        let mut suspect: Option<Vec<u8>> = None;
         for attempt in 0..LOAD_ATTEMPTS {
-            let mut documents = self.store.read_many(&keys).await?.into_iter();
+            let view = self.store.read_view(&keys, &log_prefix).await?;
+            let mut documents = view.values.into_iter();
             let process = documents.next().flatten();
             let recovery_index = documents.next().flatten();
             let outbox_index = documents.next().flatten();
@@ -1262,109 +1492,148 @@ impl AsyncProcessRepository {
                 self.forget_loaded(process_id);
                 return Ok(None);
             };
-            let log_entries = self.store.scan_prefix(&log_prefix).await?;
-            let head_bytes = process.clone();
+            if let Some(prior) = &suspect
+                && prior != &process
+            {
+                self.observations.read_races.fetch_add(1, Ordering::Relaxed);
+            }
             match decode_loaded_process(
                 process_id,
-                process,
+                process.clone(),
                 base,
-                &log_entries,
+                &view.entries,
                 recovery_index,
                 outbox_index,
                 ready_index,
             ) {
-                Ok(loaded) if loaded.is_legacy() => match self.migrate_legacy(loaded).await? {
-                    MigrationOutcome::Migrated(loaded) => {
-                        self.cache_loaded(&loaded);
-                        return Ok(Some(loaded));
+                Ok(loaded) if loaded.is_legacy() => {
+                    suspect = None;
+                    match self.migrate_legacy(loaded).await? {
+                        MigrationOutcome::Migrated(loaded) => {
+                            self.cache_loaded(&loaded);
+                            return Ok(Some(loaded));
+                        }
+                        MigrationOutcome::Failed(loaded) => {
+                            // The legacy document stays readable, but the next
+                            // load must retry the migration: caching it would
+                            // pin the un-migrated read forever.
+                            self.forget_loaded(process_id);
+                            return Ok(Some(loaded));
+                        }
+                        MigrationOutcome::Conflict if attempt + 1 < LOAD_ATTEMPTS => {
+                            tracing::debug!(
+                                process_id,
+                                attempt,
+                                "legacy migration lost a guard; re-reading"
+                            );
+                        }
+                        MigrationOutcome::Conflict => {
+                            return Err(AsyncRepositoryError::Conflict(process_id.into()));
+                        }
                     }
-                    MigrationOutcome::Failed(loaded) => {
-                        // The legacy document stays readable, but the next
-                        // load must retry the migration: caching it would
-                        // pin the un-migrated read forever.
-                        self.forget_loaded(process_id);
-                        return Ok(Some(loaded));
-                    }
-                    MigrationOutcome::Conflict if attempt + 1 < LOAD_ATTEMPTS => {
-                        tracing::debug!(
-                            process_id,
-                            attempt,
-                            "legacy migration lost a guard; re-reading"
-                        );
-                    }
-                    MigrationOutcome::Conflict => {
-                        return Err(AsyncRepositoryError::Conflict(process_id.into()));
-                    }
-                },
+                }
                 Ok(loaded) => {
-                    // Prefer the newest consistent view: if a commit landed
-                    // between the batch read and the log scan, retry. On the
-                    // last attempt the decoded snapshot is still internally
-                    // consistent (base/head/log all agree), so hand it back
-                    // rather than failing a reader under a busy writer.
-                    let current = self
-                        .store
-                        .read_many(&[process_key(process_id)?])
-                        .await?
-                        .into_iter()
-                        .next()
-                        .flatten();
-                    if current.as_deref() == Some(head_bytes.as_slice()) {
-                        self.cache_loaded(&loaded);
-                        return Ok(Some(loaded));
-                    }
-                    if attempt + 1 < LOAD_ATTEMPTS {
-                        tracing::debug!(
-                            process_id,
-                            attempt,
-                            "aggregate head moved while reading its log; re-reading"
-                        );
-                        continue;
-                    }
                     self.cache_loaded(&loaded);
                     return Ok(Some(loaded));
                 }
                 Err(error) => {
-                    // A derived index can be read from another version; that
-                    // is a plain race and retries without another head read. A
-                    // compaction can also delete the log window between the
-                    // batch read and the prefix scan, leaving an intact old
-                    // head with no entries — so a non-race error is retried
-                    // only when the head moved.
-                    if error.is_read_race() {
-                        if attempt + 1 < LOAD_ATTEMPTS {
-                            tracing::debug!(
-                                process_id,
-                                attempt,
-                                "aggregate read raced a writer; re-reading"
-                            );
-                            continue;
-                        }
+                    self.note_decode_failure(&error);
+                    if suspect.as_deref() == Some(process.as_slice()) {
+                        // Two independent stable samples, one unchanged head,
+                        // the same inconsistency: no writer could have caused
+                        // it, so the family itself is damaged.
+                        self.observations
+                            .corrupt_families
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            process_id,
+                            error = %error,
+                            "aggregate family is persistently inconsistent under one stable head"
+                        );
                         return Err(error.into());
                     }
-                    let current = self
-                        .store
-                        .read_many(&[process_key(process_id)?])
-                        .await?
-                        .into_iter()
-                        .next()
-                        .flatten();
-                    if current.as_deref() != Some(head_bytes.as_slice())
-                        && attempt + 1 < LOAD_ATTEMPTS
-                    {
-                        tracing::debug!(
-                            process_id,
-                            attempt,
-                            "aggregate head moved while reading its log; re-reading"
-                        );
-                        continue;
+                    suspect = Some(process);
+                    if attempt + 1 == LOAD_ATTEMPTS {
+                        return Err(AsyncRepositoryError::Conflict(process_id.into()));
                     }
-                    return Err(error.into());
+                    tracing::debug!(
+                        process_id,
+                        attempt,
+                        derived_index_disagrees = error.is_read_race(),
+                        "aggregate sample was inconsistent; re-reading under its head"
+                    );
                 }
             }
         }
-        unreachable!("the loop returns within LOAD_ATTEMPTS")
+        Err(AsyncRepositoryError::Conflict(process_id.into()))
     }
+
+    /// Load one aggregate family for the derived-index repair.
+    ///
+    /// The aggregate (head, base, log window) is decoded strictly; a recovery
+    /// or outbox index document that disagrees with it is retained as the
+    /// observed bytes the repair guards and rewrites. Without this lenient
+    /// sample a damaged derived index could never be repaired: [`Self::load`]
+    /// would reject the very state the repair exists to heal. The stable-head
+    /// confirmation still applies to a failure of the aggregate itself.
+    pub(crate) async fn load_for_repair(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<LoadedProcess>, AsyncRepositoryError> {
+        let keys = family_keys(process_id)?;
+        let log_prefix = process_log_prefix(process_id)?;
+        let mut suspect: Option<Vec<u8>> = None;
+        for attempt in 0..LOAD_ATTEMPTS {
+            let view = self.store.read_view(&keys, &log_prefix).await?;
+            let mut documents = view.values.into_iter();
+            let process = documents.next().flatten();
+            let recovery_index = documents.next().flatten();
+            let outbox_index = documents.next().flatten();
+            let ready_index = documents.next().flatten();
+            let base = documents.next().flatten();
+            let Some(process) = process else {
+                return Ok(None);
+            };
+            match decode_loaded_process_for_repair(
+                process_id,
+                process.clone(),
+                base,
+                &view.entries,
+                recovery_index,
+                outbox_index,
+                ready_index,
+            ) {
+                Ok(loaded) => return Ok(Some(loaded)),
+                Err(error) => {
+                    if suspect.as_deref() == Some(process.as_slice()) {
+                        self.observations
+                            .corrupt_families
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Err(error.into());
+                    }
+                    suspect = Some(process);
+                    if attempt + 1 == LOAD_ATTEMPTS {
+                        return Err(AsyncRepositoryError::Conflict(process_id.into()));
+                    }
+                }
+            }
+        }
+        Err(AsyncRepositoryError::Conflict(process_id.into()))
+    }
+}
+
+/// The five documents and the log prefix that make up one aggregate family,
+/// in the order [`AsyncProcessRepository::load`] reads them.
+fn family_keys(
+    process_id: &str,
+) -> Result<[String; 5], crate::scheduler::durable::document_store::DocumentRepositoryError> {
+    Ok([
+        process_key(process_id)?,
+        recovery_index_key(process_id)?,
+        outbox_index_key(process_id)?,
+        ready_index_key(process_id)?,
+        process_base_key(process_id)?,
+    ])
 }
 
 enum MigrationOutcome {
@@ -1651,6 +1920,90 @@ mod tests {
         ) -> Result<bool, ActError> {
             unimplemented!("the load path does not write")
         }
+    }
+
+    /// Serves the same inconsistent pair on every read: the head is stable, so
+    /// the family itself is damaged rather than an observation racing a
+    /// writer.
+    struct StableMismatchStore {
+        head: Vec<u8>,
+        base: Vec<u8>,
+        wrong_index: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncDocumentStore for StableMismatchStore {
+        async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+            assert_eq!(keys.len(), 5, "the view reads the whole family");
+            Ok(vec![
+                Some(self.head.clone()),
+                Some(self.wrong_index.clone()),
+                None,
+                None,
+                Some(self.base.clone()),
+            ])
+        }
+
+        async fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            Ok(Vec::new())
+        }
+
+        async fn scan_range(
+            &self,
+            _prefix: &str,
+            _lower: Option<&str>,
+            _upper: Option<&str>,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            Ok(Vec::new())
+        }
+
+        async fn atomic_batch(
+            &self,
+            _guards: &[DocumentGuard],
+            _mutations: &[DocumentMutation],
+        ) -> Result<bool, ActError> {
+            Ok(false)
+        }
+    }
+
+    /// Damage is not inferred from one inconsistent sample: the load takes a
+    /// second stable sample under byte-identical head bytes, and only then
+    /// reports the disagreement. The counters prove both confirmations
+    /// happened.
+    #[tokio::test]
+    async fn load_confirms_damage_only_under_one_stable_head() {
+        use crate::scheduler::durable::document::ProcessLogCodec;
+        use crate::scheduler::durable::snapshot_codec::HeadPayload;
+
+        let source = snapshot(false);
+        let head = ProcessLogCodec::encode_head(&HeadPayload {
+            process_id: source.process_id.clone(),
+            version: source.version.clone(),
+            epoch: 0,
+            base_seq: 0,
+            next_seq: 0,
+        })
+        .unwrap();
+        let base = ProcessLogCodec::encode_base(&source, 0).unwrap();
+        let repository = AsyncProcessRepository::new(Arc::new(StableMismatchStore {
+            head,
+            base,
+            wrong_index: RecoveryIndexCodec::encode(
+                &RecoveryIndex::project(&snapshot(true)).unwrap(),
+            )
+            .unwrap(),
+        }));
+        let error = repository.load("process").await.unwrap_err();
+        assert!(
+            format!("{error}").contains("RecoveryIndexMismatch"),
+            "the confirmed disagreement is damage: {error}"
+        );
+        let observed = repository.observations();
+        assert_eq!(
+            observed.recovery_index_mismatches, 2,
+            "one inconsistent sample is a candidate; the second under the same head confirms it"
+        );
+        assert_eq!(observed.corrupt_families, 1);
     }
 
     fn torn_store(torn: usize) -> (Arc<TornIndexStore>, Arc<AtomicUsize>) {
@@ -2125,11 +2478,13 @@ mod tests {
         assert!(page.records.is_empty());
     }
 
-    /// A load that finds the aggregate paired with a recovery index from
-    /// another version re-reads instead of reporting damage — that pairing is a
-    /// race with a writer, not a corrupt document.
+    /// A store that cannot provide a native snapshot serves the trait's
+    /// sampling fallback. A mixed sample (the recovery index from the next
+    /// version) is discarded and the load must re-sample instead of decoding
+    /// it as damage — the head did not change, so the accepted sample is one
+    /// version.
     #[tokio::test]
-    async fn load_retries_a_read_that_raced_a_writer() {
+    async fn load_discards_a_mixed_sample_and_reads_again() {
         let (store, reads) = torn_store(1);
         let repository = AsyncProcessRepository::new(store);
         let loaded = repository
@@ -2140,23 +2495,118 @@ mod tests {
         assert_eq!(loaded.snapshot.version, snapshot(false).version);
         assert_eq!(
             reads.load(Ordering::SeqCst),
-            3,
-            "the torn read was retried, then the head re-read verified the window"
+            4,
+            "the first sample mixed two versions, so the second sample decided it"
         );
+        let observed = repository.observations();
+        assert_eq!(observed.recovery_index_mismatches, 0);
+        assert_eq!(observed.corrupt_families, 0);
     }
 
-    /// A store that keeps serving the mismatched pair is damage: the load
-    /// surfaces it once the bounded re-reads are spent.
+    /// A store that keeps serving the mismatched pair is damage: every sample
+    /// is stable, the head never moves, and both samples disagree — the load
+    /// confirms it instead of retrying forever or calling it a race.
     #[tokio::test]
-    async fn load_surfaces_a_mismatch_that_never_heals() {
+    async fn load_confirms_a_mismatch_that_never_heals() {
         let (store, reads) = torn_store(usize::MAX);
         let repository = AsyncProcessRepository::new(store);
         let error = repository.load("process").await.unwrap_err();
         assert!(
-            format!("{error}").contains("RecoveryIndexMismatch"),
+            matches!(error, AsyncRepositoryError::Integrity(_)),
             "damage is still surfaced: {error}"
         );
-        assert_eq!(reads.load(Ordering::SeqCst), LOAD_ATTEMPTS);
+        assert!(format!("{error}").contains("RecoveryIndexMismatch"));
+        // Two views of two key reads each; the second view's identical head is
+        // what turns the first disagreement into a verdict.
+        assert_eq!(reads.load(Ordering::SeqCst), 4);
+        let observed = repository.observations();
+        assert_eq!(observed.recovery_index_mismatches, 2);
+        assert_eq!(observed.corrupt_families, 1);
+    }
+
+    /// Alternates between the consistent family and a mixed one on every key
+    /// read: no sample can be accepted. That is unavailable evidence, not
+    /// damage — the caller retries the load later.
+    struct FlappingIndexStore {
+        head: Vec<u8>,
+        base: Vec<u8>,
+        torn_index: Vec<u8>,
+        flip: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncDocumentStore for FlappingIndexStore {
+        async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+            assert_eq!(keys.len(), 5, "the view reads the whole family");
+            let mixed = self
+                .flip
+                .fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![
+                Some(self.head.clone()),
+                mixed.then(|| self.torn_index.clone()),
+                None,
+                None,
+                Some(self.base.clone()),
+            ])
+        }
+
+        async fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            Ok(Vec::new())
+        }
+
+        async fn scan_range(
+            &self,
+            _prefix: &str,
+            _lower: Option<&str>,
+            _upper: Option<&str>,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            Ok(Vec::new())
+        }
+
+        async fn atomic_batch(
+            &self,
+            _guards: &[DocumentGuard],
+            _mutations: &[DocumentMutation],
+        ) -> Result<bool, ActError> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn load_reports_a_view_that_never_settles_as_busy_not_corrupt() {
+        use crate::scheduler::durable::document::ProcessLogCodec;
+        use crate::scheduler::durable::snapshot_codec::HeadPayload;
+
+        let source = snapshot(false);
+        let head = ProcessLogCodec::encode_head(&HeadPayload {
+            process_id: source.process_id.clone(),
+            version: source.version.clone(),
+            epoch: 0,
+            base_seq: 0,
+            next_seq: 0,
+        })
+        .unwrap();
+        let base = ProcessLogCodec::encode_base(&source, 0).unwrap();
+        let repository = AsyncProcessRepository::new(Arc::new(FlappingIndexStore {
+            head,
+            base,
+            torn_index: RecoveryIndexCodec::encode(
+                &RecoveryIndex::project(&snapshot(true)).unwrap(),
+            )
+            .unwrap(),
+            flip: std::sync::atomic::AtomicBool::new(false),
+        }));
+        let error = repository.load("process").await.unwrap_err();
+        assert!(
+            matches!(error, AsyncRepositoryError::Store(_)),
+            "an unstable view is unavailable evidence, not damage: {error}"
+        );
+        let observed = repository.observations();
+        assert_eq!(observed.corrupt_families, 0);
+        assert!(
+            observed.recovery_index_mismatches <= 1,
+            "no mixed sample may reach the decoder: {observed:?}"
+        );
     }
 
     /// An operation a writer from *before* the operation's close was folded into its
@@ -3471,6 +3921,43 @@ mod tests {
         assert!(!losing.repair_ready("process", 0, 800).await.unwrap());
     }
 
+    /// A derived outbox index that no longer matches its aggregate is
+    /// repaired from the aggregate, not reported forever: the strict loader
+    /// refuses the family, the repair loads it leniently and rewrites the
+    /// index, and the next strict load is clean. This is the repair a poisoned
+    /// outbox pid takes.
+    #[tokio::test]
+    async fn repair_ready_rebuilds_a_damaged_outbox_index() {
+        let (process, _) = outbox_snapshot();
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let repository = AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(kv.clone())));
+        repository.create(&process, 0, 800).await.unwrap();
+        let key = outbox_index_key("outbox").unwrap();
+        let expected = outbox_index_document(&process)
+            .unwrap()
+            .expect("the pending records project an index");
+        kv.put(&key, b"torn index".to_vec()).await.unwrap();
+
+        assert!(
+            repository.load("outbox").await.is_err(),
+            "a strict reader still reports the mismatch instead of hiding it"
+        );
+        assert!(
+            repository.repair_ready("outbox", 0, 800).await.unwrap(),
+            "the repair rewrites the outbox index from the aggregate"
+        );
+        assert_eq!(
+            kv.one(&key).await.unwrap().as_deref(),
+            Some(expected.as_slice())
+        );
+        let loaded = repository
+            .load("outbox")
+            .await
+            .unwrap()
+            .expect("the family reads cleanly after the repair");
+        assert_eq!(loaded.snapshot.as_ref(), &process);
+    }
+
     #[tokio::test]
     async fn a_corrupt_ready_document_fails_the_commit_that_reads_it() {
         let (process, id) = ready_snapshot("process");
@@ -3591,19 +4078,31 @@ mod tests {
         assert_eq!(page.records.len(), 1);
         assert!(page.records[0].id > cursor.0);
 
+        // An undecodable index document is isolated to its pid: the page still
+        // answers, records the failure, and leaves the repair to rewrite it
+        // from the aggregate.
         let corrupt_key = format!("{OUTBOX_INDEX_KEY_PREFIX}corrupt");
         store.put(&corrupt_key, b"junk".to_vec()).await.unwrap();
-        let error = repository
+        let page = repository
             .dispatchable_outbox_page(0, None, 10)
             .await
-            .unwrap_err();
-        assert!(matches!(error, OutboxRepositoryError::CorruptData(_)));
+            .expect("one bad document must not fail the page");
+        assert_eq!(
+            page.records.len(),
+            1,
+            "the healthy run's record still goes out: {page:?}"
+        );
+        assert_eq!(page.failures.len(), 1, "{page:?}");
+        assert!(page.failures[0].repairable);
+        assert!(page.failures[0].error.contains("outbox index"));
     }
 
-    /// A stale index entry (an aggregate that moved on after the scan) is
-    /// damage the page refuses rather than handing out an outdated record.
+    /// A stale index entry (an aggregate that moved on after the index scan)
+    /// is skipped, not damage: the page must keep delivering its other entries
+    /// and the next pass re-reads the index. An entry naming a record the
+    /// aggregate does not have is still damage.
     #[tokio::test]
-    async fn outbox_page_refuses_a_stale_index_entry() {
+    async fn outbox_page_skips_a_stale_index_entry() {
         use crate::scheduler::core::outbox::outbox_index::{OutboxIndex, OutboxIndexState};
 
         let (process, _) = outbox_snapshot();
@@ -3631,11 +4130,14 @@ mod tests {
                 OutboxIndexCodec::encode(&stale).unwrap(),
             )],
         }));
-        let error = scanned
+        let page = scanned
             .dispatchable_outbox_page(0, None, 10)
             .await
-            .unwrap_err();
-        assert!(matches!(error, OutboxRepositoryError::CorruptData(_)));
+            .expect("a stale scan is not a failed pass");
+        assert!(
+            page.records.is_empty(),
+            "the moved-on record must not be handed out: {page:?}"
+        );
 
         // The revision still matches, but the record's own state says it is
         // not dispatchable right now (a live claim): also stale, not damage.
@@ -3662,14 +4164,15 @@ mod tests {
                 OutboxIndexCodec::encode(&not_ready).unwrap(),
             )],
         }));
-        let error = scanned
+        let page = scanned
             .dispatchable_outbox_page(0, None, 10)
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains("stale outbox index"));
+            .expect("a claimed record is stale, not a failed pass");
+        assert!(page.records.is_empty());
 
-        // An index entry naming a record the aggregate does not have is the
-        // same kind of damage.
+        // An index entry naming a record the aggregate does not have is
+        // damage: no commit can remove a record from an aggregate without
+        // rewriting the index in the same batch.
         let missing = OutboxIndex {
             process_id: "outbox".into(),
             entries: vec![
@@ -3691,11 +4194,15 @@ mod tests {
                 OutboxIndexCodec::encode(&missing).unwrap(),
             )],
         }));
-        let error = scanned
+        let page = scanned
             .dispatchable_outbox_page(0, None, 10)
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains("missing record"));
+            .expect("a missing record is isolated to its pid, not a failed pass");
+        assert!(page.records.is_empty());
+        assert_eq!(page.failures.len(), 1);
+        assert_eq!(page.failures[0].process_id, "outbox");
+        assert!(page.failures[0].repairable);
+        assert!(page.failures[0].error.contains("missing record"));
     }
 
     #[tokio::test]
@@ -3972,8 +4479,11 @@ mod tests {
         }
     }
 
+    /// A damaged log entry under a stable head is confirmed damage: the
+    /// second stable sample repeats the same head, so no writer could have
+    /// caused the disagreement.
     #[tokio::test]
-    async fn load_retries_a_damaged_log_while_the_head_moves() {
+    async fn load_confirms_a_damaged_log_under_one_stable_head() {
         use crate::scheduler::durable::document::ProcessLogCodec;
         use crate::scheduler::durable::snapshot_codec::HeadPayload;
 
@@ -4072,5 +4582,231 @@ mod tests {
             format!("{error}").contains("base covers sequence 7"),
             "the mismatched base must be surfaced, got {error}"
         );
+    }
+
+    /// Advance one loaded aggregate in memory and commit it exactly the way an
+    /// operation commit does: a fresh ready document, the current
+    /// recovery-entry guards, and only the moved variable in the log entry.
+    async fn commit_variable(
+        repository: &AsyncProcessRepository,
+        loaded: &mut LoadedProcess,
+        version: usize,
+    ) {
+        let mut next = (*loaded.snapshot).clone();
+        next.variables.insert(
+            (TaskId::new("step", 0).unwrap(), "version".into()),
+            version.to_string(),
+        );
+        let recovery = recovery_entries(&loaded.snapshot);
+        let ready = repository
+            .ready_document(loaded, 0, 800, &HashMap::new())
+            .unwrap();
+        let mut changes = LogChanges::default();
+        changes
+            .variables
+            .insert((TaskId::new("step", 0).unwrap(), "version".into()));
+        match repository
+            .replace(loaded, &next, &recovery, ready.as_deref(), &changes)
+            .await
+            .unwrap()
+        {
+            ReplaceOutcome::Committed(write) => loaded.install_replace_documents(write),
+            ReplaceOutcome::AlreadyCommitted(_) => {
+                panic!("a single writer must not find its own commit already landed")
+            }
+            ReplaceOutcome::Conflict => panic!("the single writer lost a version guard"),
+        }
+    }
+
+    /// One process commits continuously while one task per lane loads it.
+    ///
+    /// This is the reproduction the mix used to fail: the head and the derived
+    /// indexes were read key by key, and a commit landing between two of those
+    /// reads paired them from different versions. The load's old bounded retry
+    /// then reported `RecoveryIndexMismatch`/`OutboxIndexMismatch` as damage
+    /// under enough writer pressure.
+    ///
+    /// Every sample is now one committed version, so those counters must stay
+    /// at zero for every lane count — including 70, where the writer's window
+    /// between two document reads is widest.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_commit_and_load_never_reports_an_index_mismatch() {
+        for lanes in [1usize, 4, 70] {
+            let repository = Arc::new(AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(
+                Arc::new(crate::store::MemoryStore::new()),
+            ))));
+            let pid = format!("hot-{lanes}");
+            let mut source = snapshot(false);
+            source.process_id = pid.clone();
+            let mut loaded = repository.create(&source, 0, 800).await.unwrap();
+
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reads = Arc::new(AtomicUsize::new(0));
+            let commits = 10_000usize;
+            let writer = {
+                let repository = repository.clone();
+                let done = done.clone();
+                tokio::spawn(async move {
+                    for version in 0..commits {
+                        commit_variable(&repository, &mut loaded, version).await;
+                    }
+                    done.store(true, Ordering::SeqCst);
+                })
+            };
+            let mut readers = Vec::with_capacity(lanes);
+            for _ in 0..lanes {
+                let repository = repository.clone();
+                let pid = pid.clone();
+                let done = done.clone();
+                let reads = reads.clone();
+                readers.push(tokio::spawn(async move {
+                    // Load for the writer's whole run, then keep loading the
+                    // settled aggregate so a slow lane still exercises the
+                    // cache-hit and full-decode paths.
+                    while !done.load(Ordering::SeqCst) {
+                        assert!(repository.load(&pid).await.unwrap().is_some());
+                        reads.fetch_add(1, Ordering::Relaxed);
+                    }
+                    for _ in 0..200 {
+                        assert!(repository.load(&pid).await.unwrap().is_some());
+                        reads.fetch_add(1, Ordering::Relaxed);
+                    }
+                }));
+            }
+            writer.await.unwrap();
+            for reader in readers {
+                reader.await.unwrap();
+            }
+            assert!(
+                reads.load(Ordering::Relaxed) >= 10_000,
+                "lanes={lanes}: the readers must have exercised tens of thousands of loads"
+            );
+            let observed = repository.observations();
+            assert_eq!(
+                observed.recovery_index_mismatches, 0,
+                "lanes={lanes}: a mixed-version read must never reach the decoder"
+            );
+            assert_eq!(
+                observed.outbox_index_mismatches, 0,
+                "lanes={lanes}: a mixed-version read must never reach the decoder"
+            );
+            assert_eq!(observed.corrupt_families, 0, "lanes={lanes}");
+            assert_eq!(
+                observed.read_races, 0,
+                "lanes={lanes}: a stable view needs no discarded sample"
+            );
+            assert_eq!(
+                repository.cached_len(),
+                1,
+                "lanes={lanes}: only the hot aggregate stays resident"
+            );
+        }
+    }
+
+    /// The same hot aggregate under a concurrent cleanup, outbox page and
+    /// recovery page — the three other store readers a serving host runs
+    /// beside the scheduler. None of them may make the hot load look
+    /// inconsistent, and the hot run itself must survive (its task is not
+    /// terminal, so no cleanup may reclaim it).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_cleanup_outbox_and_recovery_do_not_tear_a_hot_aggregate() {
+        let repository = Arc::new(AsyncProcessRepository::new(Arc::new(KvDocumentStore::new(
+            Arc::new(crate::store::MemoryStore::new()),
+        ))));
+        let pid = "hot-beside-loops";
+        let mut source = snapshot(false);
+        source.process_id = pid.into();
+        let mut loaded = repository.create(&source, 0, 800).await.unwrap();
+
+        // Cold, reclaimable runs the cleanup keeps churning through: each
+        // reclaim and re-create is a full family batch the hot load can race.
+        let cold = (0..8)
+            .map(|lane| format!("cold-{lane}"))
+            .collect::<Vec<_>>();
+        for cold_pid in &cold {
+            let snapshot = reclaimable_snapshot(cold_pid);
+            repository.create(&snapshot, 0, 800).await.unwrap();
+        }
+
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let repository = repository.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                for version in 0..4_000 {
+                    commit_variable(&repository, &mut loaded, version).await;
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let reader = {
+            let repository = repository.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                let mut loads = 0usize;
+                while !done.load(Ordering::SeqCst) {
+                    assert!(repository.load(pid).await.unwrap().is_some());
+                    loads += 1;
+                }
+                assert!(loads > 0);
+            })
+        };
+        let cleaner = {
+            let repository = repository.clone();
+            let cold = cold.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                while !done.load(Ordering::SeqCst) {
+                    for cold_pid in &cold {
+                        match repository.reclaim(cold_pid).await.unwrap() {
+                            ReclaimOutcome::Reclaimed { .. } | ReclaimOutcome::Absent { .. } => {
+                                repository
+                                    .create(&reclaimable_snapshot(cold_pid), 0, 800)
+                                    .await
+                                    .unwrap();
+                            }
+                            ReclaimOutcome::Retained => {}
+                        }
+                    }
+                }
+            })
+        };
+        let outbox = {
+            let repository = repository.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                while !done.load(Ordering::SeqCst) {
+                    repository
+                        .dispatchable_outbox_page(0, None, 32)
+                        .await
+                        .unwrap();
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let recovery = {
+            let repository = repository.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                while !done.load(Ordering::SeqCst) {
+                    repository.load_recovery_page(None, 32).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        writer.await.unwrap();
+        reader.await.unwrap();
+        cleaner.await.unwrap();
+        outbox.await.unwrap();
+        recovery.await.unwrap();
+
+        let observed = repository.observations();
+        assert_eq!(observed.recovery_index_mismatches, 0);
+        assert_eq!(observed.outbox_index_mismatches, 0);
+        assert_eq!(observed.corrupt_families, 0);
+
+        // The hot run is still there: cleanup must not have reclaimed a run
+        // whose task is not terminal.
+        assert!(repository.load(pid).await.unwrap().is_some());
     }
 }

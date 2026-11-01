@@ -64,6 +64,11 @@ mod tests;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+/// The engine crate's version (`CARGO_PKG_VERSION`) — what `sys:status`
+/// reports as `version`, and what an external report (a benchmark, a
+/// deployment probe) can label its numbers with without re-deriving it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub use crate::scheduler::{Context, HealthState, SchedulerHealth};
 pub use acl::{
     ACTION_LOGIN, ACTION_LOGOUT, ACTION_REFRESH, ACTION_SETUSER, ACTION_SUBSCRIBE, ACTION_WHOAMI,

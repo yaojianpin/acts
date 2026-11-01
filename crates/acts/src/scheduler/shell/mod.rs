@@ -67,7 +67,7 @@ use crate::{
                 },
             },
             outbox::{
-                outbox_repository::OutboxCursor,
+                outbox_repository::{OutboxCursor, OutboxPageFailure},
                 records::{DeliveryClaim, OutboxEvent, OutboxRecord},
             },
             plan::{
@@ -285,6 +285,13 @@ pub(crate) struct Workers {
     outbox_health: Arc<LoopGuard>,
     projection_health: Arc<LoopGuard>,
     outbox_metrics: Arc<parking_lot::Mutex<OutboxMetrics>>,
+    /// Pids whose outbox index/aggregate the retry pass could not use, with
+    /// the error and the number of passes that have failed on them. One bad
+    /// run is isolated (its records are skipped, the rest of the pass runs)
+    /// but never hidden: health stays degraded, every failing pass logs the
+    /// pid, and this map is the operator's list to retry or repair. An entry
+    /// clears as soon as a pass reads the pid cleanly.
+    outbox_poisoned: Arc<parking_lot::Mutex<std::collections::HashMap<String, PoisonedOutbox>>>,
     recovery_metrics: Arc<parking_lot::Mutex<RecoveryMetrics>>,
     /// The recovery scan's resume point across bounded passes (A10). The
     /// in-memory cursor is an optimization, not a durable fact: losing it
@@ -326,6 +333,37 @@ pub(crate) struct Workers {
     /// accelerator — a waiter always re-reads the aggregate, which is the
     /// truth — so a missed notification costs latency, never correctness.
     settled: Arc<parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>>,
+}
+
+/// How many per-pid lanes may sit in a lane map before the idle ones are
+/// dropped while a lane is taken.
+///
+/// The lifecycle lock and the command lane are per pid and the maps are the
+/// lookup for them; an entry whose `Arc` has no other owner is an idle lock
+/// left behind by a finished run. Keeping them would grow both maps with every
+/// run the engine ever started, so a map past this bound drops exactly the
+/// entries nobody holds (an active lane has at least the map's own reference
+/// plus its guard or waiter). Active lanes are never touched.
+const IDLE_LANE_PRUNE_THRESHOLD: usize = 256;
+
+/// Drop the idle lanes of a per-pid lock map (see
+/// [`IDLE_LANE_PRUNE_THRESHOLD`]).
+fn prune_idle_lanes(lanes: &mut std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>) {
+    if lanes.len() > IDLE_LANE_PRUNE_THRESHOLD {
+        lanes.retain(|_, lane| Arc::strong_count(lane) > 1);
+    }
+}
+
+/// One process the outbox retry pass isolated (see
+/// [`Workers::outbox_poisoned`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PoisonedOutbox {
+    /// The failure as the page recorded it.
+    pub(crate) error: String,
+    /// When this pid's current failure streak began.
+    pub(crate) first_seen_ms: i64,
+    /// Consecutive passes that failed on the pid.
+    pub(crate) attempts: u64,
 }
 
 impl Workers {
@@ -422,6 +460,9 @@ impl Workers {
                 outbox_health: LoopGuard::new("outbox-retry"),
                 projection_health: LoopGuard::new("projection-repair"),
                 outbox_metrics: Arc::new(parking_lot::Mutex::new(OutboxMetrics::default())),
+                outbox_poisoned: Arc::new(
+                    parking_lot::Mutex::new(std::collections::HashMap::new()),
+                ),
                 recovery_metrics: Arc::new(parking_lot::Mutex::new(RecoveryMetrics::default())),
                 recovery_cursor: Arc::new(parking_lot::Mutex::new(None)),
                 outbox_cursor: Arc::new(parking_lot::Mutex::new(None)),
@@ -466,6 +507,68 @@ impl Workers {
     /// The outbox retry pass's backlog/age gauges (A10).
     pub(crate) fn outbox_metrics(&self) -> OutboxMetrics {
         *self.outbox_metrics.lock()
+    }
+
+    /// The pids the outbox retry pass isolated, in id order: the failure and
+    /// how many passes have failed on it. One bad run never stops the pass,
+    /// but it is never hidden either — health stays degraded and this list is
+    /// what an operator retries or repairs.
+    pub(crate) fn outbox_poisoned(&self) -> Vec<(String, PoisonedOutbox)> {
+        let poisoned = self.outbox_poisoned.lock();
+        let mut entries: Vec<(String, PoisonedOutbox)> = poisoned
+            .iter()
+            .map(|(pid, entry)| (pid.clone(), entry.clone()))
+            .collect();
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        entries
+    }
+
+    /// Clear every poisoned pid so the next pass retries all of them — the
+    /// explicit retry path for an operator who repaired the store or wants a
+    /// fresh attempt. Returns how many entries were cleared.
+    ///
+    /// Kept as an operator/embedder seam: the engine itself retries every
+    /// poisoned pid on each pass (and repairs a repairable index first), so
+    /// nothing in-crate calls this; a management command or a test that wants
+    /// to force an immediate retry does.
+    #[allow(dead_code)]
+    pub(crate) fn retry_poisoned_outbox(&self) -> usize {
+        let mut poisoned = self.outbox_poisoned.lock();
+        let cleared = poisoned.len();
+        poisoned.clear();
+        cleared
+    }
+
+    /// Fold one pass's per-pid outcome into the poisoned set: a pid the page
+    /// read cleanly leaves it (a later pass healed it), a pid that failed
+    /// enters or advances its entry.
+    pub(crate) fn record_outbox_health(
+        &self,
+        attempted: &std::collections::BTreeSet<String>,
+        failures: &[OutboxPageFailure],
+    ) {
+        let failed: std::collections::HashSet<&str> = failures
+            .iter()
+            .map(|failure| failure.process_id.as_str())
+            .collect();
+        let now = crate::utils::time::time_millis();
+        let mut poisoned = self.outbox_poisoned.lock();
+        for pid in attempted {
+            if !failed.contains(pid.as_str()) {
+                poisoned.remove(pid);
+            }
+        }
+        for failure in failures {
+            let entry = poisoned
+                .entry(failure.process_id.clone())
+                .or_insert_with(|| PoisonedOutbox {
+                    error: String::new(),
+                    first_seen_ms: now,
+                    attempts: 0,
+                });
+            entry.error = failure.error.clone();
+            entry.attempts += 1;
+        }
     }
 
     /// The recovery scanner's backlog/counters (A10).
@@ -877,12 +980,21 @@ impl Workers {
     ) -> tokio::sync::OwnedMutexGuard<()> {
         let lane = {
             let mut lanes = self.command_lanes.lock();
+            prune_idle_lanes(&mut lanes);
             lanes
                 .entry(process_id.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
         lane.lock_owned().await
+    }
+
+    /// The decoded-aggregate cache size (see
+    /// [`AsyncProcessRepository::cached_len`]): the observability seam a test
+    /// uses to prove reclaimed runs are forgotten.
+    #[cfg(test)]
+    pub(crate) fn loaded_cache_len(&self) -> usize {
+        self.processes.cached_len()
     }
 
     /// How many client-action re-plans a lost compare-and-swap forced (A4).
@@ -914,13 +1026,18 @@ impl Workers {
     /// records were delivered only becomes `removable` once they are, so the
     /// whole run is re-projected — tasks first, the proc row last — at the
     /// same aggregate version. Returns whether the rows are current.
+    #[cfg(test)]
     pub(crate) async fn refresh_projection(&self, process_id: &str) -> bool {
         self.repair_projection(process_id).await
     }
 
     /// Re-project one process's row only: the deliveries just settled, so the
     /// sole fact that can have changed is the sweeper's `removable` flag.
-    async fn refresh_proc_row(&self, process_id: &str) {
+    /// Cleanup uses this (not the full projection) to re-derive the mark: the
+    /// reclaim decision itself is the aggregate's, and rewriting every task
+    /// and vars row just to set one flag dominated a sweep of thousands of
+    /// finished runs.
+    pub(crate) async fn refresh_proc_row(&self, process_id: &str) {
         let projector = self.projector();
         let Some(projector) = projector else {
             return;
@@ -1001,7 +1118,6 @@ impl Workers {
         let mut projection_ticker = tokio::time::interval(schedule.projection);
         let mut trigger_ticker = tokio::time::interval(schedule.trigger);
         let mut retry_ticker = tokio::time::interval(schedule.retry);
-        let mut cleanup_ticker = tokio::time::interval(schedule.cleanup);
         let mut snapshot_ticker = tokio::time::interval(schedule.snapshot);
         for ticker in [
             &mut ready_ticker,
@@ -1010,7 +1126,6 @@ impl Workers {
             &mut projection_ticker,
             &mut trigger_ticker,
             &mut retry_ticker,
-            &mut cleanup_ticker,
             &mut snapshot_ticker,
         ] {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1146,8 +1261,19 @@ impl Workers {
                     if !self.outbox_health.attempt() {
                         continue;
                     }
-                    match self.dispatch_outbox_batch(schedule.outbox_budget).await {
-                        Ok(_) => self.outbox_health.recovered(),
+                    match self.dispatch_outbox_pass(schedule.outbox_budget).await {
+                        Ok(report) if report.poisoned == 0 => self.outbox_health.recovered(),
+                        Ok(report) => {
+                            let error = ActError::Runtime(format!(
+                                "{} outbox process(es) isolated; the remaining records were delivered",
+                                report.poisoned
+                            ));
+                            tracing::warn!(
+                                poisoned = report.poisoned,
+                                "kernel outbox pass isolated per-process failures"
+                            );
+                            self.outbox_health.failed_isolated(&error);
+                        }
                         Err(error) => {
                             tracing::warn!(error = %error, "kernel outbox pass failed");
                             self.outbox_health.failed(&error);
@@ -1204,12 +1330,6 @@ impl Workers {
                     let timers = self.timer_guider.read().clone();
                     if let Some(timers) = timers {
                         timers.retry_tick().await;
-                    }
-                }
-                _ = cleanup_ticker.tick() => {
-                    let timers = self.timer_guider.read().clone();
-                    if let Some(timers) = timers {
-                        timers.cleanup_tick().await;
                     }
                 }
                 _ = snapshot_ticker.tick() => {

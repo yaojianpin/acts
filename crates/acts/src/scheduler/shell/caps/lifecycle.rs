@@ -121,6 +121,7 @@ impl Workers {
     ) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.lifecycle_locks.lock();
+            prune_idle_lanes(&mut locks);
             locks
                 .entry(process_id.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -283,6 +284,11 @@ impl Workers {
     /// new identity from here on, and the next start must not inherit a
     /// reported lifecycle phase, a slot or a projection claim.
     fn forget_process(&self, process_id: &str) {
+        // The decoded aggregate is a view of a document family that is gone:
+        // dropping it here (the repository's reclaim also does, for its own
+        // paths) is what keeps the resident decode cache proportional to the
+        // runs in flight rather than to every run ever started.
+        self.processes.forget_loaded(process_id);
         self.admissions.lock().abandon(process_id);
         {
             let mut reported = self.reported.lock();

@@ -1,6 +1,7 @@
 use crate::consts;
 use acts::{
     ActError, KvStore, Result, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard,
+    StoreView,
 };
 use std::time::Duration;
 
@@ -108,6 +109,32 @@ fn op_conditions(op: &ScanOperation, key: &str) -> (String, Vec<String>) {
     }
 }
 
+/// Read every requested key through one connection (inside the caller's
+/// transaction): the answer keeps the caller's key order and uses `IN`
+/// batches of at most 500 binds, SQLite's bound-parameter ceiling for a
+/// hand-built list.
+async fn read_keys(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    keys: &[String],
+) -> std::result::Result<Vec<Option<Vec<u8>>>, sqlx::Error> {
+    let mut values = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!("SELECT key, value FROM {table} WHERE key IN ({placeholders})");
+        let mut query = sqlx::query_as::<_, (String, Vec<u8>)>(&sql);
+        for key in chunk {
+            query = query.bind(key);
+        }
+        let rows = query.fetch_all(&mut *conn).await?;
+        let mut by_key = rows
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        values.extend(chunk.iter().map(|key| by_key.remove(key)));
+    }
+    Ok(values)
+}
+
 /// Turn a key prefix into a literal LIKE prefix. Values are encoded before
 /// they enter index keys, but escaping keeps direct callers and field prefixes
 /// safe if they contain SQL LIKE wildcards.
@@ -212,6 +239,56 @@ impl KvStore for SqliteStore {
             values.extend(chunk.iter().map(|key| by_key.remove(key)));
         }
         Ok(values)
+    }
+
+    /// One read transaction over the whole key set. SQLite pins the read
+    /// snapshot at the transaction's first read, so no write can interleave.
+    /// The sqlx transaction rolls back on drop, so a cancelled read cannot
+    /// return a connection holding a snapshot to the pool.
+    async fn read_stable(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let table = consts::ACTS_STORE_NAME;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        let values = read_keys(&mut tx, table, keys)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        Ok(values)
+    }
+
+    /// The key set and the prefix walk share one read transaction: both parts
+    /// are the version that was committed before the transaction's first read,
+    /// never a mix of two versions a writer moved between.
+    async fn read_view(&self, keys: &[String], prefix: &str) -> Result<StoreView> {
+        let table = consts::ACTS_STORE_NAME;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        let values = read_keys(&mut tx, table, keys)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        let entries = sqlx::query_as::<_, (String, Vec<u8>)>(&format!(
+            "SELECT key, value FROM {} WHERE key LIKE ? ESCAPE '\\' ORDER BY key ASC",
+            table
+        ))
+        .bind(like_pattern(prefix))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| ActError::Store(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        Ok(StoreView { values, entries })
     }
 
     async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {

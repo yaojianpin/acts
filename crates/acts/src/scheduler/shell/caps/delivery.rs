@@ -13,7 +13,20 @@
 //! transport below is the kernel's default.
 
 use super::Capability;
+use crate::ActError;
+use crate::scheduler::core::outbox::outbox_repository::OutboxPageFailure;
 use crate::scheduler::shell::*;
+
+/// What one outbox retry pass did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct OutboxPassReport {
+    /// Records whose delivery settled (or was confirmed) in the pass.
+    pub(crate) delivered: usize,
+    /// Distinct pids the pass isolated because their index or aggregate
+    /// could not be used. Non-zero keeps the loop's health degraded without
+    /// arming its backoff window.
+    pub(crate) poisoned: usize,
+}
 
 /// Result of one external delivery attempt. The transport reports facts only;
 /// retry timing and quarantine policy remain application decisions.
@@ -277,12 +290,33 @@ impl Workers {
     /// records remain `Pending` in the aggregate, so losing it (restart) just
     /// restarts the pass.
     pub(crate) async fn dispatch_outbox_batch(&self, budget: usize) -> Result<usize> {
+        let report = self.dispatch_outbox_pass(budget).await?;
+        if report.poisoned > 0 {
+            return Err(ActError::Runtime(format!(
+                "{} outbox process(es) isolated; the remaining records were delivered",
+                report.poisoned
+            )));
+        }
+        Ok(report.delivered)
+    }
+
+    /// One outbox retry pass with per-pid isolation.
+    ///
+    /// A page never fails the pass for one process's damage: the pid is
+    /// recorded ([`Workers::outbox_poisoned`]), its index is queued for the
+    /// derived-index repair when the aggregate is readable, and every other
+    /// pid's records are still delivered. The caller keeps the loop's health
+    /// degraded on a non-zero [`OutboxPassReport::poisoned`] but does not arm
+    /// the backoff window, so the healthy work keeps flowing.
+    pub(crate) async fn dispatch_outbox_pass(&self, budget: usize) -> Result<OutboxPassReport> {
         let now = SystemClock.now_ms();
         let budget = budget.max(1);
         let mut delivered = 0usize;
         let mut processed = 0usize;
         let mut deferred_records = 0u64;
         let mut settled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut attempted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut failures: Vec<OutboxPageFailure> = Vec::new();
         // Pids whose rows this pass verified current. The normal path already
         // projected before it delivered; this pass also serves records a
         // failed/withheld projection left `Pending` (and records another
@@ -304,6 +338,8 @@ impl Workers {
                 .dispatchable_outbox_page(now, cursor.as_ref(), PAGE_SIZE.min(remaining))
                 .await
                 .map_err(runtime)?;
+            attempted.extend(page.attempted.iter().cloned());
+            failures.extend(page.failures.iter().cloned());
             if first_page {
                 first_page = false;
                 let mut metrics = self.outbox_metrics.lock();
@@ -373,6 +409,54 @@ impl Workers {
         for process_id in &settled {
             self.refresh_proc_row(process_id).await;
         }
-        Ok(delivered)
+        // Per-pid damage is recorded, logged, and handed to the repair path —
+        // never swallowed and never allowed to stop the rest of the pass.
+        self.record_outbox_health(&attempted, &failures);
+        let poisoned_now = self.outbox_poisoned();
+        if !poisoned_now.is_empty() {
+            tracing::warn!(
+                poisoned = poisoned_now.len(),
+                processes = ?poisoned_now
+                    .iter()
+                    .map(|(pid, entry)| (pid.as_str(), entry.attempts))
+                    .collect::<Vec<_>>(),
+                "outbox processes are poisoned; the pass continues with the healthy ones and retries these"
+            );
+        }
+        for failure in &failures {
+            tracing::warn!(
+                pid = %failure.process_id,
+                repairable = failure.repairable,
+                error = %failure.error,
+                "outbox process isolated; the pass continues with the other processes"
+            );
+            if failure.repairable {
+                match self
+                    .processes
+                    .repair_ready(&failure.process_id, now, self.timer_poll_ms)
+                    .await
+                {
+                    Ok(true) => tracing::info!(
+                        pid = %failure.process_id,
+                        "outbox index rebuilt from the aggregate; the next pass re-reads it"
+                    ),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        pid = %failure.process_id,
+                        error = %error,
+                        "outbox index repair failed; the pid stays poisoned and is retried"
+                    ),
+                }
+            }
+        }
+        let poisoned = failures
+            .iter()
+            .map(|failure| failure.process_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        Ok(OutboxPassReport {
+            delivered,
+            poisoned,
+        })
     }
 }

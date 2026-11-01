@@ -16,6 +16,29 @@ pub(crate) struct OutboxPage {
     /// The earliest due instant among this page's due entries, so the loop can
     /// report how far behind the oldest one is.
     pub(crate) oldest_due_at_ms: Option<i64>,
+    /// The pids the page tried to load. A pid that does not appear in
+    /// [`Self::failures`] was read cleanly, which is what clears an earlier
+    /// poisoned entry for it.
+    pub(crate) attempted: Vec<String>,
+    /// Per-pid damage the page isolated. The page's other records are still
+    /// returned: one bad run must not stop delivery for every other run. The
+    /// loop records these pids, keeps its health degraded, retries them on the
+    /// next pass, and asks the index repair to rewrite the derived documents.
+    pub(crate) failures: Vec<OutboxPageFailure>,
+}
+
+/// One process whose outbox index or aggregate could not be used by a page.
+/// The error text is the operator-facing record of what is wrong; the pid is
+/// retried every pass until it reads cleanly or a repair rewrites its index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OutboxPageFailure {
+    pub(crate) process_id: String,
+    pub(crate) error: String,
+    /// Whether the derived-index repair can rewrite this run's outbox index
+    /// from its aggregate (an index document that does not match its records)
+    /// as opposed to a family that is itself inconsistent (no repair can
+    /// invent the missing truth).
+    pub(crate) repairable: bool,
 }
 
 /// One record's post-delivery facts, applied in memory before the one guarded
@@ -48,7 +71,6 @@ pub(crate) enum OutboxRepositoryError {
         actual: u64,
     },
     InvalidRecord(OutboxError),
-    CorruptData(String),
     ConcurrentModification(OutboxId),
     ConcurrentProcess(String),
     Unavailable(String),
@@ -69,7 +91,6 @@ impl std::fmt::Display for OutboxRepositoryError {
                 id.key
             ),
             Self::InvalidRecord(error) => write!(f, "invalid outbox record: {error}"),
-            Self::CorruptData(reason) => write!(f, "corrupt outbox data: {reason}"),
             Self::ConcurrentModification(id) => {
                 write!(f, "outbox record {} modified concurrently", id.key)
             }
@@ -112,10 +133,6 @@ mod tests {
         assert_eq!(
             OutboxRepositoryError::InvalidRecord(OutboxError::InvalidTopic).to_string(),
             "invalid outbox record: outbox error: InvalidTopic"
-        );
-        assert_eq!(
-            OutboxRepositoryError::CorruptData("bad bytes".into()).to_string(),
-            "corrupt outbox data: bad bytes"
         );
         assert_eq!(
             OutboxRepositoryError::ConcurrentModification(id).to_string(),

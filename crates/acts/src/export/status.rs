@@ -153,7 +153,7 @@ pub async fn collect(engine: &Engine) -> Result<SystemStatus> {
     let health = health_status(runtime.scheduler_health());
 
     Ok(SystemStatus {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: crate::VERSION.to_string(),
         memory,
         cpu,
         storage,

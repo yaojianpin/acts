@@ -15,9 +15,11 @@
 
 use acts::{
     ActError, KvStore, Result, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard,
+    StoreView,
 };
 use sled::transaction::{ConflictableTransactionError, TransactionError};
 use std::path::Path;
+use std::sync::Arc;
 
 /// How many times sled may re-run a guarded batch's closure before the batch
 /// is reported as a conflict instead. sled retries on its own whenever a key
@@ -60,6 +62,15 @@ pub struct SledStore {
     /// walks. `None` for the in-memory variant, which has no footprint on
     /// disk to measure (sled's `Db` does not expose its path itself).
     path: Option<std::path::PathBuf>,
+    /// Serializes a multi-document read against writes (see
+    /// [`KvStore::read_view`]). sled 0.34 transactions read point keys only —
+    /// they cannot walk a prefix — so the view's prefix scan cannot join the
+    /// same transaction as its key reads. Holding the write side of this lock
+    /// in every mutation makes the read side one stable version without a
+    /// retry loop, which is what a load needs while a writer commits the same
+    /// process. sled allows one process per database directory, so this lock
+    /// sees every writer.
+    barrier: Arc<std::sync::RwLock<()>>,
 }
 
 impl SledStore {
@@ -72,6 +83,7 @@ impl SledStore {
         Ok(Self {
             db,
             path: Some(std::path::PathBuf::from(path)),
+            barrier: Arc::new(std::sync::RwLock::new(())),
         })
     }
 
@@ -82,7 +94,11 @@ impl SledStore {
             .flush_every_ms(Some(DEFAULT_FLUSH_EVERY_MS))
             .open()
             .map_err(|e| ActError::Store(e.to_string()))?;
-        Ok(Self { db, path: None })
+        Ok(Self {
+            db,
+            path: None,
+            barrier: Arc::new(std::sync::RwLock::new(())),
+        })
     }
 }
 
@@ -161,10 +177,73 @@ impl KvStore for SledStore {
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
+    /// Every key read under one read guard of the write barrier: no mutation
+    /// can land between two values, so the answer is one committed version.
+    async fn read_stable(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        let db = self.db.clone();
+        let barrier = self.barrier.clone();
+        let keys = keys.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let _view = barrier
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            keys.iter()
+                .map(|key| {
+                    db.get(key.as_bytes())
+                        .map(|value| value.map(|bytes| bytes.to_vec()))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| ActError::Store(e.to_string()))
+        })
+        .await
+        .map_err(|e| ActError::Store(e.to_string()))?
+    }
+
+    /// The keys and the prefix walk are read under the same read guard: a
+    /// commit can land before or after the view, never inside it. sled 0.34's
+    /// transactions cannot walk a prefix, so the barrier — not a retry loop —
+    /// is what makes the two parts one version.
+    async fn read_view(&self, keys: &[String], prefix: &str) -> Result<StoreView> {
+        let db = self.db.clone();
+        let barrier = self.barrier.clone();
+        let keys = keys.to_vec();
+        let prefix = prefix.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _view = barrier
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let values = keys
+                .iter()
+                .map(|key| {
+                    db.get(key.as_bytes())
+                        .map(|value| value.map(|bytes| bytes.to_vec()))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| ActError::Store(e.to_string()))?;
+            let mut entries = Vec::new();
+            for entry in db.scan_prefix(prefix.as_bytes()) {
+                let (key, value) = entry.map_err(|e| ActError::Store(e.to_string()))?;
+                let key =
+                    String::from_utf8(key.to_vec()).map_err(|e| ActError::Store(e.to_string()))?;
+                if key.starts_with(prefix.as_str()) {
+                    entries.push((key, value.to_vec()));
+                }
+            }
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Ok(StoreView { values, entries })
+        })
+        .await
+        .map_err(|e| ActError::Store(e.to_string()))?
+    }
+
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
         let db = self.db.clone();
+        let barrier = self.barrier.clone();
         let key = key.to_owned();
         tokio::task::spawn_blocking(move || {
+            let _write = barrier
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             db.insert(key.as_bytes(), value)
                 .map(|_| ())
                 .map_err(|e| ActError::Store(e.to_string()))
@@ -175,8 +254,12 @@ impl KvStore for SledStore {
 
     async fn delete(&self, key: &str) -> Result<()> {
         let db = self.db.clone();
+        let barrier = self.barrier.clone();
         let key = key.to_owned();
         tokio::task::spawn_blocking(move || {
+            let _write = barrier
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             db.remove(key.as_bytes())
                 .map(|_| ())
                 .map_err(|e| ActError::Store(e.to_string()))
@@ -210,9 +293,15 @@ impl KvStore for SledStore {
             return Ok(true);
         }
         let db = self.db.clone();
+        let barrier = self.barrier.clone();
         let ops = ops.to_vec();
         let guards = guards.to_vec();
         tokio::task::spawn_blocking(move || {
+            // A batch is one version change: a view either sees all of it or
+            // none of it.
+            let _write = barrier
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if guards.is_empty() {
                 let mut sled_batch = sled::Batch::default();
                 for op in ops {

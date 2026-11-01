@@ -617,6 +617,12 @@ impl Runtime {
         // store-facing timers once the guider is attached below, so ONE
         // background task owns every store-reaching pass.
         let schedule = shell_timers::kernel_schedule(config);
+        // The cleanup task below runs on its own cadence; the schedule is
+        // moved into the driver task with the rest of the loops.
+        #[cfg(not(test))]
+        let cleanup_interval = schedule.cleanup;
+        #[cfg(test)]
+        let _ = schedule.cleanup;
         let (workers, wake_rx) = Workers::new_with_admissions(
             store.kv(),
             Workers::caps_from_config(config),
@@ -700,10 +706,41 @@ impl Runtime {
         host.attach_assignment_resolver(Arc::new(
             crate::scheduler::shell::RuntimeAssignmentResolver::new(runtime.clone()),
         ));
-        // The store-facing timers ride the host's serve loop: the guider's
-        // four passes are ticks of the ONE background task that reaches the
-        // store, not separate spawned loops.
-        host.attach_timers(Arc::new(TimerGuider::new(&runtime)));
+        // The store-facing timers ride the host's serve loop: the trigger,
+        // retry, snapshot and ready/recovery/outbox passes are ticks of the
+        // one background task that reaches the store.
+        let guider = Arc::new(TimerGuider::new(&runtime));
+        host.attach_timers(guider.clone());
+        // Terminal cleanup is the exception: one page of finished runs is a
+        // bulk operation whose cost grows with the backlog (and with a store
+        // that is still draining the run's own projections), so it must not
+        // hold the serve loop while the ready/recovery/outbox ticks wait
+        // behind it. It owns a task of its own on the same interval and the
+        // same health guard; the per-pid lifecycle/projection locks keep it
+        // ordered against starts and commits exactly as before. Under test
+        // the tick is a no-op and the suites drive `sweep_removable` directly,
+        // so no per-runtime task is spawned there.
+        #[cfg(not(test))]
+        {
+            let shutdown = runtime.shutdown.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(cleanup_interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // `interval` fires immediately; the boot pass already ran.
+                ticker.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => break,
+                        _ = ticker.tick() => {
+                            tokio::select! {
+                                _ = shutdown.cancelled() => break,
+                                _ = guider.cleanup_tick() => {}
+                            }
+                        }
+                    }
+                }
+            });
+        }
         Ok(runtime)
     }
 

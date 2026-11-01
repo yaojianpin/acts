@@ -10,7 +10,8 @@
 
 use acts::{
     CancellationToken, CpuStatus, Engine, HealthStatus, KvStore, MemoryStatus, MemoryStore,
-    Principal, ProcessCounts, RunHandle, RunOutcome, StorageStatus, SystemStatus, Vars, Workflow,
+    Principal, ProcessCounts, RunHandle, RunOutcome, ScanOperation, ScanOptions, StorageStatus,
+    SystemStatus, Vars, Workflow,
 };
 use acts_store::{DEFAULT_FLUSH_EVERY_MS, PostgresStore, SledStore, SqliteStore};
 use parking_lot::{Mutex, RwLock};
@@ -88,6 +89,11 @@ struct Options {
     concurrency: Vec<usize>,
     warmup: u64,
     soak_seconds: u64,
+    /// After the last phase, wait this long for the terminal cleanup to drain
+    /// the finished runs' rows (0 disables the wait). Cleanup is a background
+    /// loop, so without it a run that ends with the last workflow reports
+    /// every row still present.
+    cleanup_wait_seconds: u64,
     sample_ms: u64,
     timeout_seconds: u64,
     scheduler_workers: usize,
@@ -110,16 +116,21 @@ impl Options {
             .map(|value| value.get())
             .unwrap_or(4)
             .max(1);
-        let base = cores.clamp(4, 32);
+        // The harness stays below the contention knee: 70 scheduler lanes and
+        // 70 writer shards against one sled log measured worse than 16–32 lanes
+        // and 4–8 shards, so the top stage is 64 clients and the worker counts
+        // are capped where the engine defaults now are.
+        let base = cores.clamp(4, 16);
         let mut options = Self {
             count: DEFAULT_COUNT,
-            concurrency: unique_sorted(vec![base, base * 2, base * 4]),
+            concurrency: unique_sorted(vec![base, (base * 2).min(64), 64]),
             warmup: 500,
             soak_seconds: DEFAULT_SOAK_SECONDS,
+            cleanup_wait_seconds: 0,
             sample_ms: DEFAULT_SAMPLE_MS,
             timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
-            scheduler_workers: cores,
-            store_workers: cores,
+            scheduler_workers: cores.clamp(4, 32),
+            store_workers: cores.clamp(4, 8),
             store: "sled".to_string(),
             store_url: None,
             output: PathBuf::from("target/stress-results"),
@@ -145,6 +156,12 @@ impl Options {
                 }
                 "--sample-ms" => {
                     options.sample_ms = parse_num(&value(&mut args, "--sample-ms")?, "sample-ms")?;
+                }
+                "--cleanup-wait-seconds" => {
+                    options.cleanup_wait_seconds = parse_num(
+                        &value(&mut args, "--cleanup-wait-seconds")?,
+                        "cleanup-wait-seconds",
+                    )?;
                 }
                 "--timeout-seconds" => {
                     options.timeout_seconds =
@@ -223,9 +240,12 @@ fn print_help() {
            --warmup N                Warm-up workflows, default 500\n\
            --soak-seconds N          Extra max-concurrency soak, default 30 (0 disables)\n\
            --sample-ms N             System metric sampling interval, default 1000\n\
+           --cleanup-wait-seconds N  Wait up to N seconds for terminal cleanup to\n\
+                                     drain the finished runs after the last phase\n\
+                                     (0 disables, default 0)\n\
            --timeout-seconds N       Per-workflow completion timeout, default 120\n\
-           --workers N               Scheduler lanes, default logical CPU count\n\
-           --store-workers N         Store writer shards, default logical CPU count\n\
+           --workers N               Scheduler lanes, default min(half the cores, 32)\n\
+           --store-workers N         Store writer shards, default min(half the cores, 8)\n\
            --store BACKEND           sled (default, ./data, 50ms background flush),\n\
                                      memory, sqlite, postgres\n\
            --store-url URL           Sled directory, SQLite file path, or Postgres URL\n\
@@ -409,6 +429,7 @@ struct ConfigReport {
     concurrency_stages: Vec<usize>,
     warmup_workflows: u64,
     soak_seconds: u64,
+    cleanup_wait_seconds: u64,
     scheduler_workers: usize,
     store_writer_workers: usize,
     cache_cap: usize,
@@ -445,6 +466,9 @@ struct FinalReport {
     avg_system_cpu_percent: f32,
     max_storage_used_bytes: Option<u64>,
     max_process_rows: usize,
+    final_process_rows: usize,
+    residual_aggregate_documents: usize,
+    residual_index_documents: usize,
     max_active_processes: usize,
     logical_cores: usize,
     degraded_health_samples: usize,
@@ -737,6 +761,39 @@ impl MetricsSampler {
     }
 }
 
+/// Count the durable aggregate-family documents the store still holds:
+/// process heads, base snapshots and log windows (all under
+/// `kernel/aggregates/`) plus the derived recovery/outbox/ready indexes and
+/// per-operation recovery entries. A drained terminal cleanup leaves both
+/// counts at zero; this probe is what makes that observable in the report
+/// instead of only in the read model's row counts.
+async fn store_residue(store: &dyn KvStore) -> (usize, usize) {
+    let prefixes = [
+        ("kernel/aggregates/", true),
+        ("kernel/indexes/recovery/", false),
+        ("kernel/indexes/outbox/", false),
+        ("kernel/indexes/ready/", false),
+        ("kernel/indexes/recovery-entries/", false),
+    ];
+    let mut aggregates = 0usize;
+    let mut indexes = 0usize;
+    for (prefix, is_aggregate) in prefixes {
+        let entries = store
+            .scan_prefix(
+                prefix,
+                ScanOptions::new(ScanOperation::Eq, prefix.to_string(), false),
+            )
+            .await
+            .unwrap_or_default();
+        if is_aggregate {
+            aggregates += entries.len();
+        } else {
+            indexes += entries.len();
+        }
+    }
+    (aggregates, indexes)
+}
+
 fn summarize_metrics(points: &[MetricPoint]) -> (u64, u64, f32, f32, usize) {
     let max_rss = points.iter().map(|p| p.memory.rss_bytes).max().unwrap_or(0);
     let min_available = points
@@ -801,7 +858,7 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
     let mut md = String::new();
     md.push_str("# Acts million-run stress report\n\n");
     md.push_str(&format!(
-        "- Generated at (Unix seconds): {}\n- Result: **{}**\n- Measured attempts: {}\n- Measured completed: {}\n- Measured errored: {}\n- Measured terminated: {}\n- Measured error rate: {:.4}%\n- Measured elapsed: {:.2}s\n- Measured throughput: {:.2} workflows/s\n- Peak RSS: {:.2} GiB\n- Min system available memory: {:.2} GiB\n- Process CPU: peak {:.1}% / sample mean {:.1}%\n- System CPU: peak {:.1}% / sample mean {:.1}%\n- Max storage used: {}\n- Peak process rows: {} (active {})\n- Logical CPUs: {}\n- Degraded health samples: {}\n- Metric collection failures: {}\n- Engine shutdown: {:.3}s\n\n",
+        "- Generated at (Unix seconds): {}\n- Result: **{}**\n- Measured attempts: {}\n- Measured completed: {}\n- Measured errored: {}\n- Measured terminated: {}\n- Measured error rate: {:.4}%\n- Measured elapsed: {:.2}s\n- Measured throughput: {:.2} workflows/s\n- Peak RSS: {:.2} GiB\n- Min system available memory: {:.2} GiB\n- Process CPU: peak {:.1}% / sample mean {:.1}%\n- System CPU: peak {:.1}% / sample mean {:.1}%\n- Max storage used: {}\n- Peak process rows: {} (active {})\n- Process rows at the end (after the cleanup wait, when configured): {}\n- Residual aggregate documents: {}\n- Residual index documents: {}\n- Logical CPUs: {}\n- Degraded health samples: {}\n- Metric collection failures: {}\n- Engine shutdown: {:.3}s\n\n",
         report.generated_at_unix_seconds,
         report.status,
         report.total_attempted,
@@ -820,6 +877,9 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
         report.max_storage_used_bytes.map(|v| format!("{:.2} GiB", v as f64 / 1_073_741_824.0)).unwrap_or_else(|| "unknown".into()),
         report.max_process_rows,
         report.max_active_processes,
+        report.final_process_rows,
+        report.residual_aggregate_documents,
+        report.residual_index_documents,
         report.logical_cores,
         report.degraded_health_samples,
         report.metrics_collection_errors,
@@ -827,7 +887,7 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
     ));
     md.push_str("## Test configuration\n\n");
     md.push_str(&format!(
-        "- Workload: {}\n- Host: {} / {} ({} logical CPUs)\n- Concurrency stages: {:?}\n- Warmup workflows: {}\n- Steady-state soak: {}s\n- Scheduler workers: {}\n- Store writer workers: {}\n- Cache cap: {}\n- Scheduler queue cap: {}\n- Store writer queue cap: {}\n- Metric sample interval: {}ms (each status sample also waits for sysinfo's CPU delta window)\n- Per-workflow wait timeout: {}s\n- Engine version: {}\n- Store backend: {}\n- Error-rate gate: {:.3}%\n\n{}\n\n",
+        "- Workload: {}\n- Host: {} / {} ({} logical CPUs)\n- Concurrency stages: {:?}\n- Warmup workflows: {}\n- Steady-state soak: {}s\n- Cleanup drain wait: {}s\n- Scheduler workers: {}\n- Store writer workers: {}\n- Cache cap: {}\n- Scheduler queue cap: {}\n- Store writer queue cap: {}\n- Metric sample interval: {}ms (each status sample also waits for sysinfo's CPU delta window)\n- Per-workflow wait timeout: {}s\n- Engine version: {}\n- Store backend: {}\n- Error-rate gate: {:.3}%\n\n{}\n\n",
         report.config.workload,
         report.config.host_os,
         report.config.host_arch,
@@ -835,6 +895,7 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
         report.config.concurrency_stages,
         report.config.warmup_workflows,
         report.config.soak_seconds,
+        report.config.cleanup_wait_seconds,
         report.config.scheduler_workers,
         report.config.store_writer_workers,
         report.config.cache_cap,
@@ -994,6 +1055,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_level = %options.log_level,
         "stress run starting"
     );
+    // Retained for the post-run residue probe: the engine's own store handle
+    // is private, and the probe is what turns "process rows drained" into
+    // "the aggregate family is gone too".
+    let probe_store = store.clone();
     let engine = Engine::builder()
         .set_store(store)
         .cache_size(cache_cap as i64)
@@ -1157,6 +1222,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     monitor_stop.cancel();
     let _ = monitor.await;
+
+    // Terminal cleanup is a background loop: without a wait, a run that ends
+    // with its last workflow reports every finished run's rows still present.
+    // The drain loop makes that difference explicit and reports what is left.
+    if options.cleanup_wait_seconds > 0 {
+        let deadline = Instant::now() + Duration::from_secs(options.cleanup_wait_seconds);
+        println!(
+            "[cleanup] waiting up to {}s for terminal cleanup to drain finished runs...",
+            options.cleanup_wait_seconds
+        );
+        loop {
+            match collect_status(&engine, &principal).await {
+                Ok(status) => {
+                    let remaining = status.processes.total;
+                    metric_samples.lock().push(MetricPoint::new(
+                        origin.elapsed().as_secs_f64(),
+                        "cleanup".into(),
+                        0,
+                        status,
+                    ));
+                    if remaining == 0 || Instant::now() >= deadline {
+                        println!("[cleanup] {remaining} process rows remain");
+                        break;
+                    }
+                }
+                Err(_) if Instant::now() >= deadline => break,
+                Err(_) => {}
+            }
+            tokio::time::sleep(Duration::from_millis(options.sample_ms.max(100))).await;
+        }
+    }
+    let (residual_aggregates, residual_indexes) = store_residue(probe_store.as_ref()).await;
+    if residual_aggregates > 0 || residual_indexes > 0 {
+        println!(
+            "[cleanup] store residue: {residual_aggregates} aggregate documents, \
+             {residual_indexes} index documents"
+        );
+    } else {
+        println!("[cleanup] store residue: no aggregate or index documents left");
+    }
     if let Ok(status) = collect_status(&engine, &principal).await {
         metric_samples.lock().push(MetricPoint::new(
             origin.elapsed().as_secs_f64(),
@@ -1212,6 +1317,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let max_storage_used = metrics.iter().filter_map(|p| p.storage.used_bytes).max();
     let max_process_rows = metrics.iter().map(|p| p.processes.total).max().unwrap_or(0);
+    let final_process_rows = metrics
+        .iter()
+        .rev()
+        .find(|point| point.phase == "final" || point.phase == "cleanup")
+        .map(|point| point.processes.total)
+        .unwrap_or(0);
     let max_active_processes = metrics
         .iter()
         .map(|p| p.processes.active)
@@ -1254,6 +1365,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         avg_system_cpu_percent: avg_system_cpu,
         max_storage_used_bytes: max_storage_used,
         max_process_rows,
+        final_process_rows,
+        residual_aggregate_documents: residual_aggregates,
+        residual_index_documents: residual_indexes,
         max_active_processes,
         logical_cores,
         degraded_health_samples: degraded_health,
@@ -1265,6 +1379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             concurrency_stages: options.concurrency.clone(),
             warmup_workflows: warmup_count,
             soak_seconds: options.soak_seconds,
+            cleanup_wait_seconds: options.cleanup_wait_seconds,
             scheduler_workers: options.scheduler_workers,
             store_writer_workers: options.store_workers,
             cache_cap,

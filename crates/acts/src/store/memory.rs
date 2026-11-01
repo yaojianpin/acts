@@ -2,7 +2,9 @@ use crate::Result;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 
-use crate::store::{KvStore, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard};
+use crate::store::{
+    KvStore, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard, StoreView,
+};
 
 /// Apply every op of a batch to `data`.
 fn apply_ops(data: &mut BTreeMap<String, Vec<u8>>, ops: &[StoreBatchOp]) {
@@ -92,6 +94,26 @@ impl KvStore for MemoryStore {
     async fn delete(&self, key: &str) -> Result<()> {
         self.data.write().remove(key);
         Ok(())
+    }
+
+    /// One read lock for the whole key set: no batch can land between two
+    /// values of the answer, so the sample is already one committed version.
+    async fn read_stable(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        let data = self.data.read();
+        Ok(keys.iter().map(|key| data.get(key).cloned()).collect())
+    }
+
+    /// One read lock covers the key set and the prefix walk, so the two parts
+    /// of the view are the same committed version without sampling twice.
+    async fn read_view(&self, keys: &[String], prefix: &str) -> Result<StoreView> {
+        let data = self.data.read();
+        let values = keys.iter().map(|key| data.get(key).cloned()).collect();
+        let entries = data
+            .range(prefix.to_string()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        Ok(StoreView { values, entries })
     }
 
     /// One write lock for the whole batch: concurrent readers can never

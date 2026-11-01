@@ -138,18 +138,19 @@ pub struct ConfigData {
     /// unbounded task creation caused by a node self-loop / cyclic `next`.
     /// Must be at least 1 — the engine refuses to start with a smaller value.
     pub max_node_run_times: Option<i64>,
-    /// Number of scheduler worker lanes; defaults to available parallelism.
-    /// Each lane executes one operation at a time on its own worker task.
-    /// A pid always hashes (XXH3-64) to the same lane, so its operations are
-    /// serialized on one worker while independent processes run in parallel.
+    /// Number of scheduler worker lanes; defaults to half the available
+    /// parallelism, capped at 32. Each lane executes one operation at a time
+    /// on its own worker task. A pid always hashes (XXH3-64) to the same lane,
+    /// so its operations are serialized on one worker while independent
+    /// processes run in parallel.
     pub scheduler_workers: Option<usize>,
     /// Maximum number of scheduler jobs buffered in memory, split evenly across
     /// the worker lanes (at least one per lane): a full lane refuses the
     /// enqueue and leaves the operation in the durable ready index for the
     /// next pass. Zero selects the default.
     pub scheduler_queue_cap: Option<usize>,
-    /// Number of store-writer shards; defaults to available parallelism.
-    /// Each shard applies one write at a time.
+    /// Number of store-writer shards; defaults to half the available
+    /// parallelism, capped at 8. Each shard applies one write at a time.
     /// Ops of the same pid always hash to the same shard to keep their
     /// enqueue order (task state durable before the outbox records that
     /// depend on it), so independent processes no longer queue behind one
@@ -438,10 +439,13 @@ impl Config {
     /// Maximum concurrently executing scheduler jobs. This is also the explicit
     /// in-flight admission limit for the fixed task-lane pool.
     pub fn scheduler_workers(&self) -> usize {
-        let configured = self
-            .data
-            .scheduler_workers
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() / 2));
+        let configured = self.data.scheduler_workers.unwrap_or_else(|| {
+            // Half the cores, capped: past 32 lanes every pid hashed to a lane
+            // is another blocking writer contending for one database log, and
+            // the measured effect is contention, not throughput. An explicit
+            // `scheduler_workers` may still go up to 1024.
+            std::thread::available_parallelism().map_or(4, |n| (n.get() / 2).clamp(1, 32))
+        });
         configured.clamp(1, 1024)
     }
 
@@ -460,10 +464,13 @@ impl Config {
     /// shard, so the ops of a process are applied in enqueue order while
     /// independent processes are persisted concurrently.
     pub fn store_writer_workers(&self) -> usize {
-        let configured = self
-            .data
-            .store_writer_workers
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() / 2));
+        let configured = self.data.store_writer_workers.unwrap_or_else(|| {
+            // Half the cores, capped at 8: every shard applies one write at a
+            // time against a store that serializes writes internally (one sled
+            // log, one SQLite writer), so a shard count far above that only
+            // multiplies contention. An explicit setting may still go higher.
+            std::thread::available_parallelism().map_or(4, |n| (n.get() / 2).clamp(1, 8))
+        });
         configured.clamp(1, 1024)
     }
 

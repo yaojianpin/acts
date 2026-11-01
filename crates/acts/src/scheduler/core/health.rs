@@ -148,8 +148,39 @@ impl LoopGuard {
     /// window are reported, which is what keeps a long outage from logging a
     /// warning per attempt on top of the error line the loop itself emits.
     pub(crate) fn failed(&self, err: &ActError) {
+        self.note_failure(err, true);
+    }
+
+    /// Record a tick that reached the store but whose failure is isolated to
+    /// one pid or one scanner entry, while the rest of the tick's work
+    /// continued.
+    ///
+    /// Health degrades exactly like [`Self::failed`] — the failure is the
+    /// operator's to see — but the backoff window is *not* armed: the loop
+    /// still runs on its normal cadence, because skipping ticks would also
+    /// skip the healthy work in them and let a single bad pid slow every
+    /// other run. A later clean tick clears the streak.
+    pub(crate) fn failed_isolated(&self, err: &ActError) {
+        self.note_failure(err, false);
+    }
+
+    fn note_failure(&self, err: &ActError, backoff: bool) {
         let failures = self.failures.fetch_add(1, Ordering::AcqRel) + 1;
         if failures < DEGRADE_AFTER {
+            return;
+        }
+
+        if !backoff {
+            if failures == DEGRADE_AFTER {
+                warn!(
+                    loop_name = self.name,
+                    state = HealthState::Degraded.as_str(),
+                    consecutive_failures = failures,
+                    backoff_ticks = 0,
+                    error = %err,
+                    "store loop degraded (isolated failures; the loop keeps running)"
+                );
+            }
             return;
         }
 
@@ -325,10 +356,12 @@ pub(crate) struct CleanupPass {
 ///
 /// Each loop owns one interval: the ready/timer pass (normal liveness), the
 /// recovery scanner (exceptional work), the outbox retry pass, the projection
-/// repair pass — and the runtime's four store-facing timers (schedule
-/// triggers, delivery retries, terminal cleanup, snapshot purge), which the
-/// same driver loop ticks. A slow or failing loop cannot delay another, and a
-/// shorter loop never multiplies another's scans.
+/// repair pass — and the runtime's store-facing timers (schedule triggers,
+/// delivery retries, terminal cleanup, snapshot purge). The driver loop ticks
+/// all of them except terminal cleanup, which owns a background task of its
+/// own because a pass over a large finished-run backlog is bulk work. A slow
+/// or failing loop cannot delay another, and a shorter loop never multiplies
+/// another's scans.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct KernelSchedule {
     pub(crate) ready: Duration,
@@ -439,5 +472,49 @@ impl TimerGuards {
     /// What the last cleanup passes observed and reclaimed.
     pub(crate) fn cleanup_metrics(&self) -> CleanupMetrics {
         *self.cleanup_metrics.lock()
+    }
+}
+
+#[cfg(test)]
+mod loop_guard_tests {
+    use super::*;
+
+    /// An isolated failure (one pid, the rest of the tick's work continued)
+    /// degrades health like any other failure but never arms the backoff: the
+    /// loop must keep running for the healthy work. A store-level failure
+    /// still backs off, and a clean tick clears both.
+    #[test]
+    fn isolated_failures_degrade_without_a_backoff() {
+        let guard = LoopGuard::new("test-loop");
+        let error = ActError::Runtime("one bad pid".into());
+        for _ in 0..DEGRADE_AFTER {
+            guard.failed_isolated(&error);
+        }
+        let state = guard.snapshot();
+        assert_eq!(state.state, HealthState::Degraded);
+        assert_eq!(state.consecutive_failures, DEGRADE_AFTER);
+        assert_eq!(state.backoff_ticks, 0);
+        assert!(
+            guard.attempt(),
+            "an isolated failure must not skip the next tick"
+        );
+
+        for _ in 0..DEGRADE_AFTER {
+            guard.failed(&error);
+        }
+        let state = guard.snapshot();
+        assert_eq!(state.state, HealthState::Degraded);
+        assert!(
+            state.backoff_ticks > 0,
+            "a store-level failure still backs off"
+        );
+        assert!(!guard.attempt(), "the armed tick is skipped");
+
+        guard.recovered();
+        let state = guard.snapshot();
+        assert_eq!(state.state, HealthState::Healthy);
+        assert_eq!(state.consecutive_failures, 0);
+        assert_eq!(state.backoff_ticks, 0);
+        assert!(guard.attempt());
     }
 }

@@ -8,8 +8,10 @@
 //! ([`TimerGuider::purge_tick`]). The guards and the cleanup counters
 //! they read and write live in [`crate::scheduler::core::health`] — the state
 //! is health's; this module is only the loops and the cadence math they tick
-//! on. The host's serve loop owns the only task that runs them, so one
-//! background service reaches the store.
+//! on. The host's serve loop runs every loop except the terminal cleanup:
+//! a cleanup pass over a large finished-run backlog is bulk work, so it owns
+//! a task of its own (see [`cleanup`]) instead of holding the serve loop that
+//! also drives ready, recovery and outbox.
 
 mod cleanup;
 mod purge;
@@ -19,7 +21,7 @@ mod trigger;
 // Test suites drive the trigger and cleanup capabilities directly; the loops
 // themselves live in the child modules.
 #[cfg(test)]
-pub(crate) use cleanup::sweep_removable;
+pub(crate) use cleanup::{sweep_cycle, sweep_removable};
 #[cfg(test)]
 pub(crate) use trigger::fire_schedule;
 
@@ -146,6 +148,20 @@ pub(crate) fn cleanup_interval(config: &Config) -> Duration {
 pub(crate) struct TimerGuider {
     runtime: Arc<Runtime>,
     timers: Arc<TimerGuards>,
+    /// The terminal-cleanup cycle: every finished run's id, and how far the
+    /// sweep has walked. Held across ticks so a page that could not be
+    /// reclaimed this pass is not the page the next pass starts on
+    /// (see [`cleanup`]).
+    #[cfg(not(test))]
+    cleanup_cycle: parking_lot::Mutex<CleanupCycle>,
+}
+
+/// The terminal cleanup's cursor over one loaded id set.
+#[cfg(not(test))]
+#[derive(Default)]
+struct CleanupCycle {
+    ids: Vec<String>,
+    next: usize,
 }
 
 impl TimerGuider {
@@ -153,6 +169,24 @@ impl TimerGuider {
         Self {
             timers: runtime.workers().timer_guards().clone(),
             runtime: runtime.clone(),
+            #[cfg(not(test))]
+            cleanup_cycle: parking_lot::Mutex::new(CleanupCycle::default()),
         }
+    }
+
+    /// The current cleanup cycle is fully walked (or was never loaded): the
+    /// next tick reloads the terminal set.
+    #[cfg(not(test))]
+    fn cleanup_cycle_exhausted(&self) -> bool {
+        let cycle = self.cleanup_cycle.lock();
+        cycle.next >= cycle.ids.len()
+    }
+
+    /// Start a fresh terminal-cleanup cycle over `ids`.
+    #[cfg(not(test))]
+    fn replace_cleanup_cycle(&self, ids: Vec<String>) {
+        let mut cycle = self.cleanup_cycle.lock();
+        cycle.ids = ids;
+        cycle.next = 0;
     }
 }

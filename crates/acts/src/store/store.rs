@@ -779,6 +779,7 @@ impl Store {
     /// settled its outbox records, and nothing repairs a settled run's row —
     /// so a stale `false` here is what a leaking run (rows, and the directory
     /// swept with them) looks like.
+    #[cfg(test)]
     pub(crate) async fn unmarked_settled_procs(&self, limit: usize) -> Result<Vec<String>> {
         Ok(self
             .terminal_proc_rows(limit)
@@ -789,33 +790,57 @@ impl Store {
             .collect())
     }
 
+    /// The ids of every finished process, ascending.
+    ///
+    /// This is the cleanup cycle's membership: one indexed scan per pass over
+    /// the whole terminal set, so the sweeper can walk every run exactly once
+    /// instead of re-reading the same first page while a run that cannot be
+    /// reclaimed yet (an undelivered outbox record, a degraded outbox loop)
+    /// sits at its front.
+    pub(crate) async fn terminal_proc_ids(&self) -> Result<Vec<String>> {
+        use super::query::{Expr, Filter};
+
+        let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
+        procs
+            .matching_ids(Some(
+                &Filter::and().expr(Expr::r#in("state", terminal_proc_states())),
+            ))
+            .await
+    }
+
     /// Every finished process's row, `removable` or not: one scan over the
     /// terminal states (`state` is indexed), capped at `limit`.
+    #[cfg(test)]
     pub(crate) async fn terminal_proc_rows(&self, limit: usize) -> Result<Vec<data::Proc>> {
         use super::query::{Expr, Filter, Query};
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
-        let terminal: Vec<String> = [
-            TaskState::Completed,
-            TaskState::Cancelled,
-            TaskState::Submitted,
-            TaskState::Backed,
-            TaskState::Failed,
-            TaskState::Skipped,
-            TaskState::Aborted,
-            TaskState::Removed,
-        ]
-        .iter()
-        .map(|state| state.as_str().to_string())
-        .collect();
         // one scan over every terminal state (`state` is indexed); the
         // `removable` filter is applied in memory because the flag is not
         // indexed
         let q = Query::new()
             .limit(limit)
-            .filter(Filter::and().expr(Expr::r#in("state", terminal)));
+            .filter(Filter::and().expr(Expr::r#in("state", terminal_proc_states())));
         Ok(procs.query(&q).await?.rows)
     }
+}
+
+/// The proc-row states the terminal cleanup sweeps: the words
+/// [`TaskState::is_terminal`] answers for the run's root.
+fn terminal_proc_states() -> Vec<String> {
+    [
+        TaskState::Completed,
+        TaskState::Cancelled,
+        TaskState::Submitted,
+        TaskState::Backed,
+        TaskState::Failed,
+        TaskState::Skipped,
+        TaskState::Aborted,
+        TaskState::Removed,
+    ]
+    .iter()
+    .map(|state| state.as_str().to_string())
+    .collect()
 }
 
 #[cfg(test)]

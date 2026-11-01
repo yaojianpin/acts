@@ -239,6 +239,24 @@ impl StoreGuard {
     }
 }
 
+/// One stable view of a key set and a key-prefix range, as
+/// [`KvStore::read_view`] observed them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreView {
+    /// The value of every requested key, in the order the keys were given.
+    pub values: Vec<Option<Vec<u8>>>,
+    /// Every stored entry whose key starts with the view's prefix, ordered by
+    /// key.
+    pub entries: Vec<(String, Vec<u8>)>,
+}
+
+/// How many samples [`KvStore::read_stable`] / [`KvStore::read_view`] take
+/// before reporting that the store kept moving. This is a bound on obtaining
+/// *evidence* of a stable version, never a corruption verdict: a backend whose
+/// native view is a real snapshot (memory, sled, SQLite, Postgres) answers on
+/// the first sample.
+pub const STABLE_READ_ATTEMPTS: usize = 64;
+
 /// A store backend's self-reported footprint (`KvStore::usage`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageUsage {
@@ -288,6 +306,76 @@ pub trait KvStore: Send + Sync {
             values.push(self.one(key).await?);
         }
         Ok(values)
+    }
+
+    /// Read `keys` as one committed version.
+    ///
+    /// Every value in the answer was stored at the same version: a write that
+    /// lands while the read runs makes the method sample again instead of
+    /// returning a mix of the versions on either side of it. The proof the
+    /// default relies on is that a caller includes its version token (the
+    /// document head) among `keys` and that token changes on every write, so
+    /// two identical samples straddle no write at all.
+    ///
+    /// The default double-samples the keys; a backend that can read them
+    /// inside one native transaction/snapshot (`MemoryStore`, `SledStore`,
+    /// `SqliteStore`, `PostgresStore`) overrides this and answers on the first
+    /// sample. [`STABLE_READ_ATTEMPTS`] bounds the sampling: exhausting it is
+    /// reported as an error, never as corruption — the caller retries later.
+    async fn read_stable(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        for _ in 0..STABLE_READ_ATTEMPTS {
+            let before = self.many(keys).await?;
+            let after = self.many(keys).await?;
+            if before == after {
+                return Ok(before);
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(ActError::Store(format!(
+            "store keys did not stay stable across {STABLE_READ_ATTEMPTS} samples; \
+             a writer is committing without a pause"
+        )))
+    }
+
+    /// Read `keys` **and** every entry under `prefix` as one committed version.
+    ///
+    /// This is the primitive a repository uses to reassemble a document family
+    /// whose parts are written by one [`KvStore::batch`] (a head plus its base,
+    /// log window and derived indexes): every part of the answer belongs to the
+    /// same version, so a family that is consistent in storage cannot be
+    /// observed half-updated and diagnosed as corrupt.
+    ///
+    /// The default samples `keys` around the prefix scan and repeats until both
+    /// samples agree (the same version-token argument as
+    /// [`KvStore::read_stable`]). Backends with a native snapshot override it;
+    /// exhausting [`STABLE_READ_ATTEMPTS`] is an error, not a verdict.
+    async fn read_view(&self, keys: &[String], prefix: &str) -> Result<StoreView> {
+        for _ in 0..STABLE_READ_ATTEMPTS {
+            let before = self.read_stable(keys).await?;
+            let entries = self
+                .scan_prefix(
+                    prefix,
+                    ScanOptions::new(ScanOperation::Eq, prefix.to_owned(), false),
+                )
+                .await?;
+            let after = self.read_stable(keys).await?;
+            if before == after {
+                let mut entries: Vec<(String, Vec<u8>)> = entries
+                    .into_iter()
+                    .filter(|(key, _)| key.starts_with(prefix))
+                    .collect();
+                entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                return Ok(StoreView {
+                    values: before,
+                    entries,
+                });
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(ActError::Store(format!(
+            "store view did not reach one stable version across \
+             {STABLE_READ_ATTEMPTS} samples; a writer is committing without a pause"
+        )))
     }
 
     /// Write one key.
