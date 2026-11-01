@@ -1,0 +1,3887 @@
+{
+  "generated_at_unix_seconds": 1793542040,
+  "status": "PASS",
+  "total_attempted": 5000,
+  "total_completed": 5000,
+  "total_errored": 0,
+  "total_terminated": 0,
+  "overall_error_rate_pct": 0.0,
+  "elapsed_seconds": 44.537163063,
+  "workflows_per_second": 112.26579458883035,
+  "max_rss_bytes": 279412736,
+  "min_system_available_bytes": 15566323712,
+  "max_process_cpu_percent": 381.6092,
+  "avg_process_cpu_percent": 239.51685,
+  "max_system_cpu_percent": 95.4023,
+  "avg_system_cpu_percent": 61.66089,
+  "max_storage_used_bytes": 143365541,
+  "max_process_rows": 2004,
+  "final_process_rows": 0,
+  "residual_aggregate_documents": 0,
+  "residual_index_documents": 0,
+  "max_active_processes": 64,
+  "logical_cores": 4,
+  "degraded_health_samples": 0,
+  "phases": [
+    {
+      "name": "warmup",
+      "concurrency": 16,
+      "target": 100,
+      "attempted": 100,
+      "completed": 100,
+      "errored": 0,
+      "terminated": 0,
+      "elapsed_seconds": 0.630444951,
+      "workflows_per_second": 158.61813127598512,
+      "error_rate_pct": 0.0,
+      "start_latency": {
+        "samples": 100,
+        "min_ms": 0.537169,
+        "mean_ms": 0.95230944,
+        "stddev_ms": 0.4870370605585641,
+        "p50_ms": 0.777751,
+        "p90_ms": 1.351809,
+        "p95_ms": 1.914405,
+        "p99_ms": 3.15815,
+        "p999_ms": 3.518797,
+        "max_ms": 3.518797
+      },
+      "end_to_end_latency": {
+        "samples": 100,
+        "min_ms": 10.291516,
+        "mean_ms": 91.31428906999999,
+        "stddev_ms": 83.75830607389815,
+        "p50_ms": 45.126219,
+        "p90_ms": 224.82743,
+        "p95_ms": 275.854806,
+        "p99_ms": 302.900448,
+        "p999_ms": 311.174791,
+        "max_ms": 311.174791
+      },
+      "first_errors": [],
+      "timed_out": false
+    },
+    {
+      "name": "load-1/3-c16",
+      "concurrency": 16,
+      "target": 1667,
+      "attempted": 1667,
+      "completed": 1667,
+      "errored": 0,
+      "terminated": 0,
+      "elapsed_seconds": 12.210649468,
+      "workflows_per_second": 136.52017481696168,
+      "error_rate_pct": 0.0,
+      "start_latency": {
+        "samples": 1667,
+        "min_ms": 0.521419,
+        "mean_ms": 1.0836584865026995,
+        "stddev_ms": 1.2196669259990154,
+        "p50_ms": 0.960583,
+        "p90_ms": 1.335689,
+        "p95_ms": 1.546324,
+        "p99_ms": 2.660175,
+        "p999_ms": 28.973377,
+        "max_ms": 30.012459
+      },
+      "end_to_end_latency": {
+        "samples": 1667,
+        "min_ms": 10.095588,
+        "mean_ms": 116.65430982063587,
+        "stddev_ms": 79.29351327711746,
+        "p50_ms": 98.664355,
+        "p90_ms": 232.865303,
+        "p95_ms": 265.941768,
+        "p99_ms": 338.801536,
+        "p999_ms": 417.99532,
+        "max_ms": 444.60371
+      },
+      "first_errors": [],
+      "timed_out": false
+    },
+    {
+      "name": "load-2/3-c32",
+      "concurrency": 32,
+      "target": 1667,
+      "attempted": 1667,
+      "completed": 1667,
+      "errored": 0,
+      "terminated": 0,
+      "elapsed_seconds": 18.959141692,
+      "workflows_per_second": 87.92592128278716,
+      "error_rate_pct": 0.0,
+      "start_latency": {
+        "samples": 1667,
+        "min_ms": 0.517752,
+        "mean_ms": 1.6991479106178764,
+        "stddev_ms": 1.8588532890946927,
+        "p50_ms": 1.125604,
+        "p90_ms": 3.686433,
+        "p95_ms": 4.280819,
+        "p99_ms": 5.182421,
+        "p999_ms": 22.98516,
+        "max_ms": 57.605945
+      },
+      "end_to_end_latency": {
+        "samples": 1667,
+        "min_ms": 10.370566,
+        "mean_ms": 360.4569141919616,
+        "stddev_ms": 319.3198696521237,
+        "p50_ms": 260.499,
+        "p90_ms": 782.687674,
+        "p95_ms": 1040.696366,
+        "p99_ms": 1460.696566,
+        "p999_ms": 1682.443091,
+        "max_ms": 1746.35582
+      },
+      "first_errors": [],
+      "timed_out": false
+    },
+    {
+      "name": "load-3/3-c64",
+      "concurrency": 64,
+      "target": 1666,
+      "attempted": 1666,
+      "completed": 1666,
+      "errored": 0,
+      "terminated": 0,
+      "elapsed_seconds": 13.367371903,
+      "workflows_per_second": 124.63182831219834,
+      "error_rate_pct": 0.0,
+      "start_latency": {
+        "samples": 1666,
+        "min_ms": 0.575039,
+        "mean_ms": 1.1792161224489797,
+        "stddev_ms": 1.4744208076742171,
+        "p50_ms": 0.975302,
+        "p90_ms": 1.518992,
+        "p95_ms": 2.087308,
+        "p99_ms": 3.565906,
+        "p999_ms": 28.871526,
+        "max_ms": 49.323663
+      },
+      "end_to_end_latency": {
+        "samples": 1666,
+        "min_ms": 13.845814,
+        "mean_ms": 500.5694996962785,
+        "stddev_ms": 338.8853421935434,
+        "p50_ms": 429.78388,
+        "p90_ms": 1013.590772,
+        "p95_ms": 1155.129207,
+        "p99_ms": 1306.544524,
+        "p999_ms": 1423.684391,
+        "max_ms": 1445.751008
+      },
+      "first_errors": [],
+      "timed_out": false
+    },
+    {
+      "name": "post-stress-smoke",
+      "concurrency": 16,
+      "target": 100,
+      "attempted": 100,
+      "completed": 100,
+      "errored": 0,
+      "terminated": 0,
+      "elapsed_seconds": 2.027209455,
+      "workflows_per_second": 49.32889384141117,
+      "error_rate_pct": 0.0,
+      "start_latency": {
+        "samples": 100,
+        "min_ms": 0.84584,
+        "mean_ms": 2.7932142599999996,
+        "stddev_ms": 1.4836528053093931,
+        "p50_ms": 3.209212,
+        "p90_ms": 4.546946,
+        "p95_ms": 4.812654,
+        "p99_ms": 5.235199,
+        "p999_ms": 5.348915,
+        "max_ms": 5.348915
+      },
+      "end_to_end_latency": {
+        "samples": 100,
+        "min_ms": 28.301208,
+        "mean_ms": 305.24715883,
+        "stddev_ms": 215.0887880723028,
+        "p50_ms": 242.850665,
+        "p90_ms": 589.917983,
+        "p95_ms": 717.279683,
+        "p99_ms": 905.789968,
+        "p999_ms": 931.559406,
+        "max_ms": 931.559406
+      },
+      "first_errors": [],
+      "timed_out": false
+    }
+  ],
+  "metrics": [
+    {
+      "elapsed_seconds": 0.201634657,
+      "phase": "baseline",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 12226560,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15648129024
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 3.7500002,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 19049
+      },
+      "processes": {
+        "total": 0,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 1.434131422,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 47390720,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15655088128
+      },
+      "cpu": {
+        "process_percent": 334.88373,
+        "system_percent": 87.209305,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 11568580
+      },
+      "processes": {
+        "total": 165,
+        "active": 15
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 2.655895278,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 68726784,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15662911488
+      },
+      "cpu": {
+        "process_percent": 369.62024,
+        "system_percent": 93.67088,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 25589340
+      },
+      "processes": {
+        "total": 360,
+        "active": 15
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 3.883917134,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 86835200,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15669919744
+      },
+      "cpu": {
+        "process_percent": 276.19046,
+        "system_percent": 95.2381,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 37637776
+      },
+      "processes": {
+        "total": 530,
+        "active": 16
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 5.106163138,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 105865216,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15685992448
+      },
+      "cpu": {
+        "process_percent": 375.30862,
+        "system_percent": 95.06173,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 49575908
+      },
+      "processes": {
+        "total": 695,
+        "active": 15
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 6.316449052,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 123707392,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15692505088
+      },
+      "cpu": {
+        "process_percent": 323.0769,
+        "system_percent": 82.051285,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 61445770
+      },
+      "processes": {
+        "total": 859,
+        "active": 15
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 7.527827523,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 142389248,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15684681728
+      },
+      "cpu": {
+        "process_percent": 330.0,
+        "system_percent": 85.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 73539657
+      },
+      "processes": {
+        "total": 1029,
+        "active": 16
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 8.754674442,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 161603584,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15667781632
+      },
+      "cpu": {
+        "process_percent": 340.74075,
+        "system_percent": 85.18518,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 85574448
+      },
+      "processes": {
+        "total": 1194,
+        "active": 16
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 9.985074408,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 179228672,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15662432256
+      },
+      "cpu": {
+        "process_percent": 342.85715,
+        "system_percent": 84.41559,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 97340988
+      },
+      "processes": {
+        "total": 1357,
+        "active": 16
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 11.214923488,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 197029888,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15645384704
+      },
+      "cpu": {
+        "process_percent": 346.98798,
+        "system_percent": 86.746994,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 108704552
+      },
+      "processes": {
+        "total": 1517,
+        "active": 16
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 12.444458282,
+      "phase": "load-1/3-c16",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 214016000,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15634509824
+      },
+      "cpu": {
+        "process_percent": 309.52383,
+        "system_percent": 78.57143,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 119958562
+      },
+      "processes": {
+        "total": 1673,
+        "active": 16
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 13.67276964,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 232525824,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15615176704
+      },
+      "cpu": {
+        "process_percent": 359.49365,
+        "system_percent": 91.13924,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 131776726
+      },
+      "processes": {
+        "total": 1842,
+        "active": 31
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 14.898416315,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 250122240,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15594455040
+      },
+      "cpu": {
+        "process_percent": 365.4321,
+        "system_percent": 92.5926,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 143365541
+      },
+      "processes": {
+        "total": 2004,
+        "active": 31
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 16.127513246,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 256376832,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15586344960
+      },
+      "cpu": {
+        "process_percent": 220.51282,
+        "system_percent": 55.128204,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 141719648
+      },
+      "processes": {
+        "total": 1986,
+        "active": 32
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 17.414339653,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 257028096,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15583100928
+      },
+      "cpu": {
+        "process_percent": 223.25583,
+        "system_percent": 55.813957,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 133792594
+      },
+      "processes": {
+        "total": 1869,
+        "active": 31
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 18.690187418,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 257277952,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15581704192
+      },
+      "cpu": {
+        "process_percent": 337.77777,
+        "system_percent": 87.77778,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 122078382
+      },
+      "processes": {
+        "total": 1703,
+        "active": 32
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 19.985759823,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 257646592,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15578841088
+      },
+      "cpu": {
+        "process_percent": 235.99998,
+        "system_percent": 61.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 111978288
+      },
+      "processes": {
+        "total": 1567,
+        "active": 32
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 21.263874592,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 257789952,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15578710016
+      },
+      "cpu": {
+        "process_percent": 239.13043,
+        "system_percent": 61.95652,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 101835571
+      },
+      "processes": {
+        "total": 1421,
+        "active": 31
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 22.547887203,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 258486272,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574474752
+      },
+      "cpu": {
+        "process_percent": 263.82977,
+        "system_percent": 68.085106,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 89268460
+      },
+      "processes": {
+        "total": 1251,
+        "active": 31
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 23.77504608,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 258609152,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574343680
+      },
+      "cpu": {
+        "process_percent": 317.94873,
+        "system_percent": 79.48718,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 73863178
+      },
+      "processes": {
+        "total": 1033,
+        "active": 31
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 25.023862925,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 258764800,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574495232
+      },
+      "cpu": {
+        "process_percent": 335.63217,
+        "system_percent": 87.356316,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 57224552
+      },
+      "processes": {
+        "total": 802,
+        "active": 33
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 26.243796083,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 258850816,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574740992
+      },
+      "cpu": {
+        "process_percent": 379.48718,
+        "system_percent": 94.871796,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 55695385
+      },
+      "processes": {
+        "total": 786,
+        "active": 30
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 27.452851136,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 261652480,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574515712
+      },
+      "cpu": {
+        "process_percent": 336.8421,
+        "system_percent": 85.52631,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 67642450
+      },
+      "processes": {
+        "total": 949,
+        "active": 30
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 28.71116522,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 264437760,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15572918272
+      },
+      "cpu": {
+        "process_percent": 360.43958,
+        "system_percent": 92.30769,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 79495107
+      },
+      "processes": {
+        "total": 1115,
+        "active": 32
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 29.938252251,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 268304384,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15567810560
+      },
+      "cpu": {
+        "process_percent": 353.24677,
+        "system_percent": 89.61038,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 91551334
+      },
+      "processes": {
+        "total": 1283,
+        "active": 32
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 31.17171573,
+      "phase": "load-2/3-c32",
+      "concurrency": 32,
+      "memory": {
+        "rss_bytes": 269557760,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15566647296
+      },
+      "cpu": {
+        "process_percent": 260.24097,
+        "system_percent": 63.855423,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 87396889
+      },
+      "processes": {
+        "total": 1228,
+        "active": 32
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 32.47006193,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 269787136,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15566323712
+      },
+      "cpu": {
+        "process_percent": 254.54546,
+        "system_percent": 64.64647,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 75795163
+      },
+      "processes": {
+        "total": 1095,
+        "active": 64
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 33.714885,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 269787136,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15572320256
+      },
+      "cpu": {
+        "process_percent": 297.6744,
+        "system_percent": 74.41861,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 61744590
+      },
+      "processes": {
+        "total": 886,
+        "active": 64
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 34.935074813,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 269971456,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15584944128
+      },
+      "cpu": {
+        "process_percent": 361.44577,
+        "system_percent": 90.36144,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 44587115
+      },
+      "processes": {
+        "total": 644,
+        "active": 63
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 36.147267346,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 269971456,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15585071104
+      },
+      "cpu": {
+        "process_percent": 349.3671,
+        "system_percent": 88.60759,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 36808770
+      },
+      "processes": {
+        "total": 534,
+        "active": 63
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 37.36412352,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 269987840,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15585181696
+      },
+      "cpu": {
+        "process_percent": 361.44577,
+        "system_percent": 92.77108,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 49671152
+      },
+      "processes": {
+        "total": 710,
+        "active": 64
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 38.580719856,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 269987840,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15585398784
+      },
+      "cpu": {
+        "process_percent": 369.23077,
+        "system_percent": 92.30769,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 62361194
+      },
+      "processes": {
+        "total": 888,
+        "active": 62
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 39.808689208,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 269987840,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15585648640
+      },
+      "cpu": {
+        "process_percent": 359.49365,
+        "system_percent": 92.40506,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 75134189
+      },
+      "processes": {
+        "total": 1067,
+        "active": 63
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 41.043398105,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 270020608,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15585972224
+      },
+      "cpu": {
+        "process_percent": 370.73172,
+        "system_percent": 95.12195,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 87632333
+      },
+      "processes": {
+        "total": 1243,
+        "active": 64
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 42.285216235,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 270163968,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15585968128
+      },
+      "cpu": {
+        "process_percent": 375.60974,
+        "system_percent": 95.12195,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 100128823
+      },
+      "processes": {
+        "total": 1414,
+        "active": 63
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 43.530599151,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 271794176,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15582658560
+      },
+      "cpu": {
+        "process_percent": 375.9036,
+        "system_percent": 95.180725,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 112457519
+      },
+      "processes": {
+        "total": 1585,
+        "active": 64
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 44.795173809,
+      "phase": "load-3/3-c64",
+      "concurrency": 64,
+      "memory": {
+        "rss_bytes": 272781312,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15582396416
+      },
+      "cpu": {
+        "process_percent": 381.6092,
+        "system_percent": 95.4023,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 124650761
+      },
+      "processes": {
+        "total": 1756,
+        "active": 61
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 46.073489436,
+      "phase": "post-stress-smoke",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 274374656,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574867968
+      },
+      "cpu": {
+        "process_percent": 230.43477,
+        "system_percent": 58.69565,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 122888622
+      },
+      "processes": {
+        "total": 1714,
+        "active": 16
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 47.287007995,
+      "phase": "post-stress-smoke",
+      "concurrency": 16,
+      "memory": {
+        "rss_bytes": 274620416,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574917120
+      },
+      "cpu": {
+        "process_percent": 217.72151,
+        "system_percent": 53.164555,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 113095298
+      },
+      "processes": {
+        "total": 1575,
+        "active": 16
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 47.606480102,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574917120
+      },
+      "cpu": {
+        "process_percent": 100.0,
+        "system_percent": 25.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 107818214
+      },
+      "processes": {
+        "total": 1496,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 48.813453353,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 101.26582,
+        "system_percent": 25.316456,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 69383416
+      },
+      "processes": {
+        "total": 960,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 50.017527056,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574761472
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 0.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 51.221925969,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574761472
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 1.2345679,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 52.4254739,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574761472
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 21.95122,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 53.628954166,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 0.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 54.832713318,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 0.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 56.035818475,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 0.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 57.239851622,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 0.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 58.443388516,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 0.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 59.64807413,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 4.9382715,
+        "system_percent": 0.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 10125069
+      },
+      "processes": {
+        "total": 139,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 60.851401773,
+      "phase": "cleanup",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 0.0,
+        "system_percent": 0.0,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 19049
+      },
+      "processes": {
+        "total": 0,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_seconds": 61.053024621,
+      "phase": "final",
+      "concurrency": 0,
+      "memory": {
+        "rss_bytes": 279412736,
+        "system_total_bytes": 16759443456,
+        "system_available_bytes": 15574765568
+      },
+      "cpu": {
+        "process_percent": 5.0,
+        "system_percent": 1.25,
+        "logical_cores": 4
+      },
+      "storage": {
+        "kind": "memory",
+        "used_bytes": 19049
+      },
+      "processes": {
+        "total": 0,
+        "active": 0
+      },
+      "health": {
+        "state": "healthy",
+        "loops": [
+          {
+            "name": "trigger",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "retry",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "cleanup",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "ready",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "recovery",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "outbox",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          },
+          {
+            "name": "projection",
+            "state": "healthy",
+            "consecutive_failures": 0,
+            "backoff_ticks": 0
+          }
+        ]
+      }
+    }
+  ],
+  "metrics_collection_errors": 0,
+  "config": {
+    "measured_workflows": 5000,
+    "concurrency_stages": [
+      16,
+      32,
+      64
+    ],
+    "warmup_workflows": 100,
+    "soak_seconds": 0,
+    "cleanup_wait_seconds": 300,
+    "scheduler_workers": 4,
+    "store_writer_workers": 4,
+    "cache_cap": 192,
+    "scheduler_queue_cap": 2048,
+    "store_writer_queue_cap": 2048,
+    "sample_interval_ms": 1000,
+    "workflow_timeout_seconds": 120,
+    "engine_version": "0.1.0",
+    "store_backend": "memory",
+    "max_error_rate_pct": 0.0,
+    "workload": "workflow: init + variable while-loop + expression evaluation + two-way branch + finalize",
+    "host_os": "linux",
+    "host_arch": "x86_64",
+    "logical_cores": 4,
+    "note": "Backend selected by --store; connection URLs are not copied into this report; closed-loop load; sampled peaks may understate instantaneous peaks. Run a release build on the target machine."
+  },
+  "shutdown_seconds": 0.001162259
+}
