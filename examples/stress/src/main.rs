@@ -12,7 +12,7 @@ use acts::{
     CancellationToken, CpuStatus, Engine, HealthStatus, KvStore, MemoryStatus, MemoryStore,
     Principal, ProcessCounts, RunHandle, RunOutcome, StorageStatus, SystemStatus, Vars, Workflow,
 };
-use acts_store::{PostgresStore, SledStore, SqliteStore};
+use acts_store::{DEFAULT_FLUSH_EVERY_MS, PostgresStore, SledStore, SqliteStore};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use std::{
@@ -226,10 +226,12 @@ fn print_help() {
            --timeout-seconds N       Per-workflow completion timeout, default 120\n\
            --workers N               Scheduler lanes, default logical CPU count\n\
            --store-workers N         Store writer shards, default logical CPU count\n\
-           --store BACKEND           sled (default, ./data), memory, sqlite, postgres\n\
-           --store-url URL           SQLite file path or Postgres URL\n\
-                                     (SQLite default <output>/stress.sqlite; Postgres\n\
-                                      falls back to $DATABASE_URL)\n\
+           --store BACKEND           sled (default, ./data, 50ms background flush),\n\
+                                     memory, sqlite, postgres\n\
+           --store-url URL           Sled directory, SQLite file path, or Postgres URL\n\
+                                     (sled default ./data; SQLite default\n\
+                                      <output>/stress.sqlite; Postgres falls back to\n\
+                                      $DATABASE_URL)\n\
            --output DIR               Output directory, default target/stress-results\n\
            --log-level FILTER         Tracing filter, default $ACTS_LOG or 'info'\n\
            --max-error-rate-pct N    Error-rate gate, default 0.1 percent\n\
@@ -883,7 +885,7 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
         md.push('\n');
     }
     md.push_str("## Metric definitions and limitations\n\n");
-    md.push_str("- Each run's `input` varies 0–9, so the while-loop length and both branches are exercised.\n- The report keeps status metrics only; it never copies `SystemStatus.config`, so credentials in configuration cannot leak into a report.\n- start API latency: from the `proc:start` call until a durable run handle is returned.\n- end-to-end latency: from submission until `RunHandle::wait` observes a terminal outcome, including queueing and execution.\n- workflows/s: completed runs divided by the phase's wall-clock time; errored and terminated runs do not count.\n- Percentiles use nearest-rank; stddev is the sample standard deviation.\n- CPU/RSS/storage/process counts/background loop health come from the engine's `sys:status`; each CPU sample waits for sysinfo's minimum CPU delta window, so the actual sampling interval is at least `sample-ms` and the sampler itself adds some overhead. Peaks are sample points, not continuous peak values. Collection failures are counted and fail the PASS gate.\n- This is a closed-loop load: each worker submits its next run only after the previous one finished; it is not a fixed-arrival-rate open-loop model.\n- The backend is selected by `--store`: `sled` (default, `./data`), `memory`, `sqlite` (file in `--store-url` or `<output>/stress.sqlite`), or `postgres` (URL in `--store-url` or `DATABASE_URL`; never copied into this report). Durable backends keep the engine's per-commit flush/commit semantics; `memory` isolates engine cost from storage cost.\n- PASS means the measured target was submitted and every measured/soak/post-stress phase stayed under the error-rate gate, with no wait timeouts, a complete post-stress smoke run, healthy background loops and successful metric collection. A few failures under the gate are still reported. Use `--max-error-rate-pct 0` for strict zero-failure gating. PASS is not a performance SLO claim for every workload.\n\n");
+    md.push_str("- Each run's `input` varies 0–9, so the while-loop length and both branches are exercised.\n- The report keeps status metrics only; it never copies `SystemStatus.config`, so credentials in configuration cannot leak into a report.\n- start API latency: from the `proc:start` call until a durable run handle is returned.\n- end-to-end latency: from submission until `RunHandle::wait` observes a terminal outcome, including queueing and execution.\n- workflows/s: completed runs divided by the phase's wall-clock time; errored and terminated runs do not count.\n- Percentiles use nearest-rank; stddev is the sample standard deviation.\n- CPU/RSS/storage/process counts/background loop health come from the engine's `sys:status`; each CPU sample waits for sysinfo's minimum CPU delta window, so the actual sampling interval is at least `sample-ms` and the sampler itself adds some overhead. Peaks are sample points, not continuous peak values. Collection failures are counted and fail the PASS gate.\n- This is a closed-loop load: each worker submits its next run only after the previous one finished; it is not a fixed-arrival-rate open-loop model.\n- The backend is selected by `--store`: `sled` (default, `./data`), `memory`, `sqlite` (file in `--store-url` or `<output>/stress.sqlite`), or `postgres` (URL in `--store-url` or `DATABASE_URL`; never copied into this report). `sled` acknowledges before fsync and flushes in the background every 50ms, so a crash can lose that window (and the measured throughput excludes the final shutdown flush); SQLite/Postgres make each commit durable before it returns; `memory` isolates engine cost from storage cost.\n- PASS means the measured target was submitted and every measured/soak/post-stress phase stayed under the error-rate gate, with no wait timeouts, a complete post-stress smoke run, healthy background loops and successful metric collection. A few failures under the gate are still reported. Use `--max-error-rate-pct 0` for strict zero-failure gating. PASS is not a performance SLO claim for every workload.\n\n");
     md.push_str("## Output files\n\n- `report.json`: full structured report.\n- `metrics.csv`: system resource and background health time series.\n- `report.md`: this report.\n- `trace.log`: tracing log for this run (controlled by `--log-level` / `ACTS_LOG`, default `info`; use `acts=debug,acts_example_stress=debug` for bottleneck analysis and `acts=trace` to see every operation's worker lane. Each `scheduler lane executing operation` line is one plan transition; count them per pid to measure transitions/workflow).\n");
     fs::write(path, md)
 }
@@ -932,10 +934,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // are never copied into the report (a Postgres URL may carry a password).
     let (store, store_label): (Arc<dyn KvStore>, String) = match options.store.as_str() {
         "memory" => (Arc::new(MemoryStore::new()), "memory".to_string()),
-        "sled" => (
-            Arc::new(SledStore::open("./data")?),
-            "sled (./data)".to_string(),
-        ),
+        "sled" => {
+            let path = options
+                .store_url
+                .clone()
+                .unwrap_or_else(|| "./data".to_string());
+            (
+                Arc::new(SledStore::open(&path)?),
+                format!("sled ({path}, {DEFAULT_FLUSH_EVERY_MS}ms flush)"),
+            )
+        }
         "sqlite" => {
             let path = options.store_url.clone().unwrap_or_else(|| {
                 options

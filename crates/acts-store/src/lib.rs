@@ -23,6 +23,12 @@
 //! - [`PostgresStore`] — feature `postgres`
 //! - [`SledStore`] — feature `sled`
 //!
+//! SQLite and Postgres make a commit durable before it returns. `SledStore`
+//! applies writes immediately and is flushed by sled's background flusher
+//! every [`DEFAULT_FLUSH_EVERY_MS`] (50 ms), so a crash can lose the writes
+//! applied since the last completed flush; call [`KvStore::flush`] for an
+//! explicit barrier (the engine performs one at a graceful shutdown).
+//!
 //! Every backend here commits a batch with its guards (see
 //! [`KvStore::batch`](acts::KvStore::batch)), which is what
 //! [`DbLease`](acts::DbLease) needs to hold a database exclusively across
@@ -40,6 +46,6 @@ mod sqlite;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStore;
 #[cfg(feature = "sled")]
-pub use sled::SledStore;
+pub use sled::{DEFAULT_FLUSH_EVERY_MS, SledStore};
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStore;

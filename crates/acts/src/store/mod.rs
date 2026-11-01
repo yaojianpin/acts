@@ -267,6 +267,18 @@ pub trait KvStore: Send + Sync {
         Ok(None)
     }
 
+    /// Force everything applied so far to stable storage.
+    ///
+    /// Transactional backends (Postgres) make every commit durable before it
+    /// returns, so the default is a no-op. An embedded backend whose writes
+    /// are applied to an in-memory log and made durable by a background
+    /// flusher (sled) overrides this; the engine calls it at a graceful
+    /// shutdown and an embedder may call it at any acknowledgement boundary
+    /// it needs to make durable.
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Read several keys in one logical call. The default preserves
     /// compatibility for stores without a native batch read; backends with a
     /// network or SQL round trip should override it.

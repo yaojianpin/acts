@@ -539,6 +539,11 @@ Backends enabled by the matching `acts-store` feature:
 - `PostgresStore` — `acts-store` feature `postgres`
 - `SledStore` — `acts-store` feature `sled`
 
+SQLite and Postgres make each commit durable before it returns. `SledStore`
+applies writes immediately and flushes in the background every 50 ms, so a
+crash can lose the writes applied since the last completed flush; call
+`KvStore::flush()` for an explicit barrier (a graceful engine shutdown does).
+
 Custom stores can be built by implementing `acts::KvStore` (including its
 `batch` with the guards in the same atomic unit — an exclusive database lease
 depends on it) and passed to `set_store` the same way.

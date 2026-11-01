@@ -45,6 +45,9 @@ impl ServerPlugins {
 #[serde(rename_all = "lowercase")]
 pub enum DbType {
     /// Local sled database (default) — `database_url` is a directory path.
+    /// Sled writes are made durable by its background flusher every 50 ms
+    /// (`SledStore::DEFAULT_FLUSH_EVERY_MS`), and a graceful engine shutdown
+    /// performs one final flush.
     #[default]
     Sled,
     /// SQLite file — `database_url` is a file path.

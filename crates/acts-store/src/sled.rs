@@ -1,3 +1,18 @@
+//! The sled backend.
+//!
+//! Writes are applied to sled's in-memory log and are visible to readers
+//! immediately. They are made durable by sled's background flusher every
+//! [`DEFAULT_FLUSH_EVERY_MS`] (50 ms), not by a flush per write: every writer
+//! shares one `sled::Db` and one log/fsync barrier, so a per-write flush made
+//! all writer shards queue behind the same disk operation.
+//!
+//! The acknowledged-write window this leaves is explicit: a process or system
+//! crash can lose the writes applied since the last completed background
+//! flush (up to the window, longer if the flusher is delayed). [`KvStore::flush`]
+//! is the explicit barrier, and the engine calls it once after draining the
+//! write-behind queue at a graceful shutdown. An embedder that needs a
+//! stronger acknowledgement boundary can call it directly.
+
 use acts::{
     ActError, KvStore, Result, ScanOperation, ScanOptions, StorageUsage, StoreBatchOp, StoreGuard,
 };
@@ -9,6 +24,14 @@ use std::path::Path;
 /// the transaction read changed, so this bound only matters when the guard key
 /// is written continuously — a guard that keeps changing cannot be proven held.
 const BATCH_MAX_ATTEMPTS: usize = 32;
+
+/// The background durability cadence when `SledStore::open` does not name one.
+/// A write is visible to readers immediately and is made durable by sled's
+/// periodic flusher; this window is therefore the maximum data a crash can
+/// lose without an explicit [`KvStore::flush`] barrier. `SledStore` no longer
+/// fsyncs on every write: eight writer shards sharing one database would all
+/// queue on that single barrier.
+pub const DEFAULT_FLUSH_EVERY_MS: u64 = 50;
 
 /// Sum every regular file's size under `dir`, recursively. Missing or
 /// unreadable entries are skipped: the answer is the best-effort footprint of
@@ -41,7 +64,11 @@ pub struct SledStore {
 
 impl SledStore {
     pub fn open(path: &str) -> Result<Self> {
-        let db = sled::open(path).map_err(|e| ActError::Store(e.to_string()))?;
+        let db = sled::Config::new()
+            .path(path)
+            .flush_every_ms(Some(DEFAULT_FLUSH_EVERY_MS))
+            .open()
+            .map_err(|e| ActError::Store(e.to_string()))?;
         Ok(Self {
             db,
             path: Some(std::path::PathBuf::from(path)),
@@ -52,6 +79,7 @@ impl SledStore {
     pub fn open_in_memory() -> Result<Self> {
         let db = sled::Config::new()
             .temporary(true)
+            .flush_every_ms(Some(DEFAULT_FLUSH_EVERY_MS))
             .open()
             .map_err(|e| ActError::Store(e.to_string()))?;
         Ok(Self { db, path: None })
@@ -120,15 +148,24 @@ impl KvStore for SledStore {
         }))
     }
 
+    /// The explicit durability barrier: rolls sled's in-memory log and fsyncs
+    /// it. The engine calls this once at a graceful shutdown; a caller that
+    /// needs an acknowledgement boundary stronger than the background
+    /// `flush_every_ms` window can call it directly.
+    async fn flush(&self) -> Result<()> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || db.flush())
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?
+            .map(|_| ())
+            .map_err(|e| ActError::Store(e.to_string()))
+    }
+
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
         let db = self.db.clone();
         let key = key.to_owned();
         tokio::task::spawn_blocking(move || {
             db.insert(key.as_bytes(), value)
-                .map_err(|e| ActError::Store(e.to_string()))?;
-            // Preserve the existing per-write durability guarantee while
-            // keeping the sled call and its flush off the async worker.
-            db.flush()
                 .map(|_| ())
                 .map_err(|e| ActError::Store(e.to_string()))
         })
@@ -141,8 +178,6 @@ impl KvStore for SledStore {
         let key = key.to_owned();
         tokio::task::spawn_blocking(move || {
             db.remove(key.as_bytes())
-                .map_err(|e| ActError::Store(e.to_string()))?;
-            db.flush()
                 .map(|_| ())
                 .map_err(|e| ActError::Store(e.to_string()))
         })
@@ -192,8 +227,6 @@ impl KvStore for SledStore {
                 }
                 db.apply_batch(sled_batch)
                     .map_err(|e| ActError::Store(e.to_string()))?;
-                // One durability boundary belongs to the atomic batch itself.
-                db.flush().map_err(|e| ActError::Store(e.to_string()))?;
                 return Ok(true);
             }
 
@@ -235,10 +268,6 @@ impl KvStore for SledStore {
                     return Err(ActError::Store(err.to_string()));
                 }
             };
-            if applied {
-                // The transaction's durability boundary, as the plain batch has.
-                db.flush().map_err(|e| ActError::Store(e.to_string()))?;
-            }
             Ok(applied)
         })
         .await

@@ -231,7 +231,23 @@ impl Runtime {
 
     pub async fn close(&self) {
         self.shutdown.cancel();
+        // Let every queued write reach the backend before the durability
+        // barrier: a store that flushes in the background (sled) would
+        // otherwise leave the tail of the run only in its log buffer.
+        let writer_started = std::time::Instant::now();
         self.writer.close().await;
+        debug!(
+            elapsed = ?writer_started.elapsed(),
+            "store writer drained at shutdown"
+        );
+        let flush_started = std::time::Instant::now();
+        if let Err(error) = self.store.kv().flush().await {
+            warn!(error = %error, "store flush at shutdown failed");
+        }
+        debug!(
+            elapsed = ?flush_started.elapsed(),
+            "store flushed at shutdown"
+        );
         self.emitter.close();
     }
 
