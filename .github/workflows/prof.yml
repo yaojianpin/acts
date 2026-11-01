@@ -1,0 +1,239 @@
+name: prof
+
+# `examples/prof` — the completion-latency microbenchmark — for both stores.
+#
+# A pull request runs a short smoke of each store (200 memory / 100 sled
+# completions); main/develop, the weekly schedule, and manual dispatch run the
+# full size (2,000 / 500) and publish the reports and README badges to the
+# `prof` branch.
+#
+# The gate is deterministic: every completion must succeed and at least one
+# sample must be measured. Latency and throughput are published as a trend, not
+# a threshold — a shared runner's timings move by double-digit percents between
+# runs (the same reason `bench-compile` in rust.yml only builds the benches).
+# The two stores are reported separately: the memory run is the engine's
+# in-memory path and the sled run pays the durable write path, so one number
+# must never stand in for the other.
+on:
+  pull_request:
+    paths:
+      - 'crates/acts/src/**'
+      - 'crates/acts-store/**'
+      - 'examples/prof/**'
+      - '.github/workflows/prof.yml'
+      - '.github/scripts/badge.sh'
+      - '.github/scripts/prof-badge.sh'
+  push:
+    branches: ['main', 'develop']
+    paths:
+      - 'crates/acts/src/**'
+      - 'crates/acts-store/**'
+      - 'examples/prof/**'
+      - '.github/workflows/prof.yml'
+      - '.github/scripts/badge.sh'
+      - '.github/scripts/prof-badge.sh'
+  schedule:
+    # Monday 04:00 UTC — one hour after the end-to-end stress point.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      memory_iters:
+        description: Parked processes for the memory-store run
+        required: false
+        default: '2000'
+      sled_iters:
+        description: Parked processes for the sled run
+        required: false
+        default: '500'
+      warmup:
+        description: Completions before each measured window
+        required: false
+        default: '20'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PROF_OUTPUT: target/prof
+
+jobs:
+  prof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Build the prof harness
+        run: cargo build --release --locked -p acts-example-prof
+
+      # The event picks the size: a PR gets a build-sized smoke of both stores,
+      # while the publishing legs get the full sample. Manual inputs win on
+      # dispatch.
+      - name: Plan the runs
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            memory_iters=200
+            sled_iters=100
+            warmup=10
+          else
+            memory_iters="${{ inputs.memory_iters }}"; memory_iters="${memory_iters:-2000}"
+            sled_iters="${{ inputs.sled_iters }}"; sled_iters="${sled_iters:-500}"
+            warmup="${{ inputs.warmup }}"; warmup="${warmup:-20}"
+          fi
+          {
+            echo "memory_iters=${memory_iters}"
+            echo "sled_iters=${sled_iters}"
+            echo "warmup=${warmup}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prof memory
+        id: memory
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          target/release/acts-example-prof \
+            --store memory \
+            --iters "${{ steps.plan.outputs.memory_iters }}" \
+            --warmup "${{ steps.plan.outputs.warmup }}" \
+            --json "$PROF_OUTPUT/memory/report.json" \
+            --markdown "$PROF_OUTPUT/memory/report.md"
+          code=$?
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: Prof sled
+        id: sled
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          target/release/acts-example-prof \
+            --store sled \
+            --store-url "$PROF_OUTPUT/sled/store" \
+            --iters "${{ steps.plan.outputs.sled_iters }}" \
+            --warmup "${{ steps.plan.outputs.warmup }}" \
+            --json "$PROF_OUTPUT/sled/report.json" \
+            --markdown "$PROF_OUTPUT/sled/report.md"
+          code=$?
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: Summarize the runs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Completion latency: memory vs sled"
+            echo
+            echo '| store | result | samples / errors | avg | p50 / p95 / p99 | throughput |'
+            echo '| --- | --- | --- | --- | --- | --- |'
+            for store in memory sled; do
+              report="$PROF_OUTPUT/$store/report.json"
+              if [ ! -f "$report" ]; then
+                echo "| $store | missing report | - | - | - | - |"
+                continue
+              fi
+              jq -r --arg store "$store" '
+                "| \($store) | \(.status) | \(.samples) / \(.errors) | \((.avg_us / 1000) * 100 | round / 100) ms | \((.p50_us / 1000) * 100 | round / 100) / \((.p95_us / 1000) * 100 | round / 100) / \((.p99_us / 1000) * 100 | round / 100) ms | \(.completions_per_second * 10 | round / 10)/s |"
+              ' "$report"
+            done
+            echo
+            echo "Latency and throughput are trend data, not a threshold. The gate is every completion succeeding."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prof-report
+          path: |
+            target/prof/memory/report.md
+            target/prof/memory/report.json
+            target/prof/sled/report.md
+            target/prof/sled/report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce the prof result
+        if: always()
+        shell: bash
+        run: |
+          failed=0
+          if [ "${{ steps.memory.outcome }}" != "success" ]; then
+            echo "::warning::memory-store prof run reported a failure"
+            failed=1
+          fi
+          if [ "${{ steps.sled.outcome }}" != "success" ]; then
+            echo "::warning::sled prof run reported a failure"
+            failed=1
+          fi
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::examples/prof failed for at least one store; see the job summary and the prof-report artifact."
+            exit 1
+          fi
+
+  # Publishing is the only write and lives away from the benchmark, like the
+  # stress and coverage workflows. The `prof` branch carries both reports and
+  # the eight SVGs the README reads; a failing store still gets a FAIL status
+  # badge, and keep_files leaves the other store's previous report intact.
+  publish:
+    needs: prof
+    if: >-
+      always()
+      && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+      && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    concurrency:
+      group: prof-badges
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: prof-report
+          path: target/prof
+
+      - name: Render the reports and the badges
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p publish
+          # shellcheck source=badge.sh
+          source .github/scripts/badge.sh
+          for store in memory sled; do
+            report="target/prof/$store/report.json"
+            if [ -f "$report" ]; then
+              cp "target/prof/$store/report.md" "publish/report-$store.md"
+              cp "$report" "publish/report-$store.json"
+              bash .github/scripts/prof-badge.sh "$report" publish "$store"
+            else
+              echo "No $store report artifact; publishing a FAIL status badge only."
+              render_badge "prof $store" FAIL "#e05d44" 170 "publish/prof-$store.svg"
+            fi
+          done
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: prof
+          publish_dir: ./publish
+          keep_files: true
+          commit_message: "prof results for ${{ github.ref_name }}@${{ github.sha }}"
