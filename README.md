@@ -4,7 +4,7 @@
 [![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=test)
 [![Coverage](https://raw.githubusercontent.com/yaojianpin/acts/badges/coverage.svg)](https://github.com/yaojianpin/acts/actions/workflows/coverage.yml)
 [![Stress](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress.svg)](https://github.com/yaojianpin/acts/actions/workflows/stress.yml)
-[![Prof](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory.svg)](https://github.com/yaojianpin/acts/actions/workflows/prof.yml)
+[![Perf](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory.svg)](https://github.com/yaojianpin/acts/actions/workflows/perf.yml)
 
 Acts is a fast, lightweight, extensible workflow engine for workflows defined in YAML. It runs as an embedded Rust library or as a server, and it is durable by design: every run is a transactional aggregate, every state transition commits together with its outbox records, and an interrupted engine resumes exactly where its aggregate left off.
 
@@ -60,21 +60,21 @@ The latest [`report.md`](https://github.com/yaojianpin/acts/blob/stress/report.m
 
 Reference run (memory store, 8-core workstation, 10,000 workflows at c16/32/64): **82.4 workflows/s**, **0.24 GiB peak RSS**, **0 rows / 0 aggregate documents / 0 index documents after the cleanup wait**, 0 degraded health samples.
 
-### Completion microbenchmark (`examples/prof`)
+### Completion microbenchmark (`examples/perf`)
 
-[`examples/prof`](examples/prof) is a completion-latency microbenchmark, not a load test: it parks N processes on one human act and times each `complete()` after a warmup. `--store memory` measures the in-memory engine path; `--store sled` measures the same path with the durable sled backend, so the two numbers are published separately — one never stands in for the other.
+[`examples/perf`](examples/perf) is a completion-latency microbenchmark, not a load test: it parks N processes on one human act and times each `complete()` after a warmup. `--store memory` measures the in-memory engine path; `--store sled` measures the same path with the durable sled backend, so the two numbers are published separately — one never stands in for the other.
 
 | Store | Status | Avg | p99 | Throughput |
 | --- | --- | --- | --- | --- |
-| memory | [![prof memory](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory.svg)](https://github.com/yaojianpin/acts/blob/prof/report-memory.md) | [![avg memory](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory-avg.svg)](https://github.com/yaojianpin/acts/blob/prof/report-memory.md) | [![p99 memory](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory-p99.svg)](https://github.com/yaojianpin/acts/blob/prof/report-memory.md) | [![rate memory](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-memory-throughput.svg)](https://github.com/yaojianpin/acts/blob/prof/report-memory.md) |
-| sled | [![prof sled](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-sled.svg)](https://github.com/yaojianpin/acts/blob/prof/report-sled.md) | [![avg sled](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-sled-avg.svg)](https://github.com/yaojianpin/acts/blob/prof/report-sled.md) | [![p99 sled](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-sled-p99.svg)](https://github.com/yaojianpin/acts/blob/prof/report-sled.md) | [![rate sled](https://raw.githubusercontent.com/yaojianpin/acts/prof/prof-sled-throughput.svg)](https://github.com/yaojianpin/acts/blob/prof/report-sled.md) |
+| memory | [![perf memory](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory.svg)](https://github.com/yaojianpin/acts/blob/perf/report-memory.md) | [![avg memory](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory-avg.svg)](https://github.com/yaojianpin/acts/blob/perf/report-memory.md) | [![p99 memory](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory-p99.svg)](https://github.com/yaojianpin/acts/blob/perf/report-memory.md) | [![rate memory](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory-throughput.svg)](https://github.com/yaojianpin/acts/blob/perf/report-memory.md) |
+| sled | [![perf sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![avg sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-avg.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![p99 sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-p99.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![rate sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-throughput.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) |
 
-The [`prof` workflow](.github/workflows/prof.yml) runs both stores on pull requests (200/100 completions) and on `main`/`develop`, weekly, and manual dispatch (2,000/500), publishing `report-memory.*` and `report-sled.*` plus the badges to the `prof` branch. The gate is zero failed completions; latency and throughput are trend data.
+The [`perf` workflow](.github/workflows/perf.yml) runs both stores on pull requests (200/100 completions) and on `main`/`develop`, weekly, and manual dispatch (2,000/500), publishing `report-memory.*` and `report-sled.*` plus the badges to the `perf` branch. The gate is zero failed completions; latency and throughput are trend data.
 
 ```sh
-cargo run --release -p acts-example-prof -- --store memory --iters 2000 --warmup 20 \
+cargo run --release -p acts-example-perf -- --store memory --iters 2000 --warmup 20 \
   --json report-memory.json --markdown report-memory.md
-cargo run --release -p acts-example-prof -- --store sled --store-url target/prof-sled \
+cargo run --release -p acts-example-perf -- --store sled --store-url target/perf-sled \
   --iters 500 --warmup 20 --json report-sled.json --markdown report-sled.md
 ```
 
