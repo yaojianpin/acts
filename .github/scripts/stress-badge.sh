@@ -52,7 +52,7 @@ else
   rows_color="#e05d44"
 fi
 
-# The SVG geometry is shared with prof-badge.sh (see badge.sh).
+# The SVG geometry is shared with perf-badge.sh (see badge.sh).
 # shellcheck source=badge.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/badge.sh"
 

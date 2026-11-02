@@ -3,13 +3,13 @@
 # Shared SVG badge renderer for the README's measured badges.
 #
 # The badges are files this repository renders and stores (`coverage.svg`,
-# `stress*.svg`, `prof-*.svg`), not images fetched from a badge service: no
+# `stress*.svg`, `perf-*.svg`), not images fetched from a badge service: no
 # account, no upload token, and nothing that stops resolving when a third
 # party's free tier changes. The workflows publish them to a branch and
 # `raw.githubusercontent.com` serves them, so a badge is a commit traceable to
 # the run that produced it.
 #
-# Sourced by `coverage`-style scripts (stress-badge.sh, prof-badge.sh); it is
+# Sourced by `coverage`-style scripts (stress-badge.sh, perf-badge.sh); it is
 # not executable on its own.
 #
 # render_badge <label> <value> <color> <width> <file>
