@@ -53,7 +53,7 @@ pub struct CpuStatus {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StorageStatus {
     /// The backend's own word for itself (`memory`, `sled`, `sqlite`,
-    /// `postgres`, or a custom store's).
+    /// `postgres`, `rocksdb`, `sharded`, or a custom store's).
     pub kind: String,
     /// Data size in bytes, best effort; `null` when the backend cannot
     /// measure itself.
@@ -74,11 +74,26 @@ pub struct ProcessCounts {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct HealthStatus {
     /// `healthy` when every loop is, `degraded` when any loop is skipping
-    /// ticks because its store keeps failing.
+    /// ticks because its store keeps failing. Backpressure is reported
+    /// separately: a full write pipeline is a healthy limit, not a failure.
     pub state: String,
+    /// The store-writer queue and the backend's own write pressure.
+    pub store_writer: StoreWriterStatus,
     /// One entry per loop: trigger, retry, cleanup, ready, recovery, outbox,
     /// projection.
     pub loops: Vec<LoopStatus>,
+}
+
+/// The write path's current pressure.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct StoreWriterStatus {
+    /// Ops accepted by the writer but not yet applied.
+    pub depth: usize,
+    /// Highest `depth` observed since the server started.
+    pub high_watermark: usize,
+    /// Whether the writer is refusing new work right now — its own backlog
+    /// fill or the database's bounded pipeline is full.
+    pub saturated: bool,
 }
 
 /// One loop's failure state.

@@ -5,6 +5,7 @@
 [![Coverage](https://raw.githubusercontent.com/yaojianpin/acts/badges/coverage.svg)](https://github.com/yaojianpin/acts/actions/workflows/coverage.yml)
 [![Stress memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-memory.svg)](https://github.com/yaojianpin/acts/actions/workflows/stress.yml)
 [![Stress sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-sled.svg)](https://github.com/yaojianpin/acts/actions/workflows/stress.yml)
+[![Stress rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rocksdb.svg)](https://github.com/yaojianpin/acts/actions/workflows/stress.yml)
 [![Perf](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory.svg)](https://github.com/yaojianpin/acts/actions/workflows/perf.yml)
 
 Acts is a fast, lightweight, extensible workflow engine for workflows defined in YAML. It runs as an embedded Rust library or as a server, and it is durable by design: every run is a transactional aggregate, every state transition commits together with its outbox records, and an interrupted engine resumes exactly where its aggregate left off.
@@ -16,7 +17,7 @@ Workflows are built from steps and branches. A step that declares a package (`us
 `Engine::builder().start()` returns an `Engine` that owns one runtime and one kernel host. The runtime is layered:
 
 - **Kernel (`scheduler`)** — operations, claims, transition planning, outbox records and the run lifecycle (start, terminal, reclaim). One operation is one guarded commit: the aggregate, its appended log entry and the derived indexes move together or not at all.
-- **Durable layer (`scheduler/durable`)** — each run is an aggregate family (head, base snapshot, append-only log window and recovery/outbox/ready indexes) in a `KvStore`. Reads take one consistent snapshot of the family; commits are compare-and-swap batches; the log compacts online. `MemoryStore` is the default; `acts-store` adds sled, SQLite and Postgres, each with native snapshot reads.
+- **Durable layer (`scheduler/durable`)** — each run is an aggregate family (head, base snapshot, append-only log window and recovery/outbox/ready indexes) in a `KvStore`. Reads take one consistent snapshot of the family; commits are compare-and-swap batches; the log compacts online. `MemoryStore` is the default; `acts-store` adds sled, RocksDB, SQLite and Postgres, each with native snapshot reads, and a pid-consistent-hash `ShardedStore` over any of them.
 - **Runtime** — pid-keyed scheduler lanes, store-writer shards, and independent ready, recovery, outbox, cleanup and projection loops with bounded batches and their own health. In-memory queues are bounded and apply backpressure; the durable indexes are the overflow.
 - **Read model** — `procs`, `tasks` and `vars` are a versioned projection of the aggregate. Every row records the revision it was derived from and is written conditionally, so a slow projection cannot overwrite a newer one; `proc:get` re-projects a lagging run before answering.
 
@@ -30,12 +31,12 @@ A started run is one aggregate; a client action (`act:*`, `proc:*`) is re-planne
 - Consistent snapshot loads, a bounded decode cache, and an append-only log with online compaction.
 - Pid-keyed scheduler lanes and store-writer shards run independent processes in parallel while preserving per-process order.
 - Bounded in-memory queues with a durable overflow, so overload slows intake instead of losing work.
-- Continuous measurement instead of a static table: the [performance and stress gates](#performance-and-stress-gates) publish throughput, latency and resource trends for both stores.
+- Continuous measurement instead of a static table: the [performance and stress gates](#performance-and-stress-gates) publish throughput, latency and resource trends for every store.
 
 ### Lightweight
 
 - A single Rust library with no virtual machine and no mandatory broker; `Engine::builder().start()` is the whole setup.
-- The default store is in-memory; durability is a backend choice (sled, SQLite, Postgres) behind the same `KvStore`.
+- The default store is in-memory; durability is a backend choice (sled, RocksDB, SQLite, Postgres) behind the same `KvStore`.
 - One kernel host per engine with independent loops, bounded batches, and no resident object per completed run: finished runs are reclaimed.
 - Optional layers — server, CLI, channels, packages and plugins — are separate crates; the core does not require them.
 
@@ -50,34 +51,41 @@ A started run is one aggregate; a client action (`act:*`, `proc:*`) is re-planne
 
 [![Stress memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md)
 [![Stress sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md)
+[![Stress rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rocksdb.svg)](https://github.com/yaojianpin/acts/blob/stress/report-rocksdb.md)
 
 | Store | Status | Throughput | Peak RSS | Rows left |
 | --- | --- | --- | --- | --- |
 | memory | [![stress memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) | [![throughput memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-throughput-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) | [![peak RSS memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rss-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) | [![rows left memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rows-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) |
 | sled | [![stress sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) | [![throughput sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-throughput-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) | [![peak RSS sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rss-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) | [![rows left sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rows-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) |
+| rocksdb (4 shards) | [![stress rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rocksdb.svg)](https://github.com/yaojianpin/acts/blob/stress/report-rocksdb.md) | [![throughput rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-throughput-rocksdb.svg)](https://github.com/yaojianpin/acts/blob/stress/report-rocksdb.md) | [![peak RSS rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rss-rocksdb.svg)](https://github.com/yaojianpin/acts/blob/stress/report-rocksdb.md) | [![rows left rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rows-rocksdb.svg)](https://github.com/yaojianpin/acts/blob/stress/report-rocksdb.md) |
 
-[`examples/stress`](examples/stress) is the load generator behind these numbers. The [`stress` workflow](.github/workflows/stress.yml) runs it for both stores on every pull request that touches the scheduler, the store, or the harness — a 1,000-workflow performance smoke at concurrency 16 — and on `main`/`develop`, weekly, and by manual dispatch with 100,000 workflows per store across concurrency 16/32/64/128 and a cleanup drain wait. Memory and sled run as separate jobs, so one store's number never stands in for the other.
+[`examples/stress`](examples/stress) is the load generator behind these numbers. The [`stress` workflow](.github/workflows/stress.yml) runs it for every store on every pull request that touches the scheduler, the store, or the harness — a 1,000-workflow performance smoke at concurrency 16 — and on `main`/`develop`, weekly, and by manual dispatch with 100,000 workflows per store across concurrency 16/32/64/128 and a cleanup drain wait. Memory, sled and RocksDB run as separate jobs, and sled/RocksDB run as four physical shards each, so one store's number never stands in for another.
 
 The gate is deterministic: every measured workflow completes, the error rate is zero, no phase times out, background health never degrades, and after the drain the process-row count, residual aggregate documents, and residual index documents are zero. Throughput and peak RSS are published as a trend — a shared runner's timings move by double-digit percents between runs, so they are not a regression threshold.
 
-The latest [`report-memory.md`](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) and [`report-sled.md`](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) (each with `report-<store>.json`, `metrics-<store>.csv`, and `trace-<store>.log`) are published to the `stress` branch, and every run also attaches them as the `stress-report-memory` and `stress-report-sled` artifacts. Manual dispatch can choose the workflow count, concurrency stages, cleanup wait, and soak; every publishing run covers both stores.
+The latest [`report-memory.md`](https://github.com/yaojianpin/acts/blob/stress/report-memory.md), [`report-sled.md`](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) and [`report-rocksdb.md`](https://github.com/yaojianpin/acts/blob/stress/report-rocksdb.md) (each with `report-<store>.json`, `metrics-<store>.csv`, and `trace-<store>.log`) are published to the `stress` branch, and every run also attaches them as the `stress-report-<store>` artifacts. Manual dispatch can choose the workflow count, concurrency stages, cleanup wait, and soak; every publishing run covers all stores.
 
 ### Completion microbenchmark (`examples/perf`)
 
-[`examples/perf`](examples/perf) is a completion-latency microbenchmark, not a load test: it parks N processes on one human act and times each `complete()` after a warmup. `--store memory` measures the in-memory engine path; `--store sled` measures the same path with the durable sled backend, so the two numbers are published separately — one never stands in for the other.
+[`examples/perf`](examples/perf) is a completion-latency microbenchmark, not a load test: it parks N processes on one human act and times each `complete()` after a warmup. `--store memory` measures the in-memory engine path; `--store sled` and `--store rocksdb` measure the same path with the durable backends (four physical shards each in CI), so every number is published separately — one never stands in for another.
 
 | Store | Status | Avg | p99 | Throughput |
 | --- | --- | --- | --- | --- |
 | memory | [![perf memory](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory.svg)](https://github.com/yaojianpin/acts/blob/perf/report-memory.md) | [![avg memory](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory-avg.svg)](https://github.com/yaojianpin/acts/blob/perf/report-memory.md) | [![p99 memory](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory-p99.svg)](https://github.com/yaojianpin/acts/blob/perf/report-memory.md) | [![rate memory](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory-throughput.svg)](https://github.com/yaojianpin/acts/blob/perf/report-memory.md) |
-| sled | [![perf sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![avg sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-avg.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![p99 sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-p99.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![rate sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-throughput.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) |
+| sled (4 shards) | [![perf sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![avg sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-avg.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![p99 sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-p99.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) | [![rate sled](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-sled-throughput.svg)](https://github.com/yaojianpin/acts/blob/perf/report-sled.md) |
+| rocksdb (4 shards) | [![perf rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-rocksdb.svg)](https://github.com/yaojianpin/acts/blob/perf/report-rocksdb.md) | [![avg rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-rocksdb-avg.svg)](https://github.com/yaojianpin/acts/blob/perf/report-rocksdb.md) | [![p99 rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-rocksdb-p99.svg)](https://github.com/yaojianpin/acts/blob/perf/report-rocksdb.md) | [![rate rocksdb](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-rocksdb-throughput.svg)](https://github.com/yaojianpin/acts/blob/perf/report-rocksdb.md) |
 
-The [`perf` workflow](.github/workflows/perf.yml) runs both stores on pull requests (200/100 completions) and on `main`/`develop`, weekly, and manual dispatch (2,000/500), publishing `report-memory.*` and `report-sled.*` plus the badges to the `perf` branch. The gate is zero failed completions; latency and throughput are trend data.
+The [`perf` workflow](.github/workflows/perf.yml) runs every store on pull requests (200 memory / 100 sled / 100 RocksDB completions) and on `main`/`develop`, weekly, and manual dispatch (2,000/500/500), publishing `report-<store>.*` plus the badges to the `perf` branch. The gate is zero failed completions; latency and throughput are trend data.
 
 ```sh
 cargo run --release -p acts-example-perf -- --store memory --iters 2000 --warmup 20 \
   --json report-memory.json --markdown report-memory.md
-cargo run --release -p acts-example-perf -- --store sled --store-url target/perf-sled \
-  --iters 500 --warmup 20 --json report-sled.json --markdown report-sled.md
+cargo run --release -p acts-example-perf -- --store sled --store-shards 4 \
+  --store-url target/perf-sled --iters 500 --warmup 20 \
+  --json report-sled.json --markdown report-sled.md
+cargo run --release -p acts-example-perf -- --store rocksdb --store-shards 4 \
+  --store-url target/perf-rocksdb --iters 500 --warmup 20 \
+  --json report-rocksdb.json --markdown report-rocksdb.md
 ```
 
 ## Installation
@@ -548,11 +556,26 @@ Backends enabled by the matching `acts-store` feature:
 - `SqliteStore` — `acts-store` feature `sqlite`
 - `PostgresStore` — `acts-store` feature `postgres`
 - `SledStore` — `acts-store` feature `sled`
+- `RocksdbStore` — `acts-store` feature `rocksdb`
+- `ShardedStore` — no feature; spreads process-owned keys over several of the
+  backends above
 
 SQLite and Postgres make each commit durable before it returns. `SledStore`
-applies writes immediately and flushes in the background every 50 ms, so a
-crash can lose the writes applied since the last completed flush; call
-`KvStore::flush()` for an explicit barrier (a graceful engine shutdown does).
+applies writes immediately and flushes in the background every 50 ms;
+`RocksdbStore` writes the WAL before returning and flushes on
+`KvStore::flush()`. A crash can lose the writes applied since the last
+completed flush on either embedded backend; call `KvStore::flush()` for an
+explicit barrier (a graceful engine shutdown does).
+
+`ShardedStore` places a process's keys on one physical shard through a
+pid consistent-hash ring (1024 virtual-node slots by default) and merges
+ordered scans across shards. It bounds each shard's write pipeline and reports
+that pressure through `KvStore::saturated`, which the engine's store-writer
+combines with its own backlog latch. `ShardedStore::rebalance` moves rows after
+a shard is added or removed, and `Shard::draining` keeps a removed shard
+readable until its rows have moved. The database lease is a global row checked
+on every write, so a multi-shard `acts-server` deployment requires
+`[db] lease = false` (one server per shard set).
 
 Custom stores can be built by implementing `acts::KvStore` (including its
 `batch` with the guards in the same atomic unit — an exclusive database lease

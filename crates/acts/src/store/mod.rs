@@ -297,6 +297,23 @@ pub trait KvStore: Send + Sync {
         Ok(())
     }
 
+    /// Whether the backend is currently applying as many writes as it admits
+    /// and would make a new write wait.
+    ///
+    /// This is the database half of the engine's write backpressure. The
+    /// store-writer shards already bound their own queues and latch saturated
+    /// when a producer has to wait for room; a backend that bounds its own
+    /// write pipeline (the RocksDB backend and the sharded wrapper do) answers
+    /// `true` here while that pipeline is full, and
+    /// [`Runtime::store_writer_saturated`](crate::Engine) reports the
+    /// combination. Producers that already consult the engine's saturation can
+    /// therefore stop before the database queue fills, instead of discovering
+    /// the limit as a stalled writer. The default is `false`: a backend with
+    /// no bounded write pipeline of its own has nothing to report.
+    fn saturated(&self) -> bool {
+        false
+    }
+
     /// Read several keys in one logical call. The default preserves
     /// compatibility for stores without a native batch read; backends with a
     /// network or SQL round trip should override it.
@@ -319,8 +336,9 @@ pub trait KvStore: Send + Sync {
     ///
     /// The default double-samples the keys; a backend that can read them
     /// inside one native transaction/snapshot (`MemoryStore`, `SledStore`,
-    /// `SqliteStore`, `PostgresStore`) overrides this and answers on the first
-    /// sample. [`STABLE_READ_ATTEMPTS`] bounds the sampling: exhausting it is
+    /// `SqliteStore`, `PostgresStore`, `RocksdbStore`; and `ShardedStore` when
+    /// the whole family maps to one shard) overrides this and answers on the
+    /// first sample. [`STABLE_READ_ATTEMPTS`] bounds the sampling: exhausting it is
     /// reported as an error, never as corruption — the caller retries later.
     async fn read_stable(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
         for _ in 0..STABLE_READ_ATTEMPTS {
@@ -405,9 +423,9 @@ pub trait KvStore: Send + Sync {
     /// the writes MUST report an error rather than commit a check-then-write:
     /// the default below does exactly that, so a custom [`KvStore`] inherits a
     /// safe refusal instead of a silent race. `MemoryStore` (in `acts`) and
-    /// the `acts-store` backends `SledStore`, `SqliteStore` and
-    /// `PostgresStore` commit through a native transaction with the guards
-    /// included (a guardless single-op batch falls back to `put`/`delete`,
+    /// the `acts-store` backends `SledStore`, `SqliteStore`,
+    /// `PostgresStore` and `RocksdbStore` commit through a native transaction
+    /// with the guards included (a guardless single-op batch falls back to `put`/`delete`,
     /// skipping transaction overhead).
     ///
     /// A guard set rather than one optional guard, because a decorator has to

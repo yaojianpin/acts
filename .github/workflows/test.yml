@@ -38,7 +38,7 @@ jobs:
       - name: Install build tools
         shell: bash
         run: |
-          sudo apt install -y git g++ cmake ninja-build libssl-dev
+          sudo apt install -y git g++ cmake ninja-build libssl-dev libclang-dev
       # service-container `options` only accept docker-create flags, so the
       # `-js` JetStream flag cannot be passed through the nats service; start
       # it directly (a JetStream server also serves the core-NATS tests of
@@ -76,7 +76,7 @@ jobs:
       - name: Run tests packages
         run: cargo test -p acts-package-* --verbose
       - name: Run tests store
-        run: cargo test -p acts-store --verbose --features sled,sqlite,postgres
+        run: cargo test -p acts-store --verbose --features sled,sqlite,postgres,rocksdb
       - name: Run tests cli
         run: cargo test -p acts-cli --verbose
       - name: Run tests server

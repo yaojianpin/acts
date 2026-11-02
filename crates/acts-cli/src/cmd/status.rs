@@ -62,6 +62,16 @@ fn render(status: &SystemStatus) -> String {
         ret.push_str(&format!(" (degraded loops: {degraded})"));
     }
     ret.push('\n');
+    ret.push_str(&format!(
+        "backpressure {} (writer depth {}, high water {})\n",
+        if status.health.store_writer.saturated {
+            "saturated"
+        } else {
+            "normal"
+        },
+        status.health.store_writer.depth,
+        status.health.store_writer.high_watermark,
+    ));
 
     ret.push_str(&format!(
         "processes    total {}, active {}\n",
@@ -127,6 +137,7 @@ mod tests {
     use super::*;
     use acts_channel::model::{
         CpuStatus, HealthStatus, LoopStatus, MemoryStatus, ProcessCounts, StorageStatus,
+        StoreWriterStatus,
     };
     use serde_json::json;
 
@@ -159,6 +170,11 @@ mod tests {
             ],
             health: HealthStatus {
                 state: "degraded".to_string(),
+                store_writer: StoreWriterStatus {
+                    depth: 3,
+                    high_watermark: 8,
+                    saturated: true,
+                },
                 loops: vec![
                     LoopStatus {
                         name: "trigger".to_string(),
@@ -187,6 +203,10 @@ mod tests {
         assert!(text.contains("version      0.25.0"), "{text}");
         assert!(
             text.contains("health       degraded (degraded loops: retry)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("backpressure saturated (writer depth 3, high water 8)"),
             "{text}"
         );
         assert!(text.contains("processes    total 7, active 2"), "{text}");

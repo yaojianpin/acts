@@ -54,6 +54,8 @@ pub enum DbType {
     Sqlite,
     /// PostgreSQL — `database_url` is a connection URL.
     Postgres,
+    /// Embedded RocksDB — `database_url` is a directory path.
+    Rocksdb,
 }
 
 impl DbType {
@@ -62,6 +64,7 @@ impl DbType {
             DbType::Sled => "sled",
             DbType::Sqlite => "sqlite",
             DbType::Postgres => "postgres",
+            DbType::Rocksdb => "rocksdb",
         }
     }
 }
@@ -81,9 +84,40 @@ pub struct DbConfig {
     /// Store backend to open; `sled` when omitted.
     #[serde(rename = "type")]
     pub kind: DbType,
-    /// Backend location: directory (sled), file (sqlite) or connection URL
-    /// (postgres). The `ACTS_DATABASE_URL` env var overrides it.
+    /// Backend location: directory (sled/rocksdb), file (sqlite) or connection
+    /// URL (postgres). The `ACTS_DATABASE_URL` env var overrides it.
     pub database_url: Option<String>,
+    /// Optional physical shard URLs of the configured `type`. When non-empty,
+    /// this replaces `database_url` and wraps the databases in a
+    /// [`acts_store::ShardedStore`] — process-owned keys route by pid through
+    /// a consistent-hash ring, and scans merge by key across shards. The URL
+    /// is also the shard's stable ring id, so entries may be reordered and a
+    /// shard may be added without moving the others' slots.
+    ///
+    /// `lease = true` is refused with more than one shard: the lease is one
+    /// global row checked as a guard on every write, and that guard cannot be
+    /// atomic across independent physical databases. Run one server per shard
+    /// set with `lease = false`, or coordinate writers outside the engine.
+    #[serde(default)]
+    pub shards: Vec<String>,
+    /// Shards kept only as migration sources: they are readable and included
+    /// in scans, but receive no new writes. Use one after removing a shard
+    /// from `shards`; with `rebalance_on_start` the server copies the rows to
+    /// their active owners and deletes the stale copies before starting.
+    #[serde(default)]
+    pub draining_shards: Vec<String>,
+    /// Run [`acts_store::ShardedStore::rebalance`] once while opening the
+    /// store: copy every key to its current owner, then delete stale copies.
+    /// This is the migration step for adding or removing a shard. It scans
+    /// the whole database, so leave it off on routine starts.
+    pub rebalance_on_start: bool,
+    /// Virtual-node slots on the shard ring (default
+    /// [`acts_store::DEFAULT_VIRTUAL_NODES`], 1024).
+    pub virtual_nodes: Option<usize>,
+    /// Concurrent writes admitted per physical shard. A full shard reports
+    /// saturation through the engine, which stops admitting new work until it
+    /// drains.
+    pub max_in_flight_writes: Option<usize>,
     /// Hold the database's exclusive lease while this server runs (default
     /// `true`). The lease is a row in the database itself, taken with an
     /// atomic compare-and-swap, and every write the engine makes is committed
@@ -114,6 +148,11 @@ impl Default for DbConfig {
         Self {
             kind: DbType::default(),
             database_url: None,
+            shards: Vec::new(),
+            draining_shards: Vec::new(),
+            rebalance_on_start: false,
+            virtual_nodes: None,
+            max_in_flight_writes: None,
             lease: true,
             lease_ttl_secs: None,
             lease_renew_secs: None,
@@ -287,6 +326,28 @@ max_files = 168
 # (the ACTS_DATABASE_URL env var overrides database_url):
 #   type = "sqlite"   database_url = "acts.db"
 #   type = "postgres" database_url = "postgres://user:pass@host:5432/acts"
+#   type = "rocksdb"  database_url = "@ACTS_DIR@/rocks"
+#
+# Write throughput can be spread over physical databases. `shards` lists the
+# URLs of the configured `type` (directories for sled/rocksdb, files for
+# sqlite, connection URLs for postgres); process-owned keys are placed by a
+# pid consistent-hash ring with `virtual_nodes` slots, and ordered queries are
+# merged across shards. A multi-shard layout requires `lease = false`: the
+# database lease is one guard on every write and cannot be atomic across
+# physical databases. Shard URLs are stable ring ids, so a new shard can be
+# appended without moving the existing ones; drain a removed shard before
+# dropping it (see `acts_store::ShardedStore::rebalance`).
+#   shards = ["@ACTS_DIR@/shard-0", "@ACTS_DIR@/shard-1"]
+#   virtual_nodes = 1024
+#   max_in_flight_writes = 16
+#
+# Removing a shard: move its URL from `shards` to `draining_shards`, keep it
+# readable, and set `rebalance_on_start = true` for the migration start (or
+# call acts_store::ShardedStore::rebalance yourself). The server copies every
+# key to its current owner, deletes stale copies, and only then starts the
+# engine. Drop the drain entry on the next start.
+#   draining_shards = ["@ACTS_DIR@/shard-old"]
+#   rebalance_on_start = true
 #
 # Exclusive database lease (on unless it is turned off). The engine's document
 # locks, write lanes, scheduler lanes and recovery claims are process-local, so
@@ -613,23 +674,81 @@ impl OpenedStore {
 ///
 /// `database_url` resolution: the `ACTS_DATABASE_URL` env var, then
 /// `[db].database_url`, then the default `<config_dir>/data` for sled.
-/// Any other type without a url is an error.
+/// Any other type without a url is an error. When `[db].shards` is non-empty
+/// those URLs replace `database_url` (and the env var) and the result is a
+/// [`acts_store::ShardedStore`] over them.
 ///
 /// Fails — instead of starting a second engine over one database — when
 /// another live instance holds the lease ([`acts::ActError::LeaseHeld`],
-/// naming it).
+/// naming it). A multi-shard layout also fails with `lease = true`: the lease
+/// guard would have to be atomic across physical databases, which they cannot
+/// provide.
 pub async fn open_store(config_dir: &Path, db: &DbConfig) -> acts::Result<OpenedStore> {
-    let url = database_url(config_dir, db)?;
-    let raw: Arc<dyn KvStore> = match db.kind {
-        DbType::Sled => {
-            ensure_store_dir(&url)?;
-            Arc::new(acts_store::SledStore::open(&url)?)
+    if db.shards.is_empty() && !db.draining_shards.is_empty() {
+        return Err(acts::ActError::Config(
+            "[db].draining_shards requires at least one active [db].shards entry".to_string(),
+        ));
+    }
+    if db.shards.is_empty() && db.rebalance_on_start {
+        return Err(acts::ActError::Config(
+            "[db].rebalance_on_start requires [db].shards".to_string(),
+        ));
+    }
+    let shard_count = db.shards.len() + db.draining_shards.len();
+    if shard_count > 1 && db.lease {
+        return Err(acts::ActError::Config(
+            "[db].lease = true cannot be used with a sharded layout: the lease row is a single \
+             guard on every write and cannot be atomic across independent physical databases. \
+             Set lease = false and run one server per shard set, or coordinate writers outside \
+             the engine."
+                .to_string(),
+        ));
+    }
+
+    let raw: Arc<dyn KvStore> = if db.shards.is_empty() {
+        let url = database_url(config_dir, db)?;
+        open_backend(db.kind, &url, db.max_in_flight_writes).await?
+    } else {
+        let mut shards = Vec::with_capacity(shard_count);
+        for url in &db.shards {
+            if url.trim().is_empty() {
+                return Err(acts::ActError::Config(
+                    "[db].shards contains an empty URL".to_string(),
+                ));
+            }
+            let store = open_backend(db.kind, url, db.max_in_flight_writes).await?;
+            shards.push(acts_store::Shard::new(url.clone(), store));
         }
-        DbType::Sqlite => {
-            ensure_store_dir(&url)?;
-            Arc::new(acts_store::SqliteStore::open(&url).await?)
+        for url in &db.draining_shards {
+            if url.trim().is_empty() {
+                return Err(acts::ActError::Config(
+                    "[db].draining_shards contains an empty URL".to_string(),
+                ));
+            }
+            let store = open_backend(db.kind, url, db.max_in_flight_writes).await?;
+            shards.push(acts_store::Shard::draining(url.clone(), store));
         }
-        DbType::Postgres => Arc::new(acts_store::PostgresStore::open(&url).await?),
+        let config = acts_store::ShardConfig {
+            virtual_nodes: db
+                .virtual_nodes
+                .unwrap_or(acts_store::DEFAULT_VIRTUAL_NODES),
+            max_in_flight_writes: db
+                .max_in_flight_writes
+                .unwrap_or(acts_store::DEFAULT_SHARD_WRITES),
+            search_on_miss: true,
+        };
+        let sharded = acts_store::ShardedStore::with_config(shards, config)?;
+        if db.rebalance_on_start {
+            let report = sharded.rebalance().await?;
+            tracing::info!(
+                scanned = report.scanned,
+                copied = report.copied,
+                removed = report.removed,
+                conflicts = report.conflicts,
+                "shard rebalance finished"
+            );
+        }
+        Arc::new(sharded)
     };
 
     let lease_config = db.lease_config()?;
@@ -656,6 +775,37 @@ pub async fn open_store(config_dir: &Path, db: &DbConfig) -> acts::Result<Opened
         store,
         lease: Some(Arc::new(lease)),
         renew: lease_config.renew,
+    })
+}
+
+/// Open one physical database of the configured type. Sharded and single
+/// backends share this so a shard list behaves exactly like the single URL.
+async fn open_backend(
+    kind: DbType,
+    url: &str,
+    max_in_flight_writes: Option<usize>,
+) -> acts::Result<Arc<dyn KvStore>> {
+    Ok(match kind {
+        DbType::Sled => {
+            ensure_store_dir(url)?;
+            Arc::new(acts_store::SledStore::open(url)?)
+        }
+        DbType::Sqlite => {
+            ensure_store_dir(url)?;
+            Arc::new(acts_store::SqliteStore::open(url).await?)
+        }
+        DbType::Postgres => Arc::new(acts_store::PostgresStore::open(url).await?),
+        DbType::Rocksdb => {
+            ensure_store_dir(url)?;
+            Arc::new(acts_store::RocksdbStore::open_with(
+                url,
+                acts_store::RocksdbOptions {
+                    max_in_flight_writes: max_in_flight_writes
+                        .unwrap_or(acts_store::DEFAULT_MAX_IN_FLIGHT_WRITES),
+                    ..acts_store::RocksdbOptions::default()
+                },
+            )?)
+        }
     })
 }
 
@@ -1120,6 +1270,10 @@ ttl = "5m"
     fn db_config_defaults_and_parses_other_types() {
         assert_eq!(DbConfig::default().kind, DbType::Sled);
         assert_eq!(DbConfig::default().database_url, None);
+        assert!(DbConfig::default().shards.is_empty());
+        assert!(DbConfig::default().draining_shards.is_empty());
+        assert!(!DbConfig::default().rebalance_on_start);
+        assert_eq!(DbConfig::default().virtual_nodes, None);
 
         let (dir, path) =
             write_config("[db]\ntype = \"postgres\"\ndatabase_url = \"postgres://h/db\"\n");
@@ -1129,6 +1283,126 @@ ttl = "5m"
         assert_eq!(db.database_url.as_deref(), Some("postgres://h/db"));
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
+
+        let (dir, path) = write_config(
+            "[db]\ntype = \"rocksdb\"\nshards = [\"a\", \"b\"]\n\
+             draining_shards = [\"old\"]\nrebalance_on_start = true\n\
+             virtual_nodes = 64\nmax_in_flight_writes = 4\n",
+        );
+        let db = Config::create(&path)
+            .unwrap()
+            .get::<DbConfig>("db")
+            .unwrap();
+        assert_eq!(db.kind, DbType::Rocksdb);
+        assert_eq!(db.shards, ["a", "b"]);
+        assert_eq!(db.draining_shards, ["old"]);
+        assert!(db.rebalance_on_start);
+        assert_eq!(db.virtual_nodes, Some(64));
+        assert_eq!(db.max_in_flight_writes, Some(4));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    /// `[db].shards` builds one `ShardedStore` over the configured backends;
+    /// with no lease a server may run on it, and the status kind names the
+    /// wrapper rather than one physical database.
+    #[tokio::test]
+    async fn open_store_builds_the_configured_sharded_database() {
+        let root = std::env::temp_dir().join(format!(
+            "acts-sharded-sled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let shards = (0..2)
+            .map(|index| {
+                root.join(format!("shard-{index}"))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        let db = DbConfig {
+            kind: DbType::Sled,
+            shards,
+            lease: false,
+            ..DbConfig::default()
+        };
+        let opened = open_store(&root, &db).await.unwrap();
+        opened
+            .store
+            .put("models-id-sharded", b"value".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            opened.store.one("models-id-sharded").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(opened.store.usage().await.unwrap().unwrap().kind, "sharded");
+        drop(opened);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A multi-shard layout cannot hold the one-row database lease: the guard
+    /// is checked on every write and would have to be atomic across physical
+    /// databases. The refusal names the fix instead of starting a half-fenced
+    /// engine.
+    #[tokio::test]
+    async fn open_store_refuses_a_leased_multi_shard_database() {
+        let db = DbConfig {
+            kind: DbType::Sled,
+            shards: vec!["one".to_string(), "two".to_string()],
+            ..DbConfig::default()
+        };
+        let error = open_store(std::env::temp_dir().as_path(), &db)
+            .await
+            .err()
+            .expect("a leased multi-shard database must be refused");
+        assert!(matches!(error, acts::ActError::Config(_)), "got: {error}");
+        assert!(
+            error.to_string().contains("lease = false"),
+            "the refusal names the supported configuration: {error}"
+        );
+
+        let empty = DbConfig {
+            kind: DbType::Sled,
+            shards: vec![String::new()],
+            lease: false,
+            ..DbConfig::default()
+        };
+        let error = open_store(std::env::temp_dir().as_path(), &empty)
+            .await
+            .err()
+            .expect("an empty shard URL must be refused");
+        assert!(error.to_string().contains("empty URL"), "got: {error}");
+
+        let draining_only = DbConfig {
+            kind: DbType::Sled,
+            draining_shards: vec!["old".to_string()],
+            lease: false,
+            ..DbConfig::default()
+        };
+        let error = open_store(std::env::temp_dir().as_path(), &draining_only)
+            .await
+            .err()
+            .expect("a drain source needs an active shard");
+        assert!(error.to_string().contains("active"), "got: {error}");
+
+        let rebalance_without_shards = DbConfig {
+            kind: DbType::Sled,
+            rebalance_on_start: true,
+            lease: false,
+            ..DbConfig::default()
+        };
+        let error = open_store(std::env::temp_dir().as_path(), &rebalance_without_shards)
+            .await
+            .err()
+            .expect("rebalance without a shard list must be refused");
+        assert!(
+            error.to_string().contains("requires [db].shards"),
+            "got: {error}"
+        );
     }
 
     /// The lease is on unless a deployment turns it off, and its knobs are
@@ -1416,6 +1690,7 @@ ttl = "5m"
             (DbType::Sled, "sled"),
             (DbType::Sqlite, "sqlite"),
             (DbType::Postgres, "postgres"),
+            (DbType::Rocksdb, "rocksdb"),
         ] {
             assert_eq!(kind.as_str(), name);
             assert_eq!(kind.to_string(), name);

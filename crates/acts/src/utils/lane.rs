@@ -86,6 +86,41 @@ mod tests {
         }
     }
 
+    /// User-supplied pids are often a monotonically increasing integer
+    /// rendered as text (`1`, `2`, ... or zero-padded). XXH3's avalanche means
+    /// the low bits used by `% lanes` do not follow that order: for a large
+    /// enough live set every lane carries its share. With fewer pids than
+    /// lanes the mapping is still deterministic, but several lanes naturally
+    /// stay idle and the spread is binomial, not exact.
+    #[test]
+    fn sequential_numeric_pids_spread_evenly_across_lanes() {
+        for lanes in [2usize, 4, 8, 16, 64] {
+            let router = LaneRouter::new(lanes);
+            let per_lane = 4096usize;
+            let pids = lanes * per_lane;
+            for zero_padded in [false, true] {
+                let mut counts = vec![0usize; lanes];
+                for index in 0..pids {
+                    let pid = if zero_padded {
+                        format!("{index:012}")
+                    } else {
+                        index.to_string()
+                    };
+                    counts[router.lane_of(&pid)] += 1;
+                }
+                for (lane, &count) in counts.iter().enumerate() {
+                    let low = per_lane - per_lane / 10;
+                    let high = per_lane + per_lane / 10;
+                    assert!(
+                        (low..=high).contains(&count),
+                        "lanes={lanes} zero_padded={zero_padded} lane {lane} carries \
+                         {count}, expected about {per_lane}: {counts:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_single_lane_is_always_lane_zero() {
         let router = LaneRouter::new(0);

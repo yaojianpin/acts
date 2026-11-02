@@ -2,20 +2,20 @@
 #
 # Render the README's `examples/perf` badges for one store from its report.
 #
-# Usage: perf-badge.sh <report.json> <out-dir> <memory|sled>
+# Usage: perf-badge.sh <report.json> <out-dir> <memory|sled|rocksdb>
 #
 # `<report.json>` is the `perf` schema (`status`, `avg_us`, `p99_us`,
-# `completions_per_second`, ...). Both stores are published separately, so a
-# reader can compare the in-memory engine path with the durable sled path
-# without one hiding the other.
+# `completions_per_second`, ...). Every store is published separately, so a
+# reader can compare the in-memory engine path with the durable sled and
+# RocksDB paths without one hiding another.
 set -euo pipefail
 
 # A locale with a comma decimal separator would render `1,24 ms`.
 export LC_ALL=C
 
-report="${1:?usage: perf-badge.sh <report.json> <out-dir> <memory|sled>}"
-out="${2:?usage: perf-badge.sh <report.json> <out-dir> <memory|sled>}"
-store="${3:?usage: perf-badge.sh <report.json> <out-dir> <memory|sled>}"
+report="${1:?usage: perf-badge.sh <report.json> <out-dir> <memory|sled|rocksdb>}"
+out="${2:?usage: perf-badge.sh <report.json> <out-dir> <memory|sled|rocksdb>}"
+store="${3:?usage: perf-badge.sh <report.json> <out-dir> <memory|sled|rocksdb>}"
 mkdir -p "$out"
 
 # shellcheck source=badge.sh

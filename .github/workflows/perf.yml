@@ -1,19 +1,20 @@
 name: perf
 
-# `examples/perf` — the completion-latency microbenchmark — for both stores.
+# `examples/perf` — the completion-latency microbenchmark — for every store.
 #
-# A pull request runs a short smoke of each store (200 memory / 100 sled
-# completions); main/develop, the weekly schedule, and manual dispatch run the
-# full size (2,000 / 500) and publish the reports and README badges to the
-# `perf` branch.
+# A pull request runs a short smoke of each store (200 memory / 100 sled /
+# 100 RocksDB completions); main/develop, the weekly schedule, and manual
+# dispatch run the full size (2,000 / 500 / 500) and publish the reports and
+# README badges to the `perf` branch. Sled and RocksDB run as four physical
+# shards each.
 #
 # The gate is deterministic: every completion must succeed and at least one
 # sample must be measured. Latency and throughput are published as a trend, not
 # a threshold — a shared runner's timings move by double-digit percents between
 # runs (the same reason `bench-compile` in rust.yml only builds the benches).
-# The two stores are reported separately: the memory run is the engine's
-# in-memory path and the sled run pays the durable write path, so one number
-# must never stand in for the other.
+# The stores are reported separately: the memory run is the engine's in-memory
+# path, while sled and RocksDB pay the durable write path (sharded in CI), so
+# one number must never stand in for another.
 on:
   pull_request:
     paths:
@@ -45,6 +46,10 @@ on:
         description: Parked processes for the sled run
         required: false
         default: '500'
+      rocksdb_iters:
+        description: Parked processes for the RocksDB run
+        required: false
+        default: '500'
       warmup:
         description: Completions before each measured window
         required: false
@@ -60,7 +65,7 @@ env:
 jobs:
   perf:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -69,10 +74,13 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Install libclang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - name: Build the perf harness
         run: cargo build --release --locked -p acts-example-perf
 
-      # The event picks the size: a PR gets a build-sized smoke of both stores,
+      # The event picks the size: a PR gets a build-sized smoke of every store,
       # while the publishing legs get the full sample. Manual inputs win on
       # dispatch.
       - name: Plan the runs
@@ -83,15 +91,18 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             memory_iters=200
             sled_iters=100
+            rocksdb_iters=100
             warmup=10
           else
             memory_iters="${{ inputs.memory_iters }}"; memory_iters="${memory_iters:-2000}"
             sled_iters="${{ inputs.sled_iters }}"; sled_iters="${sled_iters:-500}"
+            rocksdb_iters="${{ inputs.rocksdb_iters }}"; rocksdb_iters="${rocksdb_iters:-500}"
             warmup="${{ inputs.warmup }}"; warmup="${warmup:-20}"
           fi
           {
             echo "memory_iters=${memory_iters}"
             echo "sled_iters=${sled_iters}"
+            echo "rocksdb_iters=${rocksdb_iters}"
             echo "warmup=${warmup}"
           } >> "$GITHUB_OUTPUT"
 
@@ -119,11 +130,30 @@ jobs:
           set +e
           target/release/acts-example-perf \
             --store sled \
+            --store-shards 4 \
             --store-url "$perf_OUTPUT/sled/store" \
             --iters "${{ steps.plan.outputs.sled_iters }}" \
             --warmup "${{ steps.plan.outputs.warmup }}" \
             --json "$perf_OUTPUT/sled/report.json" \
             --markdown "$perf_OUTPUT/sled/report.md"
+          code=$?
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: perf rocksdb
+        id: rocksdb
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          target/release/acts-example-perf \
+            --store rocksdb \
+            --store-shards 4 \
+            --store-url "$perf_OUTPUT/rocksdb/store" \
+            --iters "${{ steps.plan.outputs.rocksdb_iters }}" \
+            --warmup "${{ steps.plan.outputs.warmup }}" \
+            --json "$perf_OUTPUT/rocksdb/report.json" \
+            --markdown "$perf_OUTPUT/rocksdb/report.md"
           code=$?
           echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
           exit "$code"
@@ -134,11 +164,11 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## Completion latency: memory vs sled"
+            echo "## Completion latency: memory vs sled vs RocksDB"
             echo
             echo '| store | result | samples / errors | avg | p50 / p95 / p99 | throughput |'
             echo '| --- | --- | --- | --- | --- | --- |'
-            for store in memory sled; do
+            for store in memory sled rocksdb; do
               report="$perf_OUTPUT/$store/report.json"
               if [ ! -f "$report" ]; then
                 echo "| $store | missing report | - | - | - | - |"
@@ -162,6 +192,8 @@ jobs:
             target/perf/memory/report.json
             target/perf/sled/report.md
             target/perf/sled/report.json
+            target/perf/rocksdb/report.md
+            target/perf/rocksdb/report.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -176,6 +208,10 @@ jobs:
           fi
           if [ "${{ steps.sled.outcome }}" != "success" ]; then
             echo "::warning::sled perf run reported a failure"
+            failed=1
+          fi
+          if [ "${{ steps.rocksdb.outcome }}" != "success" ]; then
+            echo "::warning::rocksdb perf run reported a failure"
             failed=1
           fi
           if [ "$failed" -ne 0 ]; then
@@ -218,7 +254,7 @@ jobs:
           mkdir -p publish
           # shellcheck source=badge.sh
           source .github/scripts/badge.sh
-          for store in memory sled; do
+          for store in memory sled rocksdb; do
             report="target/perf/$store/report.json"
             if [ -f "$report" ]; then
               cp "target/perf/$store/report.md" "publish/report-$store.md"

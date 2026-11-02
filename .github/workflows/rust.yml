@@ -35,6 +35,11 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           override: true
           components: rustfmt, clippy
+      # `librocksdb-sys` generates its C bindings with bindgen at build time;
+      # the `--all-features` build therefore needs libclang (the C++ sources
+      # themselves are compiled by the `cc` crate, no cmake).
+      - name: Install libclang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       # `+${{ matrix.toolchain }}` (not a bare `cargo`): `rust-toolchain.toml`
       # names a channel too, and the `+toolchain` argument is the one selector
@@ -100,6 +105,8 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
+      - name: Install libclang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
       - name: Clippy Check
         run: cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
 

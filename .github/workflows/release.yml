@@ -64,6 +64,9 @@ jobs:
           mkdir -p dist/staging
           cp "target/${{ matrix.target }}/release/acts-server${{ matrix.exe }}" "dist/staging/acts-server${{ matrix.exe }}"
           cp "target/${{ matrix.target }}/release/acts-cli${{ matrix.exe }}" "dist/staging/acts-cli${{ matrix.exe }}"
+          # Apache-2.0 section 4(a) (license copy) and the attribution terms of
+          # the statically linked RocksDB/LevelDB/xxHash/Snappy code.
+          cp LICENSE THIRD_PARTY_NOTICES.md dist/staging/
           echo "version=${version}" >> "$GITHUB_ENV"
 
       - name: Package archive (tar.gz)

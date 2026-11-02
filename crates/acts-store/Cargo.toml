@@ -1,6 +1,6 @@
 [package]
 authors.workspace = true
-description = "external KvStore backends (sqlite / postgres / sled) for the acts workflow engine"
+description = "external KvStore backends (sqlite / postgres / sled / rocksdb) and pid-consistent-hash sharding for the acts workflow engine"
 keywords = ["workflow", "store"]
 edition.workspace = true
 license.workspace = true
@@ -9,14 +9,19 @@ repository.workspace = true
 homepage = "https://github.com/yaojianpin/acts"
 version.workspace = true
 rust-version.workspace = true
-include = ["src/**/*"]
+include = ["src/**/*", "LICENSE"]
 
 [dependencies]
 acts = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
+rocksdb = { workspace = true, optional = true }
+serde_json = { workspace = true }
 sled = { version = "0.34", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }
 tokio = { features = ["rt", "sync"], workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 acts = { workspace = true }
@@ -29,5 +34,6 @@ tracing-subscriber = { features = ["env-filter"], workspace = true }
 [features]
 default = []
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls"]
+rocksdb = ["dep:rocksdb"]
 sled = ["dep:sled"]
 sqlite = ["dep:sqlx", "sqlx/sqlite"]

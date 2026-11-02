@@ -12,7 +12,7 @@
 //! in-memory engine path, so its numbers are comparable between runs in a way a
 //! shared-runner end-to-end test is not (see `.github/workflows/prof.yml`).
 use acts::{Engine, MessageState, Vars, Workflow};
-use acts_store::SledStore;
+use acts_store::{RocksdbStore, Shard, ShardConfig, ShardedStore, SledStore};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::{
@@ -29,6 +29,7 @@ const ARM_TIMEOUT: Duration = Duration::from_secs(120);
 enum Store {
     Memory,
     Sled,
+    Rocksdb,
 }
 
 impl Store {
@@ -36,6 +37,7 @@ impl Store {
         match self {
             Self::Memory => "memory",
             Self::Sled => "sled",
+            Self::Rocksdb => "rocksdb",
         }
     }
 }
@@ -45,6 +47,7 @@ struct Options {
     iters: u32,
     warmup: u32,
     store: Store,
+    store_shards: usize,
     store_url: Option<PathBuf>,
     json: Option<PathBuf>,
     markdown: Option<PathBuf>,
@@ -64,6 +67,7 @@ impl Default for Options {
             iters,
             warmup: 1,
             store: Store::Memory,
+            store_shards: 1,
             store_url: None,
             json: None,
             markdown: None,
@@ -96,8 +100,18 @@ fn parse_args() -> Result<Options, String> {
                 options.store = match arg(&mut args, "--store")?.as_str() {
                     "memory" => Store::Memory,
                     "sled" => Store::Sled,
-                    other => return Err(format!("--store must be memory or sled, got {other:?}")),
+                    "rocksdb" => Store::Rocksdb,
+                    other => {
+                        return Err(format!(
+                            "--store must be memory, sled or rocksdb, got {other:?}"
+                        ));
+                    }
                 };
+            }
+            "--store-shards" => {
+                options.store_shards = arg(&mut args, "--store-shards")?
+                    .parse()
+                    .map_err(|error| format!("invalid --store-shards: {error}"))?;
             }
             "--store-url" => {
                 options.store_url = Some(PathBuf::from(arg(&mut args, "--store-url")?))
@@ -115,7 +129,13 @@ fn parse_args() -> Result<Options, String> {
         return Err("--warmup must be smaller than --iters".into());
     }
     if options.store == Store::Memory && options.store_url.is_some() {
-        return Err("--store-url requires --store sled".into());
+        return Err("--store-url requires --store sled or rocksdb".into());
+    }
+    if options.store_shards == 0 || options.store_shards > 1_024 {
+        return Err("--store-shards must be between 1 and 1024".into());
+    }
+    if options.store == Store::Memory && options.store_shards != 1 {
+        return Err("--store-shards > 1 requires --store sled or rocksdb".into());
     }
     Ok(options)
 }
@@ -127,8 +147,10 @@ fn usage() {
          OPTIONS:\n\
            --iters N       parked processes to arm and complete (default 2000, at least 2)\n\
            --warmup N      completions before the measured window (default 1)\n\
-           --store KIND    memory (default) or sled\n\
-           --store-url P   sled directory (default target/prof-sled; sled only)\n\
+           --store KIND    memory (default), sled or rocksdb\n\
+           --store-shards N physical shards for sled/rocksdb (default 1)\n\
+           --store-url P   sled/rocksdb base directory (default target/prof-<store>;\n\
+                           each shard uses <base>/shard-<i>)\n\
            --json PATH     write the JSON report\n\
            --markdown PATH write the Markdown report\n\
            -h, --help      show this help\n\n\
@@ -143,6 +165,7 @@ fn usage() {
 struct Report {
     status: &'static str,
     store: &'static str,
+    shards: usize,
     iters: u32,
     warmup: u32,
     samples: usize,
@@ -184,7 +207,7 @@ fn markdown(report: &Report) -> String {
          | metric | value |\n\
          | --- | --- |\n\
          | Result | {} |\n\
-         | Store | {} |\n\
+         | Store | {} ({} shards) |\n\
          | Samples | {} (iters {}, warmup {}) |\n\
          | Errors | {} |\n\
          | Total measured time | {:.3} ms |\n\
@@ -199,6 +222,7 @@ fn markdown(report: &Report) -> String {
          is `Result`, which fails on any completion error.\n",
         report.status,
         report.store,
+        report.shards,
         report.samples,
         report.iters,
         report.warmup,
@@ -243,16 +267,59 @@ steps:
     let mut config = acts::Config::default();
     config.data.cache_cap = Some(100_000);
     let mut builder = Engine::builder().set_config(&config);
-    if options.store == Store::Sled {
-        // The sled directory is the measured medium. A caller that wants to
-        // keep it for inspection passes --store-url; CI gives it a path under
-        // the run's output directory.
-        let path = options
-            .store_url
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("target/prof-sled"));
-        let store = SledStore::open(&path.to_string_lossy()).expect("failed to open sled store");
-        builder = builder.set_store(Arc::new(store));
+    match options.store {
+        Store::Memory => {}
+        Store::Sled | Store::Rocksdb => {
+            // The directory is the measured medium. A caller that wants to
+            // keep it for inspection passes --store-url; CI gives it a path
+            // under the run's output directory. Sharded runs put each physical
+            // database under <base>/shard-<i>.
+            let default = format!("target/prof-{}", options.store.as_str());
+            let base = options
+                .store_url
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(default));
+            let shard_config = || ShardConfig {
+                max_in_flight_writes: 16,
+                ..ShardConfig::default()
+            };
+            if options.store_shards > 1 {
+                let mut shards = Vec::with_capacity(options.store_shards);
+                for index in 0..options.store_shards {
+                    let path = base.join(format!("shard-{index}"));
+                    let id = path.to_string_lossy().into_owned();
+                    let store: Arc<dyn acts::KvStore> = match options.store {
+                        Store::Sled => Arc::new(
+                            SledStore::open(&path.to_string_lossy())
+                                .expect("failed to open sled shard"),
+                        ),
+                        Store::Rocksdb => Arc::new(
+                            RocksdbStore::open(&path.to_string_lossy())
+                                .expect("failed to open rocksdb shard"),
+                        ),
+                        Store::Memory => unreachable!("memory is not sharded"),
+                    };
+                    shards.push(Shard::new(id, store));
+                }
+                let store = ShardedStore::with_config(shards, shard_config())
+                    .expect("failed to build sharded store");
+                builder = builder.set_store(Arc::new(store));
+            } else {
+                match options.store {
+                    Store::Sled => {
+                        let store = SledStore::open(&base.to_string_lossy())
+                            .expect("failed to open sled store");
+                        builder = builder.set_store(Arc::new(store));
+                    }
+                    Store::Rocksdb => {
+                        let store = RocksdbStore::open(&base.to_string_lossy())
+                            .expect("failed to open rocksdb store");
+                        builder = builder.set_store(Arc::new(store));
+                    }
+                    Store::Memory => unreachable!("memory is not durable"),
+                }
+            }
+        }
     }
     let engine = builder.start().await.expect("failed to start engine");
     engine
@@ -355,6 +422,7 @@ steps:
             "FAIL"
         },
         store: options.store.as_str(),
+        shards: options.store_shards,
         iters: options.iters,
         warmup: options.warmup,
         samples: samples.len(),

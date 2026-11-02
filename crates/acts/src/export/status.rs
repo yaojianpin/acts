@@ -71,7 +71,7 @@ pub struct CpuStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStatus {
     /// The backend's own word for itself (`memory`, `sled`, `sqlite`,
-    /// `postgres`, or a custom store's).
+    /// `postgres`, `rocksdb`, `sharded`, or a custom store's).
     pub kind: String,
     /// Data size in bytes, best effort; `null` when the backend cannot
     /// measure itself.
@@ -93,11 +93,30 @@ pub struct ProcessCounts {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
     /// `healthy` when every loop is, `degraded` when any loop is skipping
-    /// ticks because its store keeps failing.
+    /// ticks because its store keeps failing. Backpressure is reported
+    /// separately: a full write pipeline is a healthy limit, not a failure —
+    /// it only becomes `degraded` once loop ticks actually fail.
     pub state: String,
+    /// The store-writer's queue and the backend's own write pressure
+    /// (`KvStore::saturated`). `saturated` is the exact flag
+    /// [`crate::Engine`] exposes as `store_writer_saturated`, so a status
+    /// reader sees the same admission signal producers use.
+    pub store_writer: StoreWriterStatus,
     /// One entry per loop, in [`crate::scheduler::core::health`]'s order:
     /// trigger, retry, cleanup, ready, recovery, outbox, projection.
     pub loops: Vec<LoopStatus>,
+}
+
+/// The write path's current pressure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreWriterStatus {
+    /// Ops accepted by the writer but not yet applied.
+    pub depth: usize,
+    /// Highest `depth` observed since the engine started.
+    pub high_watermark: usize,
+    /// Whether the writer is refusing new work right now — its own backlog
+    /// fill or the database's bounded pipeline is full.
+    pub saturated: bool,
 }
 
 /// One loop's failure state.
@@ -150,7 +169,12 @@ pub async fn collect(engine: &Engine) -> Result<SystemStatus> {
     };
 
     let (memory, cpu) = sample_process_metrics().await;
-    let health = health_status(runtime.scheduler_health());
+    let health = health_status(
+        runtime.scheduler_health(),
+        runtime.store_writer_depth(),
+        runtime.store_writer_high_watermark(),
+        runtime.store_writer_saturated(),
+    );
 
     Ok(SystemStatus {
         version: crate::VERSION.to_string(),
@@ -220,9 +244,14 @@ async fn sample_process_metrics() -> (MemoryStatus, CpuStatus) {
     (memory, cpu)
 }
 
-/// Flatten the health bundle into the wire answer: an overall word plus one
-/// entry per loop.
-fn health_status(health: SchedulerHealth) -> HealthStatus {
+/// Flatten the health bundle into the wire answer: an overall word, the
+/// write path's pressure, and one entry per loop.
+fn health_status(
+    health: SchedulerHealth,
+    depth: usize,
+    high_watermark: usize,
+    saturated: bool,
+) -> HealthStatus {
     let loops = [
         ("trigger", health.trigger),
         ("retry", health.retry),
@@ -253,6 +282,11 @@ fn health_status(health: SchedulerHealth) -> HealthStatus {
 
     HealthStatus {
         state: state.to_string(),
+        store_writer: StoreWriterStatus {
+            depth,
+            high_watermark,
+            saturated,
+        },
         loops,
     }
 }

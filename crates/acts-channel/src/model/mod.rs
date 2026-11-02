@@ -15,5 +15,6 @@ pub use message::Message;
 pub use package::Package;
 pub use query::*;
 pub use status::{
-    CpuStatus, HealthStatus, LoopStatus, MemoryStatus, ProcessCounts, StorageStatus, SystemStatus,
+    CpuStatus, HealthStatus, LoopStatus, MemoryStatus, ProcessCounts, StorageStatus,
+    StoreWriterStatus, SystemStatus,
 };

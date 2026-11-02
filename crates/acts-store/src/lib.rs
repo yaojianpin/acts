@@ -22,22 +22,45 @@
 //! - [`SqliteStore`] — feature `sqlite`
 //! - [`PostgresStore`] — feature `postgres`
 //! - [`SledStore`] — feature `sled`
+//! - [`RocksdbStore`] — feature `rocksdb`
+//! - [`ShardedStore`] — no feature; wraps several backends behind one
+//!   consistent-hash shard ring
 //!
 //! SQLite and Postgres make a commit durable before it returns. `SledStore`
 //! applies writes immediately and is flushed by sled's background flusher
-//! every [`DEFAULT_FLUSH_EVERY_MS`] (50 ms), so a crash can lose the writes
-//! applied since the last completed flush; call [`KvStore::flush`] for an
-//! explicit barrier (the engine performs one at a graceful shutdown).
+//! every [`DEFAULT_FLUSH_EVERY_MS`] (50 ms); `RocksdbStore` writes the WAL
+//! before returning and flushes memtables/WAL on [`KvStore::flush`]. A crash
+//! can therefore lose writes applied since the last completed flush on either
+//! embedded backend; the engine performs one explicit barrier at a graceful
+//! shutdown.
 //!
 //! Every backend here commits a batch with its guards (see
 //! [`KvStore::batch`](acts::KvStore::batch)), which is what
 //! [`DbLease`](acts::DbLease) needs to hold a database exclusively across
 //! processes.
+//!
+//! # Sharding
+//!
+//! [`ShardedStore`] spreads the engine's write load over several physical
+//! databases. Process-owned keys route by pid through a 1024-slot consistent
+//! hash ring ([`DEFAULT_VIRTUAL_NODES`]); scans fan out and merge by key, so
+//! ordered queries stay globally ordered. `ShardedStore::rebalance` moves rows
+//! after a shard is added or removed, and [`Shard::draining`] keeps a removed
+//! shard readable until its rows have moved. A guarded batch must stay on one
+//! physical shard: the database lease is a global row, so a fenced store over
+//! several shards is not supported — run one server per shard set with
+//! `lease = false`, or coordinate writers outside the engine. Each shard
+//! bounds its write pipeline and reports it through `KvStore::saturated`,
+//! which the engine's store-writer combines with its own backlog.
 
 mod consts;
+mod pressure;
 
 #[cfg(feature = "postgres")]
 mod postgres;
+#[cfg(feature = "rocksdb")]
+mod rocksdb;
+mod shard;
 #[cfg(feature = "sled")]
 mod sled;
 #[cfg(feature = "sqlite")]
@@ -45,6 +68,14 @@ mod sqlite;
 
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStore;
+#[cfg(feature = "rocksdb")]
+pub use rocksdb::{
+    DEFAULT_MAX_IN_FLIGHT_WRITES, DEFAULT_WRITE_BUFFER_BYTES, RocksdbOptions, RocksdbStore,
+};
+pub use shard::{
+    DEFAULT_SHARD_WRITES, DEFAULT_VIRTUAL_NODES, RebalanceReport, Shard, ShardConfig, ShardRole,
+    ShardedStore,
+};
 #[cfg(feature = "sled")]
 pub use sled::{DEFAULT_FLUSH_EVERY_MS, SledStore};
 #[cfg(feature = "sqlite")]
@@ -52,7 +83,12 @@ pub use sqlite::SqliteStore;
 
 #[cfg(test)]
 mod snapshot_view_tests {
-    use super::*;
+    #[cfg(feature = "rocksdb")]
+    use crate::RocksdbStore;
+    #[cfg(feature = "sled")]
+    use crate::SledStore;
+    #[cfg(feature = "sqlite")]
+    use crate::SqliteStore;
     use acts::{KvStore, MemoryStore, StoreBatchOp};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -236,6 +272,15 @@ mod snapshot_view_tests {
         for lanes in [1usize, 4, 70] {
             let store = SledStore::open_in_memory().expect("sled");
             exercise(Arc::new(store), lanes, (6_000 / lanes).max(50)).await;
+        }
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn rocksdb_views_are_one_version_under_concurrent_writers() {
+        for lanes in [1usize, 4, 70] {
+            let store = RocksdbStore::open_in_memory().expect("rocksdb");
+            exercise(Arc::new(store), lanes, (2_000 / lanes).max(30)).await;
         }
     }
 

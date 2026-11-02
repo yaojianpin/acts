@@ -11,5 +11,6 @@ pub use channel::{Channel, ChannelOptions};
 pub use executor::Executor;
 pub use run::{RunHandle, RunOutcome};
 pub use status::{
-    CpuStatus, HealthStatus, LoopStatus, MemoryStatus, ProcessCounts, StorageStatus, SystemStatus,
+    CpuStatus, HealthStatus, LoopStatus, MemoryStatus, ProcessCounts, StorageStatus,
+    StoreWriterStatus, SystemStatus,
 };

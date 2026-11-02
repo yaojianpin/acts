@@ -18,8 +18,8 @@ a checkout.
 
 ## External Storage
 
-The persistent storage backends (sqlite/postgres/sled) live in the `acts-store`
-crate — enable the matching feature and import the backend from `acts_store`,
+The persistent storage backends (sqlite/postgres/sled/rocksdb) live in the
+`acts-store` crate — enable the matching feature and import the backend from `acts_store`,
 then pass it to `EngineBuilder::set_store` (when unset, an in-memory
 `MemoryStore` is used):
 
@@ -32,11 +32,14 @@ cargo add acts-store --features postgres
 
 # Sled
 cargo add acts-store --features sled
+
+# RocksDB
+cargo add acts-store --features rocksdb
 ```
 
 ```rust
 use acts::Engine;
-use acts_store::SqliteStore; // or PostgresStore / SledStore
+use acts_store::SqliteStore; // or PostgresStore / SledStore / RocksdbStore
 use std::sync::Arc;
 
 #[tokio::main]
@@ -85,9 +88,48 @@ ops — and only while every guard still holds — as one atomic step of the
 backend. The guard is the stored state the caller decided on, re-checked where
 the write lands rather than before it, so a second writer cannot slip between
 the read and the write. `Ok(false)` means a guard moved: nothing was applied.
-Every backend in `acts-store` (sqlite/postgres/sled) and the in-memory
+Every backend in `acts-store` (sqlite/postgres/sled/rocksdb) and the in-memory
 `MemoryStore` implement it; a custom `KvStore` that does not inherits a
 refusal instead of a silent check-then-write.
+
+### Sharding and backpressure
+
+`acts_store::ShardedStore` spreads the write load over several physical
+databases. Process-owned keys are placed by a pid consistent-hash ring
+(1024 virtual-node slots by default, configurable with `ShardConfig`), so a
+process's aggregate, task rows and indexes stay on one shard and a guarded
+batch stays a single-shard transaction. `scan_prefix` fans out and merges the
+per-shard ordered streams by key, which keeps ordered queries globally ordered.
+`ShardedStore::rebalance` copies keys to their new owner before deleting stale
+copies after a shard is added; a shard being removed is kept readable with
+`Shard::draining` until its rows have moved.
+
+Each shard bounds its write pipeline (`ShardConfig::max_in_flight_writes`).
+While a full shard makes a write wait, `KvStore::saturated` is true; the
+engine's store-writer combines it with its own backlog latch, so new work stops
+before a second unbounded queue forms in front of the database. The RocksDB
+backend reports the same pressure through its own write gate.
+
+A multi-shard database cannot use the exclusive lease: the lease row is a
+single guard on every write and no atomic unit spans independent physical
+databases. The `acts-server` form is:
+
+```toml
+[db]
+type = "rocksdb"                 # or "sled" / "sqlite" / "postgres"
+shards = ["/data/acts-0", "/data/acts-1"]
+# when retiring a shard, keep it readable and migrate at startup:
+# draining_shards = ["/data/acts-old"]
+# rebalance_on_start = true
+virtual_nodes = 1024
+max_in_flight_writes = 16
+lease = false
+```
+
+`rebalance_on_start` runs copy-then-delete before the engine starts; once the
+draining shards are empty, remove them from the config. A multi-shard layout
+requires `lease = false`: run one server per shard set, or coordinate writers
+outside the engine.
 
 `lease = false` is how an embedder or a deployment keeps the older contract —
 **one writer per database is then yours to guarantee**, by giving each server

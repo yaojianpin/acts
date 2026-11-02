@@ -165,6 +165,11 @@
 
 | 现有隐患(node id 直接当 tid):用户声明 `id: "a-b"` ⇒ 行键无分隔符拼接 + `Id::from` 按 `-` 切 ⇒ 歧义;根 `tid = "$"`(0x24 < 0x2D)也不满足"ids are alphanumeric"(今天无害) | `utils/id.rs:39-46`、`consts.rs:27` |
 
+> **分片补充(2026-11-02):** `acts-store` 的 pid 一致性哈希分片不改变上面的键面,
+> 只在 `KvStore` 外层按 key/pid 路由到物理库;`{prefix}-id-{pid+wire}` 的 pid 学习、
+> 1024 虚拟节点、跨分片顺序查询归并、背压和节点迁移见
+> [`design/shard.md`](shard.md)。
+
 
 
 \### 1.7 模块面

@@ -32,7 +32,7 @@ acts-package-javascript = { workspace = true }
 acts-plugin-grpc = { workspace = true }
 acts-plugin-web = { workspace = true }
 acts-plugin-nats = { workspace = true }
-acts-store = { workspace = true, features = ["sled", "sqlite", "postgres"] }
+acts-store = { workspace = true, features = ["sled", "sqlite", "postgres", "rocksdb"] }
 [dev-dependencies]
 acts = { workspace = true, features = ["test-utils"] }
 async-nats = { workspace = true }

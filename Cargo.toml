@@ -105,6 +105,13 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # process and every restart, and independent of the order pids are first seen.
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # message brokers / stores
+# RocksDB is an embedded LSM store with its own write pipeline; the `acts-store`
+# `rocksdb` backend compiles the bundled C++ library. Only bindgen (a build
+# dependency) needs libclang; the C++ sources are built by the `cc` crate.
+rocksdb = { version = "0.25", default-features = false, features = [
+    "bindgen-runtime",
+    "snappy",
+] }
 async-nats = "0.50"
 redis = { version = "1.7", default-features = false, features = [
     "aio",

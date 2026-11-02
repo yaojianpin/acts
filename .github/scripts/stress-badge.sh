@@ -14,8 +14,8 @@
 # `<report.json>` is the `FinalReport` the harness writes (`status`,
 # `workflows_per_second`, `max_rss_bytes`, `final_process_rows`, ...).
 # `<store>` names the badge files (`stress-<store>.svg`,
-# `stress-throughput-<store>.svg`, ...) so memory and sled never overwrite
-# each other.
+# `stress-throughput-<store>.svg`, ...) so memory, sled and rocksdb never
+# overwrite each other.
 
 set -euo pipefail
 

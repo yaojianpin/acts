@@ -588,6 +588,8 @@ mod tests {
         assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(status["health"]["state"], "healthy");
         assert_eq!(status["health"]["loops"].as_array().map(Vec::len), Some(7));
+        assert_eq!(status["health"]["store_writer"]["saturated"], false);
+        assert!(status["health"]["store_writer"]["depth"].is_u64());
         assert!(
             status["memory"]["rss_bytes"].as_u64().unwrap_or_default() > 0,
             "a running process has a resident set: {status}"

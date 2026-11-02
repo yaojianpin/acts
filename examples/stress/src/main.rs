@@ -13,7 +13,10 @@ use acts::{
     Principal, ProcessCounts, RunHandle, RunOutcome, ScanOperation, ScanOptions, StorageStatus,
     SystemStatus, Vars, Workflow,
 };
-use acts_store::{DEFAULT_FLUSH_EVERY_MS, PostgresStore, SledStore, SqliteStore};
+use acts_store::{
+    DEFAULT_FLUSH_EVERY_MS, PostgresStore, RocksdbOptions, RocksdbStore, Shard, ShardConfig,
+    ShardedStore, SledStore, SqliteStore,
+};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use std::{
@@ -98,10 +101,14 @@ struct Options {
     timeout_seconds: u64,
     scheduler_workers: usize,
     store_workers: usize,
-    /// `sled` (durable, `./data`), `memory`, `sqlite` or `postgres`.
+    /// `sled` (durable, `./data`), `memory`, `rocksdb`, `sqlite` or
+    /// `postgres`.
     store: String,
-    /// SQLite file path or Postgres connection URL. Postgres falls back to
-    /// `DATABASE_URL`; SQLite defaults to `<output>/stress.sqlite`.
+    /// Physical shards for `sled`/`rocksdb`; `1` means one database.
+    store_shards: usize,
+    /// Sled/RocksDB directory, SQLite file path or Postgres connection URL.
+    /// Postgres falls back to `DATABASE_URL`; SQLite defaults to
+    /// `<output>/stress.sqlite`.
     store_url: Option<String>,
     output: PathBuf,
     /// `EnvFilter` directives for tracing. `$ACTS_LOG` is the default (like
@@ -132,6 +139,7 @@ impl Options {
             scheduler_workers: cores.clamp(4, 32),
             store_workers: cores.clamp(4, 8),
             store: "sled".to_string(),
+            store_shards: 1,
             store_url: None,
             output: PathBuf::from("target/stress-results"),
             log_level: env::var("ACTS_LOG").unwrap_or_else(|_| "info".to_string()),
@@ -176,6 +184,10 @@ impl Options {
                         parse_num(&value(&mut args, "--store-workers")?, "store-workers")?;
                 }
                 "--store" => options.store = value(&mut args, "--store")?,
+                "--store-shards" => {
+                    options.store_shards =
+                        parse_num(&value(&mut args, "--store-shards")?, "store-shards")?;
+                }
                 "--store-url" => options.store_url = Some(value(&mut args, "--store-url")?),
                 "--output" => options.output = PathBuf::from(value(&mut args, "--output")?),
                 "--log-level" => options.log_level = value(&mut args, "--log-level")?,
@@ -215,9 +227,17 @@ impl Options {
         }
         if !matches!(
             options.store.as_str(),
-            "memory" | "sled" | "sqlite" | "postgres"
+            "memory" | "sled" | "rocksdb" | "sqlite" | "postgres"
         ) {
-            return Err("--store must be 'sled', 'memory', 'sqlite' or 'postgres'".into());
+            return Err(
+                "--store must be 'sled', 'memory', 'rocksdb', 'sqlite' or 'postgres'".into(),
+            );
+        }
+        if options.store_shards == 0 || options.store_shards > 1_024 {
+            return Err("--store-shards must be between 1 and 1024".into());
+        }
+        if options.store_shards > 1 && !matches!(options.store.as_str(), "sled" | "rocksdb") {
+            return Err("--store-shards > 1 is only supported by sled and rocksdb".into());
         }
         if options.log_level.trim().is_empty() {
             return Err("--log-level cannot be empty".into());
@@ -432,6 +452,7 @@ struct ConfigReport {
     cleanup_wait_seconds: u64,
     scheduler_workers: usize,
     store_writer_workers: usize,
+    store_shards: usize,
     cache_cap: usize,
     scheduler_queue_cap: usize,
     store_writer_queue_cap: usize,
@@ -887,7 +908,7 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
     ));
     md.push_str("## Test configuration\n\n");
     md.push_str(&format!(
-        "- Workload: {}\n- Host: {} / {} ({} logical CPUs)\n- Concurrency stages: {:?}\n- Warmup workflows: {}\n- Steady-state soak: {}s\n- Cleanup drain wait: {}s\n- Scheduler workers: {}\n- Store writer workers: {}\n- Cache cap: {}\n- Scheduler queue cap: {}\n- Store writer queue cap: {}\n- Metric sample interval: {}ms (each status sample also waits for sysinfo's CPU delta window)\n- Per-workflow wait timeout: {}s\n- Engine version: {}\n- Store backend: {}\n- Error-rate gate: {:.3}%\n\n{}\n\n",
+        "- Workload: {}\n- Host: {} / {} ({} logical CPUs)\n- Concurrency stages: {:?}\n- Warmup workflows: {}\n- Steady-state soak: {}s\n- Cleanup drain wait: {}s\n- Scheduler workers: {}\n- Store writer workers: {}\n- Store shards: {}\n- Cache cap: {}\n- Scheduler queue cap: {}\n- Store writer queue cap: {}\n- Metric sample interval: {}ms (each status sample also waits for sysinfo's CPU delta window)\n- Per-workflow wait timeout: {}s\n- Engine version: {}\n- Store backend: {}\n- Error-rate gate: {:.3}%\n\n{}\n\n",
         report.config.workload,
         report.config.host_os,
         report.config.host_arch,
@@ -898,6 +919,7 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
         report.config.cleanup_wait_seconds,
         report.config.scheduler_workers,
         report.config.store_writer_workers,
+        report.config.store_shards,
         report.config.cache_cap,
         report.config.scheduler_queue_cap,
         report.config.store_writer_queue_cap,
@@ -956,6 +978,15 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
 /// mirrored to stdout and `<output>/trace.log` so the run can be analyzed after
 /// it finished. The file is opened before the engine starts, so a bad filter or
 /// unwritable output directory fails the run immediately.
+/// The per-shard write bound: the engine has at most `store_workers` writer
+/// shards, so a physical database never needs to admit more than that.
+fn shard_config(options: &Options) -> ShardConfig {
+    ShardConfig {
+        max_in_flight_writes: options.store_workers.max(1),
+        ..ShardConfig::default()
+    }
+}
+
 fn init_tracing(options: &Options) -> Result<PathBuf, Box<dyn std::error::Error>> {
     use tracing_subscriber::{EnvFilter, fmt::writer::MakeWriterExt};
 
@@ -996,14 +1027,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (store, store_label): (Arc<dyn KvStore>, String) = match options.store.as_str() {
         "memory" => (Arc::new(MemoryStore::new()), "memory".to_string()),
         "sled" => {
-            let path = options
+            let base = options
                 .store_url
                 .clone()
                 .unwrap_or_else(|| "./data".to_string());
-            (
-                Arc::new(SledStore::open(&path)?),
-                format!("sled ({path}, {DEFAULT_FLUSH_EVERY_MS}ms flush)"),
-            )
+            if options.store_shards > 1 {
+                let mut shards = Vec::with_capacity(options.store_shards);
+                for index in 0..options.store_shards {
+                    let path = Path::new(&base).join(format!("shard-{index}"));
+                    let path = path.to_string_lossy().into_owned();
+                    let store: Arc<dyn KvStore> = Arc::new(SledStore::open(&path)?);
+                    shards.push(Shard::new(path, store));
+                }
+                let store = ShardedStore::with_config(shards, shard_config(&options))?;
+                (
+                    Arc::new(store),
+                    format!(
+                        "sled ({base}, {} shards, {DEFAULT_FLUSH_EVERY_MS}ms flush)",
+                        options.store_shards
+                    ),
+                )
+            } else {
+                (
+                    Arc::new(SledStore::open(&base)?),
+                    format!("sled ({base}, {DEFAULT_FLUSH_EVERY_MS}ms flush)"),
+                )
+            }
+        }
+        "rocksdb" => {
+            let base = options
+                .store_url
+                .clone()
+                .unwrap_or_else(|| "./rocksdb".to_string());
+            let rocksdb_options = || RocksdbOptions {
+                max_in_flight_writes: options.store_workers.max(1),
+                ..RocksdbOptions::default()
+            };
+            if options.store_shards > 1 {
+                let mut shards = Vec::with_capacity(options.store_shards);
+                for index in 0..options.store_shards {
+                    let path = Path::new(&base).join(format!("shard-{index}"));
+                    let path = path.to_string_lossy().into_owned();
+                    let store: Arc<dyn KvStore> =
+                        Arc::new(RocksdbStore::open_with(&path, rocksdb_options())?);
+                    shards.push(Shard::new(path, store));
+                }
+                let store = ShardedStore::with_config(shards, shard_config(&options))?;
+                (
+                    Arc::new(store),
+                    format!("rocksdb ({base}, {} shards)", options.store_shards),
+                )
+            } else {
+                (
+                    Arc::new(RocksdbStore::open_with(&base, rocksdb_options())?),
+                    format!("rocksdb ({base})"),
+                )
+            }
         }
         "sqlite" => {
             let path = options.store_url.clone().unwrap_or_else(|| {
@@ -1033,6 +1112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  concurrency:  {:?}", options.concurrency);
     println!("  scheduler:    {} workers", options.scheduler_workers);
     println!("  store writer: {} workers", options.store_workers);
+    println!("  store shards: {}", options.store_shards);
     println!("  store:        {store_label}");
     println!("  cache cap:    {}", cache_cap);
     println!("  soak:         {} seconds", options.soak_seconds);
@@ -1048,6 +1128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeout_seconds = options.timeout_seconds,
         scheduler_workers = options.scheduler_workers,
         store_workers = options.store_workers,
+        store_shards = options.store_shards,
         store = %store_label,
         cache_cap,
         queue_cap,
@@ -1382,6 +1463,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cleanup_wait_seconds: options.cleanup_wait_seconds,
             scheduler_workers: options.scheduler_workers,
             store_writer_workers: options.store_workers,
+            store_shards: options.store_shards,
             cache_cap,
             scheduler_queue_cap: queue_cap,
             store_writer_queue_cap: queue_cap,

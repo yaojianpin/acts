@@ -8,11 +8,11 @@ publish = false
 [dependencies]
 tokio = { features = ["full"], workspace = true }
 acts = { workspace = true }
-# The prof harness measures both the in-memory engine path and the durable
-# sled path; the store crate owns the backend, so the example is a package of
-# its own (an example of `acts` cannot depend on `acts-store`, which depends
-# on `acts`).
-acts-store = { workspace = true, features = ["sled"] }
+# The prof harness measures the in-memory engine path and the durable
+# sled/RocksDB paths (with optional physical sharding); the store crate owns
+# the backends, so the example is a package of its own (an example of `acts`
+# cannot depend on `acts-store`, which depends on `acts`).
+acts-store = { workspace = true, features = ["sled", "rocksdb"] }
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true

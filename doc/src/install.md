@@ -16,7 +16,7 @@ cargo add acts
 
 ## 安装外部存储
 
-外部存储后端（sqlite/postgres/sled）在独立的 `acts-store` crate 中，
+外部存储后端（sqlite/postgres/sled/rocksdb）在独立的 `acts-store` crate 中，
 启用对应 feature 后从 `acts_store` 导入后端，再通过 `EngineBuilder::set_store`
 指定（不设置时默认使用内存存储 `MemoryStore`）：
 
@@ -29,11 +29,14 @@ cargo add acts-store --features postgres
 
 # Sled
 cargo add acts-store --features sled
+
+# RocksDB
+cargo add acts-store --features rocksdb
 ```
 
 ```rust
 use acts::Engine;
-use acts_store::SqliteStore; // 或 PostgresStore / SledStore
+use acts_store::SqliteStore; // 或 PostgresStore / SledStore / RocksdbStore
 use std::sync::Arc;
 
 #[tokio::main]
@@ -69,9 +72,42 @@ async fn main() -> acts::Result<()> {
 租约建立在一个原语之上：`KvStore::batch(ops, guards)` 把 ops 与「所有守卫仍然成立」这一
 条件作为后端的同一个原子步骤提交。守卫就是调用方当初据以决策的已存状态，它是在写入落地的
 地方重新核对，而不是在写入之前先核对，因此第二个写入者无法插进读取与写入之间；`Ok(false)`
-表示守卫已变、什么都没写入。`acts-store` 的每个后端（sqlite/postgres/sled）与内存
+表示守卫已变、什么都没写入。`acts-store` 的每个后端（sqlite/postgres/sled/rocksdb）与内存
 `MemoryStore` 都实现了它；未实现的自定义 `KvStore` 会直接得到拒绝，而不是静默退化为
 「先检查再写入」。
+
+### 分片与背压
+
+`acts_store::ShardedStore` 把写入负载分摊到多个物理数据库。属于进程的 key 通过 pid
+一致性哈希环（默认 1024 个虚拟节点，可由 `ShardConfig` 配置）定位到其中一个分片，
+因此一个进程的聚合、任务行与索引行始终在同一分片，带守卫的 batch 仍是单分片事务。
+`scan_prefix` 会向所有分片fan-out，再按 key 归并各分片的有序结果，因此跨分片的顺序查询
+仍然是全局有序的。增加分片后，`ShardedStore::rebalance` 先把 key 复制到新 owner，再删除
+旧副本；要移除的分片用 `Shard::draining` 保持可读，直到数据搬完。
+
+每个分片通过 `ShardConfig::max_in_flight_writes` 限制同时进行的写入。分片写满、写入需要
+等待时，`KvStore::saturated` 返回 true；引擎的 store-writer 会把它与自身 backlog 的
+饱和锁存合并，从而在数据库前形成第二个无界队列之前停止接收新工作。RocksDB 后端也通过
+自己的写入闸门上报同样的压力。
+
+多分片数据库不能使用排他租约：租约行是每次写入都会检查的单一守卫，而独立的物理数据库
+之间不存在跨库原子提交。`acts-server` 的配置形如：
+
+```toml
+[db]
+type = "rocksdb"                 # 或 "sled" / "sqlite" / "postgres"
+shards = ["/data/acts-0", "/data/acts-1"]
+# 下线旧分片时把它放进 drain，保持可读，并在启动时迁移
+# draining_shards = ["/data/acts-old"]
+# rebalance_on_start = true
+virtual_nodes = 1024
+max_in_flight_writes = 16
+lease = false
+```
+
+`rebalance_on_start` 在 engine 启动前完成 copy-then-delete；完成并确认 drain 分片为空后，
+从配置中移除 `draining_shards`。多分片布局请设置 `lease = false`，每个分片组只运行一个
+服务器，或在引擎之外协调写入者。
 
 `lease = false` 是嵌入式调用方或部署沿用旧约定的方式——此时
 **「每个数据库一个写入者」需由你自行保证**：为每个服务器分配独立数据库，或在引擎之外协调。

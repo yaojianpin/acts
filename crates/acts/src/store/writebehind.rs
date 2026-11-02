@@ -178,6 +178,10 @@ pub(crate) struct StoreWriter {
     /// the scheduler lanes.
     router: Arc<LaneRouter>,
     backlog: Arc<Backlog>,
+    /// The store the consumers write through. Kept here so
+    /// [`Self::saturated`] can report the backend's own write pressure as well
+    /// as this writer's backlog.
+    store: Arc<Store>,
 }
 
 impl StoreWriter {
@@ -240,6 +244,7 @@ impl StoreWriter {
             tasks: Arc::new(Mutex::new(tasks)),
             router,
             backlog,
+            store,
         }
     }
 
@@ -293,9 +298,13 @@ impl StoreWriter {
     }
 
     /// Whether the write path is refusing new work right now — the store is
-    /// not keeping up with its writes.
+    /// not keeping up with its writes. Two pressures make up the answer: this
+    /// writer's backlog (a queue full or a producer waiting for room) and the
+    /// backend's own bounded write pipeline ([`KvStore::saturated`]), so a
+    /// saturated database also stops new engine work instead of only stalling
+    /// the shard already inside it.
     pub(crate) fn saturated(&self) -> bool {
-        self.backlog.is_saturated()
+        self.backlog.is_saturated() || self.store.kv().saturated()
     }
 
     /// Block until all previously enqueued writes have been applied: a barrier
@@ -535,6 +544,9 @@ mod tests {
         /// Set once the join gate latched open (see [`TestKv::join_gate`]).
         open: AtomicBool,
         peak: AtomicUsize,
+        /// The backend's own write-pipeline pressure, reported through
+        /// [`KvStore::saturated`].
+        stressed: AtomicBool,
     }
 
     /// Guard of [`TestKv::join_gate`]: the write stays counted as in flight
@@ -560,6 +572,7 @@ mod tests {
                 in_flight: AtomicUsize::new(0),
                 open: AtomicBool::new(false),
                 peak: AtomicUsize::new(0),
+                stressed: AtomicBool::new(false),
             }
         }
 
@@ -666,6 +679,10 @@ mod tests {
             options: ScanOptions,
         ) -> Result<Vec<(String, Vec<u8>)>> {
             self.inner.scan_prefix(key, options).await
+        }
+
+        fn saturated(&self) -> bool {
+            self.stressed.load(Ordering::SeqCst)
         }
     }
 
@@ -1016,6 +1033,25 @@ mod tests {
         writer.flush().await.unwrap();
         assert_eq!(writer.depth(), 0);
         assert!(!writer.saturated(), "a drained backlog re-opens the writer");
+    }
+
+    /// The backend's own write pressure is part of the writer's saturation
+    /// answer: a full database stops new engine work even while this writer's
+    /// backlog is still empty.
+    #[tokio::test]
+    async fn backend_pressure_is_reported_as_writer_saturation() {
+        let kv = Arc::new(TestKv::new());
+        let store = Arc::new(Store::new(kv.clone()));
+        let writer = StoreWriter::spawn(store, 2, 8, shared(2));
+        assert!(!writer.saturated());
+        kv.stressed.store(true, Ordering::SeqCst);
+        assert!(
+            writer.saturated(),
+            "the database's bounded pipeline must reach the engine's latch"
+        );
+        kv.stressed.store(false, Ordering::SeqCst);
+        assert!(!writer.saturated());
+        writer.close().await;
     }
 
     /// The write path is sharded by pid: ops of independent pids are applied

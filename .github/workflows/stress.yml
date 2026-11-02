@@ -11,9 +11,10 @@ name: stress
 # badges and in the report, never gated against a fixed number.
 #
 # A pull request runs a 1,000-workflow performance smoke at concurrency 16 for
-# both stores; main/develop, a weekly schedule, and manual dispatch run 100,000
-# workflows across 16/32/64/128 for memory and sled with a cleanup drain wait,
-# and publish the per-store reports and README badges to the `stress` branch.
+# every store; main/develop, a weekly schedule, and manual dispatch run 100,000
+# workflows across 16/32/64/128 for memory, sled and RocksDB with a cleanup
+# drain wait, and publish the per-store reports and README badges to the
+# `stress` branch. Sled and RocksDB run as four physical shards each.
 on:
   pull_request:
     paths:
@@ -66,11 +67,17 @@ env:
 jobs:
   stress:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        store: [memory, sled]
+        include:
+          - store: memory
+            shards: 1
+          - store: sled
+            shards: 4
+          - store: rocksdb
+            shards: 4
 
     steps:
       - uses: actions/checkout@v4
@@ -79,11 +86,14 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Install libclang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - name: Build the stress harness
         run: cargo build --release --locked -p acts-example-stress
 
       # The event picks the shape: a PR gets the short smoke (a build-sized run
-      # that still exercises commit/load/recovery/cleanup for both stores),
+      # that still exercises commit/load/recovery/cleanup for every store),
       # while the publishing legs get the full ramp. Manual inputs win on
       # dispatch.
       - name: Plan the run
@@ -122,9 +132,9 @@ jobs:
         run: |
           set +e
           output="$STRESS_OUTPUT/${{ matrix.store }}"
-          extra=()
-          if [ "${{ matrix.store }}" = "sled" ]; then
-            extra=(--store-url "$STRESS_OUTPUT/sled-store")
+          extra=(--store-shards "${{ matrix.shards }}")
+          if [ "${{ matrix.store }}" != "memory" ]; then
+            extra+=(--store-url "$STRESS_OUTPUT/${{ matrix.store }}-store")
           fi
           target/release/acts-example-stress \
             --count "${{ steps.plan.outputs.count }}" \
@@ -234,6 +244,13 @@ jobs:
           name: stress-report-sled
           path: target/stress-results/sled
 
+      - name: Download the rocksdb report
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: stress-report-rocksdb
+          path: target/stress-results/rocksdb
+
       - name: Render the reports and the badges
         shell: bash
         run: |
@@ -241,7 +258,7 @@ jobs:
           mkdir -p publish
           # shellcheck source=badge.sh
           source .github/scripts/badge.sh
-          for store in memory sled; do
+          for store in memory sled rocksdb; do
             dir="target/stress-results/$store"
             report="$dir/report.json"
             if [ -f "$report" ]; then

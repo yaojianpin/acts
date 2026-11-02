@@ -85,7 +85,7 @@ pub use event::{Action, Event, Message, MessageState};
 pub use export::actions;
 pub use export::{
     Channel, ChannelOptions, CpuStatus, Executor, HealthStatus, LoopStatus, MemoryStatus,
-    ProcessCounts, RunHandle, RunOutcome, StorageStatus, SystemStatus,
+    ProcessCounts, RunHandle, RunOutcome, StorageStatus, StoreWriterStatus, SystemStatus,
 };
 pub use model::*;
 pub use package::{
