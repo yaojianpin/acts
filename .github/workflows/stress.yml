@@ -10,10 +10,10 @@ name: stress
 # on a shared runner. Throughput and peak RSS are therefore *published* as
 # badges and in the report, never gated against a fixed number.
 #
-# A pull request runs a 1,000-workflow performance smoke at concurrency 16;
-# main/develop, a weekly schedule, and manual dispatch run 5,000 workflows
-# across 16/32/64 with a cleanup drain wait, and publish the report and the
-# README badges to the `stress` branch.
+# A pull request runs a 1,000-workflow performance smoke at concurrency 16 for
+# both stores; main/develop, a weekly schedule, and manual dispatch run 100,000
+# workflows across 16/32/64/128 for memory and sled with a cleanup drain wait,
+# and publish the per-store reports and README badges to the `stress` branch.
 on:
   pull_request:
     paths:
@@ -40,13 +40,13 @@ on:
   workflow_dispatch:
     inputs:
       count:
-        description: Measured workflows
+        description: Measured workflows per store
         required: false
-        default: '5000'
+        default: '100000'
       concurrency:
         description: Comma-separated concurrency stages
         required: false
-        default: '16,32,64'
+        default: '16,32,64,128'
       cleanup_wait_seconds:
         description: Seconds to wait for terminal cleanup after the last phase
         required: false
@@ -55,11 +55,6 @@ on:
         description: Steady-state soak seconds after the ramp (0 disables)
         required: false
         default: '0'
-      store:
-        description: Store backend
-        type: choice
-        options: [memory, sled, sqlite]
-        default: memory
 
 permissions:
   contents: read
@@ -71,7 +66,11 @@ env:
 jobs:
   stress:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [memory, sled]
 
     steps:
       - uses: actions/checkout@v4
@@ -84,8 +83,9 @@ jobs:
         run: cargo build --release --locked -p acts-example-stress
 
       # The event picks the shape: a PR gets the short smoke (a build-sized run
-      # that still exercises commit/load/recovery/cleanup), while the publishing
-      # legs get the full ramp. Manual inputs win on dispatch.
+      # that still exercises commit/load/recovery/cleanup for both stores),
+      # while the publishing legs get the full ramp. Manual inputs win on
+      # dispatch.
       - name: Plan the run
         id: plan
         shell: bash
@@ -96,14 +96,12 @@ jobs:
             concurrency=16
             cleanup=120
             soak=0
-            store=memory
             label=smoke
           else
-            count="${{ inputs.count }}"; count="${count:-5000}"
-            concurrency="${{ inputs.concurrency }}"; concurrency="${concurrency:-16,32,64}"
+            count="${{ inputs.count }}"; count="${count:-100000}"
+            concurrency="${{ inputs.concurrency }}"; concurrency="${concurrency:-16,32,64,128}"
             cleanup="${{ inputs.cleanup_wait_seconds }}"; cleanup="${cleanup:-300}"
             soak="${{ inputs.soak_seconds }}"; soak="${soak:-0}"
-            store="${{ inputs.store }}"; store="${store:-memory}"
             label=stress
           fi
           {
@@ -111,7 +109,6 @@ jobs:
             echo "concurrency=${concurrency}"
             echo "cleanup_wait_seconds=${cleanup}"
             echo "soak_seconds=${soak}"
-            echo "store=${store}"
             echo "label=${label}"
           } >> "$GITHUB_OUTPUT"
 
@@ -124,9 +121,10 @@ jobs:
         shell: bash
         run: |
           set +e
+          output="$STRESS_OUTPUT/${{ matrix.store }}"
           extra=()
-          if [ "${{ steps.plan.outputs.store }}" = "sled" ]; then
-            extra=(--store-url "$STRESS_OUTPUT/sled")
+          if [ "${{ matrix.store }}" = "sled" ]; then
+            extra=(--store-url "$STRESS_OUTPUT/sled-store")
           fi
           target/release/acts-example-stress \
             --count "${{ steps.plan.outputs.count }}" \
@@ -134,9 +132,9 @@ jobs:
             --warmup 100 \
             --soak-seconds "${{ steps.plan.outputs.soak_seconds }}" \
             --cleanup-wait-seconds "${{ steps.plan.outputs.cleanup_wait_seconds }}" \
-            --store "${{ steps.plan.outputs.store }}" \
+            --store "${{ matrix.store }}" \
             ${extra[@]+"${extra[@]}"} \
-            --output "$STRESS_OUTPUT" \
+            --output "$output" \
             --sample-ms 1000 \
             --max-error-rate-pct 0
           code=$?
@@ -148,13 +146,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "$STRESS_OUTPUT/report.json" ]; then
-            echo "## Stress: no report" >> "$GITHUB_STEP_SUMMARY"
+          report="$STRESS_OUTPUT/${{ matrix.store }}/report.json"
+          if [ ! -f "$report" ]; then
+            echo "## Stress (${{ matrix.store }}): no report" >> "$GITHUB_STEP_SUMMARY"
             echo "The harness exited before writing \`report.json\`; see the job log." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           {
-            echo "## Stress (${{ steps.plan.outputs.label }}: ${{ steps.plan.outputs.store }})"
+            echo "## Stress (${{ steps.plan.outputs.label }}: ${{ matrix.store }})"
             echo
             echo '| metric | value |'
             echo '| --- | --- |'
@@ -168,7 +167,7 @@ jobs:
               "| Residual aggregates / indexes | \(.residual_aggregate_documents) / \(.residual_index_documents) |",
               "| Degraded health samples | \(.degraded_health_samples) |",
               "| Elapsed | \(.elapsed_seconds * 10 | round / 10) s |"
-            ' "$STRESS_OUTPUT/report.json"
+            ' "$report"
             echo
             echo "Throughput and RSS are trend data, not a threshold: a shared runner's timings move by double-digit percents between runs. The gate is the invariant rows above."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -177,12 +176,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stress-report
+          name: stress-report-${{ matrix.store }}
           path: |
-            target/stress-results/report.md
-            target/stress-results/report.json
-            target/stress-results/metrics.csv
-            target/stress-results/trace.log
+            target/stress-results/${{ matrix.store }}/report.md
+            target/stress-results/${{ matrix.store }}/report.json
+            target/stress-results/${{ matrix.store }}/metrics.csv
+            target/stress-results/${{ matrix.store }}/trace.log
           if-no-files-found: warn
           retention-days: 30
 
@@ -192,15 +191,15 @@ jobs:
         run: |
           outcome="${{ steps.stress.outcome }}"
           if [ "$outcome" != "success" ]; then
-            echo "::error::examples/stress reported a failure (step outcome: ${outcome}); see the job summary and the stress-report artifact."
+            echo "::error::examples/stress reported a failure for ${{ matrix.store }} (step outcome: ${outcome}); see the job summary and the stress-report-${{ matrix.store }} artifact."
             exit 1
           fi
 
   # Publishing is the only write in this workflow and lives away from the run,
   # like coverage.yml's badge job. The `stress` branch (not the coverage
-  # workflow's `badges` branch) carries the report and the four SVGs the README
-  # reads, so the two publishing workflows never race on a branch or delete
-  # each other's files. A run that failed still publishes a FAIL status badge;
+  # workflow's `badges` branch) carries one report set and four SVGs per store,
+  # so the two publishing workflows never race on a branch or delete each
+  # other's files. A run that failed still publishes a FAIL status badge;
   # keep_files leaves the previous report and metric badges in place so the
   # status never points at a report from the broken run.
   publish:
@@ -221,47 +220,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      - name: Download the memory report
+        uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: stress-report
-          path: target/stress-results
+          name: stress-report-memory
+          path: target/stress-results/memory
 
-      - name: Render the report and the badges
+      - name: Download the sled report
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: stress-report-sled
+          path: target/stress-results/sled
+
+      - name: Render the reports and the badges
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p publish
-          if [ -f target/stress-results/report.json ]; then
-            cp target/stress-results/report.md publish/report.md
-            cp target/stress-results/report.json publish/report.json
-            bash .github/scripts/stress-badge.sh target/stress-results/report.json publish
-          else
-            echo "No report artifact; publishing a FAIL status badge only."
-            cat > publish/stress.svg <<'SVG'
-          <svg xmlns="http://www.w3.org/2000/svg" width="130" height="20" role="img" aria-label="stress: FAIL">
-            <title>stress: FAIL</title>
-            <defs>
-              <clipPath id="round"><rect width="130" height="20" rx="3" fill="#fff"/></clipPath>
-              <linearGradient id="shade" x2="0" y2="100%">
-                <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
-                <stop offset="1" stop-opacity=".1"/>
-              </linearGradient>
-            </defs>
-            <g clip-path="url(#round)">
-              <rect width="65" height="20" fill="#555"/>
-              <rect x="65" width="65" height="20" fill="#e05d44"/>
-              <rect width="130" height="20" fill="url(#shade)"/>
-            </g>
-            <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
-              <text x="32.5" y="15" fill="#010101" fill-opacity=".3">stress</text>
-              <text x="32.5" y="14">stress</text>
-              <text x="97.5" y="15" fill="#010101" fill-opacity=".3">FAIL</text>
-              <text x="97.5" y="14">FAIL</text>
-            </g>
-          </svg>
-          SVG
-          fi
+          # shellcheck source=badge.sh
+          source .github/scripts/badge.sh
+          for store in memory sled; do
+            dir="target/stress-results/$store"
+            report="$dir/report.json"
+            if [ -f "$report" ]; then
+              cp "$dir/report.md" "publish/report-$store.md"
+              cp "$report" "publish/report-$store.json"
+              cp "$dir/metrics.csv" "publish/metrics-$store.csv"
+              cp "$dir/trace.log" "publish/trace-$store.log"
+              bash .github/scripts/stress-badge.sh "$report" publish "$store"
+            else
+              echo "No $store report artifact; publishing a FAIL status badge only."
+              render_badge "stress $store" FAIL "#e05d44" 170 "publish/stress-$store.svg"
+            fi
+          done
 
       - uses: peaceiris/actions-gh-pages@v4
         with:

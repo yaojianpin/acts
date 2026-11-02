@@ -3,7 +3,8 @@
 [![Build](https://github.com/yaojianpin/acts/actions/workflows/rust.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=rust)
 [![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=test)
 [![Coverage](https://raw.githubusercontent.com/yaojianpin/acts/badges/coverage.svg)](https://github.com/yaojianpin/acts/actions/workflows/coverage.yml)
-[![Stress](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress.svg)](https://github.com/yaojianpin/acts/actions/workflows/stress.yml)
+[![Stress memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-memory.svg)](https://github.com/yaojianpin/acts/actions/workflows/stress.yml)
+[![Stress sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-sled.svg)](https://github.com/yaojianpin/acts/actions/workflows/stress.yml)
 [![Perf](https://raw.githubusercontent.com/yaojianpin/acts/perf/perf-memory.svg)](https://github.com/yaojianpin/acts/actions/workflows/perf.yml)
 
 Acts is a fast, lightweight, extensible workflow engine for workflows defined in YAML. It runs as an embedded Rust library or as a server, and it is durable by design: every run is a transactional aggregate, every state transition commits together with its outbox records, and an interrupted engine resumes exactly where its aggregate left off.
@@ -47,18 +48,19 @@ A started run is one aggregate; a client action (`act:*`, `proc:*`) is re-planne
 
 ## Performance and stress gates
 
-[![Stress](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress.svg)](https://github.com/yaojianpin/acts/blob/stress/report.md)
-[![Throughput](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-throughput.svg)](https://github.com/yaojianpin/acts/blob/stress/report.md)
-[![Peak RSS](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rss.svg)](https://github.com/yaojianpin/acts/blob/stress/report.md)
-[![Rows left](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rows.svg)](https://github.com/yaojianpin/acts/blob/stress/report.md)
+[![Stress memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md)
+[![Stress sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md)
 
-[`examples/stress`](examples/stress) is the load generator behind these numbers. The [`stress` workflow](.github/workflows/stress.yml) runs it on every pull request that touches the scheduler, the store, or the harness — a 1,000-workflow performance smoke at concurrency 16 — and on `main`/`develop`, weekly, and by manual dispatch with 5,000 workflows across concurrency 16/32/64 and a cleanup drain wait.
+| Store | Status | Throughput | Peak RSS | Rows left |
+| --- | --- | --- | --- | --- |
+| memory | [![stress memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) | [![throughput memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-throughput-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) | [![peak RSS memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rss-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) | [![rows left memory](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rows-memory.svg)](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) |
+| sled | [![stress sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) | [![throughput sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-throughput-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) | [![peak RSS sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rss-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) | [![rows left sled](https://raw.githubusercontent.com/yaojianpin/acts/stress/stress-rows-sled.svg)](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) |
+
+[`examples/stress`](examples/stress) is the load generator behind these numbers. The [`stress` workflow](.github/workflows/stress.yml) runs it for both stores on every pull request that touches the scheduler, the store, or the harness — a 1,000-workflow performance smoke at concurrency 16 — and on `main`/`develop`, weekly, and by manual dispatch with 100,000 workflows per store across concurrency 16/32/64/128 and a cleanup drain wait. Memory and sled run as separate jobs, so one store's number never stands in for the other.
 
 The gate is deterministic: every measured workflow completes, the error rate is zero, no phase times out, background health never degrades, and after the drain the process-row count, residual aggregate documents, and residual index documents are zero. Throughput and peak RSS are published as a trend — a shared runner's timings move by double-digit percents between runs, so they are not a regression threshold.
 
-The latest [`report.md`](https://github.com/yaojianpin/acts/blob/stress/report.md) (with `report.json`, `metrics.csv`, and `trace.log`) is published to the `stress` branch, and every run also attaches them as the `stress-report` artifact. Manual dispatch can choose the workflow count, concurrency stages, cleanup wait, soak, and store backend (memory by default; sled/sqlite for the durable paths).
-
-Reference run (memory store, 8-core workstation, 10,000 workflows at c16/32/64): **82.4 workflows/s**, **0.24 GiB peak RSS**, **0 rows / 0 aggregate documents / 0 index documents after the cleanup wait**, 0 degraded health samples.
+The latest [`report-memory.md`](https://github.com/yaojianpin/acts/blob/stress/report-memory.md) and [`report-sled.md`](https://github.com/yaojianpin/acts/blob/stress/report-sled.md) (each with `report-<store>.json`, `metrics-<store>.csv`, and `trace-<store>.log`) are published to the `stress` branch, and every run also attaches them as the `stress-report-memory` and `stress-report-sled` artifacts. Manual dispatch can choose the workflow count, concurrency stages, cleanup wait, and soak; every publishing run covers both stores.
 
 ### Completion microbenchmark (`examples/perf`)
 

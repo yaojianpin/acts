@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Render the README's stress badges from the report `examples/stress` writes.
+# Render the README's per-store stress badges from the report `examples/stress` writes.
 #
 # Like coverage-badge.sh, these are files this repository renders and stores,
 # not images fetched from a badge service: no account, no upload token, and
@@ -9,10 +9,13 @@
 # them; the README reads that branch, so a badge is a commit traceable to the
 # run that produced it.
 #
-# Usage: stress-badge.sh <report.json> <out-dir>
+# Usage: stress-badge.sh <report.json> <out-dir> <store>
 #
 # `<report.json>` is the `FinalReport` the harness writes (`status`,
 # `workflows_per_second`, `max_rss_bytes`, `final_process_rows`, ...).
+# `<store>` names the badge files (`stress-<store>.svg`,
+# `stress-throughput-<store>.svg`, ...) so memory and sled never overwrite
+# each other.
 
 set -euo pipefail
 
@@ -20,8 +23,9 @@ set -euo pipefail
 # and the harness's own report must agree on the decimal point.
 export LC_ALL=C
 
-report="${1:?usage: stress-badge.sh <report.json> <out-dir>}"
-out="${2:?usage: stress-badge.sh <report.json> <out-dir>}"
+report="${1:?usage: stress-badge.sh <report.json> <out-dir> <store>}"
+out="${2:?usage: stress-badge.sh <report.json> <out-dir> <store>}"
+store="${3:?usage: stress-badge.sh <report.json> <out-dir> <store>}"
 mkdir -p "$out"
 
 status="$(jq -r '.status // "FAIL"' "$report")"
@@ -52,9 +56,9 @@ fi
 # shellcheck source=badge.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/badge.sh"
 
-render_badge "stress" "$status" "$status_color" 130 "$out/stress.svg"
-render_badge "throughput" "$throughput_value" "#007ec6" 160 "$out/stress-throughput.svg"
-render_badge "peak RSS" "$rss_value" "#007ec6" 150 "$out/stress-rss.svg"
-render_badge "rows left" "$rows" "$rows_color" 140 "$out/stress-rows.svg"
+render_badge "stress ${store}" "$status" "$status_color" 170 "$out/stress-${store}.svg"
+render_badge "throughput" "$throughput_value" "#007ec6" 160 "$out/stress-throughput-${store}.svg"
+render_badge "peak RSS" "$rss_value" "#007ec6" 150 "$out/stress-rss-${store}.svg"
+render_badge "rows left" "$rows" "$rows_color" 140 "$out/stress-rows-${store}.svg"
 
-echo "stress: ${status} | ${throughput_value} | peak ${rss_value} | ${rows} rows -> ${out}"
+echo "stress ${store}: ${status} | ${throughput_value} | peak ${rss_value} | ${rows} rows -> ${out}"
