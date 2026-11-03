@@ -25,11 +25,12 @@ use acts::{
     StoreView,
 };
 use rocksdb::{
-    DBCompressionType, Env, Options, ReadOptions, SingleThreaded, TransactionDB,
-    TransactionDBOptions, WriteBatchWithTransaction,
+    DBCompressionType, Env, InfoLogger, LogLevel, Options, ReadOptions, SingleThreaded,
+    TransactionDB, TransactionDBOptions, WriteBatchWithTransaction,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Writes one physical RocksDB database admits at once by default. The engine
 /// already runs one consumer per store-writer shard; this bound is the second
@@ -99,15 +100,28 @@ impl RocksdbStore {
 
     /// An in-memory database. Tests and short-lived embedders use it; it has
     /// no file footprint, so [`KvStore::usage`] reports `None` bytes.
+    ///
+    /// The `rocksdb` crate calls `fs::create_dir_all` on the database path
+    /// before the memory environment sees it, so that directory must be
+    /// creatable by the caller. A root-anchored name such as
+    /// `/acts-rocksdb-memory` lands on the filesystem root and is rejected for
+    /// an unprivileged process (the CI runner included), so the scratch
+    /// directory comes from the host temp directory and is removed as soon as
+    /// the handle exists. Every file RocksDB creates afterwards lives in the
+    /// memory environment.
     #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self> {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
         let env = Env::mem_env().map_err(|e| ActError::Store(e.to_string()))?;
-        Self::open_configured(
-            "/acts-rocksdb-memory",
-            RocksdbOptions::default(),
-            Some(env),
-            None,
-        )
+        let scratch = std::env::temp_dir().join(format!(
+            "acts-rocksdb-memory-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = scratch.to_string_lossy();
+        let store = Self::open_configured(&path, RocksdbOptions::default(), Some(env), None);
+        let _ = std::fs::remove_dir_all(&scratch);
+        store
     }
 
     fn open_configured(
@@ -136,6 +150,13 @@ impl RocksdbStore {
         opts.set_keep_log_file_num(8);
         if let Some(env) = &env {
             opts.set_env(env);
+            // The memory environment resolves absolute paths only for
+            // `/`-anchored names, so the default info logger (which asks the
+            // environment for the database's absolute path) fails a Windows
+            // open; there is also no host file for it to write. A callback
+            // logger keeps the in-memory open independent of the host
+            // filesystem.
+            opts.set_info_logger(InfoLogger::new_callback_logger(LogLevel::Error, |_, _| {}));
         }
 
         let mut txn_opts = TransactionDBOptions::new();

@@ -135,18 +135,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "acts-example-perf"
-version = "0.1.0"
-dependencies = [
- "acts",
- "acts-store",
- "parking_lot 0.12.5",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "acts-example-plugin-grpc"
 version = "0.1.0"
 dependencies = [

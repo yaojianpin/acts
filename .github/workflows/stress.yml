@@ -7,14 +7,18 @@ name: stress
 # and after the cleanup drain the read model and the durable aggregate family
 # are empty. Those are invariants of the engine, not timings — the repo's
 # `bench-compile` job explains why a wall-clock threshold would be a random red
-# on a shared runner. Throughput and peak RSS are therefore *published* as
-# badges and in the report, never gated against a fixed number.
+# on a shared runner. Throughput, peak RSS and latency are therefore *published*
+# as badges and in the report, never gated against a fixed number.
 #
 # A pull request runs a 1,000-workflow performance smoke at concurrency 16 for
-# every store; main/develop, a weekly schedule, and manual dispatch run 100,000
-# workflows across 16/32/64/128 for memory, sled and RocksDB with a cleanup
-# drain wait, and publish the per-store reports and README badges to the
-# `stress` branch. Sled and RocksDB run as four physical shards each.
+# every store. The publishing shape stages the durable stores: three tiers whose
+# counts total 1,000,000 workflows per store and whose scheduler workers, store
+# writer workers and physical shards ramp 4/4/4 -> 8/8/8 -> 16/16/16. Each tier
+# is its own job after the baseline passes, so a slow tier cannot hide the
+# smaller reports, and no job approaches the GitHub 6-hour cap (the 100,000-
+# workflow baseline takes ~29 min for sled and ~38 min for RocksDB on the
+# 4-core runner). Memory keeps its harness-derived workers and one store, at
+# 100,000 workflows. The concurrency ramp inside every run stays 16/32/64/128.
 on:
   pull_request:
     paths:
@@ -37,13 +41,9 @@ on:
       - '.github/scripts/stress-badge.sh'
   schedule:
     # Monday 03:00 UTC — a weekly trend point even on quiet weeks.
-    - cron: '0 3 * * 1'
+    - cron: '0 3 * * 2'
   workflow_dispatch:
     inputs:
-      count:
-        description: Measured workflows per store
-        required: false
-        default: '100000'
       concurrency:
         description: Comma-separated concurrency stages
         required: false
@@ -67,19 +67,32 @@ env:
 jobs:
   stress:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Memory has no physical shards to scale; keep the existing baseline.
           - store: memory
+            tier: baseline
             shards: 1
+            workers: ''
+            store_workers: ''
+            count: 100000
           - store: sled
+            tier: baseline
             shards: 4
+            workers: 4
+            store_workers: 4
+            count: 100000
           - store: rocksdb
+            tier: baseline
             shards: 4
+            workers: 4
+            store_workers: 4
+            count: 100000
 
-    steps:
+    steps: &stress_steps
       - uses: actions/checkout@v4
       - uses: actions-rs/toolchain@v1
         with:
@@ -94,8 +107,8 @@ jobs:
 
       # The event picks the shape: a PR gets the short smoke (a build-sized run
       # that still exercises commit/load/recovery/cleanup for every store),
-      # while the publishing legs get the full ramp. Manual inputs win on
-      # dispatch.
+      # while the publishing legs use the tier's own count. Manual inputs win on
+      # dispatch for the concurrency, cleanup and soak knobs.
       - name: Plan the run
         id: plan
         shell: bash
@@ -108,7 +121,7 @@ jobs:
             soak=0
             label=smoke
           else
-            count="${{ inputs.count }}"; count="${count:-100000}"
+            count="${{ matrix.count }}"
             concurrency="${{ inputs.concurrency }}"; concurrency="${concurrency:-16,32,64,128}"
             cleanup="${{ inputs.cleanup_wait_seconds }}"; cleanup="${cleanup:-300}"
             soak="${{ inputs.soak_seconds }}"; soak="${soak:-0}"
@@ -131,10 +144,16 @@ jobs:
         shell: bash
         run: |
           set +e
-          output="$STRESS_OUTPUT/${{ matrix.store }}"
+          output="$STRESS_OUTPUT/${{ matrix.store }}-${{ matrix.tier }}"
           extra=(--store-shards "${{ matrix.shards }}")
+          if [ -n "${{ matrix.workers }}" ]; then
+            extra+=(--workers "${{ matrix.workers }}")
+          fi
+          if [ -n "${{ matrix.store_workers }}" ]; then
+            extra+=(--store-workers "${{ matrix.store_workers }}")
+          fi
           if [ "${{ matrix.store }}" != "memory" ]; then
-            extra+=(--store-url "$STRESS_OUTPUT/${{ matrix.store }}-store")
+            extra+=(--store-url "$STRESS_OUTPUT/${{ matrix.store }}-${{ matrix.tier }}-store")
           fi
           target/release/acts-example-stress \
             --count "${{ steps.plan.outputs.count }}" \
@@ -156,14 +175,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          report="$STRESS_OUTPUT/${{ matrix.store }}/report.json"
+          report="$STRESS_OUTPUT/${{ matrix.store }}-${{ matrix.tier }}/report.json"
           if [ ! -f "$report" ]; then
-            echo "## Stress (${{ matrix.store }}): no report" >> "$GITHUB_STEP_SUMMARY"
+            echo "## Stress (${{ matrix.store }} ${{ matrix.tier }}): no report" >> "$GITHUB_STEP_SUMMARY"
             echo "The harness exited before writing \`report.json\`; see the job log." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           {
-            echo "## Stress (${{ steps.plan.outputs.label }}: ${{ matrix.store }})"
+            echo "## Stress (${{ steps.plan.outputs.label }}: ${{ matrix.store }} ${{ matrix.tier }})"
             echo
             echo '| metric | value |'
             echo '| --- | --- |'
@@ -186,12 +205,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stress-report-${{ matrix.store }}
+          name: stress-report-${{ matrix.store }}-${{ matrix.tier }}
           path: |
-            target/stress-results/${{ matrix.store }}/report.md
-            target/stress-results/${{ matrix.store }}/report.json
-            target/stress-results/${{ matrix.store }}/metrics.csv
-            target/stress-results/${{ matrix.store }}/trace.log
+            target/stress-results/${{ matrix.store }}-${{ matrix.tier }}/report.md
+            target/stress-results/${{ matrix.store }}-${{ matrix.tier }}/report.json
+            target/stress-results/${{ matrix.store }}-${{ matrix.tier }}/metrics.csv
+            target/stress-results/${{ matrix.store }}-${{ matrix.tier }}/trace.log
           if-no-files-found: warn
           retention-days: 30
 
@@ -201,19 +220,60 @@ jobs:
         run: |
           outcome="${{ steps.stress.outcome }}"
           if [ "$outcome" != "success" ]; then
-            echo "::error::examples/stress reported a failure for ${{ matrix.store }} (step outcome: ${outcome}); see the job summary and the stress-report-${{ matrix.store }} artifact."
+            echo "::error::examples/stress reported a failure for ${{ matrix.store }} ${{ matrix.tier }} (step outcome: ${outcome}); see the job summary and the stress-report-${{ matrix.store }}-${{ matrix.tier }} artifact."
             exit 1
           fi
 
+  # The publishing tiers run after the baseline passes, on main/develop, the
+  # schedule and manual dispatch; a PR runs only the baseline job above. The
+  # steps come from the same YAML anchor, so the two matrices cannot drift. Each
+  # durable store's tiers total 1,000,000 workflows, and scheduler workers,
+  # store writers and shards ramp together.
+  stress-tiers:
+    needs: stress
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - store: sled
+            tier: scale
+            shards: 8
+            workers: 8
+            store_workers: 8
+            count: 300000
+          - store: sled
+            tier: peak
+            shards: 16
+            workers: 16
+            store_workers: 16
+            count: 600000
+          - store: rocksdb
+            tier: scale
+            shards: 8
+            workers: 8
+            store_workers: 8
+            count: 300000
+          - store: rocksdb
+            tier: peak
+            shards: 16
+            workers: 16
+            store_workers: 16
+            count: 600000
+
+    steps: *stress_steps
+
   # Publishing is the only write in this workflow and lives away from the run,
   # like coverage.yml's badge job. The `stress` branch (not the coverage
-  # workflow's `badges` branch) carries one report set and four SVGs per store,
+  # workflow's `badges` branch) carries one report set and nine SVGs per store,
   # so the two publishing workflows never race on a branch or delete each
   # other's files. A run that failed still publishes a FAIL status badge;
   # keep_files leaves the previous report and metric badges in place so the
   # status never points at a report from the broken run.
   publish:
-    needs: stress
+    needs: [stress, stress-tiers]
     if: >-
       always()
       && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
@@ -230,26 +290,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download the memory report
+      - name: Download the tiered reports
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: stress-report-memory
-          path: target/stress-results/memory
-
-      - name: Download the sled report
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: stress-report-sled
-          path: target/stress-results/sled
-
-      - name: Download the rocksdb report
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: stress-report-rocksdb
-          path: target/stress-results/rocksdb
+          pattern: stress-report-*
+          path: target/stress-results
 
       - name: Render the reports and the badges
         shell: bash
@@ -259,14 +305,26 @@ jobs:
           # shellcheck source=badge.sh
           source .github/scripts/badge.sh
           for store in memory sled rocksdb; do
-            dir="target/stress-results/$store"
-            report="$dir/report.json"
-            if [ -f "$report" ]; then
+            # A tier that did not finish has no artifact. Publish the largest
+            # tier that did, so a skipped or timed-out peak never hides the
+            # smaller tiers' report.
+            best=""
+            best_count=-1
+            for candidate in target/stress-results/stress-report-"$store"-*/report.json; do
+              [ -f "$candidate" ] || continue
+              count="$(jq -r '.config.measured_workflows // 0' "$candidate")"
+              if [ "$count" -gt "$best_count" ]; then
+                best="$candidate"
+                best_count="$count"
+              fi
+            done
+            if [ -n "$best" ]; then
+              dir="$(dirname "$best")"
               cp "$dir/report.md" "publish/report-$store.md"
-              cp "$report" "publish/report-$store.json"
+              cp "$best" "publish/report-$store.json"
               cp "$dir/metrics.csv" "publish/metrics-$store.csv"
               cp "$dir/trace.log" "publish/trace-$store.log"
-              bash .github/scripts/stress-badge.sh "$report" publish "$store"
+              bash .github/scripts/stress-badge.sh "$best" publish "$store"
             else
               echo "No $store report artifact; publishing a FAIL status badge only."
               render_badge "stress $store" FAIL "#e05d44" 170 "publish/stress-$store.svg"

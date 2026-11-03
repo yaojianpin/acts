@@ -416,8 +416,7 @@ lease 是单行 guard，检查必须和写入在同一个原子单元。跨物�
 | `crates/acts-cli/src/cmd/status.rs` | backpressure 行渲染 |
 | `crates/acts-server/src/lib.rs` | `[db].shards` 解析、lease 拒绝、draining/rebalance 校验、sharded sled 打开 |
 
-`examples/stress` 与 `examples/perf` 的 CI 矩阵分别把 `sled`、`rocksdb` 跑成
-4 个物理分片；`RocksdbStore` 还需要 bindgen 的 `libclang`（C++ 源码由 `cc`
+`examples/stress` 的 CI 矩阵把 `sled`、`rocksdb` 分别跑成 16 个物理分片（与 16 个 store writer lane 对齐；更多数据库只增加后台线程和文件句柄，不增加写并行度）；`RocksdbStore` 还需要 bindgen 的 `libclang`（C++ 源码由 `cc`
 编译，不需要 cmake）。
 
 ---
