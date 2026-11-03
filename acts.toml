@@ -96,7 +96,7 @@ max_files = 168
 [db]
 type = "sled"
 database_url = "./data"
-lease = true
+# lease = true
 # lease_ttl_secs = 30
 # lease_renew_secs = 10
 # lease_owner = "acts-1"
