@@ -54,9 +54,10 @@ fi
 
 # The latency columns come from the highest-concurrency load stage: it is the
 # one stage comparable across stores, unlike warmup or the post-stress smoke.
-# `max_by` picks c128 for the default 16/32/64/128 ramp, and a manual ramp with
-# a different last stage still picks its own maximum. End-to-end latency covers
-# submission, queueing and execution, in milliseconds.
+# `max_by` picks c16 for the default single-stage ramp; a manual ramp (for
+# example 16,32,64) still picks its own maximum. Past c32 the closed loop
+# mostly measures queueing, which is why the default no longer goes there.
+# End-to-end latency covers submission, queueing and execution, in ms.
 latency="$(jq -r '
   [.phases[]
    | select(.name | startswith("load-"))

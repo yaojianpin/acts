@@ -12,13 +12,18 @@ name: stress
 #
 # A pull request runs a 1,000-workflow performance smoke at concurrency 16 for
 # every store. The publishing shape stages the durable stores: three tiers whose
-# counts total 1,000,000 workflows per store and whose scheduler workers, store
-# writer workers and physical shards ramp 4/4/4 -> 8/8/8 -> 16/16/16. Each tier
-# is its own job after the baseline passes, so a slow tier cannot hide the
-# smaller reports, and no job approaches the GitHub 6-hour cap (the 100,000-
-# workflow baseline takes ~29 min for sled and ~38 min for RocksDB on the
-# 4-core runner). Memory keeps its harness-derived workers and one store, at
-# 100,000 workflows. The concurrency ramp inside every run stays 16/32/64/128.
+# counts total 1,000,000 workflows per store (100,000 -> 300,000 -> 600,000).
+# Every tier runs the same 4 scheduler workers, 4 store writers and 4 physical
+# shards: the workload is CPU-bound on the runner's 4 vCPUs (4/4/4 already peaks
+# at 354-385% of 400%), so a worker ramp cannot add throughput. Each tier is its
+# own job after the baseline passes, so a slow tier cannot hide the smaller
+# reports. Every harness step has a hard timeout (60/150/300 min), so a stalled
+# run fails the gate instead of consuming the job's 6-hour cap (the 100,000-
+# workflow baseline takes ~13 min for memory, ~29 min for sled and ~38 min for
+# RocksDB on the 4-core runner). Memory keeps one store and one shard, at
+# 100,000 workflows. Every run uses concurrency 16, the measured throughput
+# knee; a manual dispatch can still request a ramp (for example 16,32,64) and
+# the latency badges then publish its highest stage.
 on:
   pull_request:
     paths:
@@ -41,13 +46,13 @@ on:
       - '.github/scripts/stress-badge.sh'
   schedule:
     # Monday 03:00 UTC — a weekly trend point even on quiet weeks.
-    - cron: '0 3 * * 2'
+    - cron: '0 3 * * 3'
   workflow_dispatch:
     inputs:
       concurrency:
-        description: Comma-separated concurrency stages
+        description: Comma-separated concurrency stages (16 is the throughput knee)
         required: false
-        default: '16,32,64,128'
+        default: '16'
       cleanup_wait_seconds:
         description: Seconds to wait for terminal cleanup after the last phase
         required: false
@@ -72,25 +77,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Memory has no physical shards to scale; keep the existing baseline.
+          # Memory has no physical shards to scale; pin the workers anyway so a
+          # different runner's core count cannot change the run.
           - store: memory
             tier: baseline
             shards: 1
-            workers: ''
-            store_workers: ''
+            workers: 4
+            store_workers: 4
             count: 100000
+            timeout: 60
           - store: sled
             tier: baseline
             shards: 4
             workers: 4
             store_workers: 4
             count: 100000
+            timeout: 60
           - store: rocksdb
             tier: baseline
             shards: 4
             workers: 4
             store_workers: 4
             count: 100000
+            timeout: 60
 
     steps: &stress_steps
       - uses: actions/checkout@v4
@@ -122,7 +131,7 @@ jobs:
             label=smoke
           else
             count="${{ matrix.count }}"
-            concurrency="${{ inputs.concurrency }}"; concurrency="${concurrency:-16,32,64,128}"
+            concurrency="${{ inputs.concurrency }}"; concurrency="${concurrency:-16}"
             cleanup="${{ inputs.cleanup_wait_seconds }}"; cleanup="${cleanup:-300}"
             soak="${{ inputs.soak_seconds }}"; soak="${soak:-0}"
             label=stress
@@ -141,6 +150,11 @@ jobs:
         # summary still have to be produced, so the step itself tolerates the
         # code and the "Enforce" step below fails the job.
         continue-on-error: true
+        # Hard stop for a stalled engine. Without it a hang burns the job's
+        # 6-hour cap and only surfaces as `cancelled` at the very end; the
+        # report and summary run under `always()`, and Enforce fails the job
+        # when this step did not succeed. A manual soak must fit the timeout.
+        timeout-minutes: ${{ matrix.timeout }}
         shell: bash
         run: |
           set +e
@@ -220,15 +234,16 @@ jobs:
         run: |
           outcome="${{ steps.stress.outcome }}"
           if [ "$outcome" != "success" ]; then
-            echo "::error::examples/stress reported a failure for ${{ matrix.store }} ${{ matrix.tier }} (step outcome: ${outcome}); see the job summary and the stress-report-${{ matrix.store }}-${{ matrix.tier }} artifact."
+            echo "::error::examples/stress did not pass for ${{ matrix.store }} ${{ matrix.tier }} (step outcome: ${outcome}); see the job summary and the stress-report-${{ matrix.store }}-${{ matrix.tier }} artifact."
             exit 1
           fi
 
   # The publishing tiers run after the baseline passes, on main/develop, the
   # schedule and manual dispatch; a PR runs only the baseline job above. The
   # steps come from the same YAML anchor, so the two matrices cannot drift. Each
-  # durable store's tiers total 1,000,000 workflows, and scheduler workers,
-  # store writers and shards ramp together.
+  # durable store's tiers total 1,000,000 workflows; only the count grows, while
+  # workers, store writers and shards stay at the baseline's 4/4/4 because the
+  # 4-vCPU runner is already CPU-bound.
   stress-tiers:
     needs: stress
     if: github.event_name != 'pull_request'
@@ -240,28 +255,32 @@ jobs:
         include:
           - store: sled
             tier: scale
-            shards: 8
-            workers: 8
-            store_workers: 8
+            shards: 4
+            workers: 4
+            store_workers: 4
             count: 300000
+            timeout: 150
           - store: sled
             tier: peak
-            shards: 16
-            workers: 16
-            store_workers: 16
+            shards: 4
+            workers: 4
+            store_workers: 4
             count: 600000
+            timeout: 300
           - store: rocksdb
             tier: scale
-            shards: 8
-            workers: 8
-            store_workers: 8
+            shards: 4
+            workers: 4
+            store_workers: 4
             count: 300000
+            timeout: 150
           - store: rocksdb
             tier: peak
-            shards: 16
-            workers: 16
-            store_workers: 16
+            shards: 4
+            workers: 4
+            store_workers: 4
             count: 600000
+            timeout: 300
 
     steps: *stress_steps
 
