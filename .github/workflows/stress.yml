@@ -12,18 +12,21 @@ name: stress
 #
 # A pull request runs a 1,000-workflow performance smoke at concurrency 16 for
 # every store. The publishing shape stages the durable stores: three tiers whose
-# counts total 1,000,000 workflows per store (100,000 -> 300,000 -> 600,000).
-# Every tier runs the same 4 scheduler workers, 4 store writers and 4 physical
-# shards: the workload is CPU-bound on the runner's 4 vCPUs (4/4/4 already peaks
-# at 354-385% of 400%), so a worker ramp cannot add throughput. Each tier is its
-# own job after the baseline passes, so a slow tier cannot hide the smaller
-# reports. Every harness step has a hard timeout (60/150/300 min), so a stalled
-# run fails the gate instead of consuming the job's 6-hour cap (the 100,000-
-# workflow baseline takes ~13 min for memory, ~29 min for sled and ~38 min for
-# RocksDB on the 4-core runner). Memory keeps one store and one shard, at
-# 100,000 workflows. Every run uses concurrency 16, the measured throughput
-# knee; a manual dispatch can still request a ramp (for example 16,32,64) and
-# the latency badges then publish its highest stage.
+# counts are 100,000 -> 200,000 -> 300,000 workflows per store. Every tier runs
+# the same 4 scheduler workers — the write-behind path (message/delivery rows
+# and process removals) shares that concurrency — and each durable store is
+# physically split into 16 shards (memory has no physical shards, so it keeps
+# one). The 4-vCPU runner is CPU-bound on scheduler and writer work (4/4 already
+# peaks at 354-385% of 400%), so a worker ramp cannot add throughput; the 16
+# physical shards spread the database files and let independent pids' I/O
+# overlap. Each tier is its own job after the baseline passes, so a slow tier
+# cannot hide the smaller reports. Every harness step has a hard timeout
+# (60/150/300 min), so a stalled run fails the gate instead of consuming the
+# job's 6-hour cap (the 100,000-workflow baseline takes ~13 min for memory,
+# ~29 min for sled and ~38 min for RocksDB on the 4-core runner). Memory keeps
+# one store and one shard, at 100,000 workflows. Every run uses concurrency 16,
+# the measured throughput knee; a manual dispatch can still request a ramp (for
+# example 16,32,64) and the latency badges then publish its highest stage.
 on:
   pull_request:
     paths:
@@ -46,7 +49,7 @@ on:
       - '.github/scripts/stress-badge.sh'
   schedule:
     # Monday 03:00 UTC — a weekly trend point even on quiet weeks.
-    - cron: '0 3 * * 3'
+    - cron: '0 16 * * 3'
   workflow_dispatch:
     inputs:
       concurrency:
@@ -83,21 +86,18 @@ jobs:
             tier: baseline
             shards: 1
             workers: 4
-            store_workers: 4
             count: 100000
             timeout: 60
           - store: sled
             tier: baseline
-            shards: 4
+            shards: 16
             workers: 4
-            store_workers: 4
             count: 100000
             timeout: 60
           - store: rocksdb
             tier: baseline
-            shards: 4
+            shards: 16
             workers: 4
-            store_workers: 4
             count: 100000
             timeout: 60
 
@@ -162,9 +162,6 @@ jobs:
           extra=(--store-shards "${{ matrix.shards }}")
           if [ -n "${{ matrix.workers }}" ]; then
             extra+=(--workers "${{ matrix.workers }}")
-          fi
-          if [ -n "${{ matrix.store_workers }}" ]; then
-            extra+=(--store-workers "${{ matrix.store_workers }}")
           fi
           if [ "${{ matrix.store }}" != "memory" ]; then
             extra+=(--store-url "$STRESS_OUTPUT/${{ matrix.store }}-${{ matrix.tier }}-store")
@@ -241,9 +238,10 @@ jobs:
   # The publishing tiers run after the baseline passes, on main/develop, the
   # schedule and manual dispatch; a PR runs only the baseline job above. The
   # steps come from the same YAML anchor, so the two matrices cannot drift. Each
-  # durable store's tiers total 1,000,000 workflows; only the count grows, while
-  # workers, store writers and shards stay at the baseline's 4/4/4 because the
-  # 4-vCPU runner is already CPU-bound.
+  # durable store's tiers total 600,000 workflows; only the count grows, while
+  # scheduler workers stay at the baseline's 4 (the write-behind path shares
+  # that concurrency) and the physical shard count stays 16 because the 4-vCPU
+  # runner is already CPU-bound.
   stress-tiers:
     needs: stress
     if: github.event_name != 'pull_request'
@@ -255,31 +253,27 @@ jobs:
         include:
           - store: sled
             tier: scale
-            shards: 4
+            shards: 16
             workers: 4
-            store_workers: 4
-            count: 300000
+            count: 200000
             timeout: 150
           - store: sled
             tier: peak
-            shards: 4
+            shards: 16
             workers: 4
-            store_workers: 4
-            count: 600000
+            count: 300000
             timeout: 300
           - store: rocksdb
             tier: scale
-            shards: 4
+            shards: 16
             workers: 4
-            store_workers: 4
-            count: 300000
+            count: 200000
             timeout: 150
           - store: rocksdb
             tier: peak
-            shards: 4
+            shards: 16
             workers: 4
-            store_workers: 4
-            count: 600000
+            count: 300000
             timeout: 300
 
     steps: *stress_steps

@@ -163,18 +163,10 @@ impl EngineBuilder {
         self
     }
 
-    /// Set the number of concurrent store-writer shards. Independent pids are
-    /// persisted concurrently, one consumer per shard; the ops of one pid
-    /// always land in the same shard and keep their enqueue order.
-    pub fn store_writer_workers(mut self, workers: usize) -> Self {
-        self.config_mut().data.store_writer_workers = Some(workers);
-        self
-    }
-
-    /// Set the maximum store-writer backlog. It is split across the shards; a
-    /// shard with no room makes the writer refuse new work (`QueueFull`) until
-    /// the backlog drains, while the bookkeeping of work already in flight
-    /// waits for room.
+    /// Set the maximum write-behind backlog. It is split across the write-behind
+    /// consumers (one per scheduler lane); a queue with no room makes the writer
+    /// refuse new work (`QueueFull`) until the backlog drains, while the
+    /// bookkeeping of work already in flight waits for room.
     pub fn store_writer_queue_cap(mut self, cap: usize) -> Self {
         self.config_mut().data.store_writer_queue_cap = Some(cap);
         self
@@ -379,7 +371,6 @@ mod tests {
             .max_node_run_times(5)
             .scheduler_workers(2)
             .scheduler_queue_cap(16)
-            .store_writer_workers(3)
             .store_writer_queue_cap(32)
             .tick_interval_secs(7)
             .cache_size(64)
@@ -392,7 +383,6 @@ mod tests {
         );
         assert_eq!(config.data.scheduler_workers, Some(2));
         assert_eq!(config.data.scheduler_queue_cap, Some(16));
-        assert_eq!(config.data.store_writer_workers, Some(3));
         assert_eq!(config.data.store_writer_queue_cap, Some(32));
         assert_eq!(config.data.tick_interval_secs, Some(7));
         assert_eq!(config.data.cache_cap, Some(64));

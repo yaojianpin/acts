@@ -100,7 +100,6 @@ struct Options {
     sample_ms: u64,
     timeout_seconds: u64,
     scheduler_workers: usize,
-    store_workers: usize,
     /// `sled` (durable, `./data`), `memory`, `rocksdb`, `sqlite` or
     /// `postgres`.
     store: String,
@@ -137,7 +136,6 @@ impl Options {
             sample_ms: DEFAULT_SAMPLE_MS,
             timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
             scheduler_workers: cores.clamp(4, 32),
-            store_workers: cores.clamp(4, 8),
             store: "sled".to_string(),
             store_shards: 1,
             store_url: None,
@@ -179,10 +177,6 @@ impl Options {
                     options.scheduler_workers =
                         parse_num(&value(&mut args, "--workers")?, "workers")?;
                 }
-                "--store-workers" => {
-                    options.store_workers =
-                        parse_num(&value(&mut args, "--store-workers")?, "store-workers")?;
-                }
                 "--store" => options.store = value(&mut args, "--store")?,
                 "--store-shards" => {
                     options.store_shards =
@@ -216,11 +210,11 @@ impl Options {
         if options.warmup == 0 || options.sample_ms == 0 || options.timeout_seconds == 0 {
             return Err("warmup, sample-ms and timeout-seconds must be greater than zero".into());
         }
-        if options.scheduler_workers == 0 || options.store_workers == 0 {
-            return Err("workers and store-workers must be greater than zero".into());
+        if options.scheduler_workers == 0 {
+            return Err("--workers must be greater than zero".into());
         }
-        if options.scheduler_workers > 1_024 || options.store_workers > 1_024 {
-            return Err("workers and store-workers cannot exceed 1024".into());
+        if options.scheduler_workers > 1_024 {
+            return Err("--workers cannot exceed 1024".into());
         }
         if options.concurrency.iter().any(|n| *n > 8_192) {
             return Err("a concurrency stage cannot exceed 8192 workers".into());
@@ -265,7 +259,6 @@ fn print_help() {
                                      (0 disables, default 0)\n\
            --timeout-seconds N       Per-workflow completion timeout, default 120\n\
            --workers N               Scheduler lanes, default min(half the cores, 32)\n\
-           --store-workers N         Store writer shards, default min(half the cores, 8)\n\
            --store BACKEND           sled (default, ./data, 50ms background flush),\n\
                                      memory, sqlite, postgres\n\
            --store-url URL           Sled directory, SQLite file path, or Postgres URL\n\
@@ -451,7 +444,6 @@ struct ConfigReport {
     soak_seconds: u64,
     cleanup_wait_seconds: u64,
     scheduler_workers: usize,
-    store_writer_workers: usize,
     store_shards: usize,
     cache_cap: usize,
     scheduler_queue_cap: usize,
@@ -908,7 +900,7 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
     ));
     md.push_str("## Test configuration\n\n");
     md.push_str(&format!(
-        "- Workload: {}\n- Host: {} / {} ({} logical CPUs)\n- Concurrency stages: {:?}\n- Warmup workflows: {}\n- Steady-state soak: {}s\n- Cleanup drain wait: {}s\n- Scheduler workers: {}\n- Store writer workers: {}\n- Store shards: {}\n- Cache cap: {}\n- Scheduler queue cap: {}\n- Store writer queue cap: {}\n- Metric sample interval: {}ms (each status sample also waits for sysinfo's CPU delta window)\n- Per-workflow wait timeout: {}s\n- Engine version: {}\n- Store backend: {}\n- Error-rate gate: {:.3}%\n\n{}\n\n",
+        "- Workload: {}\n- Host: {} / {} ({} logical CPUs)\n- Concurrency stages: {:?}\n- Warmup workflows: {}\n- Steady-state soak: {}s\n- Cleanup drain wait: {}s\n- Scheduler workers: {}\n- Store shards: {}\n- Cache cap: {}\n- Scheduler queue cap: {}\n- Store writer queue cap: {}\n- Metric sample interval: {}ms (each status sample also waits for sysinfo's CPU delta window)\n- Per-workflow wait timeout: {}s\n- Engine version: {}\n- Store backend: {}\n- Error-rate gate: {:.3}%\n\n{}\n\n",
         report.config.workload,
         report.config.host_os,
         report.config.host_arch,
@@ -918,7 +910,6 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
         report.config.soak_seconds,
         report.config.cleanup_wait_seconds,
         report.config.scheduler_workers,
-        report.config.store_writer_workers,
         report.config.store_shards,
         report.config.cache_cap,
         report.config.scheduler_queue_cap,
@@ -978,11 +969,12 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
 /// mirrored to stdout and `<output>/trace.log` so the run can be analyzed after
 /// it finished. The file is opened before the engine starts, so a bad filter or
 /// unwritable output directory fails the run immediately.
-/// The per-shard write bound: the engine has at most `store_workers` writer
-/// shards, so a physical database never needs to admit more than that.
+/// The per-database write bound: the engine's write-behind path has one
+/// consumer per scheduler lane, so a physical database never needs to admit
+/// more than `scheduler_workers` writes.
 fn shard_config(options: &Options) -> ShardConfig {
     ShardConfig {
-        max_in_flight_writes: options.store_workers.max(1),
+        max_in_flight_writes: options.scheduler_workers.max(1),
         ..ShardConfig::default()
     }
 }
@@ -1060,7 +1052,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .clone()
                 .unwrap_or_else(|| "./rocksdb".to_string());
             let rocksdb_options = || RocksdbOptions {
-                max_in_flight_writes: options.store_workers.max(1),
+                max_in_flight_writes: options.scheduler_workers.max(1),
                 ..RocksdbOptions::default()
             };
             if options.store_shards > 1 {
@@ -1111,7 +1103,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  target:       {} workflows", options.count);
     println!("  concurrency:  {:?}", options.concurrency);
     println!("  scheduler:    {} workers", options.scheduler_workers);
-    println!("  store writer: {} workers", options.store_workers);
     println!("  store shards: {}", options.store_shards);
     println!("  store:        {store_label}");
     println!("  cache cap:    {}", cache_cap);
@@ -1127,7 +1118,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_ms = options.sample_ms,
         timeout_seconds = options.timeout_seconds,
         scheduler_workers = options.scheduler_workers,
-        store_workers = options.store_workers,
         store_shards = options.store_shards,
         store = %store_label,
         cache_cap,
@@ -1145,7 +1135,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cache_size(cache_cap as i64)
         .scheduler_workers(options.scheduler_workers)
         .scheduler_queue_cap(queue_cap)
-        .store_writer_workers(options.store_workers)
         .store_writer_queue_cap(queue_cap)
         .start()
         .await?;
@@ -1462,7 +1451,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             soak_seconds: options.soak_seconds,
             cleanup_wait_seconds: options.cleanup_wait_seconds,
             scheduler_workers: options.scheduler_workers,
-            store_writer_workers: options.store_workers,
             store_shards: options.store_shards,
             cache_cap,
             scheduler_queue_cap: queue_cap,

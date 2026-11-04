@@ -590,19 +590,19 @@ impl Runtime {
         // refuse a config that switches the runaway protections off
         config.validate()?;
         let env = Arc::new(Environment::new());
-        // The durable store, and its write-behind queue: one pid → lane
-        // mapping for the emitter's handler gate (the scheduler's worker pool
-        // hashes with the same function and lane count), and the writer's own
-        // shard router.
+        // The durable store and its write-behind queue share one pid → lane
+        // mapping with the scheduler's worker pool and the emitter's handler
+        // gate: same hash, same lane count, so a process keeps one queue and
+        // one execution lane.
         let router = Arc::new(LaneRouter::new(config.scheduler_workers()));
         let store = Arc::new(Store::new(
             store.unwrap_or_else(|| Arc::new(crate::store::MemoryStore::new())),
         ));
         let writer = writebehind::StoreWriter::spawn(
             store.clone(),
-            config.store_writer_workers(),
+            config.scheduler_workers(),
             config.store_writer_queue_cap(),
-            utils::shared(config.store_writer_workers()),
+            router.clone(),
         );
         let process_gate = ProcessGate::with_router(router.clone());
         let emitter = Arc::new(Emitter::with_process_gate(process_gate));

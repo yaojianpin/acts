@@ -149,15 +149,10 @@ pub struct ConfigData {
     /// enqueue and leaves the operation in the durable ready index for the
     /// next pass. Zero selects the default.
     pub scheduler_queue_cap: Option<usize>,
-    /// Number of store-writer shards; defaults to half the available
-    /// parallelism, capped at 8. Each shard applies one write at a time.
-    /// Ops of the same pid always hash to the same shard to keep their
-    /// enqueue order (task state durable before the outbox records that
-    /// depend on it), so independent processes no longer queue behind one
-    /// another's writes.
-    pub store_writer_workers: Option<usize>,
-    /// Maximum store-writer backlog, split evenly across the shards (at least
-    /// one op each). Sizing is the refusal policy: a shard that runs out of
+    /// Maximum write-behind backlog, split evenly across the scheduler lanes
+    /// (`scheduler_workers`, at least one op per lane). The write-behind path
+    /// — message/delivery rows and process removals — uses one consumer per
+    /// scheduler lane. Sizing is the refusal policy: a queue that runs out of
     /// room makes the writer refuse new work with `QueueFull` (its producers
     /// use their durable overflow path or report the overload) until the
     /// backlog drains, instead of buffering without limit or blocking every
@@ -460,22 +455,8 @@ impl Config {
             .clamp(1, 1_048_576)
     }
 
-    /// Number of concurrent store-writer shards. A pid always hashes to one
-    /// shard, so the ops of a process are applied in enqueue order while
-    /// independent processes are persisted concurrently.
-    pub fn store_writer_workers(&self) -> usize {
-        let configured = self.data.store_writer_workers.unwrap_or_else(|| {
-            // Half the cores, capped at 8: every shard applies one write at a
-            // time against a store that serializes writes internally (one sled
-            // log, one SQLite writer), so a shard count far above that only
-            // multiplies contention. An explicit setting may still go higher.
-            std::thread::available_parallelism().map_or(4, |n| (n.get() / 2).clamp(1, 8))
-        });
-        configured.clamp(1, 1024)
-    }
-
-    /// Maximum ops queued across the store-writer shards, split evenly
-    /// (`store_writer_workers`, at least one op per shard). A saturated writer
+    /// Maximum ops queued across the write-behind consumers, split evenly
+    /// (`scheduler_workers`, at least one op per consumer). A saturated writer
     /// refuses new work with `QueueFull` until its backlog drains; the
     /// bookkeeping of work already in flight waits for room instead.
     pub fn store_writer_queue_cap(&self) -> usize {
