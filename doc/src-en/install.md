@@ -121,7 +121,6 @@ shards = ["/data/acts-0", "/data/acts-1"]
 # when retiring a shard, keep it readable and migrate at startup:
 # draining_shards = ["/data/acts-old"]
 # rebalance_on_start = true
-virtual_nodes = 1024
 max_in_flight_writes = 16
 lease = false
 ```

@@ -100,7 +100,6 @@ shards = ["/data/acts-0", "/data/acts-1"]
 # 下线旧分片时把它放进 drain，保持可读，并在启动时迁移
 # draining_shards = ["/data/acts-old"]
 # rebalance_on_start = true
-virtual_nodes = 1024
 max_in_flight_writes = 16
 lease = false
 ```

@@ -137,7 +137,7 @@ model deploy 全是 global key，也在同一分片。
 
 ### 4.1 1024 个虚拟节点
 
-默认 `DEFAULT_VIRTUAL_NODES = 1024`。环上的每个槽位有**固定 token**：
+固定 `DEFAULT_VIRTUAL_NODES = 1024`，不暴露配置。环上的每个槽位有**固定 token**：
 
 ```text
 slot_token(i) = XXH3("acts-slot\0" + i)          i ∈ [0, 1024)
@@ -315,7 +315,8 @@ RocksDB 是 **GPLv2 OR Apache-2.0** 双许可；本仓库选择 Apache-2.0。第
 ### 8.1 增加分片
 
 1. 新分片目录/URL 加入 `[db].shards`；
-2. 读路径立即能通过 `search_on_miss` 找到旧数据；
+2. 读路径在 `search_on_miss = true`（默认）时立即能通过回退找到旧数据；
+   迁移完成后可设为 `false`，让缺失 key 直接回答 absent，避免顺序扫全部分片；
 3. 在维护窗口执行 `ShardedStore::rebalance()`（或 server 的
    `rebalance_on_start = true` 一次启动）；
 4. rebalance 返回后再切换写流量。
@@ -333,7 +334,6 @@ shards = ["/data/acts-0", "/data/acts-1"]
 draining_shards = ["/data/acts-old"]
 rebalance_on_start = true
 lease = false                    # 多分片不能用单行租约
-virtual_nodes = 1024
 max_in_flight_writes = 16
 ```
 
@@ -370,8 +370,11 @@ lease 是单行 guard，检查必须和写入在同一个原子单元。跨物�
 | `shards = [url, …]` | 物理分片；非空时替代 `database_url` |
 | `draining_shards = [url, …]` | 只读迁移源 |
 | `rebalance_on_start` | 打开时执行一次迁移 |
-| `virtual_nodes` | 环槽位数，默认 1024 |
 | `max_in_flight_writes` | 每分片/单 RocksDB 写闸门 |
+| `search_on_miss` | 点读未命中时是否跨分片回退（默认 true） |
+
+环槽位数固定为 1024，不暴露配置：修改它会重排大多数槽位，效果等同于一次全量
+rebalance，因此只保留在 `DEFAULT_VIRTUAL_NODES` 常量里。
 
 `open_store` 先校验分片组合，再打开每个物理库；`rebalance_on_start` 在 engine 启动前
 完成。`ACTS_DATABASE_URL` 和 `database_url` 在 shards 非空时不参与。
@@ -416,7 +419,7 @@ lease 是单行 guard，检查必须和写入在同一个原子单元。跨物�
 | `crates/acts-cli/src/cmd/status.rs` | backpressure 行渲染 |
 | `crates/acts-server/src/lib.rs` | `[db].shards` 解析、lease 拒绝、draining/rebalance 校验、sharded sled 打开 |
 
-`examples/stress` 的 CI 矩阵把 `sled`、`rocksdb` 分别跑成 16 个物理分片，write-behind 并发复用 4 个 scheduler worker（物理分片只分散数据库文件与后台线程，message/delivery/removal 写并发仍由 `scheduler_workers` 决定）；`RocksdbStore` 还需要 bindgen 的 `libclang`（C++ 源码由 `cc`
+`examples/stress` 的 CI 矩阵只跑 100,000 工作流 baseline：`sled`、`rocksdb` 各 4 个物理分片、4 个 scheduler worker（write-behind 复用该并发），与 4 vCPU runner 匹配；分片再多只会放大全分片扫描与后台线程，不能增加吞吐。`RocksdbStore` 还需要 bindgen 的 `libclang`（C++ 源码由 `cc`
 编译，不需要 cmake）。
 
 ---

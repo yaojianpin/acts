@@ -975,6 +975,11 @@ fn write_markdown(path: &Path, report: &FinalReport) -> std::io::Result<()> {
 fn shard_config(options: &Options) -> ShardConfig {
     ShardConfig {
         max_in_flight_writes: options.scheduler_workers.max(1),
+        // The harness opens a fresh, fixed shard set: there is no membership
+        // change to fall back from, so a routed miss is a genuinely absent
+        // key. Leaving the migration fallback on would scan every shard for
+        // it and inflate the benchmark's CPU without measuring engine work.
+        search_on_miss: false,
         ..ShardConfig::default()
     }
 }

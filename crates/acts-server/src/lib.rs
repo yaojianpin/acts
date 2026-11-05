@@ -111,13 +111,17 @@ pub struct DbConfig {
     /// This is the migration step for adding or removing a shard. It scans
     /// the whole database, so leave it off on routine starts.
     pub rebalance_on_start: bool,
-    /// Virtual-node slots on the shard ring (default
-    /// [`acts_store::DEFAULT_VIRTUAL_NODES`], 1024).
-    pub virtual_nodes: Option<usize>,
     /// Concurrent writes admitted per physical shard. A full shard reports
     /// saturation through the engine, which stops admitting new work until it
     /// drains.
     pub max_in_flight_writes: Option<usize>,
+    /// Fall back to the other shards when a point read misses its routed
+    /// shard (default `true`). That fallback is what keeps reads working
+    /// while a membership change is in flight before
+    /// [`acts_store::ShardedStore::rebalance`] has moved the old rows. A
+    /// stable shard set can set it `false`: a miss is then just an absent
+    /// key, and the read does not fan out across every physical database.
+    pub search_on_miss: Option<bool>,
     /// Hold the database's exclusive lease while this server runs (default
     /// `true`). The lease is a row in the database itself, taken with an
     /// atomic compare-and-swap, and every write the engine makes is committed
@@ -151,8 +155,8 @@ impl Default for DbConfig {
             shards: Vec::new(),
             draining_shards: Vec::new(),
             rebalance_on_start: false,
-            virtual_nodes: None,
             max_in_flight_writes: None,
+            search_on_miss: None,
             lease: true,
             lease_ttl_secs: None,
             lease_renew_secs: None,
@@ -328,15 +332,19 @@ max_files = 168
 # Write throughput can be spread over physical databases. `shards` lists the
 # URLs of the configured `type` (directories for sled/rocksdb, files for
 # sqlite, connection URLs for postgres); process-owned keys are placed by a
-# pid consistent-hash ring with `virtual_nodes` slots, and ordered queries are
+# pid consistent-hash ring with 1024 fixed slots, and ordered queries are
 # merged across shards. A multi-shard layout requires `lease = false`: the
 # database lease is one guard on every write and cannot be atomic across
 # physical databases. Shard URLs are stable ring ids, so a new shard can be
 # appended without moving the existing ones; drain a removed shard before
-# dropping it (see `acts_store::ShardedStore::rebalance`).
+# dropping it (see `acts_store::ShardedStore::rebalance`). The ring size is not
+# configurable: changing it would remap most pids and force a full rebalance.
 #   shards = ["@ACTS_DIR@/shard-0", "@ACTS_DIR@/shard-1"]
-#   virtual_nodes = 1024
 #   max_in_flight_writes = 16
+#   # default true: a point-read miss scans the other shards, the fallback that
+#   # keeps reads working during a membership change. Set false on a stable
+#   # shard set so a miss is just an absent key and does not fan out.
+#   search_on_miss = false
 #
 # Removing a shard: move its URL from `shards` to `draining_shards`, keep it
 # readable, and set `rebalance_on_start = true` for the migration start (or
@@ -726,13 +734,10 @@ pub async fn open_store(config_dir: &Path, db: &DbConfig) -> acts::Result<Opened
             shards.push(acts_store::Shard::draining(url.clone(), store));
         }
         let config = acts_store::ShardConfig {
-            virtual_nodes: db
-                .virtual_nodes
-                .unwrap_or(acts_store::DEFAULT_VIRTUAL_NODES),
             max_in_flight_writes: db
                 .max_in_flight_writes
                 .unwrap_or(acts_store::DEFAULT_SHARD_WRITES),
-            search_on_miss: true,
+            search_on_miss: db.search_on_miss.unwrap_or(true),
         };
         let sharded = acts_store::ShardedStore::with_config(shards, config)?;
         if db.rebalance_on_start {
@@ -1270,7 +1275,7 @@ ttl = "5m"
         assert!(DbConfig::default().shards.is_empty());
         assert!(DbConfig::default().draining_shards.is_empty());
         assert!(!DbConfig::default().rebalance_on_start);
-        assert_eq!(DbConfig::default().virtual_nodes, None);
+        assert_eq!(DbConfig::default().search_on_miss, None);
 
         let (dir, path) =
             write_config("[db]\ntype = \"postgres\"\ndatabase_url = \"postgres://h/db\"\n");
@@ -1284,7 +1289,7 @@ ttl = "5m"
         let (dir, path) = write_config(
             "[db]\ntype = \"rocksdb\"\nshards = [\"a\", \"b\"]\n\
              draining_shards = [\"old\"]\nrebalance_on_start = true\n\
-             virtual_nodes = 64\nmax_in_flight_writes = 4\n",
+             max_in_flight_writes = 4\nsearch_on_miss = false\n",
         );
         let db = Config::create(&path)
             .unwrap()
@@ -1294,8 +1299,8 @@ ttl = "5m"
         assert_eq!(db.shards, ["a", "b"]);
         assert_eq!(db.draining_shards, ["old"]);
         assert!(db.rebalance_on_start);
-        assert_eq!(db.virtual_nodes, Some(64));
         assert_eq!(db.max_in_flight_writes, Some(4));
+        assert_eq!(db.search_on_miss, Some(false));
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
     }

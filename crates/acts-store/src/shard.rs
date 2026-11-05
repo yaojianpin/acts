@@ -155,8 +155,6 @@ impl Shard {
 /// Tuning for [`ShardedStore`].
 #[derive(Clone, Debug)]
 pub struct ShardConfig {
-    /// Virtual-node slots on the ring (at least the number of active shards).
-    pub virtual_nodes: usize,
     /// Concurrent writes admitted per physical shard.
     pub max_in_flight_writes: usize,
     /// Look for a key on the other shards when its routed shard does not have
@@ -169,7 +167,6 @@ pub struct ShardConfig {
 impl Default for ShardConfig {
     fn default() -> Self {
         Self {
-            virtual_nodes: DEFAULT_VIRTUAL_NODES,
             max_in_flight_writes: DEFAULT_SHARD_WRITES,
             search_on_miss: true,
         }
@@ -197,9 +194,9 @@ struct HashRing {
 }
 
 impl HashRing {
-    fn new(nodes: &[(usize, String)], virtual_nodes: usize) -> Self {
-        let mut tokens = Vec::with_capacity(virtual_nodes.max(nodes.len()));
-        let slots = virtual_nodes.max(nodes.len()).max(1);
+    fn new(nodes: &[(usize, String)]) -> Self {
+        let mut tokens = Vec::with_capacity(DEFAULT_VIRTUAL_NODES.max(nodes.len()));
+        let slots = DEFAULT_VIRTUAL_NODES.max(nodes.len()).max(1);
         for slot in 0..slots {
             // The slot's position is independent of the shard list. Its owner
             // is the shard with the highest deterministic score for this slot,
@@ -698,7 +695,7 @@ impl ShardedStore {
             .iter()
             .map(|&index| (index, shards[index].id.clone()))
             .collect();
-        let ring = HashRing::new(&nodes, config.virtual_nodes.max(active.len()));
+        let ring = HashRing::new(&nodes);
         let gates = shards
             .iter()
             .map(|_| WriteGate::new(config.max_in_flight_writes))

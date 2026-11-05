@@ -11,28 +11,19 @@ name: stress
 # as badges and in the report, never gated against a fixed number.
 #
 # A pull request runs a 1,000-workflow performance smoke at concurrency 16 for
-# every store. The publishing shape stages the durable stores: three tiers whose
-# counts are 100,000 -> 200,000 -> 300,000 workflows per store. Every tier runs
-# the same 4 scheduler workers — the write-behind path (message/delivery rows
-# and process removals) shares that concurrency — and each durable store is
-# physically split into 16 shards (memory has no physical shards, so it keeps
-# one). The 4-vCPU runner is CPU-bound on scheduler and writer work (4/4 already
-# peaks at 354-385% of 400%), so a worker ramp cannot add throughput; the 16
-# physical shards spread the database files and let independent pids' I/O
-# overlap. Each tier is its own job after the baseline passes, so a slow tier
-# cannot hide the smaller reports. Every harness step has a hard timeout sized
-# to what its tier measured on this runner, so a stalled run fails the gate
-# instead of consuming the job's 6-hour cap: memory keeps 60 minutes, sled gets
-# 120/240/330 and RocksDB 90/150/300 for baseline/scale/peak. The sizes follow
-# the measured run, not the earlier 4-scheduler/4-writer estimate: with the
-# write-behind path sharing `scheduler_workers`, run 41844399056's 100,000-
-# workflow baseline took 10m52s for memory and 43m18s for RocksDB, while sled
-# did not fit its old 60-minute limit at all (the job failed at 70m03s), and
-# RocksDB's own baseline moved from 24m29s to 43m18s (~1.8x). The sled peak's
-# 330 minutes plus the build still fit the 360-minute job cap. Memory keeps one
-# store and one shard, at 100,000 workflows. Every run uses concurrency 16, the
-# measured throughput knee; a manual dispatch can still request a ramp (for
-# example 16,32,64) and the latency badges then publish its highest stage.
+# every store. The publishing shape is one 100,000-workflow baseline per store,
+# sized to the 4-vCPU runner: 4 scheduler workers (the write-behind path shares
+# that concurrency), 4 physical shards for the durable stores (memory keeps one),
+# and concurrency 16 (the measured throughput knee). The runner is CPU-bound on
+# scheduler and writer work (4/4 already peaks at 354-385% of 400%), so more
+# workers, more shards, or larger counts cannot add throughput; 4 shards keep the
+# scan fan-out and RocksDB's per-database background threads matched to the
+# vCPUs. Every harness step has a hard timeout sized to that store's measured
+# baseline, so a stalled run fails the gate instead of consuming the job's
+# 3-hour cap: memory 60 minutes, sled 90, RocksDB 90. Memory keeps one store and
+# one shard, at 100,000 workflows. A manual dispatch can still request a
+# concurrency ramp (for example 16,32,64), a longer cleanup wait, or a soak; the
+# published report is the baseline run.
 on:
   pull_request:
     paths:
@@ -81,7 +72,7 @@ env:
 jobs:
   stress:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -96,13 +87,13 @@ jobs:
             timeout: 60
           - store: sled
             tier: baseline
-            shards: 16
+            shards: 4
             workers: 4
             count: 100000
-            timeout: 120
+            timeout: 90
           - store: rocksdb
             tier: baseline
-            shards: 16
+            shards: 4
             workers: 4
             count: 100000
             timeout: 90
@@ -122,7 +113,7 @@ jobs:
 
       # The event picks the shape: a PR gets the short smoke (a build-sized run
       # that still exercises commit/load/recovery/cleanup for every store),
-      # while the publishing legs use the tier's own count. Manual inputs win on
+      # while the publishing legs use the matrix count. Manual inputs win on
       # dispatch for the concurrency, cleanup and soak knobs.
       - name: Plan the run
         id: plan
@@ -157,7 +148,7 @@ jobs:
         # code and the "Enforce" step below fails the job.
         continue-on-error: true
         # Hard stop for a stalled engine. Without it a hang burns the job's
-        # 6-hour cap and only surfaces as `cancelled` at the very end; the
+        # 3-hour cap and only surfaces as `cancelled` at the very end; the
         # report and summary run under `always()`, and Enforce fails the job
         # when this step did not succeed. A manual soak must fit the timeout.
         timeout-minutes: ${{ matrix.timeout }}
@@ -241,49 +232,6 @@ jobs:
             exit 1
           fi
 
-  # The publishing tiers run after the baseline passes, on main/develop, the
-  # schedule and manual dispatch; a PR runs only the baseline job above. The
-  # steps come from the same YAML anchor, so the two matrices cannot drift. Each
-  # durable store's tiers total 600,000 workflows; only the count grows, while
-  # scheduler workers stay at the baseline's 4 (the write-behind path shares
-  # that concurrency) and the physical shard count stays 16 because the 4-vCPU
-  # runner is already CPU-bound.
-  stress-tiers:
-    needs: stress
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - store: sled
-            tier: scale
-            shards: 16
-            workers: 4
-            count: 200000
-            timeout: 240
-          - store: sled
-            tier: peak
-            shards: 16
-            workers: 4
-            count: 300000
-            timeout: 330
-          - store: rocksdb
-            tier: scale
-            shards: 16
-            workers: 4
-            count: 200000
-            timeout: 150
-          - store: rocksdb
-            tier: peak
-            shards: 16
-            workers: 4
-            count: 300000
-            timeout: 300
-
-    steps: *stress_steps
-
   # Publishing is the only write in this workflow and lives away from the run,
   # like coverage.yml's badge job. The `stress` branch (not the coverage
   # workflow's `badges` branch) carries one report set and nine SVGs per store,
@@ -292,7 +240,7 @@ jobs:
   # keep_files leaves the previous report and metric badges in place so the
   # status never points at a report from the broken run.
   publish:
-    needs: [stress, stress-tiers]
+    needs: stress
     if: >-
       always()
       && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
@@ -309,7 +257,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download the tiered reports
+      - name: Download the reports
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -324,26 +272,16 @@ jobs:
           # shellcheck source=badge.sh
           source .github/scripts/badge.sh
           for store in memory sled rocksdb; do
-            # A tier that did not finish has no artifact. Publish the largest
-            # tier that did, so a skipped or timed-out peak never hides the
-            # smaller tiers' report.
-            best=""
-            best_count=-1
-            for candidate in target/stress-results/stress-report-"$store"-*/report.json; do
-              [ -f "$candidate" ] || continue
-              count="$(jq -r '.config.measured_workflows // 0' "$candidate")"
-              if [ "$count" -gt "$best_count" ]; then
-                best="$candidate"
-                best_count="$count"
-              fi
-            done
-            if [ -n "$best" ]; then
-              dir="$(dirname "$best")"
+            # One baseline artifact per store. A failed run has no report, so
+            # the previous report and its badges stay in place and only the
+            # status badge turns FAIL.
+            dir="target/stress-results/stress-report-$store-baseline"
+            if [ -f "$dir/report.json" ]; then
               cp "$dir/report.md" "publish/report-$store.md"
-              cp "$best" "publish/report-$store.json"
+              cp "$dir/report.json" "publish/report-$store.json"
               cp "$dir/metrics.csv" "publish/metrics-$store.csv"
               cp "$dir/trace.log" "publish/trace-$store.log"
-              bash .github/scripts/stress-badge.sh "$best" publish "$store"
+              bash .github/scripts/stress-badge.sh "$dir/report.json" publish "$store"
             else
               echo "No $store report artifact; publishing a FAIL status badge only."
               render_badge "stress $store" FAIL "#e05d44" 170 "publish/stress-$store.svg"
