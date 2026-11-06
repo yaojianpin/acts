@@ -980,7 +980,6 @@ fn shard_config(options: &Options) -> ShardConfig {
         // key. Leaving the migration fallback on would scan every shard for
         // it and inflate the benchmark's CPU without measuring engine work.
         search_on_miss: false,
-        ..ShardConfig::default()
     }
 }
 
