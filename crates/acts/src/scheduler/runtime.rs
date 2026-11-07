@@ -532,8 +532,17 @@ impl Runtime {
                 }
             }
             E::Push => {
+                // An added-approvers push (`owners` + `mode`) needs no `uses`:
+                // the kernel drives the approver chain for it. Its shape is
+                // validated here so a caller-correctable refusal consumes
+                // nothing.
+                let approver_request = crate::scheduler::shell::ApproverRequest::from_inputs(
+                    &Self::kernel_inputs(&action.options),
+                )?;
                 let uses = action.options.get::<String>("uses");
-                if uses.as_deref().unwrap_or_default().trim().is_empty() {
+                if approver_request.is_none()
+                    && uses.as_deref().unwrap_or_default().trim().is_empty()
+                {
                     return Err(ActError::Action("cannot find 'uses' in act".to_string()));
                 }
                 K::Push
@@ -558,6 +567,7 @@ impl Runtime {
                 K::Delegate
             }
             E::Undelegate => K::Undelegate,
+            E::Remind => K::Remind,
         };
         Ok(kind)
     }

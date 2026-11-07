@@ -98,7 +98,7 @@ async fn sch_act_if_true_runs_the_inline_act() {
     assert_completed(fixture.run(Vars::new()).await);
 
     let completed = fixture.wait_message("msg1", MessageState::Completed).await;
-    assert_eq!(completed.r#type, "act");
+    assert_eq!(completed.r#type, "step");
     assert_eq!(completed.nid, "msg1");
     assert!(completed.is_msg());
     assert_eq!(fixture.state("msg1").await, TaskState::Completed);
@@ -575,6 +575,453 @@ async fn sch_act_remove_decides_a_waiting_act_removed_once() {
         error.to_string().contains("ActionNotAllowed"),
         "duplicate remove: {error}"
     );
+    fixture.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Added/removed approvers — the single-owner approver chain and its authorization
+// ---------------------------------------------------------------------------
+
+/// A principal allowed to manage signs (`act:push`/`act:remove`/`act:remind`)
+/// and decide.
+pub(super) fn approver(name: &str) -> Principal {
+    Principal::from_policy(&UserPolicy {
+        name: name.to_string(),
+        enabled: true,
+        allow: vec![
+            "act:push".to_string(),
+            "act:remove".to_string(),
+            "act:complete".to_string(),
+            "act:remind".to_string(),
+        ],
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+/// `before` mode: the added approver's act runs ahead of the owner's — the
+/// kernel admits one pushed act at a time (`s1#push1` = bob, `s1#push2` =
+/// alice), the target's own answer is absorbed (parked, its act message
+/// resolved on the push), and the drained chain completes it.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_approvers_before_runs_the_added_approver_ahead_of_the_owner() {
+    let workflow = assigned_workflow("flow-act-approvers-before", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    fixture
+        .act(
+            &created.pid,
+            &created.tid,
+            EventAction::Push,
+            Vars::new()
+                .with("owners", serde_json::json!(["bob"]).to_string())
+                .with("mode", "before"),
+        )
+        .await
+        .unwrap();
+
+    fixture.wait_state("s1", TaskState::Running).await;
+    fixture.wait_message("s1", MessageState::Completed).await;
+
+    let first = fixture.wait_created("s1#push1").await;
+    assert_eq!(first.owner.as_deref(), Some("bob"));
+    fixture.next(&first.pid, &first.tid).await.unwrap();
+
+    let second = fixture.wait_created("s1#push2").await;
+    assert_eq!(second.owner.as_deref(), Some("alice"));
+    fixture.next(&second.pid, &second.tid).await.unwrap();
+
+    fixture.wait_state("s1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// `after` mode (the default): the owner's leaf runs first, the added
+/// approver's behind it.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_approvers_after_runs_the_owner_first() {
+    let workflow = assigned_workflow("flow-act-approvers-after", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    fixture
+        .act(
+            &created.pid,
+            &created.tid,
+            EventAction::Push,
+            Vars::new().with("owners", serde_json::json!(["bob"]).to_string()),
+        )
+        .await
+        .unwrap();
+
+    let first = fixture.wait_created("s1#push1").await;
+    assert_eq!(first.owner.as_deref(), Some("alice"));
+    fixture.next(&first.pid, &first.tid).await.unwrap();
+
+    let second = fixture.wait_created("s1#push2").await;
+    assert_eq!(second.owner.as_deref(), Some("bob"));
+    fixture.next(&second.pid, &second.tid).await.unwrap();
+
+    fixture.wait_state("s1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// Removing a chain leaf drops that approver and the kernel admits the next;
+/// the queue drained, the ordinary join completes the target.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_approvers_removal_admits_the_next_leaf() {
+    let workflow = assigned_workflow("flow-act-approvers-remove", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    fixture
+        .act(
+            &created.pid,
+            &created.tid,
+            EventAction::Push,
+            Vars::new().with("owners", serde_json::json!(["bob", "carol"]).to_string()),
+        )
+        .await
+        .unwrap();
+
+    let first = fixture.wait_created("s1#push1").await;
+    assert_eq!(first.owner.as_deref(), Some("alice"));
+    fixture
+        .act(&first.pid, &first.tid, EventAction::Remove, Vars::new())
+        .await
+        .unwrap();
+    fixture.wait_state("s1#push1", TaskState::Removed).await;
+
+    let second = fixture.wait_created("s1#push2").await;
+    assert_eq!(second.owner.as_deref(), Some("bob"));
+    // The business actor rides the decision's options (attribution only —
+    // the authorization is the leaf's own assignment).
+    fixture
+        .act(
+            &second.pid,
+            &second.tid,
+            EventAction::Next,
+            Vars::new().with("actor", "bob"),
+        )
+        .await
+        .unwrap();
+
+    let third = fixture.wait_created("s1#push3").await;
+    assert_eq!(third.owner.as_deref(), Some("carol"));
+    fixture
+        .act(
+            &third.pid,
+            &third.tid,
+            EventAction::Next,
+            Vars::new().with("actor", "carol"),
+        )
+        .await
+        .unwrap();
+
+    fixture.wait_state("s1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// The assigned owner is the signing authority: a stranger's push/remove is
+/// refused `ENOTOWNER`; a pushed act never signs for itself (its holder
+/// decides); an unassigned act keeps the legacy authority.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_approvers_authorizes_only_the_owner() {
+    let workflow = assigned_workflow("flow-act-approvers-auth", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+    let mallory = approver("mallory");
+    let alice = approver("alice");
+
+    let error = fixture
+        .engine()
+        .executor(&mallory)
+        .act()
+        .push(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("owners", serde_json::json!(["bob"]).to_string()),
+        )
+        .await
+        .expect_err("a stranger may not sign an assigned act");
+    assert!(error.to_string().contains("ENOTOWNER"), "{error}");
+
+    let error = fixture
+        .engine()
+        .executor(&mallory)
+        .act()
+        .remove(fixture.pid(), &created.tid, Vars::new())
+        .await
+        .expect_err("a stranger may not remove an assigned act");
+    assert!(error.to_string().contains("ENOTOWNER"), "{error}");
+
+    fixture
+        .engine()
+        .executor(&alice)
+        .act()
+        .push(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("owners", serde_json::json!(["bob"]).to_string()),
+        )
+        .await
+        .unwrap();
+    let first = fixture.wait_created("s1#push1").await;
+
+    let error = fixture
+        .engine()
+        .executor(&approver("bob"))
+        .act()
+        .remove(fixture.pid(), &first.tid, Vars::new())
+        .await
+        .expect_err("a pushed act does not sign for itself");
+    assert!(error.to_string().contains("ENOTOWNER"), "{error}");
+    fixture
+        .engine()
+        .executor(&alice)
+        .act()
+        .remove(fixture.pid(), &first.tid, Vars::new())
+        .await
+        .unwrap();
+    fixture.wait_state("s1#push1", TaskState::Removed).await;
+    fixture.close().await;
+
+    let mut legacy =
+        FlowFixture::deploy(&irq_workflow("flow-act-approvers-legacy", "s1", "act1")).await;
+    legacy.start(Vars::new()).await;
+    let created = legacy.wait_created("s1").await;
+    legacy
+        .engine()
+        .executor(&mallory)
+        .act()
+        .push(
+            legacy.pid(),
+            &created.tid,
+            Vars::new()
+                .with("uses", USES_IRQ)
+                .with("params", Vars::new().with("key", "pushed")),
+        )
+        .await
+        .expect("an unassigned act keeps the legacy push authority");
+    legacy.wait_created("s1#push1").await;
+    legacy.close().await;
+}
+
+/// Malformed added-approvers inputs are caller-correctable refusals: nothing
+/// durable exists afterwards and the act keeps waiting.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_approvers_refuses_malformed_requests() {
+    let workflow = assigned_workflow("flow-act-approvers-bad", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    for (owners, mode, why) in [
+        ("[]", "", "an empty approver list"),
+        (
+            serde_json::json!([""]).to_string().as_str(),
+            "",
+            "a blank approver",
+        ),
+        ("not json", "", "a non-array"),
+        (
+            serde_json::json!(["bob"]).to_string().as_str(),
+            "middle",
+            "an unknown mode",
+        ),
+    ] {
+        let mut vars = Vars::new().with("owners", owners);
+        if !mode.is_empty() {
+            vars = vars.with("mode", mode);
+        }
+        assert!(
+            fixture
+                .act(&created.pid, &created.tid, EventAction::Push, vars)
+                .await
+                .is_err(),
+            "{why} must be refused"
+        );
+    }
+
+    fixture.wait_state("s1", TaskState::Waiting).await;
+    fixture.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Remind — the non-owner's urge and its record
+// ---------------------------------------------------------------------------
+
+/// The remind record one urge wrote, once the wire is settled.
+async fn remind_record_of(fixture: &FlowFixture, node: &str) -> crate::Message {
+    crate::testing::poll_until("the remind record", || async {
+        fixture
+            .messages_of(node)
+            .iter()
+            .any(|message| message.r#type == "remind")
+    })
+    .await;
+    fixture
+        .messages_of(node)
+        .into_iter()
+        .find(|message| message.r#type == "remind")
+        .expect("the remind record")
+}
+
+/// A non-owner's urge writes a `type=remind` record addressed to the current
+/// owner and persists it; the owner themselves, an unauthenticated caller and
+/// an unassigned act are all refused, and the act is untouched.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_remind_records_the_owner_urged_by_a_non_owner() {
+    let workflow = assigned_workflow("flow-act-remind", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    let error = fixture
+        .engine()
+        .executor(&approver("alice"))
+        .act()
+        .remind(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("message", "hurry"),
+        )
+        .await
+        .expect_err("the owner cannot remind their own act");
+    assert!(error.to_string().contains("ENOTOWNER"), "{error}");
+
+    let error = fixture
+        .act(&created.pid, &created.tid, EventAction::Remind, Vars::new())
+        .await
+        .expect_err("an unauthenticated remind is refused");
+    assert!(error.to_string().contains("ENOTOWNER"), "{error}");
+
+    fixture
+        .engine()
+        .executor(&approver("bob"))
+        .act()
+        .remind(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("message", "hurry"),
+        )
+        .await
+        .unwrap();
+
+    let record = remind_record_of(&fixture, "s1").await;
+    assert_eq!(record.owner.as_deref(), Some("alice"));
+    assert_eq!(record.assignee.as_deref(), Some("alice"));
+    let params = record.params().expect("the remind params");
+    assert_eq!(params.get::<String>("from").as_deref(), Some("bob"));
+    assert_eq!(params.get::<String>("to").as_deref(), Some("alice"));
+    assert_eq!(params.get::<String>("message").as_deref(), Some("hurry"));
+    assert!(record.ref_msg_id.is_some(), "the record references the act");
+
+    // The record is durable in the aggregate's outbox log (a canonical row
+    // materializes per ack channel), and the act is untouched.
+    let snapshot = fixture.snapshot().await;
+    assert!(
+        snapshot.outbox.values().any(|record| {
+            record.topic == "remind.created"
+                && record.payload.contains("\"from\":\"bob\"")
+                && record.payload.contains("\"to\":\"alice\"")
+        }),
+        "the remind record is durable: {:?}",
+        snapshot
+            .outbox
+            .iter()
+            .map(|(key, record)| format!("{} {}", key.key, record.topic))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(fixture.state("s1").await, TaskState::Waiting);
+    fixture.close().await;
+}
+
+/// An act without an assignment has nobody to remind.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_remind_refuses_an_unassigned_act() {
+    let mut fixture =
+        FlowFixture::deploy(&irq_workflow("flow-act-remind-plain", "s1", "act1")).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    let error = fixture
+        .engine()
+        .executor(&approver("bob"))
+        .act()
+        .remind(fixture.pid(), &created.tid, Vars::new())
+        .await
+        .expect_err("an unassigned act takes no remind");
+    assert!(
+        error.to_string().contains("no assignment to remind"),
+        "{error}"
+    );
+    fixture.close().await;
+}
+
+/// A transferred task's remind also announces an `acts.core.msg` to the
+/// transfer target (the new owner) with the urge's facts; the remind record
+/// still names the current owner, and the task stays undecided.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_remind_announces_a_msg_to_the_transfer_target() {
+    let workflow = assigned_workflow("flow-act-remind-transfer", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    fixture
+        .engine()
+        .executor(&approver("alice"))
+        .act()
+        .transfer(fixture.pid(), &created.tid, Vars::new().with("to", "bob"))
+        .await
+        .unwrap();
+    assert_eq!(assignment_of(&fixture, "s1").await["owner"], json!("bob"));
+
+    fixture
+        .engine()
+        .executor(&approver("carol"))
+        .act()
+        .remind(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("message", "please review"),
+        )
+        .await
+        .unwrap();
+
+    // The record addresses the current owner; the msg child delivers once.
+    let record = remind_record_of(&fixture, "s1").await;
+    assert_eq!(record.owner.as_deref(), Some("bob"));
+    let announced = fixture
+        .wait_message("s1#remind1", MessageState::Completed)
+        .await;
+    assert_eq!(announced.uses.as_deref(), Some("acts.core.msg"));
+    let params = announced.params().expect("the msg params");
+    assert_eq!(params.get::<String>("to").as_deref(), Some("bob"));
+    assert_eq!(params.get::<String>("from").as_deref(), Some("carol"));
+    assert_eq!(
+        params.get::<String>("message").as_deref(),
+        Some("please review")
+    );
+
+    // The urge decided nothing: the act waits for bob again.
+    fixture.wait_state("s1", TaskState::Waiting).await;
     fixture.close().await;
 }
 

@@ -238,6 +238,41 @@ impl Assign {
         Self::compare_rev(&assignment, rev, node)
     }
 
+    /// The caller-correctable checks a remind must pass: the act is assigned
+    /// and non-terminal, the caller is authenticated and is *not* the owner
+    /// (an owner needs no reminder of their own act), and an unauthenticated
+    /// caller has no identity the non-owner rule could check. The plan
+    /// repeats them for a replay; a refusal here consumes nothing.
+    pub(crate) fn validate_remind(
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        state: crate::scheduler::core::model::task_graph::TaskState,
+        subject: Option<&str>,
+    ) -> crate::Result<()> {
+        let node = task_id.node.as_str();
+        let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+            crate::ActError::Action(format!(
+                "ENOTOWNER: act '{node}' has no assignment to remind"
+            ))
+        })?;
+        if state.is_terminal() {
+            return Err(crate::ActError::Action(format!(
+                "task('{node}') is not allowed to remind"
+            )));
+        }
+        let Some(subject) = subject.map(str::trim).filter(|subject| !subject.is_empty()) else {
+            return Err(crate::ActError::Action(format!(
+                "ENOTOWNER: act '{node}' takes no remind without an authenticated caller"
+            )));
+        };
+        if subject == assignment.owner {
+            return Err(crate::ActError::Action(format!(
+                "ENOTOWNER: the owner cannot remind their own act '{node}'"
+            )));
+        }
+        Ok(())
+    }
+
     /// The durable id of one act's `Created` message, read from the record the
     /// start commit wrote. The id lives in the outbox payload, so it survives
     /// a restart and the transfer notification can reference the original

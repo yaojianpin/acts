@@ -767,12 +767,10 @@ pub(super) fn message_outputs(
 /// model pins this word, so a `uses` step's row stays `step`
 /// (`projection::project_task`) and the import's virtual container is `block`
 /// — the one word that is not a declaration's. `message_kind` is the message
-/// level C6 fixed: the same `uses` step is `act` (the act payload path), a
-/// plain step is `step`, the root is `workflow`, and a branch announces its
-/// terminal states as `branch` — a virtual container as `block` — like any
-/// other execution (the message stream is the flow trace). The two words
-/// deliberately differ for exactly one shape — the row contract must not be
-/// read as a misspelling of the message level (C6, §10).
+/// level: the same word as the row now — `step` for every step, `workflow`
+/// for the root, `branch` for a declared branch and `block` for a virtual
+/// one. A `uses` step's message is the act payload *shape*, still told by the
+/// payload's `uses` field, not by the type word (see `doc/design/message.md`).
 pub(super) struct NodeFacts {
     pub(super) declared_kind: crate::NodeKind,
     pub(super) message_kind: crate::NodeKind,
@@ -802,17 +800,11 @@ pub(super) fn node_facts(model: &crate::model::Workflow, node: &str) -> NodeFact
         }
     }
     match find_step_in_model(model, node) {
-        Some(step) => {
-            let message_kind = match step.uses.as_deref() {
-                Some(uses) if !uses.trim().is_empty() => NodeKind::Act,
-                _ => NodeKind::Step,
-            };
-            NodeFacts {
-                declared_kind: NodeKind::Step,
-                message_kind,
-                name: step.name.clone(),
-            }
-        }
+        Some(step) => NodeFacts {
+            declared_kind: NodeKind::Step,
+            message_kind: NodeKind::Step,
+            name: step.name.clone(),
+        },
         None => NodeFacts {
             declared_kind: NodeKind::Step,
             message_kind: NodeKind::Step,
@@ -863,9 +855,10 @@ mod tests {
     use super::*;
     use crate::{NodeKind, Vars, model::Workflow};
 
-    /// The two vocabularies are the legacy four words; a `uses` step is an
-    /// act on the message level but stays a step in the row contract — the
-    /// deliberate divergence C6 pinned. The name is the same in both.
+    /// The two vocabularies share one word per level now: a `uses` step is
+    /// a `step` on both the row and the message level — the act payload
+    /// shape rides the payload's `uses`, not the type word. The name is the
+    /// same in both.
     #[test]
     fn node_facts_name_the_row_and_message_kinds_of_each_node() {
         let model = Workflow::new()
@@ -913,8 +906,8 @@ mod tests {
         );
         assert_eq!(
             facts("call"),
-            (NodeKind::Step, NodeKind::Act, "Call".to_string()),
-            "a uses step is a row 'step' but a message 'act' (C6)"
+            (NodeKind::Step, NodeKind::Step, "Call".to_string()),
+            "a uses step is a row 'step' and a message 'step'; the act shape rides `uses`"
         );
         assert_eq!(
             facts("blank"),

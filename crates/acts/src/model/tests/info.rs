@@ -379,7 +379,7 @@ fn model_info_message_from_delivery() {
         id: "m1".to_string(),
         tid: "t1".to_string(),
         name: "msg".to_string(),
-        r#type: "act".to_string(),
+        r#type: "step".to_string(),
         pid: "p1".to_string(),
         nid: "n1".to_string(),
         uses: Some("acts.core.msg".to_string()),
@@ -394,7 +394,7 @@ fn model_info_message_from_delivery() {
     assert_eq!(info.chan_id, "chan");
     assert_eq!(info.tid, "t1");
     assert_eq!(info.name, "msg");
-    assert_eq!(info.r#type, "act");
+    assert_eq!(info.r#type, "step");
     assert_eq!(info.pid, "p1");
     assert_eq!(info.nid, "n1");
     assert_eq!(info.uses.as_deref(), Some("acts.core.msg"));

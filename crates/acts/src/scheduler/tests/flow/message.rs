@@ -235,7 +235,7 @@ async fn sch_message_act_messages_carry_the_act_payload() {
     fixture.start(Vars::new()).await;
 
     let created = fixture.wait_created("s1").await;
-    assert_eq!(created.r#type, "act");
+    assert_eq!(created.r#type, "step");
     assert_eq!(created.nid, "s1");
     assert!(!created.tid.is_empty(), "an execution instance id");
     assert_eq!(created.name, "Approve");
@@ -283,7 +283,7 @@ async fn sch_message_act_messages_carry_the_act_payload() {
         .unwrap();
 
     let completed = fixture.wait_message("s1", MessageState::Completed).await;
-    assert_eq!(completed.r#type, "act");
+    assert_eq!(completed.r#type, "step");
     assert!(completed.is_irq());
     assert_eq!(completed.mid, "flow-msg-act");
     assert_eq!(

@@ -273,7 +273,7 @@ async fn sch_step_uses_packages_announce_and_settle() {
     let mut fixture = FlowFixture::deploy(&workflow).await;
     completed(&fixture.run(Vars::new()).await);
     let delivered = fixture.wait_message("msg1", MessageState::Completed).await;
-    assert_eq!(delivered.r#type, "act");
+    assert_eq!(delivered.r#type, "step");
     assert!(delivered.is_msg());
     assert_eq!(
         delivered

@@ -24,7 +24,10 @@ use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
 use std::collections::{HashMap, HashSet};
 
 impl Workers {
-    /// The run's graph with its execution instances and states.
+    /// The run's graph with its execution instances, states and message
+    /// records: the aggregate's own outbox log is the message stream, and
+    /// its records fold onto the executions that announced them, by
+    /// instance (`tid`).
     pub(crate) async fn graph(&self, pid: &str) -> Result<crate::ProcessGraph> {
         let snapshot = self
             .snapshot(pid)
@@ -176,6 +179,7 @@ fn push_execution(
         generation: live.map(|_| tid.generation),
         params: spec.params,
         vars: spec.vars,
+        messages: Vec::new(),
     });
 }
 
@@ -199,11 +203,15 @@ fn push_placeholder(
         generation: None,
         params: spec.params,
         vars: spec.vars,
+        messages: Vec::new(),
     });
 }
 
 /// Walk one materialized model into its node list, expanding each node over
-/// the executions the aggregate holds for it.
+/// the executions the aggregate holds for it. The aggregate's outbox log —
+/// every message record the run announced, durable in the snapshot — folds
+/// onto the executions that announced them, by instance (`tid`): the
+/// per-node message view `proc:graph` answers with.
 pub(crate) fn process_graph(
     snapshot: &ProcessSnapshot,
     model: &crate::model::Workflow,
@@ -241,11 +249,56 @@ pub(crate) fn process_graph(
             }
         }
     }
-    Ok(crate::ProcessGraph {
+    // The aggregate's outbox log is the message stream: map each record onto
+    // its engine message and bucket the records by instance wire (`tid`), in
+    // a deterministic order — timestamp first, a `Created` before the
+    // terminal record at the same millisecond — then attach each bucket to
+    // the node carrying that instance. A record whose instance the graph
+    // does not show (the flow never reached it, or an ancestor pruned it)
+    // stays in the message stream only.
+    let mut by_tid: std::collections::HashMap<String, Vec<(crate::GraphMessage, bool)>> =
+        std::collections::HashMap::new();
+    for record in snapshot.outbox.values() {
+        let Some(message) = crate::scheduler::shell::caps::message::message_from_record(record)
+        else {
+            continue;
+        };
+        let created = message.state == crate::MessageState::Created;
+        let tid = message.tid.clone();
+        let record = crate::GraphMessage {
+            id: message.id,
+            r#type: message.r#type,
+            state: message.state.to_string(),
+            name: message.name,
+            uses: message.uses,
+            owner: message.owner,
+            assignee: message.assignee,
+            timestamp: message.timestamp,
+        };
+        by_tid.entry(tid).or_default().push((record, created));
+    }
+    let mut by_tid: std::collections::HashMap<String, Vec<crate::GraphMessage>> = by_tid
+        .into_iter()
+        .map(|(tid, mut records)| {
+            // Event time order; a `Created` record precedes the terminal one
+            // pinned at the same millisecond.
+            records.sort_by_key(|(record, created)| (record.timestamp, !*created));
+            (tid, records.into_iter().map(|(record, _)| record).collect())
+        })
+        .collect();
+    let mut graph = crate::ProcessGraph {
         pid: snapshot.process_id.clone(),
         mid: model.id.clone(),
         nodes,
-    })
+    };
+    for node in &mut graph.nodes {
+        if let Some(tid) = node.tid.as_deref()
+            && let Some(records) = by_tid.get_mut(tid)
+        {
+            node.messages = std::mem::take(records);
+        }
+    }
+    Ok(graph)
 }
 
 /// One step and everything it declares: its branches (each a node over its own

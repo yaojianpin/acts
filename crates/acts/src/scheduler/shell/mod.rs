@@ -138,6 +138,7 @@ pub(crate) mod validation;
 use self::model::task_graph;
 use self::pool::{Enqueued, JobSource, LanePool};
 use self::{action::*, errors::*, facts::*, planning::*};
+pub(crate) use action::ApproverRequest;
 pub(crate) use admission::{AdmissionCaps, Admissions};
 pub(crate) use caps::assign::{
     ASSIGNMENT_VAR, Assign, Assignment, CANONICAL_POOL, DELEGATION_VAR, Delegation,
@@ -2177,8 +2178,9 @@ impl Workers {
         // `assign` capability) for a transfer/delegate/undelegate, on the
         // authoritative task state (never a client field). `subject = None` is
         // the ACL-disabled/engine path and keeps the old behavior. Push/remove
-        // keep their existing authority — they manage the act, not its
-        // decision.
+        // answer to the assigned owner as well (added/removed approvers, see
+        // `Assign::approver_manager`) — an unassigned chain keeps the legacy
+        // authority.
         let now = SystemClock.now_ms();
         if action.moves_assignment() {
             let state = snapshot
@@ -2204,11 +2206,40 @@ impl Workers {
                 }
                 _ => unreachable!("moves_assignment names exactly the assignment actions"),
             }
-        } else if !matches!(
+        } else if matches!(
             &action,
             crate::scheduler::core::commit::command::ActionKind::Push
                 | crate::scheduler::core::commit::command::ActionKind::Remove
         ) {
+            // Added/removed approvers manage the act's approver set, not its
+            // decision: the assigned owner decides — the target's own
+            // `__assignment`, else the nearest ancestor's (a pushed act or a
+            // fan-out item answers to the assigned execution above it). A
+            // chain with no assignment at all keeps the legacy authority
+            // (`@execute`); a delegatee gains no right to add or remove approvers.
+            let node = task_id.node.as_str();
+            if let Some(owner) = Assign::approver_manager(&snapshot, &task_id)?
+                && let Some(subject) = subject
+                && subject != owner
+            {
+                return Err(crate::ActError::Action(format!(
+                    "ENOTOWNER: act '{node}' is owned by '{owner}': only the owner may add or remove approvers"
+                )));
+            }
+        } else if matches!(
+            &action,
+            crate::scheduler::core::commit::command::ActionKind::Remind
+        ) {
+            // A remind is a non-owner's urge: the act must be assigned and
+            // live, the caller authenticated and *not* the owner. No durable
+            // intent is acquired for a caller-correctable refusal.
+            let state = snapshot
+                .tasks
+                .get(&task_id)
+                .map(|task| task.state)
+                .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
+            Assign::validate_remind(&snapshot, &task_id, state, subject)?;
+        } else {
             let assignment = Assignment::of(&snapshot, &task_id)?;
             let delegation = Delegation::of(&snapshot, &task_id)?;
             Assign::authorize_decision(

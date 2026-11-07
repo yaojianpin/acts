@@ -77,7 +77,8 @@ pub struct GraphNode {
     /// level — the declaration declares no such node — so the tree display
     /// folds it into its parent step, while the node itself stays here: the
     /// messages and rows name it. A step carrying `uses` is still a `step`
-    /// here; its *message* is the act payload (`Message.r#type == "act"`).
+    /// here; its *message* is the act payload (type `step`, shape told by
+    /// `uses`).
     pub kind: String,
     /// The package the node declares (`uses`), when it declares one. A
     /// dynamic execution the model does not declare (a pushed act, a join
@@ -116,6 +117,66 @@ pub struct GraphNode {
     /// durable fact holds.
     #[serde(default)]
     pub vars: Vec<crate::Variant>,
+    /// The message records this execution announced, in delivery order — the
+    /// act/task messages (`step`/`workflow`/`branch`/`block`) and the
+    /// task-level notices (`assignment`/`remind`) alike, so a client reads
+    /// the stream off the node instead of joining `msg:ls` rows itself.
+    #[serde(default)]
+    pub messages: Vec<GraphMessage>,
+}
+
+/// One message record folded onto its node: the canonical row the run
+/// announced for the node's execution, `proc:graph`'s message view.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GraphMessage {
+    /// The message id (`Message.id`).
+    pub id: String,
+    /// The message type (`workflow|step|branch|block`, or the task-level
+    /// notices `assignment`/`remind`).
+    pub r#type: String,
+    /// The message state, in the wire vocabulary (`created|completed|…`).
+    pub state: String,
+    /// The node name or action name the message carries.
+    pub name: String,
+    /// The package the message announces (`uses`), when it is an act payload.
+    #[serde(default)]
+    pub uses: Option<String>,
+    /// The human act's owner the message projected.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// The human act's assignee the message projected.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// The event time the record pinned, in milliseconds.
+    pub timestamp: i64,
+}
+
+/// The task-level notice types the display annotates (a `step`'s own
+/// lifecycle records are the step itself — they get no annotation).
+const NOTICE_TYPE_ORDER: [&str; 2] = ["remind", "assignment"];
+
+impl GraphNode {
+    /// The node's notice counts as the tree display renders them —
+    /// `remind=2, assignment=1`, the vocabulary order, zero counts left
+    /// out — or an empty string when the execution announced no notice.
+    pub fn message_counts(&self) -> String {
+        let mut counts = Vec::new();
+        for kind in NOTICE_TYPE_ORDER {
+            let count = self
+                .messages
+                .iter()
+                .filter(|message| message.r#type == kind)
+                .count();
+            if count > 0 {
+                counts.push(format!("{kind}={count}"));
+            }
+        }
+        if counts.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", counts.join(" "))
+        }
+    }
 }
 
 /// The run's graph (`proc:graph`): the durable (materialized) model expanded
@@ -168,13 +229,14 @@ impl ProcessGraph {
         }
         let fact = |value: &Option<String>| value.clone().unwrap_or_else(|| "nil".to_string());
         output.push_str(&format!(
-            "{} id:{} name={}  uses={} state={} next={}\n",
+            "{} id:{} name={}  uses={} state={} next={}{}\n",
             node.kind,
             node.nid,
             node.name,
             fact(&node.uses),
             fact(&node.state),
             fact(&node.next),
+            node.message_counts(),
         ));
         // A virtual block renders no line, so its visible children take its
         // place in the parent's list; the connector of every child is then

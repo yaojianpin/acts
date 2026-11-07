@@ -108,6 +108,16 @@ pub enum ActCommands {
         #[arg(short, long, help="vars in K=V format\nthe V can be number, string, or json, \nif the V contains whitesapce, please wrap it in `'` or `\"`\nexample: \n-v a=1 -v b=abc -v c='[2, 3, 4]' -v d='{ \"value\": 100 }' -v e=null", value_parser = util::parse_key_json::<String>)]
         vars: Vec<(String, serde_json::Value)>,
     },
+
+    #[command(about = "remind an assigned act as a non-owner")]
+    Remind {
+        #[arg(help = "proc id")]
+        pid: String,
+        #[arg(help = "task id")]
+        tid: String,
+        #[arg(short, long, help = "the message carried with the reminder")]
+        message: Option<String>,
+    },
 }
 
 pub async fn process(parent: &mut Command<'_>, command: &ActCommands) -> anyhow::Result<()> {
@@ -137,6 +147,13 @@ pub async fn process(parent: &mut Command<'_>, command: &ActCommands) -> anyhow:
         }
         ActCommands::Push { pid, tid, vars } => send(parent, "act:push", pid, tid, vars).await,
         ActCommands::Remove { pid, tid, vars } => send(parent, "act:remove", pid, tid, vars).await,
+        ActCommands::Remind { pid, tid, message } => {
+            let mut vars: Vec<(String, serde_json::Value)> = Vec::new();
+            if let Some(message) = message {
+                vars.push(("message".to_string(), json!(message)));
+            }
+            send(parent, "act:remind", pid, tid, &vars).await
+        }
     }?;
 
     parent.output(&ret);

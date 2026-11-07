@@ -246,7 +246,7 @@ impl<'a> Client<'a> {
             return Ok(());
         }
 
-        if message.is_type("act")
+        if message.is_type("step")
             && let Some(params) = message.inputs.get::<Vars>("params")
             && let Some(key) = params.get::<String>("key")
         {

@@ -716,6 +716,26 @@ impl ActsChannel {
         )
         .await
     }
+
+    /// Remind an assigned act as a non-owner: the kernel records the urge to
+    /// the act's current owner (a transferred task also announces an
+    /// `acts.core.msg` to the transfer target) and leaves the act untouched.
+    /// The owner themselves is refused.
+    pub async fn remind<T>(
+        &mut self,
+        pid: &str,
+        tid: &str,
+        message: Option<&str>,
+    ) -> Result<ActionResult<T>, Status>
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let mut data = Vars::new().with("pid", pid).with("tid", tid);
+        if let Some(message) = message {
+            data.set("message", message);
+        }
+        self.send("act:remind", data).await
+    }
 }
 
 /// A fault of a running subscription that does not end its feed.

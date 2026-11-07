@@ -24,7 +24,7 @@ async fn pack_msg_emits_its_params_and_completes() {
     // The single delivery: already `Completed`, with the resolved params.
     let delivered = fixture.wait_message("s1", MessageState::Completed).await;
     assert!(delivered.is_msg());
-    assert_eq!(delivered.r#type, "act");
+    assert_eq!(delivered.r#type, "step");
     let params = delivered.params().expect("the message params");
     assert_eq!(params.get::<String>("key").as_deref(), Some("m1"));
     assert_eq!(params.get::<String>("channel").as_deref(), Some("main"));

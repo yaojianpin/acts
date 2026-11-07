@@ -132,7 +132,7 @@ pub enum ResourceRef {
     Department {
         name: String,
     },
-    /// A company/unit (`单位`).
+    /// A company/unit.
     Unit {
         name: String,
     },
@@ -188,11 +188,11 @@ pub enum Duty {
     /// Every owner of the resource, whatever the duty.
     #[default]
     All,
-    /// The principal/head (`正职`).
+    /// The principal/head of a unit.
     Principal,
-    /// A deputy (`副职`).
+    /// A deputy head.
     Deputy,
-    /// A member (`成员`).
+    /// A member.
     Member,
     /// A deployment-defined duty; the directory decides what it means.
     Custom(String),
@@ -234,9 +234,9 @@ pub enum RelationName {
     UnitOf,
     /// The project a user belongs to.
     ProjectOf,
-    /// The user's manager (`上级`).
+    /// The user's manager.
     ManagerOf,
-    /// The user's reports (`下属`).
+    /// The user's direct reports.
     ReportsOf,
     /// The user's assistant.
     AssistantOf,
@@ -321,7 +321,7 @@ pub enum ContextVar {
 /// ```json
 /// { "kind": "context", "var": { "type": "current_actor" } }
 /// { "kind": "owners_of",
-///   "resource": { "resource": "department", "name": "研发部" },
+///   "resource": { "resource": "department", "name": "rd-dept" },
 ///   "duty": "principal" }
 /// { "kind": "relate",
 ///   "from": { "kind": "context", "var": { "type": "current_actor" } },
@@ -614,7 +614,7 @@ mod tests {
                 { "kind": "context", "var": { "type": "initiator" } },
                 { "kind": "all_of", "operands": [
                     { "kind": "owners_of",
-                      "resource": { "resource": "department", "name": "研发部" },
+                      "resource": { "resource": "department", "name": "rd-dept" },
                       "duty": "principal" },
                     { "kind": "context",
                       "var": { "type": "var", "name": "owner_unit", "ty": "unit", "duty": "principal" } }
@@ -694,9 +694,9 @@ mod tests {
     #[test]
     fn a_resource_reference_parses_its_wire_kind() {
         assert_eq!(
-            ResourceRef::new("department", "研发部").unwrap(),
+            ResourceRef::new("department", "rd-dept").unwrap(),
             ResourceRef::Department {
-                name: "研发部".to_string()
+                name: "rd-dept".to_string()
             }
         );
         assert!(ResourceRef::new("team", "x").is_err());

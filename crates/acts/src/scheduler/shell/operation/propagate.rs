@@ -219,6 +219,28 @@ impl ActOperation for PropagateTask {
                     cursor = ancestor_task.parent.clone();
                 }
             }
+            // A single-owner sign chain parked on the parent: the settled
+            // leaf admits the next owner's act — a task create under the
+            // parent, which also keeps the join below from deciding the
+            // parent. The drained queue falls through to the ordinary join.
+            if let Some(parent) = task.as_ref().and_then(|e| e.parent.clone())
+                && crate::scheduler::core::plan::container::parked_for_children(snapshot, &parent)
+                && let Some(mut chain) =
+                    crate::scheduler::shell::action::approver_chain_of(snapshot, &parent)?
+                        .filter(|chain| !chain.owners.is_empty())
+            {
+                let next = chain.owners.remove(0);
+                plan.variable_writes.push(VariableWrite {
+                    scope: parent.clone(),
+                    name: crate::scheduler::shell::action::APPROVER_CHAIN_VAR.to_string(),
+                    value: chain.fact(),
+                });
+                let (writes, create, operation) =
+                    super::action::approver_leaf_facts(snapshot, &parent, &next, &chain.params)?;
+                plan.variable_writes.extend(writes);
+                plan.task_creates.push(create);
+                plan.operations.push(operation);
+            }
             // The container join: a parent parked by a fan-out completes
             // in the same atomic commit that settles its last child; a
             // failed step's CATCH child runs the catch join instead, which

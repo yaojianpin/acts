@@ -174,6 +174,126 @@ pub(super) fn pushed_act_of(
         .transpose()
 }
 
+/// The next pushed node's id under `task_id`: `<target>#push<k>`, unique
+/// against every execution the run ever held, so a replay against the same
+/// snapshot mints the same id (idempotency) and two pushes never collide.
+/// A plain push and the leaves of an approver chain share the counter.
+pub(super) fn next_push_node(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+) -> String {
+    let prefix = format!("{}#push", task_id.node.as_str());
+    let nth = snapshot
+        .tasks
+        .keys()
+        .filter(|existing| existing.node.as_str().starts_with(&prefix))
+        .count()
+        + 1;
+    format!("{prefix}{nth}")
+}
+
+/// The pending approver chain (the sequential added approvers) one execution
+/// drives: the owners still to admit — one pushed act at a time, in the
+/// order the push fixed (`before` runs the added approvers ahead of the
+/// owner's turn, `after` behind it) — and the params every leaf of the
+/// chain carries. The variable lives on the target's scope; each settled
+/// leaf pops its front
+/// ([`ApplyAction::approver_push_plan`](../operation/action/struct.ApplyAction.html)).
+pub(super) const APPROVER_CHAIN_VAR: &str = "__approver_chain";
+
+/// The durable approver chain of one added-approvers push.
+#[derive(Clone, Debug)]
+pub(super) struct ApproverChain {
+    pub(super) owners: Vec<String>,
+    pub(super) params: serde_json::Value,
+}
+
+impl ApproverChain {
+    pub(super) fn fact(&self) -> String {
+        serde_json::json!({ "owners": self.owners, "params": self.params }).to_string()
+    }
+
+    pub(super) fn decode(text: &str) -> Result<Self> {
+        let fact: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| runtime(format!("corrupt approver chain: {error}")))?;
+        let owners = fact["owners"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            owners,
+            params: fact["params"].clone(),
+        })
+    }
+}
+
+/// The approver chain one execution still drives, if any.
+pub(super) fn approver_chain_of(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task_id: &crate::scheduler::core::model::task_graph::TaskId,
+) -> Result<Option<ApproverChain>> {
+    snapshot
+        .variables
+        .get(&(task_id.clone(), APPROVER_CHAIN_VAR.to_string()))
+        .map(|raw| ApproverChain::decode(raw))
+        .transpose()
+}
+
+/// The added approvers a client push names, against a single-owner act:
+/// `owners` is a non-empty JSON array of user ids and `mode` fixes the order
+/// — `before` (the added steps ahead of the owner's) or `after` (the owner's
+/// ahead, the default). Absent `owners` is the plain push whose act the
+/// client spells out itself.
+#[derive(Clone, Debug)]
+pub(crate) struct ApproverRequest {
+    pub(super) owners: Vec<String>,
+    pub(super) before: bool,
+    pub(super) params: serde_json::Value,
+}
+
+impl ApproverRequest {
+    pub(crate) fn from_inputs(inputs: &[(String, String)]) -> Result<Option<Self>> {
+        let get = |name: &str| {
+            inputs
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        let Some(raw) = get("owners").filter(|raw| !raw.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let owners: Vec<String> = serde_json::from_str(&raw)
+            .map_err(|error| runtime(format!("push 'owners' is not a user list: {error}")))?;
+        if owners.is_empty() || owners.iter().any(|owner| owner.trim().is_empty()) {
+            return Err(runtime("push 'owners' names no approver"));
+        }
+        let before = match get("mode").unwrap_or_default().as_str() {
+            "" | "after" => false,
+            "before" => true,
+            other => {
+                return Err(runtime(format!(
+                    "push 'mode' is '{other}': name 'before' or 'after'"
+                )));
+            }
+        };
+        let params = match get("params").filter(|raw| !raw.trim().is_empty()) {
+            Some(raw) => serde_json::from_str(&raw)
+                .map_err(|error| runtime(format!("push 'params' is not json: {error}")))?,
+            None => serde_json::Value::Null,
+        };
+        Ok(Some(Self {
+            owners,
+            before,
+            params,
+        }))
+    }
+}
+
 /// The action a durable intent carries, as the JSON text its operation replays.
 /// `subject` is the authenticated ACL subject (the executor's fill): the audit
 /// fields and the authorization gate use it, and it is persisted because a
@@ -205,6 +325,7 @@ pub(super) fn action_fact(
         A::Transfer => serde_json::json!({ "action": "transfer" }),
         A::Delegate => serde_json::json!({ "action": "delegate" }),
         A::Undelegate => serde_json::json!({ "action": "undelegate" }),
+        A::Remind => serde_json::json!({ "action": "remind" }),
     };
     serde_json::json!({
         "kind": kind,
@@ -249,6 +370,7 @@ pub(super) fn decode_action_fact(text: &str) -> Result<DecodedActionFact> {
         "transfer" => crate::scheduler::core::commit::command::ActionKind::Transfer,
         "delegate" => crate::scheduler::core::commit::command::ActionKind::Delegate,
         "undelegate" => crate::scheduler::core::commit::command::ActionKind::Undelegate,
+        "remind" => crate::scheduler::core::commit::command::ActionKind::Remind,
         other => return Err(runtime(format!("corrupt action fact: action '{other}'"))),
     };
     let inputs = fact["inputs"]

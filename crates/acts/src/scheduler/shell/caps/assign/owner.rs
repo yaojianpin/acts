@@ -95,6 +95,36 @@ impl Assignment {
 }
 
 impl Assign {
+    /// The owner a sign change (an added/removed approver) must name: the
+    /// assigned execution the target belongs to. A pushed act — a plain
+    /// pushed act or the leaf of a sign chain — never signs for itself: its
+    /// holder (the nearest assigned ancestor) manages the approver set. A
+    /// target that is no pushed act starts at itself; the walk then climbs
+    /// the parent chain. `None` when no execution on the chain is assigned:
+    /// the legacy authority (`@execute`) stays, and a delegatee gains no
+    /// signing right either way.
+    pub(crate) fn approver_manager(
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+    ) -> crate::Result<Option<String>> {
+        let mut current =
+            if crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)?.is_some() {
+                snapshot
+                    .tasks
+                    .get(task_id)
+                    .and_then(|task| task.parent.clone())
+            } else {
+                Some(task_id.clone())
+            };
+        while let Some(id) = current {
+            if let Some(assignment) = owner::Assignment::of(snapshot, &id)? {
+                return Ok(Some(assignment.owner));
+            }
+            current = snapshot.tasks.get(&id).and_then(|task| task.parent.clone());
+        }
+        Ok(None)
+    }
+
     /// The per-task decision check: a declared assignment admits only its
     /// owner, or a delegatee whose delegation is still valid at `now`; a
     /// decision carrying a revision must name the current one. No assignment

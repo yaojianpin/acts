@@ -297,13 +297,14 @@ impl GraphRenderer<'_> {
         }
         let fact = |value: &Option<String>| value.clone().unwrap_or_else(|| "nil".to_string());
         self.output.push_str(&format!(
-            "{} id:{} name={}  uses={} state={} next={}",
+            "{} id:{} name={}  uses={} state={} next={}{}\n",
             node.kind,
             node.nid,
             node.name,
             fact(&node.uses),
             fact(&node.state),
             fact(&node.next),
+            node.message_counts(),
         ));
         write_vars(node, self.vars, &mut self.output);
         self.output.push('\n');

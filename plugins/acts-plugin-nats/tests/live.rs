@@ -96,7 +96,7 @@ async fn start_assigned(engine: &Engine, id: &str) -> (String, String) {
     chan.on_message(move |message| {
         let tx = tx.clone();
         async move {
-            if message.state == acts::MessageState::Created && message.r#type == "act" {
+            if message.state == acts::MessageState::Created && message.r#type == "step" {
                 let _ = tx.send(message.inner().clone());
             }
         }

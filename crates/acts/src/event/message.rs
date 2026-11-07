@@ -54,8 +54,10 @@ pub struct Message {
     /// task action state
     pub state: MessageState,
 
-    /// message type
-    /// workflow | step | branch | act
+    /// message type — the node level the message announces:
+    /// workflow | step | branch | block, plus the task-level notices
+    /// `assignment` and `remind`. A step carrying `uses` is a `step` too;
+    /// the act-payload shape is told by `uses`, not by the type word.
     pub r#type: String,
 
     /// process id
@@ -123,16 +125,24 @@ impl Message {
         self.nid == nid
     }
 
+    /// Whether the message announces an act payload — a `uses` step's
+    /// message. The type word is `step` (the model's only step level); the
+    /// act shape is told by `uses`, never by the type word (see
+    /// `doc/design/message.md`).
+    pub fn is_act(&self) -> bool {
+        self.r#type == "step"
+    }
+
     pub fn is_uses(&self, uses: &str) -> bool {
-        self.uses.as_deref() == Some(uses) && self.r#type == "act"
+        self.uses.as_deref() == Some(uses) && self.is_act()
     }
 
     pub fn is_irq(&self) -> bool {
-        self.uses.as_deref() == Some("acts.core.irq") && self.r#type == "act"
+        self.is_uses("acts.core.irq")
     }
 
     pub fn is_msg(&self) -> bool {
-        self.uses.as_deref() == Some("acts.core.msg") && self.r#type == "act"
+        self.is_uses("acts.core.msg")
     }
 
     pub fn is_state(&self, state: MessageState) -> bool {
@@ -326,7 +336,7 @@ mod tests {
         Message {
             nid: "step1".to_string(),
             uses: Some("acts.core.msg".to_string()),
-            r#type: "act".to_string(),
+            r#type: "step".to_string(),
             ..Default::default()
         }
     }
@@ -346,9 +356,10 @@ mod tests {
         assert!(irq.is_irq());
         assert!(!irq.is_msg());
 
-        // `is_uses`/`is_irq` require the act message type.
+        // `is_uses`/`is_irq` require an act payload: a task-level notice
+        // (`assignment`/`remind`) carries `uses` too but is not one.
         let mut typed = message();
-        typed.r#type = "step".to_string();
+        typed.r#type = "assignment".to_string();
         assert!(!typed.is_uses("acts.core.msg"));
         assert!(!typed.is_msg());
     }
@@ -397,7 +408,7 @@ mod tests {
             tid: "t1".to_string(),
             name: "n".to_string(),
             state: MessageState::Completed,
-            r#type: "act".to_string(),
+            r#type: "step".to_string(),
             pid: "p1".to_string(),
             nid: "n1".to_string(),
             mid: "mid".to_string(),

@@ -7,7 +7,7 @@
 //! the durable record onto the engine's `Message` unchanged.
 
 use crate::{
-    NodeKind, Result,
+    Result,
     scheduler::{
         core::{
             commit::aggregate::ProcessSnapshot,
@@ -122,11 +122,17 @@ fn act_message_payload(
         "tid": task_id.wire(&snapshot.process_id),
         "nid": node_id,
         "name": name,
-        // The level is explicit since C6: the act payload used to leave
-        // `kind` to the consumer's "act" default. The word is unchanged.
-        "kind": NodeKind::Act.to_string(),
+        // The level is explicit since C6. The act payload used to leave
+        // `kind` to the consumer's "act" default and later wrote `act`;
+        // the model has no act level, so the word is the step itself —
+        // the act shape is told by `uses` (see `doc/design/message.md`).
+        "kind": crate::NodeKind::Step.to_string(),
         "uses": uses,
         "mid": mid,
+        // The commit's wall clock: the event time the record carries (the
+        // delivery stamps its own, later), so consumers can order a node's
+        // records.
+        "ts": crate::utils::time::time_millis(),
         "inputs": serde_json::Value::Object(inputs),
     });
     if let Some(assignment) = &assignment {
@@ -189,6 +195,8 @@ fn task_message_payload(
         "nid": node,
         "name": facts.name,
         "kind": facts.message_kind.to_string(),
+        // The commit's wall clock (see the act payload's `ts`).
+        "ts": crate::utils::time::time_millis(),
         "inputs": serde_json::Value::Object(inputs),
     });
     if let Some((code, message)) = error {

@@ -135,7 +135,7 @@ impl Channel {
     ///     });
     ///
     ///     engine.channel().on_message(move |e| async move {
-    ///         if let Some(uses) = &e.uses && e.r#type == "act" && uses == "acts.core.irq" {
+    ///         if let Some(uses) = &e.uses && e.r#type == "step" && uses == "acts.core.irq" {
     ///             println!("act message: state={} inputs={:?} outputs={:?}", e.state, e.inputs, e.outputs);
     ///         }
     ///     });
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn invalid_glob_falls_back_to_match_all() {
         let matcher = compile_glob("[", "type");
-        assert!(matcher.is_match("act"));
+        assert!(matcher.is_match("step"));
         assert!(matcher.is_match(""));
     }
 

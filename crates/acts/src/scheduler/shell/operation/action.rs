@@ -187,6 +187,17 @@ impl ApplyAction {
                 ) {
                     return Self::push_plan(host, snapshot, id, task_id, task, claim, &inputs);
                 }
+                // A client `Remind` decides nothing either: it records the
+                // urge (and announces an `acts.core.msg` on a transferred
+                // task). State, owner and flow are untouched.
+                if matches!(
+                    kind,
+                    crate::scheduler::core::commit::command::ActionKind::Remind
+                ) {
+                    return Self::remind_plan(
+                        host, snapshot, id, task_id, task, claim, &inputs, subject,
+                    );
+                }
                 // A client completion of a container dispatches its children
                 // instead of completing it (the legacy `Next` on a running
                 // step) — the step declaring `catches` included: the completion
@@ -825,19 +836,20 @@ impl ApplyAction {
         claim: &OperationCommit,
         inputs: &[(String, String)],
     ) -> Result<TransitionPlan> {
+        // An added-approvers push: the client names approvers (`owners`,
+        // `mode`) against a single-owner act — the kernel drives a sequential
+        // chain of pushed acts for it and absorbs the target's own answer
+        // (see `approver_push_plan`). Every other push is the client's own act.
+        if let Some(request) =
+            crate::scheduler::shell::action::ApproverRequest::from_inputs(inputs)?
+        {
+            return Self::approver_push_plan(host, snapshot, id, task_id, task, claim, request);
+        }
         let act = crate::scheduler::shell::action::PushedAct::from_inputs(inputs)?;
         // The pushed node's id: `<target>#push<k>`, unique against every
         // execution the run ever held, so a replay against the same snapshot
         // mints the same id (idempotency) and two pushes never collide.
-        let prefix = format!("{}#push", task_id.node.as_str());
-        let nth = snapshot
-            .tasks
-            .keys()
-            .filter(|existing| existing.node.as_str().starts_with(&prefix))
-            .count()
-            + 1;
-        let node = format!("{prefix}{nth}");
-        let child = TaskId::new(&node, 0).map_err(runtime)?;
+        let node = crate::scheduler::shell::action::next_push_node(snapshot, task_id);
 
         // The run-bound decisions the import built for declared nodes: the
         // pushed package's own `run_as`. An unregistered package is the `Irq`
@@ -851,6 +863,44 @@ impl ApplyAction {
         let auto = matches!(run_as, Some(crate::ActRunAs::Func | crate::ActRunAs::Msg));
         let msg = run_as == Some(crate::ActRunAs::Msg);
 
+        let (writes, create, operation) =
+            Self::dynamic_child_facts(snapshot, task_id, &node, act, auto, msg)?;
+        let mut plan = host.task_operation_plan(
+            snapshot,
+            id,
+            task_id,
+            Some(task),
+            claim,
+            "pushed",
+            "task.pushed",
+        )?;
+        plan.variable_writes = writes;
+        plan.task_creates.push(create);
+        plan.operations.push(operation);
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    /// The facts, the execution and the start operation one dynamic child
+    /// gains under `parent`: its pushed-act fact on its own scope, the
+    /// run-bound `auto` variable, the root auto/msg map entries the import
+    /// built for declared nodes (`auto_decision`/`msg_decision` refuse a
+    /// missing one), the `Ready` execution and its start operation. A plain
+    /// push and an approver-chain leaf share this; the remind's `acts.core.msg`
+    /// announcement does too.
+    fn dynamic_child_facts(
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        parent: &crate::scheduler::core::model::task_graph::TaskId,
+        node: &str,
+        act: crate::scheduler::shell::action::PushedAct,
+        auto: bool,
+        msg: bool,
+    ) -> Result<(
+        Vec<VariableWrite>,
+        crate::scheduler::core::model::transition_plan::TaskCreate,
+        OperationIntent,
+    )> {
+        let child = TaskId::new(node, 0).map_err(runtime)?;
         let root = crate::scheduler::core::decision::root_task(snapshot)
             .ok_or_else(|| ActError::Runtime("the run has no root".to_string()))?;
         let mut writes = Vec::with_capacity(4);
@@ -874,13 +924,172 @@ impl ApplyAction {
                     .transpose()
                     .map_err(runtime)?
                     .unwrap_or_default();
-            map.insert(node.clone(), serde_json::Value::Bool(name));
+            map.insert(node.to_string(), serde_json::Value::Bool(name));
             writes.push(VariableWrite {
                 scope: root.clone(),
                 name: map_var.to_string(),
                 value: serde_json::Value::Object(map).to_string(),
             });
         }
+        let create = crate::scheduler::core::model::transition_plan::TaskCreate {
+            task: child.clone(),
+            model_node: node_id(node)?,
+            parent: Some(parent.clone()),
+            predecessors: Vec::new(),
+            initial_state: crate::scheduler::core::model::task_graph::TaskState::Ready,
+        };
+        let operation = OperationIntent {
+            id: OperationId {
+                process_id: snapshot.process_id.clone(),
+                task: child,
+                sequence: 0,
+            },
+            kind: OperationKind::ExecuteTask,
+            ready_at_ms: None,
+        };
+        Ok((writes, create, operation))
+    }
+
+    /// The plan of an added-approvers push on a single-owner act: one pushed
+    /// act per named approver, admitted one at a time in the order `mode`
+    /// fixed — `before` runs the added approvers ahead of the owner's turn,
+    /// `after` behind it. The kernel drives the chain as a sequential approver set:
+    /// each leaf is an ordinary pushed act carrying its own owner (a literal
+    /// `assign.owner`), the still-pending owners queue on the target's scope,
+    /// and the target's own answer is absorbed — it parks here, its act's
+    /// message resolves, and
+    /// [`sign_admit_plan`](struct.ApplyAction.html) admits the next leaf when
+    /// the current settles. When the queue drains, the ordinary join
+    /// completes the target (a live non-declared child parks it exactly like
+    /// a plain push does).
+    fn approver_push_plan(
+        host: &Workers,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        id: &OperationId,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        task: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
+        claim: &OperationCommit,
+        request: crate::scheduler::shell::action::ApproverRequest,
+    ) -> Result<TransitionPlan> {
+        let node = task_id.node.as_str();
+        let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+            crate::ActError::Action(format!(
+                "ENOTOWNER: act '{node}' has no owner to add approvers to: \
+                 an approver chain needs a single owner"
+            ))
+        })?;
+        // The chain order the push fixed: `before` runs the added approvers
+        // ahead of the owner's step, `after` behind it.
+        let mut chain = request.owners.clone();
+        if request.before {
+            chain.push(assignment.owner.clone());
+        } else {
+            chain.insert(0, assignment.owner);
+        }
+        let first = chain.remove(0);
+        let queue = crate::scheduler::shell::action::ApproverChain {
+            owners: chain,
+            params: request.params.clone(),
+        };
+
+        // The target's own answer is absorbed: it parks for the chain like a
+        // step that already answered, and its pending act message resolves
+        // on this record (`task.completed`, so the record maps onto the
+        // message stream).
+        let mut plan = host.task_operation_plan(
+            snapshot,
+            id,
+            task_id,
+            Some(task),
+            claim,
+            "completed",
+            "task.completed",
+        )?;
+        plan.variable_writes.push(VariableWrite {
+            scope: task_id.clone(),
+            name: crate::scheduler::shell::action::APPROVER_CHAIN_VAR.to_string(),
+            value: queue.fact(),
+        });
+        if task.state == crate::scheduler::core::model::task_graph::TaskState::Waiting {
+            plan.state_changes.push(StateChange {
+                task: task_id.clone(),
+                expected_revision: task.revision,
+                from: crate::scheduler::core::model::task_graph::TaskState::Waiting,
+                to: crate::scheduler::core::model::task_graph::TaskState::Running,
+            });
+        }
+        mark_parked_for_children(&mut plan, task_id);
+        if step_uses(snapshot, task_id, &task.model_node)?.is_some()
+            && let Some(payload) = operation_message_payload(
+                snapshot,
+                task_id,
+                node,
+                act_facts(snapshot, task_id).as_ref(),
+                Some(&plan.variable_writes),
+                None,
+            )?
+        {
+            plan.outbox[0].payload = payload.to_string();
+        }
+        let (writes, create, operation) =
+            approver_leaf_facts(snapshot, task_id, &first, &request.params)?;
+        plan.variable_writes.extend(writes);
+        plan.task_creates.push(create);
+        plan.operations.push(operation);
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    /// The plan of a client `Remind`: a non-owner's urge on an assigned,
+    /// live act. It decides nothing — the plan writes the reminder record
+    /// (`type=remind`, the current owner's address, the caller in `from`,
+    /// `ref_msg_id` pointing at the original `Created`) and, on a task that
+    /// has been transferred, announces an `acts.core.msg` child to the
+    /// transfer target. State, owner and flow are untouched; the msg child
+    /// parks the target only until its one delivery settles.
+    #[allow(clippy::too_many_arguments)]
+    fn remind_plan(
+        host: &Workers,
+        snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+        id: &OperationId,
+        task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        task: &TaskSnapshot,
+        claim: &OperationCommit,
+        inputs: &[(String, String)],
+        subject: Option<&str>,
+    ) -> Result<TransitionPlan> {
+        let node = task_id.node.as_str();
+        let input = |name: &str| {
+            inputs
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        // The replay-side twin of the authorization gate: the same
+        // caller-correctable facts, decided again on the durable state.
+        let assignment = Assignment::of(snapshot, task_id)?.ok_or_else(|| {
+            crate::ActError::Action(format!(
+                "ENOTOWNER: act '{node}' has no assignment to remind"
+            ))
+        })?;
+        if task.state.is_terminal() {
+            return Err(crate::ActError::Action(format!(
+                "task('{node}') is not allowed to remind"
+            )));
+        }
+        let caller = subject.map(str::trim).filter(|caller| !caller.is_empty());
+        let Some(caller) = caller else {
+            return Err(crate::ActError::Action(format!(
+                "ENOTOWNER: act '{node}' takes no remind without an authenticated caller"
+            )));
+        };
+        if caller == assignment.owner {
+            return Err(crate::ActError::Action(format!(
+                "ENOTOWNER: the owner cannot remind their own act '{node}'"
+            )));
+        }
+        let message = input("message").unwrap_or_default();
 
         let mut plan = host.task_operation_plan(
             snapshot,
@@ -888,27 +1097,75 @@ impl ApplyAction {
             task_id,
             Some(task),
             claim,
-            "pushed",
-            "task.pushed",
+            "reminded",
+            "task.reminded",
         )?;
-        plan.task_creates
-            .push(crate::scheduler::core::model::transition_plan::TaskCreate {
-                task: child.clone(),
-                model_node: node_id(&node)?,
-                parent: Some(task_id.clone()),
-                predecessors: Vec::new(),
-                initial_state: crate::scheduler::core::model::task_graph::TaskState::Ready,
-            });
-        plan.variable_writes = writes;
-        plan.operations.push(OperationIntent {
-            id: OperationId {
-                process_id: id.process_id.clone(),
-                task: child,
-                sequence: 0,
+        let facts = act_facts(snapshot, task_id);
+        let mut payload =
+            operation_message_payload(snapshot, task_id, node, facts.as_ref(), None, None)?
+                .ok_or_else(|| {
+                    runtime(format!(
+                        "act '{node}' has no message payload for its remind"
+                    ))
+                })?;
+        payload["kind"] = serde_json::json!("remind");
+        Assign::inject_payload_assignment(&mut payload, &assignment);
+        payload["ref_msg_id"] = Assign::created_message_id(snapshot, task_id)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null);
+        // The record's own id is pinned now, in the durable record.
+        payload["msg_id"] = serde_json::Value::String(crate::utils::longid());
+        payload["inputs"]["params"]["from"] = serde_json::Value::String(caller.to_string());
+        payload["inputs"]["params"]["to"] = serde_json::Value::String(assignment.owner.clone());
+        if !message.is_empty() {
+            payload["inputs"]["params"]["message"] = serde_json::Value::String(message.to_string());
+        }
+        // The key is the operation's identity: deterministic on a replay,
+        // unique per remind.
+        plan.outbox.push(
+            crate::scheduler::core::model::transition_plan::OutboxIntent {
+                key: format!(
+                    "remind.created:{}:{}:{}:{}",
+                    plan.process_id,
+                    id.task.node.as_str(),
+                    id.task.generation,
+                    id.sequence
+                ),
+                topic: "remind.created".into(),
+                payload: payload.to_string(),
             },
-            kind: OperationKind::ExecuteTask,
-            ready_at_ms: None,
-        });
+        );
+        // A transferred task announces the urge to the transfer target (the
+        // current owner) with a real `acts.core.msg` execution.
+        if assignment.transferred_from.is_some() {
+            let prefix = format!("{node}#remind");
+            let nth = snapshot
+                .tasks
+                .keys()
+                .filter(|existing| existing.node.as_str().starts_with(&prefix))
+                .count()
+                + 1;
+            let child_node = format!("{prefix}{nth}");
+            let act = crate::scheduler::shell::action::PushedAct {
+                uses: "acts.core.msg".to_string(),
+                name: "remind".to_string(),
+                params: serde_json::json!({
+                    "to": assignment.owner,
+                    "from": caller,
+                    "message": message,
+                    "ref": node,
+                }),
+                options: serde_json::Value::Null,
+                exposes: Vec::new(),
+                vars: Vec::new(),
+                assign: None,
+            };
+            let (writes, create, operation) =
+                Self::dynamic_child_facts(snapshot, task_id, &child_node, act, true, true)?;
+            plan.variable_writes.extend(writes);
+            plan.task_creates.push(create);
+            plan.operations.push(operation);
+        }
         plan.validate().map_err(runtime)?;
         Ok(plan)
     }
@@ -2109,6 +2366,37 @@ impl ActOperation for ApplyAction {
             }
         }
     }
+}
+
+/// The facts and admission of one sign-chain leaf: an ordinary pushed act
+/// (`<parent>#push<k>`) whose `assign.owner` is the user the chain names. A
+/// human leaf: no auto run, no msg map entry. The push plan admits the first
+/// leaf with it; the propagation admits the next ones (see
+/// `operation::propagate`).
+pub(super) fn approver_leaf_facts(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    parent: &crate::scheduler::core::model::task_graph::TaskId,
+    owner: &str,
+    params: &serde_json::Value,
+) -> Result<(
+    Vec<VariableWrite>,
+    crate::scheduler::core::model::transition_plan::TaskCreate,
+    OperationIntent,
+)> {
+    let node = crate::scheduler::shell::action::next_push_node(snapshot, parent);
+    let act = crate::scheduler::shell::action::PushedAct {
+        uses: "acts.core.irq".to_string(),
+        name: owner.to_string(),
+        params: params.clone(),
+        options: serde_json::Value::Null,
+        exposes: Vec::new(),
+        vars: Vec::new(),
+        assign: Some(crate::model::Assign {
+            owner: Some(owner.to_string()),
+            ..Default::default()
+        }),
+    };
+    ApplyAction::dynamic_child_facts(snapshot, parent, &node, act, false, false)
 }
 
 #[cfg(test)]

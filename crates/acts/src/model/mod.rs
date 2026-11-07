@@ -16,7 +16,8 @@ mod tests;
 pub use branch::Branch;
 pub use catch::Catch;
 pub use info::{
-    EventInfo, GraphNode, MessageInfo, ModelInfo, PackageInfo, ProcInfo, ProcessGraph, TaskInfo,
+    EventInfo, GraphMessage, GraphNode, MessageInfo, ModelInfo, PackageInfo, ProcInfo,
+    ProcessGraph, TaskInfo,
 };
 pub use join::{DECIDE_PACKAGE, JoinRule, PartialThreshold};
 pub(crate) use owner::participants_from_json;

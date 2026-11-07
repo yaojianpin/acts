@@ -93,6 +93,65 @@ pub struct GraphNode {
     /// The step's or branch's declared vars, in declaration order.
     #[serde(default)]
     pub vars: Vec<GraphVar>,
+    /// The message records this execution announced, in delivery order — the
+    /// act/task messages and the task-level notices (`assignment`/`remind`)
+    /// alike.
+    #[serde(default)]
+    pub messages: Vec<GraphMessage>,
+}
+
+/// The task-level notice types the display annotates (a `step`'s own
+/// lifecycle records are the step itself — they get no annotation).
+const NOTICE_TYPE_ORDER: [&str; 2] = ["remind", "assignment"];
+
+impl GraphNode {
+    /// The node's notice counts as the tree display renders them —
+    /// `remind=2, assignment=1`, the vocabulary order, zero counts left
+    /// out — or an empty string when the execution announced no notice.
+    pub fn message_counts(&self) -> String {
+        let mut counts = Vec::new();
+        for kind in NOTICE_TYPE_ORDER {
+            let count = self
+                .messages
+                .iter()
+                .filter(|message| message.r#type == kind)
+                .count();
+            if count > 0 {
+                counts.push(format!("{kind}={count}"));
+            }
+        }
+        if counts.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", counts.join(" "))
+        }
+    }
+}
+
+/// One message record folded onto its node: the canonical row the run
+/// announced for the node's execution.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GraphMessage {
+    /// The message id (`Message.id`).
+    pub id: String,
+    /// The message type (`workflow|step|branch|block`, or the task-level
+    /// notices `assignment`/`remind`).
+    pub r#type: String,
+    /// The message state, in the wire vocabulary (`created|completed|…`).
+    pub state: String,
+    /// The node name or action name the message carries.
+    pub name: String,
+    /// The package the message announces (`uses`), when it is an act payload.
+    #[serde(default)]
+    pub uses: Option<String>,
+    /// The human act's owner the message projected.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// The human act's assignee the message projected.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// The message timestamp in milliseconds.
+    pub timestamp: i64,
 }
 
 /// One declared step variable on the graph. The server writes the model's
@@ -226,7 +285,7 @@ mod tests {
             name: "act".to_string(),
             pid: "proc".to_string(),
             nid: "node".to_string(),
-            r#type: "act".to_string(),
+            r#type: "step".to_string(),
             state: "created".to_string(),
             data: "{}".to_string(),
             start_time: 1,
@@ -314,7 +373,7 @@ mod tests {
         let value: serde_json::Value = info.clone().into();
         assert_eq!(value["id"], json!("task"));
         assert_eq!(value["prev"], json!("prev"));
-        assert_eq!(value["type"], json!("act"));
+        assert_eq!(value["type"], json!("step"));
 
         let back: TaskInfo = serde_json::from_value(value).unwrap();
         assert_eq!(back.prev.as_deref(), Some("prev"));

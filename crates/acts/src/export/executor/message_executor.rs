@@ -181,7 +181,7 @@ mod tests {
     fn message(id: &str) -> Message {
         Message {
             id: id.to_string(),
-            r#type: "act".to_string(),
+            r#type: "step".to_string(),
             ..Default::default()
         }
     }

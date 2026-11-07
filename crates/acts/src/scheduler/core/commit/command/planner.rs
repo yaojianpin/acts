@@ -39,10 +39,12 @@ impl ActionPlanner {
         // `Push` decides no state: its preflight is the admissibility guard
         // alone, and the plan that creates the pushed act is the shell's own
         // (`Workers::push_plan`) — the client inputs describe the new act,
-        // they are not the target's scope writes.
+        // they are not the target's scope writes. `Remind` decides nothing
+        // either: its plan (the reminder record) is the shell's own too.
         if matches!(
             command.action,
             crate::scheduler::core::commit::command::ActionKind::Push
+                | crate::scheduler::core::commit::command::ActionKind::Remind
         ) {
             if !crate::scheduler::core::commit::command::action_allowed(
                 current.state,

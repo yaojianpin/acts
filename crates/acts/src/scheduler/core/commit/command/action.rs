@@ -30,6 +30,11 @@ pub(crate) enum ActionKind {
     /// Undelegate — revoke the act's delegation, restoring the owner as the
     /// assignee. No state change, no propagation.
     Undelegate,
+    /// Remind — a non-owner urges an assigned human act. It decides nothing
+    /// and moves no assignment: the plan writes the reminder record (and, on
+    /// a transferred task, announces an `acts.core.msg` to the transfer
+    /// target) and leaves the act exactly as it was.
+    Remind,
 }
 
 impl ActionKind {
@@ -56,5 +61,6 @@ pub(super) fn action_name(action: &ActionKind) -> &'static str {
         ActionKind::Transfer => "transferred",
         ActionKind::Delegate => "delegated",
         ActionKind::Undelegate => "undelegated",
+        ActionKind::Remind => "reminded",
     }
 }

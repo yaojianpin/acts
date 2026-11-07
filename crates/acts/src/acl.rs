@@ -367,6 +367,7 @@ pub fn action_catalog(action: &str) -> &'static str {
         | "act:back"
         | "act:skip"
         | "act:error"
+        | "act:remind"
         | "msg:ack" => "execute",
         // Reassigning an act is not running it: the capability is separate
         // from `@execute` so a user who may drive a flow cannot move someone

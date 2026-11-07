@@ -26,6 +26,8 @@ pub(crate) const TRANSFER: &str = "act:transfer";
 pub(crate) const DELEGATE: &str = "act:delegate";
 /// `act:undelegate` — revoke an assigned act's delegation.
 pub(crate) const UNDELEGATE: &str = "act:undelegate";
+/// `act:remind` — a non-owner urges an assigned act.
+pub(crate) const REMIND: &str = "act:remind";
 
 #[derive(Clone)]
 pub struct ActExecutor {
@@ -119,6 +121,13 @@ impl ActExecutor {
             .await
     }
 
+    /// `act:remind {pid,tid,message}` — a non-owner urges an assigned act.
+    /// The kernel validates the caller against the assignment and writes the
+    /// reminder record; the act itself is untouched.
+    pub async fn remind(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Remind, options).await
+    }
+
     /// Run one task action. The action the caller names is the action the
     /// principal is checked against — the wrappers above are spellings of the
     /// same check, never a way around it.
@@ -209,6 +218,7 @@ fn name_of(action: &EventAction) -> &'static str {
         EventAction::Transfer => TRANSFER,
         EventAction::Delegate => DELEGATE,
         EventAction::Undelegate => UNDELEGATE,
+        EventAction::Remind => REMIND,
     }
 }
 
@@ -233,6 +243,7 @@ mod tests {
             (EventAction::Transfer, "act:transfer"),
             (EventAction::Delegate, "act:delegate"),
             (EventAction::Undelegate, "act:undelegate"),
+            (EventAction::Remind, "act:remind"),
         ] {
             assert_eq!(name_of(&action), name);
         }

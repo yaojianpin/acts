@@ -60,7 +60,7 @@ fn record_without_ack(engine: &Engine, id: &str) -> Seen {
         .channel_with_options(&ChannelOptions {
             id: id.to_string(),
             ack: true,
-            r#type: "act".to_string(),
+            r#type: "step".to_string(),
             uses: USES_IRQ.to_string(),
             ..Default::default()
         })
@@ -433,7 +433,7 @@ async fn an_unacked_delivery_is_re_sent_with_its_own_row_inner() {
         .find(&first.id)
         .await
         .expect("the canonical message row");
-    assert_eq!(message.r#type, "act");
+    assert_eq!(message.r#type, "step");
     assert_eq!(message.pid, pid);
     assert_eq!(message.state, MessageState::Created);
     let rows = store
@@ -589,7 +589,7 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
         .channel_with_options(&ChannelOptions {
             id: "chan_a".to_string(),
             ack: true,
-            r#type: "act".to_string(),
+            r#type: "step".to_string(),
             uses: USES_IRQ.to_string(),
             ..Default::default()
         })
@@ -619,7 +619,7 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
         .channel_with_options(&ChannelOptions {
             id: "chan_b".to_string(),
             ack: true,
-            r#type: "act".to_string(),
+            r#type: "step".to_string(),
             uses: USES_IRQ.to_string(),
             ..Default::default()
         })

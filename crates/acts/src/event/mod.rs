@@ -53,6 +53,11 @@ pub enum EventAction {
     /// Undelegate — revoke the act's delegation: the owner becomes the
     /// assignee again and the delegatee can no longer decide.
     Undelegate,
+    /// Remind — a non-owner urges an assigned human act: the reminder record
+    /// addresses the act's current owner (a transferred task additionally
+    /// announces an `acts.core.msg` to the transfer target). It decides
+    /// nothing and moves no assignment.
+    Remind,
 }
 
 impl EventAction {
@@ -121,6 +126,7 @@ mod tests {
             EventAction::parse("undelegate").unwrap(),
             EventAction::Undelegate
         );
+        assert_eq!(EventAction::parse("remind").unwrap(), EventAction::Remind);
         let err = EventAction::parse("no_such_action").unwrap_err();
         assert!(
             err.to_string()
@@ -138,6 +144,7 @@ mod tests {
         assert_eq!(EventAction::Transfer.to_string(), "transfer");
         assert_eq!(EventAction::Delegate.to_string(), "delegate");
         assert_eq!(EventAction::Undelegate.to_string(), "undelegate");
+        assert_eq!(EventAction::Remind.to_string(), "remind");
     }
 
     #[test]

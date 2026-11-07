@@ -3427,7 +3427,7 @@ async fn kernel_task_and_act_messages_are_emitted() {
                     // Fold onto the owning node: an act belongs to its step
                     // (the kernel's node identity), everything else is its
                     // own node.
-                    let node = if e.r#type == "act" {
+                    let node = if e.r#type == "step" {
                         e.inputs
                             .get::<crate::Vars>(crate::utils::consts::STEP_KEY)
                             .and_then(|step| step.get::<String>(crate::utils::consts::STEP_NODE_ID))
@@ -3448,7 +3448,7 @@ async fn kernel_task_and_act_messages_are_emitted() {
             engine.channel().on_message(move |e| {
                 let created = created.clone();
                 async move {
-                    if e.r#type == "act"
+                    if e.r#type == "step"
                         && e.is_params_key("irq-1")
                         && e.state == crate::MessageState::Created
                     {
@@ -3556,11 +3556,6 @@ async fn kernel_task_and_act_messages_are_emitted() {
         for row in &rows_raw {
             let node = if row.kind == "workflow" {
                 crate::utils::consts::TASK_ROOT_TID.to_string()
-            } else if row.kind == "act" {
-                row.parent
-                    .as_deref()
-                    .and_then(node_id_of)
-                    .unwrap_or_else(|| row.tid.clone())
             } else {
                 node_id_of(&row.tid).unwrap_or_else(|| row.tid.clone())
             };
@@ -3642,7 +3637,7 @@ async fn kernel_container_messages_are_emitted() {
                     if e.r#type == "workflow" {
                         return;
                     }
-                    let node = if e.r#type == "act" {
+                    let node = if e.r#type == "step" {
                         e.inputs
                             .get::<crate::Vars>(crate::utils::consts::STEP_KEY)
                             .and_then(|step| step.get::<String>(crate::utils::consts::STEP_NODE_ID))
@@ -4115,7 +4110,7 @@ async fn run_cancel_engine(
     engine.channel().on_message(move |e| {
         let tx = tx.clone();
         async move {
-            if !e.is_type("act") || !e.is_state(crate::MessageState::Created) {
+            if !e.is_type("step") || !e.is_state(crate::MessageState::Created) {
                 return;
             }
             let key = e
@@ -4411,7 +4406,7 @@ async fn kernel_error_action_carries_the_legacy_inputs() {
         engine.channel().on_message(move |e| {
             let tx = tx.clone();
             async move {
-                if e.r#type == "act"
+                if e.r#type == "step"
                     && e.is_params_key("err-act")
                     && e.state == crate::MessageState::Created
                 {
@@ -4514,7 +4509,7 @@ async fn kernel_back_read_model_serves_the_redone_generation() {
         engine.channel().on_message(move |e| {
             let tx = tx.clone();
             async move {
-                if e.r#type == "act"
+                if e.r#type == "step"
                     && e.is_params_key("back-act")
                     && e.state == crate::MessageState::Created
                 {
@@ -4584,11 +4579,6 @@ async fn kernel_back_read_model_serves_the_redone_generation() {
             .filter_map(|row| {
                 let row_node = if row.kind == "workflow" {
                     crate::utils::consts::TASK_ROOT_TID.to_string()
-                } else if row.kind == "act" {
-                    row.parent
-                        .as_deref()
-                        .and_then(node_id)
-                        .unwrap_or_else(|| row.tid.clone())
                 } else {
                     node_id(&row.tid).unwrap_or_else(|| row.tid.clone())
                 };
@@ -7525,12 +7515,12 @@ async fn uses_steps_write_created_message_records() {
     let s1_message = message_of("s1");
     let s1_payload: serde_json::Value = serde_json::from_str(&s1_message.payload).unwrap();
     assert_eq!(s1_payload["uses"], "test.func");
-    assert_eq!(s1_payload["kind"], "act");
+    assert_eq!(s1_payload["kind"], "step");
     assert_eq!(s1_payload["inputs"]["params"]["k1"], "v1");
     let s2_message = message_of("s2");
     let s2_payload: serde_json::Value = serde_json::from_str(&s2_message.payload).unwrap();
     assert_eq!(s2_payload["uses"], "test.irq");
-    assert_eq!(s2_payload["kind"], "act");
+    assert_eq!(s2_payload["kind"], "step");
     assert_eq!(s2_payload["inputs"]["params"]["key"], "irq-1");
 
     // The Msg step wrote no `Created` record: its one durable announcement is
@@ -7573,7 +7563,7 @@ async fn uses_steps_write_created_message_records() {
     let msg_message = record_of("s_msg", "task.completed");
     let msg_payload: serde_json::Value = serde_json::from_str(&msg_message.payload).unwrap();
     assert_eq!(msg_payload["uses"], "test.msg");
-    assert_eq!(msg_payload["kind"], "act");
+    assert_eq!(msg_payload["kind"], "step");
     assert_eq!(msg_payload["inputs"]["params"]["key"], "msg-1");
 
     // The Irq execution is parked on its message; the plain leaf behind

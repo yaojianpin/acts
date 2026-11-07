@@ -35,10 +35,10 @@ pub(super) fn action_target(
 /// Whether `action` is admissible on an execution in `state` — the guard
 /// `action_target` applies, exposed so a recovering operation can tell a *live*
 /// durable decision (which it must replay) from a stale one whose target moved
-/// past it while the intent was in flight. `Push` decides no state: it is
-/// admissible on exactly the states a decision may reach.
+/// past it while the intent was in flight. `Push` and `Remind` decide no
+/// state: they are admissible on exactly the states a decision may reach.
 pub(crate) fn action_allowed(current: TaskState, action: &ActionKind) -> bool {
-    if matches!(action, ActionKind::Push) {
+    if matches!(action, ActionKind::Push | ActionKind::Remind) {
         return matches!(current, TaskState::Running | TaskState::Waiting);
     }
     action_target(current, action).is_ok()

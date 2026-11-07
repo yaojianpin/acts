@@ -20,7 +20,7 @@ impl Client {
 
     pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
         // println!("process: {message:?}");
-        if message.is_type("act") && message.is_state(MessageState::Created) {
+        if message.is_type("step") && message.is_state(MessageState::Created) {
             let params = message
                 .params()
                 .ok_or(ActError::Action("message.params is null".to_string()))?;

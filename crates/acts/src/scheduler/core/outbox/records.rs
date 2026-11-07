@@ -648,7 +648,7 @@ mod tests {
             OutboxError::InvalidTopic,
         );
 
-        let multibyte = "界".repeat(MAX_OUTBOX_TOPIC_BYTES / 3 + 1);
+        let multibyte = "€".repeat(MAX_OUTBOX_TOPIC_BYTES / 3 + 1);
         assert!(multibyte.chars().count() < MAX_OUTBOX_TOPIC_BYTES);
         assert!(multibyte.len() > MAX_OUTBOX_TOPIC_BYTES);
         assert_eq!(

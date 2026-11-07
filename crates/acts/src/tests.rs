@@ -215,7 +215,7 @@ async fn engine_event_on_message() {
     engine.channel().on_message(move |e| {
         let s = s.clone();
         async move {
-            if e.is_type("act") {
+            if e.is_type("step") {
                 s.update(|data| *data = e.params().unwrap().get::<String>("key").unwrap());
                 s.close();
             }
@@ -1032,7 +1032,7 @@ async fn subflow_waits_for_its_child_before_the_parent_continues() {
             let log = log.clone();
             let ex = ex.clone();
             async move {
-                if !e.is_type("act") || !e.is_state(MessageState::Created) {
+                if !e.is_type("step") || !e.is_state(MessageState::Created) {
                     return;
                 }
                 log.lock().push(format!("{}/{}", e.mid, e.name));

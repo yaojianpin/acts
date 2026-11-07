@@ -911,7 +911,7 @@ mod tests {
         assert_eq!(task.state(), None);
         assert!(task.cost() >= 0);
         assert!(task.is_kind(NodeKind::Step));
-        assert!(!task.is_kind(NodeKind::Act));
+        assert!(!task.is_kind(NodeKind::Block));
         assert!(!task.cancellation_token().is_cancelled());
     }
 

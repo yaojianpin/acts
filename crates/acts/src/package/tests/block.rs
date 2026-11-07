@@ -34,7 +34,7 @@ async fn pack_block_sequence_runs_its_acts_in_order() {
         .messages()
         .into_iter()
         .filter(|message| message.state == MessageState::Completed)
-        .filter(|message| message.r#type == "act" && message.is_msg())
+        .filter(|message| message.is_msg())
         .filter(|message| message.nid == "m1" || message.nid == "m2")
         .map(|message| message.nid)
         .collect();

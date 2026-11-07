@@ -11,7 +11,7 @@
 //! lookups, rows) reads `nid`; `tid` addresses the instance.
 
 use crate::{
-    Message, MessageState, NodeKind, Vars,
+    Message, MessageState, Vars,
     scheduler::{
         core::outbox::records::OutboxRecord,
         shell::caps::delivery::{DeliveryOutcome, OutboxTransport},
@@ -48,6 +48,9 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         "assignment.transferred" | "assignment.delegated" | "assignment.undelegated" => {
             MessageState::Created
         }
+        // A remind is its own event too: the record addresses the act's
+        // current owner and the act stays waiting.
+        "remind.created" => MessageState::Created,
         _ => return None,
     };
     let payload: serde_json::Value = serde_json::from_str(&record.payload).ok()?;
@@ -67,9 +70,11 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         .unwrap_or(&nid)
         .to_string();
     let kind = match payload.get("kind").and_then(|value| value.as_str()) {
+        // The act payload shape writes `step` — the model's own word for the
+        // step level (see `doc/design/message.md`). A record without one is
+        // a task-level message; `step` stays the guard.
         Some(kind) => kind.to_string(),
-        // An earlier kernel's act payload omitted it; `act` is the level.
-        None => NodeKind::Act.to_string(),
+        None => "step".to_string(),
     };
     let mid = payload
         .get("mid")
@@ -126,6 +131,14 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         .map(str::to_string)
         .unwrap_or_else(crate::utils::longid);
 
+    // The record's event time, pinned by the commit that wrote the payload
+    // (`ts`); a payload an earlier shape wrote without one stamps at
+    // mapping time.
+    let timestamp = payload
+        .get("ts")
+        .and_then(|value| value.as_i64())
+        .unwrap_or_else(crate::utils::time::time_millis);
+
     Some(Message {
         id,
         delivery_id: None,
@@ -142,7 +155,7 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         start_time: 0,
         end_time: 0,
         retry_times: 0,
-        timestamp: crate::utils::time::time_millis(),
+        timestamp,
         owner: text("owner"),
         assignee: text("assignee"),
         delegator: text("delegator"),
@@ -247,7 +260,7 @@ mod tests {
         let payload = serde_json::json!({
             "nid": "s2",
             "name": "approve",
-            "kind": "act",
+            "kind": "step",
             "uses": "acts.core.irq",
             "inputs": {"params": {"key": "act1"}, "options": {"ui": true}},
             "mid": "wf1",
@@ -258,7 +271,7 @@ mod tests {
         assert_eq!(message.nid, "s2");
         assert_eq!(message.pid, "p1");
         assert_eq!(message.mid, "wf1");
-        assert_eq!(message.r#type, "act");
+        assert_eq!(message.r#type, "step");
         assert_eq!(message.state, MessageState::Created);
         assert_eq!(message.uses.as_deref(), Some("acts.core.irq"));
         assert!(message.is_irq());
@@ -399,7 +412,7 @@ mod tests {
             "tid": "abc123",
             "nid": "s2",
             "name": "approve",
-            "kind": "act",
+            "kind": "step",
             "uses": "acts.core.irq",
             "inputs": {},
             "mid": "wf1",
@@ -408,7 +421,7 @@ mod tests {
         let message = message_from_record(&record("message.created", &payload)).unwrap();
         assert_eq!(message.tid, "abc123");
         assert_eq!(message.nid, "s2");
-        assert_eq!(message.r#type, "act");
+        assert_eq!(message.r#type, "step");
     }
 
     #[test]

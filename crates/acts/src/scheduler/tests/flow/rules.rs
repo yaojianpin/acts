@@ -90,7 +90,7 @@ async fn sch_rules_pass_on_the_resolved_params_and_scope() {
     fixture.close().await;
 }
 
-/// 连岗审批：the same person holds the manager and director posts. The
+/// One post, one approver (the same person holds the manager and director posts). The
 /// director approval's rule compares the previous approval's `approver`
 /// (`$parent`) with the root's `director`; when they are the same person the
 /// condition holds and its `skip` action drops that approval — no Created
@@ -136,7 +136,7 @@ async fn sch_rules_skip_a_concurrent_post_approval() {
     fixture.close().await;
 }
 
-/// 满足条件自动审批：the amount is under the approval limit, so the rule's
+/// An auto-approval rule: the amount is under the approval limit, so the rule's
 /// condition holds and its `next` action approves the act automatically — no
 /// client decision and no manual `next` call.
 #[serial]

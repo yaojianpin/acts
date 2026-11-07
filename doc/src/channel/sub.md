@@ -9,10 +9,10 @@ use acts_channel::{ActsChannel, ActsOptions};
 
 let mut client = ActsChannel::connect("http://127.0.0.1:10080").await?;
 
-// ActsOptions 的属性支持 glob 模式，如 "act*" 匹配所有以 act 开头的消息
+// ActsOptions 的属性支持 glob 模式，如 "step*" 匹配所有以 step 开头的消息
 let options = ActsOptions {
     state: Some("{created,completed}".to_string()),
-    r#type: Some("act*".to_string()),
+    r#type: Some("step*".to_string()),
     // 其他配置
     ..ActsOptions::default()
 };

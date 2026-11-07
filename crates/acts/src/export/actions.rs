@@ -232,6 +232,11 @@ pub async fn apply_as(
             let tid = pop(&mut options, "tid")?;
             value(executor.act().undelegate(&pid, &tid, options).await)
         }
+        "act:remind" => {
+            let pid = pop(&mut options, "pid")?;
+            let tid = pop(&mut options, "tid")?;
+            value(executor.act().remind(&pid, &tid, options).await)
+        }
         // model
         "model:ls" => {
             let query = options

@@ -105,6 +105,15 @@ async fn sch_graph_answers_every_declared_node_with_its_state() {
             "└── step id:after name=after  uses=nil state=nil next=nil\n",
         )
     );
+    // The wait act's own record folded onto its node: created, the owner
+    // fields empty (no assignment declared here).
+    assert_eq!(graph.nodes[1].messages.len(), 1);
+    assert_eq!(graph.nodes[1].messages[0].r#type, "step");
+    assert_eq!(graph.nodes[1].messages[0].state, "created");
+    assert_eq!(graph.nodes[1].messages[0].uses.as_deref(), Some(USES_IRQ));
+    assert_eq!(graph.nodes[1].messages[0].owner, None);
+    // The flow behind carries no record yet.
+    assert_eq!(graph.nodes[2].messages.len(), 0);
     fixture.close().await;
 }
 
@@ -179,18 +188,21 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
     assert_eq!(act.state.as_deref(), Some("interrupted"));
 
     // Every announced node is a graph node, and its message level is the
-    // node's: `act` for a `uses` step, the declared word otherwise.
+    // node's declared word — a `uses` step's act payload says `step` too.
+    // Task-level notices (`assignment`/`remind`) announce no level.
     for message in fixture.messages() {
+        let level = message.r#type.as_str();
+        if !matches!(level, "workflow" | "branch" | "step" | "block") {
+            continue;
+        }
         let expected = node(&message.nid);
-        let level = if expected.uses.is_some() {
-            "act"
-        } else {
-            expected.kind.as_str()
-        };
         assert_eq!(
-            level, message.r#type,
+            expected.kind.as_str(),
+            level,
             "{} announced as {} but the graph's level is {}",
-            message.nid, message.r#type, level
+            message.nid,
+            message.r#type,
+            expected.kind.as_str()
         );
     }
     // The container's own act is announced too (its node is the step).
@@ -329,7 +341,7 @@ async fn sch_graph_expands_a_param_fanout_over_its_items() {
              \u{20}   └── step id:fan#item name=  uses=acts.core.block state=completed next=nil\n\
              \u{20}       └── step id:{leaf_nid} name=  uses=acts.core.msg state=completed next=nil\n"
         ),
-        "the virtual blocks fold, the two items stay visible"
+        "the two items stay visible"
     );
     fixture.close().await;
 }
@@ -406,6 +418,109 @@ async fn sch_graph_shows_a_pushed_act_and_its_removal() {
             .contains("step id:s1#push1 name=added approver  uses=acts.core.irq state=removed"),
         "the pushed act and its removal render: {}",
         graph.tree_output()
+    );
+    fixture.close().await;
+}
+
+/// The message records fold onto their nodes: a sign chain's leaves carry
+/// their own created/completed records by instance, the parked target reads
+/// its absorbed answer, the remind record and the transferred task's
+/// `acts.core.msg` announcement are on the node too.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_graph_folds_the_message_records_onto_their_nodes() {
+    let mut workflow = Workflow::new()
+        .with_id("flow-graph-fold")
+        .with_name("Graph Fold")
+        .with_var("reviewer", "alice");
+    workflow.steps.push(
+        Step::new()
+            .with_id("s1")
+            .with_name("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+            .with_owner("alice"),
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    // `after` mode: the owner's leaf first, bob's behind it.
+    fixture
+        .act(
+            &created.pid,
+            &created.tid,
+            EventAction::Push,
+            Vars::new().with("owners", serde_json::json!(["bob"]).to_string()),
+        )
+        .await
+        .unwrap();
+    let first = fixture.wait_created("s1#push1").await;
+    fixture.next(&first.pid, &first.tid).await.unwrap();
+    let second = fixture.wait_created("s1#push2").await;
+
+    // A non-owner reminds the parked act: the record lands on the node.
+    fixture
+        .engine()
+        .executor(&super::act::approver("carol"))
+        .act()
+        .remind(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("message", "hurry"),
+        )
+        .await
+        .unwrap();
+
+    fixture.next(&second.pid, &second.tid).await.unwrap();
+    fixture.wait_state("s1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+
+    let graph = fixture
+        .engine()
+        .runtime()
+        .graph(fixture.pid())
+        .await
+        .unwrap();
+    let node = |nid: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.nid == nid)
+            .unwrap_or_else(|| panic!("the graph names no node '{nid}'"))
+    };
+
+    // The target: its created, the absorbed answer (the push resolves the
+    // act's message once — the join finishes the parked execution without a
+    // second record) and the remind record addressed to the owner.
+    let s1 = node("s1");
+    let types: Vec<&str> = s1.messages.iter().map(|m| m.r#type.as_str()).collect();
+    assert_eq!(types, vec!["step", "step", "remind"], "{s1:?}");
+    assert_eq!(s1.messages[2].owner.as_deref(), Some("alice"));
+    let remind = &s1.messages[2];
+    assert_eq!(remind.state, "created");
+
+    // The chain's leaves read by instance, created before completed.
+    let pushed = node("s1#push1");
+    assert_eq!(
+        pushed
+            .messages
+            .iter()
+            .map(|m| m.state.as_str())
+            .collect::<Vec<_>>(),
+        vec!["created", "completed"]
+    );
+    assert_eq!(pushed.messages[0].owner.as_deref(), Some("alice"));
+
+    // The tree annotates the notice counts on the node's own line; the act's
+    // own lifecycle records are the step itself and get none.
+    let tree = graph.tree_output();
+    assert!(
+        tree.contains("step id:s1 name=s1  uses=acts.core.irq state=completed next=nil remind=1"),
+        "the node line carries its notice counts: {tree}"
+    );
+    assert!(
+        tree.matches(" next=nil remind=1\n").count() == 1,
+        "only the reminded node carries an annotation: {tree}"
     );
     fixture.close().await;
 }

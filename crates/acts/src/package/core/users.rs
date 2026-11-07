@@ -100,7 +100,7 @@ impl ActPackage for UsersPackage {
                 "description": "The candidate expression the business system resolves. Raw form (`{ kind: … }`) or `{ candidates: <expr> }`. The client answers with `participants: [{id, code, name}]`, `ids: [id]` and `count`; the answer lands in the act's variables for block/parallel/sequence fan-out.",
                 "examples": [
                     { "kind": "owners_of",
-                      "resource": { "resource": "department", "name": "研发部" },
+                      "resource": { "resource": "department", "name": "rd-dept" },
                       "duty": "principal" },
                     { "kind": "relate",
                       "from": { "kind": "context", "var": { "type": "current_actor" } },

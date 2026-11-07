@@ -312,9 +312,48 @@ uses 包），应答变量就位后容器才展开 fan-out，`params` 的模板�
 
 ### 7.5 加签/减签
 
-- 加签：`act:push` payload 增加 `assign`；新的 human leaf 解析自己的 `owner`。
-- 减签：`act:remove` 删除 child act；其 assignment 随 task 消失。
-- 父 act 的 join 按现有语义重新计算。
+加签与减签仍是 `act:push` / `act:remove`，由一段统一的授权和两种形态组成。
+
+**授权（两种形态一致）**：加签/减签由"持有该活动的被指派执行"的 `owner`
+决定——被推活动（普通 pushed act、顺签链的叶子）从不为自己签名，其授权在
+最近的带 `__assignment` 的祖先上；非 pushed 的目标从自身起沿 parent 链找
+最近的 assignment。`subject` 不是该 owner 时内核以 `ENOTOWNER` 拒绝。整条
+链上都没有 assignment 的活动（模型声明的无主容器、未声明 `assign` 的旧
+任务）保持旧行为（`@execute`）。委托代办人（delegatee）不获得加签/减签权：
+决策可以代办，审批人结构不能。
+
+**单 owner 节点（顺签加签）**：目标 human leaf 只有一个 owner 时，
+`act:push` payload 携带：
+
+```json
+{ "owners": ["u2", "u3"], "mode": "before", "params": { } }
+```
+
+内核在目标下动态生成一条顺签链（行为等价 `acts.core.sequence`：逐个准入、
+顺序固定）。运行中的模型不可变、pushed 容器无法参数展开，所以顺签由内核
+排序的 pushed 活动链实现：每个 `<target>#push<n>` 是一个普通 pushed
+human leaf，`assign.owner` 为链上对应用户；目标 scope 的 `__sign` 队列
+持有剩余顺序，前一个叶子落定（完成或被减签）后内核准入下一个。`mode`
+决定链序：
+
+- 前加签 `before`：`[u2, u3, …, <当前 owner>]` —— 增加的 step 在前，
+  当前 owner 的 step 在后。
+- 后加签 `after`（默认）：`[<当前 owner>, u2, u3, …]` —— 当前 owner 的
+  step 在前，增加的 step 在后。
+
+push 命令同时吸收目标自身的待答（目标 park，其 pending 的 act 消息就地
+了结）：目标不再单独等自己的 client，owner 在顺签链的 owner 叶子上答复。
+对链上一个叶子的 `act:remove` 把它决定 `Removed`，内核准入下一个；队列
+排空后由普通 join 完成目标。
+
+**会签节点（旧形态）**：目标下已是 block/parallel/sequence 多人展开（或
+已挂 pushed act）时，`act:push` 保持原形态——client 点名活动（`uses`/
+`params`/`assign`），内核生成 `<target>#push<n>` 子活动，目标 park 等它
+落定，join 按现有语义重算。授权不变：只有 owner 可加签或减签。
+
+**减签**：`act:remove` 只能由上述 owner 发起；被移除的活动决定
+`Removed`，join 按 `Vote::Withdrawn` 重算。直接减掉一个顶层等待活动同样
+owner-only。
 
 ## 8. 或签/会签
 
@@ -353,7 +392,8 @@ uses 包），应答变量就位后容器才展开 fan-out，`params` 的模板�
 | `act:complete/submit/back/cancel/abort/skip/error` | `owner`；`assignee`；有效 `delegatee`；显式 override |
 | `act:transfer` | 当前 `owner`；`assign` 能力 |
 | `act:delegate` / `act:undelegate` | 当前 `owner`；`assign` 能力 |
-| `act:push` / `act:remove` | 保持现有 `@execute` / owner 语义 |
+| `act:push` / `act:remove` | 目标（或沿 parent 链最近祖先）assignment 的 `owner`（见 §7.5）；无 assignment 的活动保持 `@execute` |
+| `act:remind` | 除当前 owner 外的认证调用者（`@execute` 组） |
 | `msg:sub` / `msg:ack` | 现有 grant；可选 `mine` 过滤 |
 | 未声明 `assign` 的任务 | 保持旧行为：`@execute` |
 
@@ -382,6 +422,7 @@ uses 包），应答变量就位后容器才展开 fan-out，`params` 的模板�
 act:transfer   {pid,tid,to,expect_rev,reason}
 act:delegate   {pid,tid,delegatee,expires_at,reason}
 act:undelegate {pid,tid}
+act:remind     {pid,tid,message?}
 ```
 
 `act:push` payload 增加：
@@ -390,10 +431,18 @@ act:undelegate {pid,tid}
 "assign": { "owner": "u2" }
 ```
 
+顺签加签（单 owner 节点）另支持：
+
+```json
+{ "owners": ["u2"], "mode": "before|after", "params": { } }
+```
+
 消息：
 
 - `type=assignment`：转办/代办通知，新的 `msg_id`，同 `tid/nid`，带 `owner/assignee/delegator/delegatee/assignment_rev/ref_msg_id`。
-- 原 `type=act` Created message：保留；转办时旧 delivery `Superseded`；代办时 owner 的 delivery 保留。
+- `type=remind`：催办记录，同 `tid/nid`，`owner/assignee/rev` 是当前 assignment，`inputs.from` 是催办人；`ref_msg_id` 指向原 `Created`。已转办的任务再向转办人投递一个动态 `acts.core.msg` 子活动（`<tid>#remind<n>`）。
+- 原 `type=step`（act payload，曾写作 `act`）的 Created message：保留；转办时旧 delivery `Superseded`；代办时 owner 的 delivery 保留。
+- `proc:graph` 按 `tid` 把消息折叠到节点（`GraphNode.messages`），assignment/remind/act 消息都在内。
 
 Channel：
 
@@ -417,7 +466,13 @@ Channel：
 | 会签 | `join:all`，所有 act 完成才继续 |
 | 候选池计算 | `assign.candidates` 的 uses 包应答写入变量；失败则 act 失败 |
 | 业务原子经候选池 | `role`/`group` 等原子由 `acts.core.users` 发给业务系统解析 |
-| 加签 | `act:push` + assign，新 act 独立 owner |
-| 减签 | `act:remove` 删除 child，join 重算 |
+| 加签（会签形态） | `act:push` + assign，新 act 独立 owner |
+| 加签（单 owner 前加签） | `act:push{owners,mode:"before"}` 生成 `acts.core.sequence`，先新增审批人后 owner |
+| 加签（单 owner 后加签） | `mode:"after"`（默认）先 owner 后新增审批人 |
+| 加签/减签授权 | 非 owner `ENOTOWNER`；无 assignment 的活动保持旧行为 |
+| 减签 | `act:remove` 删除 child，join 重算，仅 owner 可发起 |
+| 催办 | 非 owner `act:remind` 写 `type=remind` 记录；owner 自催被拒 |
+| 催办（已转办） | 另生成 `acts.core.msg` 子活动投递转办人 |
+| graph 折叠 | `proc:graph` 每节点携带自己的消息（含 msg 与 remind 记录） |
 | 并发 | transfer 与 decision 只有一个赢家 |
 | 重放 | restart 后 assignment/delegation 仍生效 |

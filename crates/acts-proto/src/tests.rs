@@ -31,7 +31,7 @@ fn sample_message() -> Message {
 fn sample_options() -> MessageOptions {
     MessageOptions {
         client_id: "client-1".to_owned(),
-        r#type: "act".to_owned(),
+        r#type: "step".to_owned(),
         state: "ready".to_owned(),
         options: HashMap::from([
             ("region".to_owned(), "eu".to_owned()),
