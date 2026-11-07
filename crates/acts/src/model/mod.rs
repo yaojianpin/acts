@@ -24,7 +24,7 @@ pub use owner::{
     CandidateExpr, ContextVar, Duty, Participant, Relation, RelationName, RelationRef, ResourceRef,
     VarType,
 };
-pub use step::{Assign, CANDIDATES_PACKAGE, Candidates, Step};
+pub use step::{Assign, Candidates, Step, USERS_PACKAGE};
 pub use timeout::{Timeout, TimeoutLimit, TimeoutUnit};
 pub use trigger::{
     TRIGGER_CHAT, TRIGGER_HOOK, TRIGGER_MANUAL, TRIGGER_SCHEDULE, Trigger, TriggerKind,

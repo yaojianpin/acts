@@ -13,6 +13,14 @@
 //! failed request rides the ordinary error walk; a skipped one defers — the
 //! re-entered start asks again.
 //!
+//! Beyond the canonical `assign.candidates` pool, every other key of the
+//! declaration is a named pool processed exactly the same way: it gets its
+//! own request, its own computed/wait markers (`__pool_<name>` /
+//! `__pool_wait_<name>`), and its answer lands under its own key
+//! (`$assign.<name>.users` / `.ids`, the bare `<name>` ids variable). A start
+//! with several pools settles them one re-entry at a time; it proceeds only
+//! when every declared pool is computed.
+//!
 //! Every function here is a method on [`Assign`](super::Assign) — the same
 //! type the pure semantics hang off in [`owner`](super::owner) and
 //! [`delegate`](super::delegate).
@@ -39,82 +47,241 @@ pub(crate) const CANDIDATES_WAIT_VAR: &str = "__candidates_wait";
 pub(crate) const CANDIDATES_ASK_VAR: &str = "__candidates_ask";
 pub(crate) const CANDIDATES_VAR: &str = "__candidates";
 
-/// The pool spec one act declared: the request's params and its package.
+/// The declaration key of the canonical pool. Every other key of `assign` is
+/// a named pool with the same processing; a named pool's markers and answer
+/// live under its own name.
+pub(crate) const CANONICAL_POOL: &str = "candidates";
+
+/// The names no pool key may take: `assignee`/`delegator`/`delegatee` are
+/// the `$assign` projection's identity fields, `ids`/`participants`/`count`
+/// the canonical pool's top-level aliases, and `at` its explicit lookup — a
+/// pool under such a key would be unreadable. `owner`/`candidates` need no
+/// reservation: the declaration routes them to their named fields, and the
+/// inherited canonical key is `candidates` itself.
+const RESERVED_POOL_NAMES: [&str; 7] = [
+    "assignee",
+    "delegator",
+    "delegatee",
+    "ids",
+    "participants",
+    "count",
+    "at",
+];
+
+/// The pool spec one act declared: its declaration key, the request's params
+/// and its package.
 #[derive(Clone, Debug)]
 pub(crate) struct CandidatesSpec {
+    /// The declaration key: [`CANONICAL_POOL`] or one of `assign.others`.
+    pub(crate) pool: String,
     pub(crate) params: crate::model::CandidateExpr,
     pub(crate) uses: String,
 }
 
 impl Assign {
-    /// The `assign.candidates` spec one act declares, after refusing the
-    /// declaration where it cannot mean a pool: a package-less node, the
-    /// waiting subflow, or a `Func`/`Msg` leaf. Unlike `owner`, a pool is
-    /// legitimate on the container packages (`block`/`parallel`/`sequence`) —
-    /// the fan-out reads it. Pushed acts read the same declaration off their
-    /// durable `__act` fact.
-    pub(crate) fn declared_candidates(
+    /// The computed-pool marker variable of one pool: the canonical pool stays
+    /// on `__candidates`; a named pool gets `__pool_<name>`.
+    pub(crate) fn pool_var(pool: &str) -> String {
+        if pool == CANONICAL_POOL {
+            CANDIDATES_VAR.to_string()
+        } else {
+            format!("__pool_{pool}")
+        }
+    }
+
+    /// The wait-marker variable of one pool (see [`Assign::pool_var`]).
+    pub(crate) fn pool_wait_var(pool: &str) -> String {
+        if pool == CANONICAL_POOL {
+            CANDIDATES_WAIT_VAR.to_string()
+        } else {
+            format!("__pool_wait_{pool}")
+        }
+    }
+
+    /// The names a pool key must satisfy: an identifier (`cc`, `my_name`),
+    /// never reserved, and never engine-private (no leading `_`).
+    fn validate_pool_name(node: &str, pool: &str) -> crate::Result<()> {
+        let invalid = |detail: String| {
+            crate::ActError::Action(format!(
+                "act '{node}' declares an invalid assign pool: {detail}"
+            ))
+        };
+        if RESERVED_POOL_NAMES.contains(&pool) {
+            return Err(invalid(format!(
+                "'{pool}' is a reserved name; pick another key for the pool"
+            )));
+        }
+        let valid = pool
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            && pool
+                .chars()
+                .all(|rest| rest.is_ascii_alphanumeric() || rest == '_');
+        if !valid {
+            return Err(invalid(format!(
+                "'{pool}' is not a pool name: use letters, digits and underscores, starting with a letter"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The pool specs one act resolves at start — its own declarations and,
+    /// for every key it does not declare itself, the nearest ancestor's
+    /// declaration (the same inheritance the owner template gets). The own
+    /// declarations are refused where they cannot mean a pool: a
+    /// package-less node, the waiting subflow, or a `Func`/`Msg` leaf. An
+    /// inherited pool rides the same placements except it skips silently on
+    /// them — a self-completing or package-less child carries no pool.
+    /// Containers are legitimate pool holders, so they inherit and declare
+    /// alike. Pushed acts read their own declarations off the durable
+    /// `__act` fact only.
+    pub(crate) fn declared_pools(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
-    ) -> crate::Result<Option<CandidatesSpec>> {
+    ) -> crate::Result<Vec<CandidatesSpec>> {
         let Some(model) = crate::scheduler::shell::model_of(snapshot)? else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let Some(step) = crate::scheduler::shell::find_step_in_model(&model, model_node.as_str())
         else {
             // A pushed act is not in the immutable model: its declaration
             // rides the execution's durable `__act` fact.
-            return Self::pushed_declared_candidates(snapshot, task_id);
+            return Self::pushed_declared_pools(snapshot, task_id);
         };
-        let Some(spec) = step
-            .assign
-            .as_ref()
-            .and_then(|assign| assign.candidates.as_ref())
-            .map(|candidates| CandidatesSpec {
-                params: candidates.params.clone(),
-                uses: candidates.uses.clone(),
-            })
-        else {
-            return Ok(None);
-        };
-        // The placement is judged on the declaring act's own package — the
+        let node = task_id.node.as_str();
+        let mut pools = Vec::new();
+        let mut own = std::collections::BTreeSet::new();
+        if let Some(assign) = step.assign.as_ref() {
+            if let Some(candidates) = assign.candidates.as_ref() {
+                own.insert(CANONICAL_POOL.to_string());
+                pools.push(CandidatesSpec {
+                    pool: CANONICAL_POOL.to_string(),
+                    params: candidates.params.clone(),
+                    uses: candidates.uses.clone(),
+                });
+            }
+            for (name, candidates) in &assign.others {
+                Self::validate_pool_name(node, name)?;
+                own.insert(name.clone());
+                pools.push(CandidatesSpec {
+                    pool: name.clone(),
+                    params: candidates.params.clone(),
+                    uses: candidates.uses.clone(),
+                });
+            }
+        }
+        // Inheritance: a step that declares an assign gets every pool key it
+        // does not declare itself from the nearest ancestor that declares
+        // it, computed in this act's own scope at its start. A step without
+        // an own assign declares nothing — it reads its ancestors' pools
+        // through the scope chain, which is what keeps a container's fan-out
+        // children (each generated from the container's own pool) from
+        // re-declaring the pool.
+        let own_pools = !own.is_empty();
+        if step.assign.is_some()
+            && !matches!(
+                step.uses.as_deref().map(str::trim),
+                Some(crate::scheduler::shell::model::BLOCK_PACKAGE)
+                    | Some(crate::scheduler::shell::model::PARALLEL_PACKAGE)
+                    | Some(crate::scheduler::shell::model::SEQUENCE_PACKAGE)
+            )
+        {
+            for (name, candidates) in
+                crate::scheduler::shell::nearest_declared_pools(&model, model_node.as_str())
+            {
+                if own.contains(&name) {
+                    continue;
+                }
+                Self::validate_pool_name(node, &name)?;
+                pools.push(CandidatesSpec {
+                    pool: name,
+                    params: candidates.params,
+                    uses: candidates.uses,
+                });
+            }
+        }
+        if pools.is_empty() {
+            return Ok(pools);
+        }
+        // Placement is judged on this declaring act's own package — the
         // spec's `uses` names the pool's computing package, which is never a
-        // container and would misjudge an auto act.
+        // container and would misjudge an auto act. An inherited pool skips
+        // silently where it cannot live; an own declaration is an error.
         let uses = step
             .uses
             .as_deref()
             .map(str::trim)
-            .filter(|uses| !uses.is_empty())
-            .ok_or_else(|| {
-                crate::ActError::Action(format!(
-                    "act '{}' declares assign.candidates but has no package",
-                    task_id.node.as_str()
-                ))
-            })?;
-        Self::reject_invalid_placement(snapshot, task_id.node.as_str(), uses)?;
-        Ok(Some(spec))
+            .filter(|uses| !uses.is_empty());
+        let Some(uses) = uses else {
+            if own_pools {
+                return Err(crate::ActError::Action(format!(
+                    "act '{node}' declares an assign pool but has no package"
+                )));
+            }
+            return Ok(Vec::new());
+        };
+        if uses == crate::scheduler::shell::model::SUBFLOW_PACKAGE {
+            if !own_pools {
+                return Ok(Vec::new());
+            }
+            return Err(crate::ActError::Action(format!(
+                "act '{node}' uses '{uses}', which cannot declare candidates"
+            )));
+        }
+        let container = matches!(
+            uses,
+            crate::scheduler::shell::model::BLOCK_PACKAGE
+                | crate::scheduler::shell::model::PARALLEL_PACKAGE
+                | crate::scheduler::shell::model::SEQUENCE_PACKAGE
+        );
+        if !container && crate::scheduler::shell::auto_decision(snapshot, model_node.as_str())? {
+            if !own_pools {
+                return Ok(Vec::new());
+            }
+            return Err(crate::ActError::Action(format!(
+                "act '{node}' uses '{uses}', which cannot declare candidates (it never waits for an answer)"
+            )));
+        }
+        Ok(pools)
     }
 
-    /// The `assign.candidates` of a pushed act, refused on the same placements.
-    fn pushed_declared_candidates(
+    /// The pool specs of a pushed act, refused on the same placements.
+    fn pushed_declared_pools(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
-    ) -> crate::Result<Option<CandidatesSpec>> {
+    ) -> crate::Result<Vec<CandidatesSpec>> {
         let Some(act) = crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)? else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let Some(assign) = &act.assign else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
-        let Some(candidates) = &assign.candidates else {
-            return Ok(None);
-        };
-        Self::reject_invalid_placement(snapshot, task_id.node.as_str(), &candidates.uses)?;
-        Ok(Some(CandidatesSpec {
-            params: candidates.params.clone(),
-            uses: candidates.uses.clone(),
-        }))
+        let node = task_id.node.as_str();
+        let mut pools = Vec::with_capacity(assign.others.len() + 1);
+        if let Some(candidates) = assign.candidates.as_ref() {
+            pools.push(CandidatesSpec {
+                pool: CANONICAL_POOL.to_string(),
+                params: candidates.params.clone(),
+                uses: candidates.uses.clone(),
+            });
+        }
+        for (name, candidates) in &assign.others {
+            Self::validate_pool_name(node, name)?;
+            pools.push(CandidatesSpec {
+                pool: name.clone(),
+                params: candidates.params.clone(),
+                uses: candidates.uses.clone(),
+            });
+        }
+        if pools.is_empty() {
+            return Ok(pools);
+        }
+        for spec in &pools {
+            Self::reject_invalid_placement(snapshot, node, &spec.uses)?;
+        }
+        Ok(pools)
     }
 
     /// The placements no candidates spec can mean anything on: the waiting
@@ -142,30 +309,35 @@ impl Assign {
         Ok(())
     }
 
-    /// Whether this execution's pool is already computed.
+    /// Whether one pool of this execution is already computed.
     pub(crate) fn pool_computed(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        pool: &str,
     ) -> bool {
-        crate::scheduler::shell::task_variable(snapshot, task_id, CANDIDATES_VAR).is_some()
+        crate::scheduler::shell::task_variable(snapshot, task_id, &Self::pool_var(pool)).is_some()
     }
 
-    /// Whether this execution is already waiting for a pool.
+    /// Whether this execution is already waiting for one pool.
     pub(crate) fn pool_pending(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
+        pool: &str,
     ) -> bool {
-        crate::scheduler::shell::task_variable(snapshot, task_id, CANDIDATES_WAIT_VAR).is_some()
+        crate::scheduler::shell::task_variable(snapshot, task_id, &Self::pool_wait_var(pool))
+            .is_some()
     }
 
-    /// Push one candidates request under the waiting act: a `Ready` child
-    /// with its start operation, riding the spec's package (`uses`) with the
-    /// request's params (the serialized expression). The start announces the
-    /// request's `Created` like any act's, which is what the client answers.
+    /// Push one pool's candidates request under the waiting act: a `Ready`
+    /// child with its start operation, riding the spec's package (`uses`)
+    /// with the request's params (the serialized expression). The start
+    /// announces the request's `Created` like any act's, which is what the
+    /// client answers.
     pub(crate) fn ask(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         plan: &mut crate::scheduler::core::model::transition_plan::TransitionPlan,
         parent: &crate::scheduler::core::model::task_graph::TaskId,
+        pool: &str,
         params: serde_json::Value,
         uses: String,
     ) -> crate::Result<()> {
@@ -198,10 +370,12 @@ impl Assign {
             name: crate::scheduler::shell::action::PUSH_ACT_VAR.to_string(),
             value: act.fact(),
         });
+        // The request carries the pool it answers, so the settlement folds
+        // the answer under that pool's own key.
         plan.variable_writes.push(VariableWrite {
             scope: ask.clone(),
             name: CANDIDATES_ASK_VAR.to_string(),
-            value: uses,
+            value: serde_json::json!({ "pool": pool, "uses": uses }).to_string(),
         });
         // A request is always an interrupt (the client answers), so the
         // auto/msg maps gain the node with `false` — the lookups refuse a
@@ -252,23 +426,38 @@ impl Assign {
     }
 
     /// One settlement under an act that waits for its pool: fold the
-    /// request's answer into the act's variables (`candidates`, `ids`,
-    /// `count`, the `__candidates` marker) and re-enter its start. A skipped
-    /// request defers: the re-entered start asks again. A failed request is
-    /// not ours — the ordinary error walk carries it. Returns whether the
-    /// settlement was ours to handle.
+    /// request's answer into the act's variables under the request's own key
+    /// (`candidates` and the `__candidates` marker for the canonical pool,
+    /// `<name>` and `__pool_<name>` for a named one) and re-enter its start.
+    /// A skipped request defers: the re-entered start asks again. A failed
+    /// request is not ours — the ordinary error walk carries it. Returns
+    /// whether the settlement was ours to handle.
     pub(crate) fn settle(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         plan: &mut crate::scheduler::core::model::transition_plan::TransitionPlan,
         parent: &crate::scheduler::core::model::task_graph::TaskId,
         settled: &crate::scheduler::core::model::task_graph::TaskId,
     ) -> crate::Result<bool> {
-        // Only an act that waits for its pool settles a candidates request:
-        // every other parent/child pair is the ordinary walk's business.
-        if !Self::pool_pending(snapshot, parent) {
+        // Only an act that waits for one of its pools settles a candidates
+        // request: every other parent/child pair is the ordinary walk's
+        // business.
+        let Some(asked) =
+            crate::scheduler::shell::task_variable(snapshot, settled, CANDIDATES_ASK_VAR)
+        else {
             return Ok(false);
-        }
-        if crate::scheduler::shell::task_variable(snapshot, settled, CANDIDATES_ASK_VAR).is_none() {
+        };
+        // The pool the settled request answers, off its ask marker. A plain
+        // string marker (a request pushed before named pools existed) answers
+        // the canonical pool.
+        let pool: String = match serde_json::from_str::<serde_json::Value>(asked) {
+            Ok(serde_json::Value::Object(map)) => map
+                .get("pool")
+                .and_then(|pool| pool.as_str())
+                .unwrap_or(CANONICAL_POOL)
+                .to_string(),
+            _ => CANONICAL_POOL.to_string(),
+        };
+        if !Self::pool_pending(snapshot, parent, &pool) {
             return Ok(false);
         }
         let state = snapshot
@@ -284,8 +473,8 @@ impl Assign {
                 // `participants`/`count` ride along for the flows that want
                 // code/name or a quorum number. The propagate's carry
                 // already folds the request's own variables into the act's
-                // scope; this writes the canonical pool and the computed
-                // marker, skipping duplicates so the plan stays valid.
+                // scope; this writes the pool under its own key, skipping
+                // duplicates so the plan stays valid.
                 let participants = Self::answer_var(snapshot, settled, "participants");
                 let ids = match Self::answer_var(snapshot, settled, "ids") {
                     serde_json::Value::Array(_) => Self::answer_var(snapshot, settled, "ids"),
@@ -309,7 +498,7 @@ impl Assign {
                     "ids": ids,
                     "count": count,
                 });
-                Self::fold_pool(plan, parent, computed);
+                Self::fold_pool(plan, parent, &pool, computed);
             }
             crate::scheduler::core::model::task_graph::TaskState::Skipped => {
                 // Defer: the re-entered start sees the wait marker with no
@@ -331,13 +520,15 @@ impl Assign {
     }
 
     /// The pool an expression whose every atom resolved in the kernel
-    /// produced: fold it into the declaring act's variables — the same shape
-    /// a settled answer lands in — and re-enter its start, which finds the
-    /// pool in scope and proceeds without a round trip.
+    /// produced: fold it into the declaring act's variables under the pool's
+    /// own key — the same shape a settled answer lands in — and re-enter its
+    /// start, which finds the pool in scope and proceeds without a round
+    /// trip.
     pub(crate) fn settle_local_pool(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         plan: &mut crate::scheduler::core::model::transition_plan::TransitionPlan,
         parent: &crate::scheduler::core::model::task_graph::TaskId,
+        pool: &str,
         participants: &[crate::model::Participant],
     ) -> crate::Result<()> {
         let ids = serde_json::Value::Array(
@@ -353,7 +544,7 @@ impl Assign {
             "ids": ids,
             "count": count,
         });
-        Self::fold_pool(plan, parent, computed);
+        Self::fold_pool(plan, parent, pool, computed);
         plan.operations.push(OperationIntent {
             id: OperationId {
                 process_id: snapshot.process_id.clone(),
@@ -366,16 +557,18 @@ impl Assign {
         Ok(())
     }
 
-    /// Write one computed pool into the act's variables: `candidates` (the
-    /// ids list the fan-out and owner expressions read), the
-    /// `participants`/`count` answer fields, the durable `__candidates`
+    /// Write one computed pool into the act's variables under its own key:
+    /// the ids list (the bare `candidates`/`<name>` variable the fan-out and
+    /// owner expressions read), the durable `__candidates`/`__pool_<name>`
     /// marker the re-entered start reads as "pool computed", and the wait
-    /// marker cleared. Writes the answer fields only when the plan does not
+    /// marker cleared. The canonical pool also writes the shared
+    /// `participants`/`count` answer fields, only when the plan does not
     /// already carry them (a settled request's propagate folds the request's
     /// own variables into the act's scope first).
     fn fold_pool(
         plan: &mut crate::scheduler::core::model::transition_plan::TransitionPlan,
         parent: &crate::scheduler::core::model::task_graph::TaskId,
+        pool: &str,
         computed: serde_json::Value,
     ) {
         let ids = computed
@@ -384,26 +577,28 @@ impl Assign {
             .unwrap_or(serde_json::Value::Null);
         let mut writes = vec![
             (
-                "candidates".to_string(),
+                pool.to_string(),
                 serde_json::to_string(&ids).unwrap_or_default(),
             ),
-            (CANDIDATES_VAR.to_string(), computed.to_string()),
-            (CANDIDATES_WAIT_VAR.to_string(), "null".to_string()),
+            (Self::pool_var(pool), computed.to_string()),
+            (Self::pool_wait_var(pool), "null".to_string()),
         ];
-        for name in ["participants", "count"] {
-            let value = computed
-                .get(name)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            let carried = plan
-                .variable_writes
-                .iter()
-                .any(|write| write.scope == *parent && write.name == name);
-            if !carried {
-                writes.push((
-                    name.to_string(),
-                    serde_json::to_string(&value).unwrap_or_default(),
-                ));
+        if pool == CANONICAL_POOL {
+            for name in ["participants", "count"] {
+                let value = computed
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let carried = plan
+                    .variable_writes
+                    .iter()
+                    .any(|write| write.scope == *parent && write.name == name);
+                if !carried {
+                    writes.push((
+                        name.to_string(),
+                        serde_json::to_string(&value).unwrap_or_default(),
+                    ));
+                }
             }
         }
         for (name, value) in writes {

@@ -157,7 +157,7 @@ impl<'a> Client<'a> {
         // uses the package directly: resolve the prepared expression against
         // the demo directory and answer the contract
         // `{ participants, ids, count }`.
-        if message.is_uses("acts.core.candidates") && message.is_state(MessageState::Created) {
+        if message.is_uses("acts.core.users") && message.is_state(MessageState::Created) {
             let params = message
                 .inputs
                 .get::<serde_json::Value>("params")

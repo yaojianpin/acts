@@ -39,7 +39,7 @@
 ## 3. 扩展规则
 
 1. **新业务数据 / 外部副作用 → package**（`ActPackage`，模型用 `uses` 声明）。
-   参与人计算（`acts.core.candidates`）与 join 裁决（`acts.core.decide`）是
+   参与人计算（`acts.core.users`）与 join 裁决（`acts.core.decide`）是
    两个范例：内核定信封与契约，业务在客户端。
 2. **新持久状态 / 新操作 → core**（设计评审）。
 3. **新传输 → 插件**（`ActPlugin` 注册包/挂 transport；无能力注册 API）。

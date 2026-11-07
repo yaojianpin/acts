@@ -5,8 +5,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeContent {
     Workflow(Arc<Workflow>),
-    Branch(Branch),
-    Step(Step),
+    Branch(Box<Branch>),
+    Step(Box<Step>),
 }
 
 /// The word a node speaks where a kind is asked for. `workflow|branch|step`
@@ -174,8 +174,8 @@ mod tests {
     fn contents() -> Vec<NodeContent> {
         vec![
             NodeContent::Workflow(Arc::new(workflow())),
-            NodeContent::Branch(Branch::new().with_id("br").with_name("Br")),
-            NodeContent::Step(Step::new().with_id("st").with_name("St")),
+            NodeContent::Branch(Box::new(Branch::new().with_id("br").with_name("Br"))),
+            NodeContent::Step(Box::new(Step::new().with_id("st").with_name("St"))),
         ]
     }
 
@@ -211,7 +211,7 @@ mod tests {
         let step = Step::new()
             .with_id("st")
             .with_uses("pack", Vars::new().with("a", 1));
-        let content = NodeContent::Step(step);
+        let content = NodeContent::Step(Box::new(step));
         assert!(content.params().is_object());
         assert_eq!(content.params()["a"], serde_json::json!(1));
     }
@@ -220,7 +220,7 @@ mod tests {
     fn node_data_renders_its_persisted_json() {
         let data = NodeData {
             id: "st".into(),
-            content: NodeContent::Step(Step::new().with_id("st").with_name("St")),
+            content: NodeContent::Step(Box::new(Step::new().with_id("st").with_name("St"))),
             level: 2,
             parent_id: Some("parent".into()),
             prev_id: None,

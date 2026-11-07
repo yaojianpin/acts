@@ -8,10 +8,12 @@ use serde_json::{Value as JsonValue, json};
 /// The declared assignment of one human decision act: the expression the act
 /// resolves at start into its persisted `__assignment` task state, and — for
 /// multi-approver steps — the candidate pool its `uses` package computes.
-/// Only a human decision leaf (`ActRunAs::Irq`) may declare an `owner`; a
-/// container step (`block`/`parallel`/`sequence`) may declare `candidates`
-/// for the fan-out. The kernel refuses an `assign` on a subflow or a
-/// `Func`/`Msg` leaf when the act starts.
+/// Only a human decision leaf (`ActRunAs::Irq`) carries its own `owner`; a
+/// container step (`block`/`parallel`/`sequence`) may declare an `owner` as
+/// the template its generated children inherit (the container itself never
+/// holds an assignment) and `candidates` (or any named key) for the fan-out.
+/// The kernel refuses an `assign` on a subflow or a `Func`/`Msg` leaf when
+/// the act starts.
 ///
 /// The three assignment vocabularies are separate capabilities (see
 /// `crate::scheduler::shell::caps::assign`):
@@ -20,6 +22,11 @@ use serde_json::{Value as JsonValue, json};
 ///   must come from them.
 /// - `candidates` — the list of people the container fans acts out over; each
 ///   generated child carries its own owner.
+/// - any other key — a named pool processed exactly like `candidates`: its
+///   computed answer lands under its own key (`$assign.<key>.users`,
+///   `$assign.<key>.ids`), next to `$assign.candidates.users` /
+///   `$assign.candidates.ids`. The declaration value is the bare expression
+///   (`cc: "abc"`) or the full spec (`my_name: { params, uses }`).
 /// - delegation — runtime state (`delegator`/`delegatee`), moved with
 ///   `act:delegate`/`act:undelegate`, never declared in the model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,32 +41,70 @@ pub struct Assign {
     /// container's fan-out (`block`/`parallel`/`sequence`) reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidates: Option<Box<Candidates>>,
+    /// Every other key of the declaration, each a named pool processed
+    /// exactly like `candidates` (see [`Assign`]). `owner` and `candidates`
+    /// are the named fields and never appear here; the runtime refuses the
+    /// engine-reserved names on the rest.
+    #[serde(flatten)]
+    pub others: std::collections::BTreeMap<String, Candidates>,
 }
 
 /// One act's candidate-pool declaration (see [`Assign::candidates`]).
 ///
 /// `uses` names the IRQ package that computes the pool — the core
-/// [`CANDIDATES_PACKAGE`] by default, or any package answering the same
+/// [`USERS_PACKAGE`] by default, or any package answering the same
 /// contract (`{ participants, ids, count }`). `params` is the package's
 /// input: a [`CandidateExpr`] the engine computes locally when every atom
 /// resolves in the kernel, and otherwise sends to the package with its
 /// local context atoms already resolved.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Candidates {
     /// The computing package's params.
     #[serde(default)]
     pub params: CandidateExpr,
     /// The package that computes the pool. Defaults to
-    /// [`CANDIDATES_PACKAGE`]; a model names its own extension here.
-    #[serde(default = "default_candidates_uses")]
+    /// [`USERS_PACKAGE`]; a model names its own extension here.
+    #[serde(default = "default_users_uses")]
     pub uses: String,
+}
+
+impl<'de> Deserialize<'de> for Candidates {
+    /// Accepts the full spec (`{ params, uses }`) and, like the expression
+    /// itself, its bare forms: a string (`cc: "abc"`) or a `kind`-tagged
+    /// object (`my_name: { kind: context, var: … }`) — both become `params`
+    /// under the default `uses`.
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Form {
+            /// A bare expression: a string or a `kind`-tagged object.
+            Raw(CandidateExpr),
+            /// The full spec: `{ params, uses }`.
+            Spec {
+                #[serde(default)]
+                params: CandidateExpr,
+                #[serde(default = "default_users_uses")]
+                uses: String,
+            },
+        }
+        match Form::deserialize(deserializer)? {
+            Form::Raw(params) => Ok(Self {
+                params,
+                uses: default_users_uses(),
+            }),
+            Form::Spec { params, uses } => Ok(Self { params, uses }),
+        }
+    }
 }
 
 impl Default for Candidates {
     fn default() -> Self {
         Self {
             params: CandidateExpr::default(),
-            uses: default_candidates_uses(),
+            uses: default_users_uses(),
         }
     }
 }
@@ -68,10 +113,10 @@ impl Default for Candidates {
 /// default `uses`. A model may name its own computing package instead; the
 /// kernel only defines the request (the prepared `params`) and the answer
 /// contract (`{ participants, ids, count }`).
-pub const CANDIDATES_PACKAGE: &str = "acts.core.candidates";
+pub const USERS_PACKAGE: &str = "acts.core.users";
 
-fn default_candidates_uses() -> String {
-    CANDIDATES_PACKAGE.to_string()
+fn default_users_uses() -> String {
+    USERS_PACKAGE.to_string()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -256,30 +301,52 @@ impl Step {
 
     /// Declare the act's owner (see [`Assign`]): a literal user id or a
     /// `${{ … }}` expression.
-    pub fn with_assign(mut self, owner: &str) -> Self {
+    pub fn with_owner(mut self, owner: &str) -> Self {
         self.assign = Some(Assign {
             owner: Some(owner.to_string()),
             candidates: None,
+            others: std::collections::BTreeMap::new(),
         });
         self
     }
 
     /// Declare the act's candidate pool, computed by the core
-    /// [`CANDIDATES_PACKAGE`] from the expression (see [`Candidates`]).
+    /// [`USERS_PACKAGE`] from the expression (see [`Candidates`]).
     pub fn with_candidates(self, params: CandidateExpr) -> Self {
-        self.with_candidates_package(CANDIDATES_PACKAGE, params)
+        self.with_candidates_package(USERS_PACKAGE, params)
     }
 
     /// Declare the act's candidate pool with an explicit computing package:
     /// `uses` names it, `params` is its input expression (see [`Candidates`]).
     pub fn with_candidates_package(mut self, uses: &str, params: CandidateExpr) -> Self {
-        self.assign = Some(Assign {
-            owner: self.assign.and_then(|assign| assign.owner),
-            candidates: Some(Box::new(Candidates {
+        let mut assign = self.assign.take().unwrap_or_default();
+        assign.candidates = Some(Box::new(Candidates {
+            params,
+            uses: uses.to_string(),
+        }));
+        self.assign = Some(assign);
+        self
+    }
+
+    /// Declare one named pool (see [`Assign::others`]): processed exactly
+    /// like `candidates`, with its answer landing under its own key
+    /// (`$assign.<name>.users` / `.ids`).
+    pub fn with_assign(self, name: &str, params: CandidateExpr) -> Self {
+        self.with_assign_package(name, USERS_PACKAGE, params)
+    }
+
+    /// Declare one named pool with an explicit computing package (see
+    /// [`Step::with_assign`]).
+    pub fn with_assign_package(mut self, name: &str, uses: &str, params: CandidateExpr) -> Self {
+        let mut assign = self.assign.take().unwrap_or_default();
+        assign.others.insert(
+            name.to_string(),
+            Candidates {
                 params,
                 uses: uses.to_string(),
-            })),
-        });
+            },
+        );
+        self.assign = Some(assign);
         self
     }
 
@@ -320,5 +387,83 @@ impl Step {
     {
         self.metadata.set(name, value);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn other_assign_keys_are_named_pools() {
+        let assign: Assign = serde_json::from_value(json!({
+            "owner": "alice",
+            "candidates": { "params": { "kind": "role", "name": "reviewer" } },
+            "cc": "bob",
+            "my_name": {
+                "params": { "kind": "context", "var": { "type": "current_actor" } }
+            }
+        }))
+        .unwrap();
+        assert_eq!(assign.owner.as_deref(), Some("alice"));
+        assert_eq!(
+            assign.candidates.as_ref().unwrap().params,
+            CandidateExpr::Role {
+                name: "reviewer".to_string()
+            }
+        );
+        assert_eq!(
+            assign.others["cc"],
+            Candidates {
+                params: CandidateExpr::Value("bob".to_string()),
+                uses: USERS_PACKAGE.to_string(),
+            }
+        );
+        assert_eq!(
+            assign.others["my_name"].params,
+            CandidateExpr::Context {
+                var: crate::model::ContextVar::CurrentActor
+            }
+        );
+        assert_eq!(assign.others["my_name"].uses, USERS_PACKAGE);
+    }
+
+    #[test]
+    fn a_named_pool_accepts_a_bare_kind_object_and_a_custom_uses() {
+        let assign: Assign = serde_json::from_value(json!({
+            "cc": { "kind": "context", "var": { "type": "initiator" } },
+            "approvers": {
+                "uses": "corp.directory",
+                "params": { "kind": "role", "name": "approver" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            assign.others["cc"].params,
+            CandidateExpr::Context {
+                var: crate::model::ContextVar::Initiator
+            }
+        );
+        assert_eq!(assign.others["cc"].uses, USERS_PACKAGE);
+        assert_eq!(assign.others["approvers"].uses, "corp.directory");
+    }
+
+    #[test]
+    fn assign_round_trips_named_pools_and_owner_stays_a_field() {
+        let assign: Assign = serde_json::from_value(json!({
+            "owner": "alice",
+            "cc": "bob"
+        }))
+        .unwrap();
+        let round = serde_json::to_value(&assign).unwrap();
+        assert_eq!(round["owner"], json!("alice"));
+        assert_eq!(
+            round["cc"],
+            json!({ "params": "bob", "uses": USERS_PACKAGE })
+        );
+        assert_eq!(serde_json::to_value(Assign::default()).unwrap(), json!({}));
+        let parsed: Assign = serde_json::from_value(round).unwrap();
+        assert_eq!(parsed, assign);
     }
 }

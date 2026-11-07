@@ -65,22 +65,26 @@ pub(in crate::scheduler::shell) enum Start {
     /// the decision is handed to its effect operation, which resolves again and
     /// fails it — the legacy act's `run()` gate, one operation later.
     Unresolved,
-    /// The act declared `assign.candidates`: its pool is business data, one
-    /// IRQ round trip away, and the start waits for it. The plan pushes one
-    /// candidates request under the act; the settlement folds the answer into
-    /// the act's variables and re-enters this start (`first` = this is the
-    /// first entry, which writes the wait marker; a re-entry after a skipped
-    /// request asks again).
+    /// The act declared an assign pool whose expression names business data:
+    /// one IRQ round trip away, and the start waits for it. The plan pushes
+    /// one candidates request under the act (`pool` names the declaration
+    /// key the request answers); the settlement folds the answer into the
+    /// act's variables under that key and re-enters this start (`first` =
+    /// this is the first entry, which writes the wait marker; a re-entry
+    /// after a skipped request asks again).
     Waiting {
+        pool: String,
         params: serde_json::Value,
         uses: String,
         first: bool,
     },
-    /// The act's `assign.candidates` expression resolved in the kernel —
-    /// every atom was local — so the pool needs no round trip: the plan folds
-    /// the computed pool into the act's variables (the same shape a settled
-    /// answer lands in) and re-enters this start.
+    /// One of the act's assign pools (`pool`) resolved in the kernel — every
+    /// atom was local — so that pool needs no round trip: the plan folds the
+    /// computed pool into the act's variables under its own key (the same
+    /// shape a settled answer lands in) and re-enters this start, which
+    /// computes the next uncomputed pool or proceeds.
     Pool {
+        pool: String,
         participants: Vec<crate::model::Participant>,
     },
 }
@@ -122,15 +126,16 @@ impl ActOperation for ExecuteTask {
             Guard::Fail(failure) => return Ok(Outcome::Start(Start::Failed(failure))),
             Guard::Run => {}
         }
-        // The act's candidate pool: local atoms compute in the kernel, one
+        // The act's assign pools: local atoms compute in the kernel, one
         // evaluation ahead of anything else; business atoms need the spec's
         // `uses` package (one IRQ round trip) and the start waits for it.
-        // Either way the fan-out (`in: "${{ candidates }}"`) and any owner
-        // expression that reads the pool resolve on the re-entered start,
-        // with the pool in the act's scope.
-        if let Some(spec) = match task {
-            Some(task) => match Assign::declared_candidates(snapshot, task_id, &task.model_node) {
-                Ok(spec) => spec,
+        // Either way the fan-out and any owner expression that reads a pool
+        // resolve on the re-entered start, with the pool in the act's scope.
+        // Several declared pools settle one re-entry at a time: this pass
+        // takes the first one not yet computed.
+        let pools = match task {
+            Some(task) => match Assign::declared_pools(snapshot, task_id, &task.model_node) {
+                Ok(pools) => pools,
                 Err(error) => {
                     return Ok(Outcome::Start(Start::Failed(Failure::new(
                         "invalid_assignment",
@@ -138,8 +143,11 @@ impl ActOperation for ExecuteTask {
                     ))));
                 }
             },
-            None => None,
-        } && !Assign::pool_computed(snapshot, task_id)
+            None => Vec::new(),
+        };
+        if let Some(spec) = pools
+            .into_iter()
+            .find(|spec| !Assign::pool_computed(snapshot, task_id, &spec.pool))
         {
             // The spec's expression decides the path: naming business data
             // defers to the `uses` package (one IRQ round trip); an all-local
@@ -156,21 +164,27 @@ impl ActOperation for ExecuteTask {
                         )
                         .await
                     {
-                        Ok(participants) => Outcome::Start(Start::Pool { participants }),
+                        Ok(participants) => Outcome::Start(Start::Pool {
+                            pool: spec.pool,
+                            participants,
+                        }),
                         Err(error) => Outcome::Start(Start::Failed(Failure::new(
                             "invalid_assignment",
                             format!(
-                                "act '{}': assign.candidates could not be computed: {error}",
-                                task_id.node.as_str()
+                                "act '{}': assign pool '{}' could not be computed: {error}",
+                                task_id.node.as_str(),
+                                spec.pool
                             ),
                         ))),
                     },
                 );
             }
+            let first = !Assign::pool_pending(snapshot, task_id, &spec.pool);
             return Ok(Outcome::Start(Start::Waiting {
+                pool: spec.pool,
                 params: serde_json::to_value(&spec.params).unwrap_or(serde_json::Value::Null),
                 uses: spec.uses,
-                first: !Assign::pool_pending(snapshot, task_id),
+                first,
             }));
         }
         // A declared `assign.owner` is a human decision act's owner. The
@@ -391,16 +405,18 @@ impl ActOperation for ExecuteTask {
                     .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
                 return Self::guard_skip_plan(host, snapshot, id, &task_id, task, claim);
             }
-            Start::Pool { participants } => {
+            Start::Pool { pool, participants } => {
                 // The kernel computed the pool locally (every atom of the
-                // expression was local): fold it into the act's variables —
-                // the same shape a settled answer lands in — and re-enter
-                // the start, which finds the pool in scope and proceeds
+                // expression was local): fold it into the act's variables
+                // under the pool's own key — the same shape a settled answer
+                // lands in — and re-enter the start, which finds the pool in
+                // scope, computes the next uncomputed pool, or proceeds
                 // without a round trip.
-                Assign::settle_local_pool(snapshot, &mut plan, &task_id, &participants)?;
+                Assign::settle_local_pool(snapshot, &mut plan, &task_id, &pool, &participants)?;
                 return Ok(plan);
             }
             Start::Waiting {
+                pool,
                 params,
                 uses,
                 first,
@@ -424,11 +440,11 @@ impl ActOperation for ExecuteTask {
                     }
                     plan.variable_writes.push(VariableWrite {
                         scope: task_id.clone(),
-                        name: CANDIDATES_WAIT_VAR.to_string(),
+                        name: Assign::pool_wait_var(&pool),
                         value: params.to_string(),
                     });
                 }
-                Assign::ask(snapshot, &mut plan, &task_id, params, uses)?;
+                Assign::ask(snapshot, &mut plan, &task_id, &pool, params, uses)?;
                 return Ok(plan);
             }
             Start::Unresolved => {

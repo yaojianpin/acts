@@ -1140,7 +1140,7 @@ ttl = "5m"
             .with_step(|step| {
                 step.with_id("approve")
                     .with_uses("acts.core.irq", acts::Vars::new().with("key", "approve"))
-                    .with_assign("alice")
+                    .with_owner("alice")
             });
         let mut fixture = acts::testing::FlowFixture::deploy_on(engine, &workflow).await;
         fixture.start(acts::Vars::new()).await;

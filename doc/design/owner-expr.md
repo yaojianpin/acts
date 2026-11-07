@@ -23,7 +23,7 @@ pub struct Assign {
 
 本设计把候选人扩展为表达式语言，并把业务数据（角色、组、资源负责人、关系）的
 解析交给业务系统：表达式文档是候选池请求的 params，`assign.candidates.uses`
-（默认 `acts.core.candidates`）命名的 IRQ 包把请求发给业务系统，业务系统返回
+（默认 `acts.core.users`）命名的 IRQ 包把请求发给业务系统，业务系统返回
 参与人（`id`/`code`/`name`）。核心不内置用户目录，也没有 `[owner]` 配置。
 
 ### 1.1 目标
@@ -32,7 +32,7 @@ pub struct Assign {
 2. `assign.candidates.params` 接受 `CandidateExpr`；表达式可以求值为一个
    参与人集合，为 `block`/`sequence`/`parallel` 审批提供预定义参与人。启动时
    先本地计算——全部原子都是本地时不出引擎；否则走 `uses` 包。
-3. `acts.core.candidates` IRQ 包：把候选表达式发给业务系统，返回
+3. `acts.core.users` IRQ 包：把候选表达式发给业务系统，返回
    `{ participants: [{id, code, name}], ids, count }`；应答写入 act 变量。
 4. 支持运行时上下文变量：`initiator`、`current_actor`、
    `previous_approver` / `previous_approver_nth`，以及持有用户的普通变量。
@@ -66,10 +66,10 @@ pub struct Assign {
 
 ### 3.1 业务数据由业务系统解析
 
-`acts.core.candidates` 是 IRQ 活动，不是求值器：
+`acts.core.users` 是 IRQ 活动，不是求值器：
 
 1. 工作流在 `assign.candidates` 声明 `params`（候选表达式）与 `uses`
-   （默认 `acts.core.candidates`）。
+   （默认 `acts.core.users`）。
 2. 引擎像任何 IRQ 活动一样把 params 发给业务系统（`Created` 消息）。
 3. 业务系统用自己的用户目录、组织架构、项目库解析表达式，完成活动并返回：
    ```json
@@ -103,7 +103,7 @@ pub struct Assign {
 `assign.candidates.uses` 指向的包计算；全本地的表达式直接在内核算出，解析失败
 （未知变量）则活动启动失败，不会伪造空池。
 
-`acts.core.candidates` 的 params 可以包含全部原子，因为业务系统会解析它们
+`acts.core.users` 的 params 可以包含全部原子，因为业务系统会解析它们
 （包的 `prepare_params` 先把本地 context 原子与 `${{ }}` 字符串替换成解析
 结果）。
 
@@ -127,12 +127,12 @@ owner 的本地解析没有可替换的解析器端口（2026-10-29 起）：它
   语言解析；引擎只定义表达式文档和应答字段。没有插件配置，没有目录副本，
   没有新的 shell 能力。
 
-因此 `acts.core.candidates` 是一个 IRQ 包（内核 `package/core` 自带，与
+因此 `acts.core.users` 是一个 IRQ 包（内核 `package/core` 自带，与
 `acts.core.irq` 同一运行方式），只定义请求契约；业务系统是唯一的解析方。
 
 ### 3.4 调度器影响
 
-- `acts.core.candidates` 是普通 `ActRunAs::Irq` 包：请求执行启动、等待客户端、
+- `acts.core.users` 是普通 `ActRunAs::Irq` 包：请求执行启动、等待客户端、
   `Complete` 后把应答折叠进声明者变量并续跑。没有新的操作类型、没有新的 plan
   分支（实现见 `doc/plan/caps-refactor.md` §B/C）。
 - 参与人 fan-out 复用 `acts.core.parallel.in`/`sequence`；`in` 在容器启动时
@@ -206,7 +206,7 @@ pub enum CandidateExpr {
   "duty": "principal" }
 ```
 
-这些例子作为 `acts.core.candidates` 的 params 原样发给业务系统。
+这些例子作为 `acts.core.users` 的 params 原样发给业务系统。
 
 ### 4.2 求值语义
 
@@ -219,7 +219,7 @@ pub enum CandidateExpr {
 - `except`：差集（`base - minus`）。
 - 空结果不是错误：`assign` 会把空结果翻译成“解析为空，拒绝无人审批”。
 
-业务系统求值（`acts.core.candidates` 的客户端）应遵循同样的集合语义；引擎不校验
+业务系统求值（`acts.core.users` 的客户端）应遵循同样的集合语义；引擎不校验
 应答，除了 `assign` 的单 owner 检查。
 
 ## 5. 上下文变量
@@ -246,7 +246,7 @@ pub enum CandidateExpr {
 `assign.candidates` 的计算是**先本地、后 uses**：活动启动时先做结构检查——表达式
 全部为本地原子（用户、context 变量、`user`/`users` 变量、集合运算、`${{ }}`
 字符串）时直接得到候选池，不发请求（解析失败则活动失败）；含业务原子时才请求
-`uses` 包。`acts.core.candidates` 在请求发出前调用
+`uses` 包。`acts.core.users` 在请求发出前调用
 `ActPackage::prepare_params`，把表达式里的**本地** context 原子（`initiator`、
 `current_actor`、`previous_approver`、`user`/`users` 变量）替换成它们解析出的
 `user` 节点，`${{ }}` 字符串替换成解析出的用户；业务原子（角色、组、资源、
@@ -255,7 +255,7 @@ pub enum CandidateExpr {
 （`any_of: []`），未知的用户变量让请求失败——引擎已经知道它不存在，不把错误
 推给业务系统。
 
-不经 `assign.candidates`、直接 `uses: acts.core.candidates` + `params` 的步骤
+不经 `assign.candidates`、直接 `uses: acts.core.users` + `params` 的步骤
 没有本地计算这一层：它是一个普通 IRQ 活动，参数本地准备好后发给业务系统，应答
 作为活动自己的输出落地。
 
@@ -263,20 +263,21 @@ pub enum CandidateExpr {
 
 ### 6.1 单个 owner（本地原子）
 
+`assign.owner` 是字符串（用户 id 或 `${{ }}` 表达式）；需要业务原子的单 owner
+先在候选池里算出参与人，再取唯一结果（见 6.3）：
+
 ```yml
 - id: approve
   uses: acts.core.irq
   assign:
-    owner:
-      kind: context
-      var: { type: previous_approver }
+    owner: "${{ $previous_approver }}"
 ```
 
 ### 6.2 多人审批（业务系统解析）
 
 ```yml
 - id: owners
-  uses: acts.core.candidates
+  uses: acts.core.users
   params:
     kind: any_of
     operands:
@@ -323,7 +324,7 @@ pub enum CandidateExpr {
 
 ```yml
 - id: owner
-  uses: acts.core.candidates
+  uses: acts.core.users
   params:
     kind: relate
     from: { kind: context, var: { type: current_actor } }
@@ -347,7 +348,7 @@ pub enum CandidateExpr {
 | 本地求值器 + 集合运算 | `crates/acts/src/caps/assign/owner.rs` | ~200 行 | 低：无 I/O |
 | 上下文变量 | `Context` + `Scope` | ~120 行 | 中：决策链是前驱图，不是父子链 |
 | `assign` 集成 | `assign/mod.rs`、`operation/task.rs` | ~60 行改动 | 低：沿用现有解析阶段 |
-| `acts.core.candidates` 包 | `crates/acts/src/package/core/candidates.rs` | ~100 行 | 低：纯 IRQ 定义 |
+| `acts.core.users` 包 | `crates/acts/src/package/core/users.rs` | ~100 行 | 低：纯 IRQ 定义 |
 | 文档 + 测试 | 本目录 + 各 crate | ~400 行 | 中：端到端审批链 |
 
 总计约 1,300 行（含测试和文档），且没有插件目录、没有 `[owner]` 配置、没有
@@ -355,7 +356,7 @@ pub enum CandidateExpr {
 
 风险：
 
-- **业务系统可用性**：`acts.core.candidates` 是一个 IRQ 活动，业务系统不在线时活动
+- **业务系统可用性**：`acts.core.users` 是一个 IRQ 活动，业务系统不在线时活动
   会等待（与任何审批一致），不会让引擎启动失败。
 - **应答契约**：引擎不校验业务系统的应答字段；工作流应使用 `participants`/
   `ids`，客户端负责返回可解析的参与人。`assign` 仍会校验单 owner 和非空 id。
@@ -379,7 +380,7 @@ pub enum CandidateExpr {
 
 ## 9. 与 shell 扩展性的关系
 
-`acts.core.candidates` 是包，不是 shell 模块：业务解析在客户端，引擎侧只有
+`acts.core.users` 是包，不是 shell 模块：业务解析在客户端，引擎侧只有
 一个包定义和 IRQ 生命周期。新增参与人能力（新的原子、新的应答字段）优先扩展
 表达式文档或包契约，而不是往 `scheduler/shell` 加代码。shell 的扩展规则见
 [`shell-extensibility.md`](./shell-extensibility.md)。
@@ -388,6 +389,6 @@ pub enum CandidateExpr {
 
 采用 IRQ 方案：`CandidateExpr` 是核心工作流语言的一部分，`assign.owner` 是
 本地求值的字符串；候选池先本地计算，业务数据由 `assign.candidates.uses` 命名的
-包（默认 `acts.core.candidates`）以 IRQ 请求发给业务系统，业务系统返回参与人，
+包（默认 `acts.core.users`）以 IRQ 请求发给业务系统，业务系统返回参与人，
 工作流用现有的 `block`/`sequence`/`parallel` 和 `join` 展开审批。
 核心没有用户目录，没有插件目录配置，调度器没有新的审批语义。

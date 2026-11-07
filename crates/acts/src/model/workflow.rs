@@ -325,8 +325,8 @@ impl Workflow {
         vars
     }
 
-    /// Whether any step declares `assign.owner` or an `assign.candidates`
-    /// pool.
+    /// Whether any step declares an assignment: an `assign.owner` or a pool
+    /// (the canonical `assign.candidates` or a named key of `assign`).
     ///
     /// `assign.owner` is a participant primitive: a model that uses it needs
     /// the assignment resolver attached (the engine installs its own), and
@@ -388,7 +388,7 @@ fn locate_in_steps(
 ) -> Option<Position> {
     for (index, step) in steps.iter().enumerate() {
         let position = Position {
-            content: NodeContent::Step(step.clone()),
+            content: NodeContent::Step(Box::new(step.clone())),
             level,
             parent_id: if index == 0 {
                 first_parent.map(str::to_string)
@@ -428,7 +428,7 @@ fn locate_in_branches(
     for branch in branches {
         if branch.id == target {
             return Some(Position {
-                content: NodeContent::Branch(branch.clone()),
+                content: NodeContent::Branch(Box::new(branch.clone())),
                 level,
                 parent_id: Some(parent_id.to_string()),
                 prev_id: None,

@@ -419,7 +419,7 @@ fn assigned_workflow(id: &str) -> Workflow {
         .with_step(|step| {
             step.with_id("step1")
                 .with_uses("acts.core.irq", Vars::new().with("key", "web-act-test"))
-                .with_assign("alice")
+                .with_owner("alice")
         })
 }
 

@@ -229,12 +229,12 @@ impl Context {
     /// This is the deterministic local evaluation — literal users, the
     /// context variables, user-valued variables and the set operations. It
     /// computes an `assign.candidates` pool whose every atom is local, and
-    /// the `acts.core.candidates` package's `prepare_params` for the atoms
+    /// the `acts.core.users` package's `prepare_params` for the atoms
     /// that ride its request.
     ///
     /// Business-data atoms (roles, groups, resource owners, relations) are
     /// refused here: they resolve in the business system, through the
-    /// `assign.candidates` spec and its `acts.core.candidates` IRQ package.
+    /// `assign.candidates` spec and its `acts.core.users` IRQ package.
     pub fn resolve_local_owners(
         &self,
         expr: &crate::model::CandidateExpr,

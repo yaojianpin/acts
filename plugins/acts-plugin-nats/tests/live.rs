@@ -89,7 +89,7 @@ async fn start_assigned(engine: &Engine, id: &str) -> (String, String) {
     let workflow = Workflow::new().with_id(id).with_step(|step| {
         step.with_id("step1")
             .with_uses("acts.core.irq", Vars::new().with("key", "nats-act-test"))
-            .with_assign("alice")
+            .with_owner("alice")
     });
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let chan = engine.channel();

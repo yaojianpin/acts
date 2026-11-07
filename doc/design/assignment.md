@@ -151,7 +151,7 @@ ref_msg_id: Option<String>,
     owner: "${{ reviewer }}"        # 责任人：字符串（用户 id 或 ${{ }} 表达式），可选
     candidates:                     # 候选池：{ params, uses }，可选
       params: { kind: role, name: reviewers }
-      uses: acts.core.candidates    # 默认值；可指向自己的计算包
+      uses: acts.core.users    # 默认值；可指向自己的计算包
 ```
 
 规则：
@@ -243,11 +243,19 @@ owner 自己操作时：
 
 ## 7. 容器中的 assign
 
-`assign.owner` 只写在容器 `params.steps[]` 的叶子人类 act 上（每个叶子自己
-的 start 时解析）。容器自身可以声明 `assign.candidates`：容器 start 时先
-计算候选池（pushed act 请求 uses 包），应答变量就位后容器才展开 fan-out，
-`params` 的模板（如 `in: "${{ candidates }}"`）由此能读到候选人并生成子
-step。容器自身不产生 `__assignment`（没有单 owner），不受决策授权约束。
+`assign.owner` 可以写在叶子人类 act 上（每个叶子自己的 start 时解析），也可以
+写在容器上——**容器的声明是子步骤的模板**：容器自身不产生 `__assignment`（没有
+单 owner），不受决策授权约束；它生成的子活动里没有单独声明 `assign.owner` 的，
+在各自启动时继承最近的祖先容器的 owner 表达式，并在子活动自己的作用域里解析
+（`$item.value`、`$initiator`、工作流变量都可用）；自己声明了 owner 的子活动
+用自己的。自完成的活动（`Func`/`Msg`）不带承办关系，继承对它们跳过。容器自身
+还可以声明 `assign.candidates`：容器 start 时先计算候选池（pushed act 请求
+uses 包），应答变量就位后容器才展开 fan-out，`params` 的模板（如
+`in: "${{ candidates }}"`）由此能读到候选人并生成子 step；命名池
+（`assign.<key>`）同理，应答落在 `$assign.<key>.*` 下。池的声明也沿模型树
+继承：声明了 assign 的子活动，缺失的池 key 从最近的祖先容器补齐并在自己的
+作用域里计算；没有声明 assign 的子活动（容器 fan-out 生成的子活动）沿作用域
+链直接读到祖先已算出的池，不重复计算。
 
 ### 7.1 `acts.core.block`
 
@@ -318,7 +326,7 @@ step。容器自身不产生 `__assignment`（没有单 owner），不受决策�
   assign:
     candidates:
       params: { kind: role, name: reviewers }
-      uses: acts.core.candidates
+      uses: acts.core.users
   params:
     in: "${{ candidates }}"     # 计算后的候选池（或 ids）
     join: any                   # 或签；all 会签；partial(2) 阈值
@@ -408,7 +416,7 @@ Channel：
 | 或签 | `parallel` + `join:any`，第一票完成，其余撤销 |
 | 会签 | `join:all`，所有 act 完成才继续 |
 | 候选池计算 | `assign.candidates` 的 uses 包应答写入变量；失败则 act 失败 |
-| 业务原子经候选池 | `role`/`group` 等原子由 `acts.core.candidates` 发给业务系统解析 |
+| 业务原子经候选池 | `role`/`group` 等原子由 `acts.core.users` 发给业务系统解析 |
 | 加签 | `act:push` + assign，新 act 独立 owner |
 | 减签 | `act:remove` 删除 child，join 重算 |
 | 并发 | transfer 与 decision 只有一个赢家 |

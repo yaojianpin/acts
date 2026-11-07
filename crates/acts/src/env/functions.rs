@@ -128,10 +128,12 @@ fn builtin(name: &str) -> Option<Value> {
         "$os" => Value::from(std::env::consts::OS),
         // `$assign`: the read-only assignment projection of the acting
         // execution — `$assign.owner`/`assignee`/`delegator`/`delegatee`
-        // and the computed pool (`candidates`/`ids`/`participants`/`count`),
-        // resolved along the scope chain; `$assign.at("<step-id>")` names an
-        // execution explicitly. A flow without assign facts answers nulls
-        // and an empty pool, never an error.
+        // and the computed pools, each under its key as a pool object
+        // (`$assign.candidates.users`/`.ids`/`.count`; every named key of
+        // `assign` lands the same way), resolved along the scope chain;
+        // `$assign.at("<step-id>")` names an execution explicitly. A flow
+        // without assign facts answers nulls and empty pools, never an
+        // error.
         "$assign" => {
             Context::try_with_current(|ctx| ctx.proc.assign_projection(ctx.task().task_id()))
                 .ok()

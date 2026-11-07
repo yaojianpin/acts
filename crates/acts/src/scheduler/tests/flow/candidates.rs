@@ -1,6 +1,6 @@
 //! `assign.candidates` cells: the candidate pool is business data, computed
 //! locally when every atom of the expression resolves in the kernel, and
-//! otherwise by the spec's `uses` package (default `acts.core.candidates`)
+//! otherwise by the spec's `uses` package (default `acts.core.users`)
 //! over one IRQ request the declaring act pushes under itself. The act's
 //! start waits for that answer — the fan-out (`in: "${{ candidates }}"`) and
 //! an owner that references the pool resolve on the re-entered start.
@@ -9,12 +9,12 @@ use super::*;
 use crate::MessageState;
 use crate::{
     Step, Vars, Workflow, scheduler::core::model::task_graph::TaskState, utils::consts,
-    utils::test::USES_IRQ,
+    utils::test::USES_BLOCK, utils::test::USES_IRQ,
 };
 use serde_json::json;
 use serial_test::serial;
 
-const USES_CANDIDATES: &str = "acts.core.candidates";
+const USES_USERS: &str = "acts.core.users";
 const USES_PARALLEL: &str = "acts.core.parallel";
 
 /// The declaring container waits for the pool, then fans it out: one owner
@@ -47,7 +47,7 @@ async fn sch_candidates_pool_fans_out_parallel_owners() {
     // The pool request rides the uses package, under the declaring act, and
     // carries the expression document.
     let request = fixture.wait_created("approve#cand1").await;
-    assert_eq!(request.uses.as_deref(), Some(USES_CANDIDATES));
+    assert_eq!(request.uses.as_deref(), Some(USES_USERS));
     let params = request.params().expect("the candidate expression");
     assert_eq!(params.get::<String>("kind").as_deref(), Some("role"));
     assert_eq!(params.get::<String>("name").as_deref(), Some("reviewers"));
@@ -98,7 +98,7 @@ async fn sch_candidates_context_atoms_compute_locally() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign("${{ candidates[0] }}")
+                .with_owner("${{ candidates[0] }}")
                 .with_candidates(crate::model::CandidateExpr::Context {
                     var: crate::model::ContextVar::Initiator,
                 })
@@ -258,7 +258,7 @@ async fn sch_candidates_unresolvable_expression_fails_the_act() {
 }
 
 /// A step that computes its pool through `step.uses =
-/// acts.core.candidates` — no `assign.candidates` — is a plain IRQ act: the
+/// acts.core.users` — no `assign.candidates` — is a plain IRQ act: the
 /// engine sends the params with the `${{ … }}` string already computed and
 /// the answer lands as the act's own outputs, never as a locally folded pool.
 #[serial]
@@ -267,7 +267,7 @@ async fn sch_candidates_step_uses_package_answers_without_local_folding() {
     let workflow = Workflow::new()
         .with_id("sch-candidates-step-uses")
         .with_step(|step| {
-            let step = step.with_id("pool").with_uses(USES_CANDIDATES, Vars::new());
+            let step = step.with_id("pool").with_uses(USES_USERS, Vars::new());
             let mut step = step;
             step.params = json!("${{ owner_var }}");
             step
@@ -307,7 +307,7 @@ async fn sch_candidates_owner_resolves_from_the_pool() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign("${{ candidates[0] }}")
+                .with_owner("${{ candidates[0] }}")
                 .with_candidates(crate::model::CandidateExpr::Role {
                     name: "reviewers".to_string(),
                 })
@@ -330,8 +330,8 @@ async fn sch_candidates_owner_resolves_from_the_pool() {
 }
 
 /// A generated child act reads the pool of the container that generated it:
-/// `$assign.candidates` resolves the nearest computed pool along the scope
-/// chain, and `$assign.at("<step-id>")` names an execution explicitly.
+/// `$assign.candidates.ids` resolves the nearest computed pool along the
+/// scope chain, and `$assign.at("<step-id>")` names an execution explicitly.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_candidates_child_reads_the_parent_pool_through_assign() {
@@ -341,18 +341,20 @@ async fn sch_candidates_child_reads_the_parent_pool_through_assign() {
             step.with_id("approve")
                 .with_uses(
                     USES_PARALLEL,
-                    Vars::new().with("in", "${{ $assign.candidates }}").with(
-                        "steps",
-                        vec![
-                            Step::new().with_id("vote").with_uses(
-                                USES_IRQ,
-                                Vars::new()
-                                    .with("value", "${{ $item.value }}")
-                                    .with("pool", "${{ $assign.candidates }}")
-                                    .with("explicit", "${{ $assign.at('approve').ids }}"),
-                            ),
-                        ],
-                    ),
+                    Vars::new()
+                        .with("in", "${{ $assign.candidates.ids }}")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new().with_id("vote").with_uses(
+                                    USES_IRQ,
+                                    Vars::new()
+                                        .with("value", "${{ $item.value }}")
+                                        .with("pool", "${{ $assign.candidates.ids }}")
+                                        .with("explicit", "${{ $assign.at('approve').ids }}"),
+                                ),
+                            ],
+                        ),
                 )
                 .with_candidates(crate::model::CandidateExpr::Role {
                     name: "reviewers".to_string(),
@@ -361,7 +363,7 @@ async fn sch_candidates_child_reads_the_parent_pool_through_assign() {
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;
 
-    // `in: "${{ $assign.candidates }}"` resolves the container's own pool.
+    // `in: "${{ $assign.candidates.ids }}"` resolves the container's own pool.
     let request = fixture.wait_created("approve#cand1").await;
     fixture
         .complete(
@@ -405,7 +407,7 @@ async fn sch_assign_without_facts_answers_an_empty_pool() {
             step.with_id("s1").with_uses(
                 USES_IRQ,
                 Vars::new()
-                    .with("pool", "${{ $assign.candidates }}")
+                    .with("pool", "${{ $assign.candidates.ids }}")
                     .with("owner", "${{ $assign.owner }}"),
             )
         });
@@ -444,5 +446,328 @@ async fn sch_candidates_failure_fails_the_act() {
     // error into its variables; the run ends errored.
     fixture.wait_state("s1", TaskState::Failed).await;
     fixture.wait_error().await;
+    fixture.close().await;
+}
+
+/// A named pool processes exactly like `candidates`: an all-local key
+/// computes in the kernel without a request, a business key rides its own
+/// `#cand` request, and each answer lands under its own key
+/// (`$assign.<key>.ids` / `.users`) next to `$assign.candidates`.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_named_pools_land_under_their_keys() {
+    let workflow = Workflow::new()
+        .with_id("sch-assign-pools")
+        .with_step(|step| {
+            step.with_id("approve")
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new().with("in", "${{ candidates }}").with(
+                        "steps",
+                        vec![
+                            Step::new().with_id("vote").with_uses(
+                                USES_IRQ,
+                                Vars::new()
+                                    .with("value", "${{ $item.value }}")
+                                    .with("cc", "${{ $assign.cc.ids }}")
+                                    .with("cc_users", "${{ $assign.cc.users }}"),
+                            ),
+                        ],
+                    ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+                // A bare string is the pool's expression: one literal user,
+                // computed locally.
+                .with_assign("cc", crate::model::CandidateExpr::from("u9"))
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    // The canonical pool is business data: one request for it, none for the
+    // local named pool.
+    let request = fixture.wait_created("approve#cand1").await;
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with("ids", json!(["u1", "u2"]))
+                .with("count", 2),
+        )
+        .await;
+
+    // The re-entered start folds the local named pool and fans the canonical
+    // one out; every generated child reads the named pool under its own key.
+    let created = fixture.wait_created_uses(USES_IRQ, 2).await;
+    for message in &created {
+        let params = message.params().expect("the resolved child params");
+        assert_eq!(
+            params.get::<serde_json::Value>("cc"),
+            Some(json!(["u9"])),
+            "the named pool lands under its own key"
+        );
+        assert_eq!(
+            params.get::<serde_json::Value>("cc_users"),
+            Some(json!([{ "id": "u9", "code": "u9", "name": "u9" }])),
+            "users carries the participant records"
+        );
+    }
+    fixture.close().await;
+}
+
+/// A minimal IRQ package a test engine registers, so a pool may name a
+/// `uses` package of its own.
+#[derive(Clone)]
+struct CorpDirectoryPackage;
+
+#[async_trait::async_trait]
+impl crate::ActPackage for CorpDirectoryPackage {
+    fn new(_config: &crate::Config) -> crate::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
+    }
+
+    fn definition() -> crate::ActPackageDefinition
+    where
+        Self: Sized,
+    {
+        crate::ActPackageDefinition {
+            id: "corp.directory",
+            name: "CorpDirectory",
+            desc: "test computing package",
+            version: "0.1.0",
+            icon: "",
+            doc: "",
+            schema: serde_json::json!({}),
+            options: None,
+            run_as: crate::ActRunAs::Irq,
+            resources: Vec::new(),
+            catalog: crate::ActPackageCatalog::Core,
+        }
+    }
+}
+
+/// `assign.<key>.uses` is per-pool: the default computing package is
+/// `acts.core.users`, and a pool may name its own. Each business pool rides
+/// its own `#cand` request, and the answers land under their keys.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_named_pools_use_their_own_packages() {
+    let workflow = Workflow::new()
+        .with_id("sch-assign-pool-uses")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(
+                    USES_IRQ,
+                    Vars::new()
+                        .with("cc", "${{ $assign.cc.ids }}")
+                        .with("approvers", "${{ $assign.approvers.ids }}"),
+                )
+                // Business atoms: both pools defer to their computing
+                // packages. The default `uses` is `acts.core.users`; the
+                // second pool names its own.
+                .with_assign(
+                    "cc",
+                    crate::model::CandidateExpr::Role {
+                        name: "reviewers".to_string(),
+                    },
+                )
+                .with_assign_package(
+                    "approvers",
+                    "corp.directory",
+                    crate::model::CandidateExpr::Role {
+                        name: "approvers".to_string(),
+                    },
+                )
+        });
+    let mut fixture = {
+        let engine = crate::Engine::builder()
+            .add_package::<CorpDirectoryPackage>()
+            .start()
+            .await
+            .unwrap();
+        FlowFixture::deploy_on(engine, &workflow).await
+    };
+    fixture.start(Vars::new()).await;
+
+    // Two requests, one per pool, in declaration (map) order: the custom
+    // package first, then the default one.
+    let approvers = fixture.wait_created("s1#cand1").await;
+    assert_eq!(approvers.uses.as_deref(), Some("corp.directory"));
+    let params = approvers.params().expect("the approvers expression");
+    assert_eq!(params.get::<String>("name").as_deref(), Some("approvers"));
+    fixture
+        .complete(
+            &approvers.pid,
+            &approvers.tid,
+            Vars::new().with("ids", json!(["a1"])).with("count", 1),
+        )
+        .await;
+
+    let cc = fixture.wait_created("s1#cand2").await;
+    assert_eq!(cc.uses.as_deref(), Some(USES_USERS));
+    let params = cc.params().expect("the reviewers expression");
+    assert_eq!(params.get::<String>("name").as_deref(), Some("reviewers"));
+    fixture
+        .complete(
+            &cc.pid,
+            &cc.tid,
+            Vars::new().with("ids", json!(["u1"])).with("count", 1),
+        )
+        .await;
+
+    // With every pool computed, the act proceeds and reads each pool under
+    // its own key.
+    let created = fixture.wait_created("s1").await;
+    let params = created.params().expect("the resolved params");
+    assert_eq!(params.get::<serde_json::Value>("cc"), Some(json!(["u1"])));
+    assert_eq!(
+        params.get::<serde_json::Value>("approvers"),
+        Some(json!(["a1"]))
+    );
+    fixture.close().await;
+}
+
+/// A container's `assign.owner` is a template, not the container's own
+/// assignment: the generated children that declare no owner of their own
+/// inherit it — each resolving the expression in its own scope at its
+/// start — while a child with its own `assign.owner` keeps its own. The
+/// inherited owner rides the child's act and its `Created` message.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_container_owner_is_inherited_by_ownerless_children() {
+    let workflow = Workflow::new()
+        .with_id("sch-assign-inherit")
+        .with_rn("sch-assign-inherit")
+        .with_step(|step| {
+            step.with_id("task")
+                .with_uses(
+                    USES_BLOCK,
+                    Vars::new().with("mode", "parallel").with(
+                        "steps",
+                        vec![
+                            // No own assign: inherits the container's owner.
+                            Step::new()
+                                .with_id("a1")
+                                .with_uses(USES_IRQ, Vars::new().with("k", "inherited")),
+                            // Own assign wins over the container template.
+                            Step::new()
+                                .with_id("a2")
+                                .with_uses(USES_IRQ, Vars::new().with("k", "own"))
+                                .with_owner("${{ $initiator }}"),
+                        ],
+                    ),
+                )
+                .with_owner("${{ owner_var }}")
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    let starter = crate::Principal::from_policy(&crate::UserPolicy {
+        name: "starter".to_string(),
+        enabled: true,
+        allow: vec!["model:deploy".to_string(), "proc:start".to_string()],
+        patterns: vec!["sch-assign-inherit".to_string()],
+        ..Default::default()
+    })
+    .unwrap();
+    fixture
+        .start_as(
+            &starter,
+            Vars::new()
+                .with("actor", "starter")
+                .with("owner_var", "boss"),
+        )
+        .await
+        .unwrap();
+
+    let inherited = fixture.wait_created("a1").await;
+    assert_eq!(
+        inherited.owner.as_deref(),
+        Some("boss"),
+        "the ownerless child inherits the container's owner"
+    );
+    let own = fixture.wait_created("a2").await;
+    assert_eq!(
+        own.owner.as_deref(),
+        Some("starter"),
+        "the child's own owner wins over the container template"
+    );
+    fixture.close().await;
+}
+
+/// A container's pools are inherited like its owner: `candidates` and every
+/// named key reach the children that do not declare the key themselves, and
+/// each child computes the inherited declaration in its own scope — a key
+/// the child declares itself wins over the inherited one.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_container_pools_are_inherited_by_children() {
+    let workflow = Workflow::new()
+        .with_id("sch-assign-pool-inherit")
+        .with_rn("sch-assign-pool-inherit")
+        .with_step(|step| {
+            step.with_id("task")
+                .with_uses(
+                    USES_BLOCK,
+                    Vars::new().with("mode", "parallel").with(
+                        "steps",
+                        vec![
+                            // No own assign: inherits both keys.
+                            Step::new().with_id("a1").with_uses(
+                                USES_IRQ,
+                                Vars::new()
+                                    .with("k", "a1")
+                                    .with("pool", "${{ $assign.candidates.ids }}")
+                                    .with("cc", "${{ $assign.cc.ids }}"),
+                            ),
+                            // Own candidates wins; cc is still inherited.
+                            Step::new()
+                                .with_id("a2")
+                                .with_uses(
+                                    USES_IRQ,
+                                    Vars::new()
+                                        .with("k", "a2")
+                                        .with("pool", "${{ $assign.candidates.ids }}")
+                                        .with("cc", "${{ $assign.cc.ids }}"),
+                                )
+                                .with_candidates(crate::model::CandidateExpr::from("u2")),
+                            // Own cc wins; candidates is still inherited.
+                            Step::new()
+                                .with_id("a3")
+                                .with_uses(
+                                    USES_IRQ,
+                                    Vars::new()
+                                        .with("k", "a3")
+                                        .with("pool", "${{ $assign.candidates.ids }}")
+                                        .with("cc", "${{ $assign.cc.ids }}"),
+                                )
+                                .with_assign("cc", crate::model::CandidateExpr::from("u8")),
+                        ],
+                    ),
+                )
+                .with_candidates(crate::model::CandidateExpr::from("u1"))
+                .with_assign("cc", crate::model::CandidateExpr::from("u9"))
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let expected = [
+        ("a1", json!(["u1"]), json!(["u9"])),
+        ("a2", json!(["u2"]), json!(["u9"])),
+        ("a3", json!(["u1"]), json!(["u8"])),
+    ];
+    for (node, pool, cc) in expected {
+        let created = fixture.wait_created(node).await;
+        let params = created.params().expect("the resolved child params");
+        assert_eq!(
+            params.get::<serde_json::Value>("pool"),
+            Some(pool),
+            "{node} candidates"
+        );
+        assert_eq!(params.get::<serde_json::Value>("cc"), Some(cc), "{node} cc");
+    }
     fixture.close().await;
 }

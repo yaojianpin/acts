@@ -8,7 +8,7 @@
 //! user-valued variables, and the set operations) is evaluated by the
 //! resolver seam's kernel implementation in the shell; business-data atoms
 //! are refused there with a message that points at the
-//! `acts.core.candidates` IRQ package, instead of inventing an owner.
+//! `acts.core.users` IRQ package, instead of inventing an owner.
 
 use super::*;
 use crate::Result;

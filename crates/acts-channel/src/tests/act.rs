@@ -190,7 +190,7 @@ fn assigned_workflow(id: &str) -> Workflow {
     Workflow::new().with_id(id).with_step(|step| {
         step.with_id("s1")
             .with_uses("acts.core.irq", Vars::new().with("key", "approve"))
-            .with_assign("alice")
+            .with_owner("alice")
     })
 }
 

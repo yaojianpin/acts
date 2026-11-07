@@ -16,7 +16,7 @@
   `freeze_step_capabilities`、`resolve_model_capabilities`）和封口逻辑。
 - 参与人插件 `acts-plugin-participant`（`ParticipantResolver` 端口 +
   `acts.core.owner` 包）整体删除；业务参与人解析由
-  `acts.core.candidates` IRQ 包承担。
+  `acts.core.users` IRQ 包承担。
 - 内核能力 = **trait + 一个实现 + key**；scheduler 是能力的调度与组装：
   `Workers`（原 KernelHost）装配 `CapServices`（原 KernelPorts），每个槽位
   一个 `Arc<dyn Trait>`。
@@ -197,20 +197,20 @@ assign:
     params:            # CandidateExpr 文档（核心包的输入契约）
       kind: role
       name: reviewers
-    uses: acts.core.candidates   # 默认值，可指向自己的包
+    uses: acts.core.users   # 默认值，可指向自己的包
 ```
 
 - act start 先对 `params` 做**结构检查**：全部原子都是本地（用户、context
   变量、`user`/`users` 变量、集合运算、`${{ }}` 字符串）时直接在内核算出候选
   池，不发起请求（本地解析失败则活动启动失败，不伪造空池）；含业务原子时才
   请求 `uses` 包。
-- `acts.core.candidates` 是 `package/core` 的 IRQ 包：`prepare_params` 把
+- `acts.core.users` 是 `package/core` 的 IRQ 包：`prepare_params` 把
   `params`（CandidateExpr）里的本地 context 原子与 `${{ }}` 字符串替换成解析
   结果后发给业务系统，应答 `{ participants, ids, count }`。
 - 应答折叠进 act 变量：`candidates` = ids 列表（fan-out 与 owner 引用的
   主形态），`participants`/`count` 随行；声明 candidates 的 act 以
   `Waiting` 停靠，应答就绪后重入启动，容器 fan-out 由此读到候选人。
-- 不经 `assign.candidates`、直接 `uses: acts.core.candidates` + `params` 的
+- 不经 `assign.candidates`、直接 `uses: acts.core.users` + `params` 的
   步骤是普通 IRQ 活动：没有本地求值与折叠，应答落在活动自己的输出上。
 
 ### 5.2 会合（join 的 delegated 规则）
@@ -235,8 +235,9 @@ step 自身的 `uses`/`params`、`assign.candidates` 的 `params`/`uses`、join
 
 有 assign 的 act，操作人（actor）必须与 `assignee` 一致（或与有效
 delegation 的 `delegatee` 一致）方可执行决策；转办/代办的管理授权
-（owner 或 `@assign` 能力）不变。仅有 candidates、没有 owner 的容器 act
-不产生 `__assignment`，保持"无 assign 即 `@execute`"的旧行为。
+（owner 或 `@assign` 能力）不变。容器 act 不产生自己的 `__assignment`
+（容器上的 `assign.owner` 是子步骤继承的模板），仅有 candidates、没有 owner
+的容器 act 保持"无 assign 即 `@execute`"的旧行为。
 
 ## 7. 删除面（对照）
 
@@ -259,9 +260,11 @@ delegation 的 `delegatee` 一致）方可执行决策；转办/代办的管理�
 - 身份字段 `owner`/`assignee`/`delegator`/`delegatee`：取最近一个持
   `__assignment` 的执行；delegator/delegatee 取该执行自己的 `__delegation`
   （不从无关祖先继承）。
-- 池字段 `candidates`/`ids`/`participants`/`count`：取最近一个已算出候选池
-  （`__candidates`）的执行。与身份字段**各自**就近解析：容器生成的子 act
-  带着自己的 owner，仍读到父容器的池。
+- 池对象 `$assign.candidates`（`.users`/`.ids`/`.count`）与命名池
+  `$assign.<key>`：取最近一个已算出候选池（`__candidates` /
+  `__pool_<key>`）的执行。与身份字段**各自**就近解析：容器生成的子 act
+  带着自己的 owner，仍读到父容器的池；顶层 `ids`/`participants`/`count`
+  是 candidates 池的兼容别名。
 - `$assign.at("<step-id>")`：显式指定执行（node id 取最新 generation，wire
   `tid` 取确切实例），只读该执行自身事实。
 - 无 assign 事实时回答 `null` 身份与空列表，不报错；无共享聚合的作用域

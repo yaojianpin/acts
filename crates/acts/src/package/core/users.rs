@@ -1,4 +1,4 @@
-//! `acts.core.candidates`: ask the business system to resolve a candidate
+//! `acts.core.users`: ask the business system to resolve a candidate
 //! expression into participants.
 //!
 //! The package is an IRQ act, not an evaluator: its params *are* the
@@ -38,12 +38,12 @@ use crate::{
 use serde_json::{Value as JsonValue, json};
 
 /// The default `uses` of `assign.candidates` — the pool this package computes.
-pub(crate) const CANDIDATES_PACKAGE: &str = crate::model::CANDIDATES_PACKAGE;
+pub(crate) const USERS_PACKAGE: &str = crate::model::USERS_PACKAGE;
 
 #[derive(Debug, Clone)]
-pub struct CandidatesPackage;
+pub struct UsersPackage;
 
-impl CandidatesPackage {
+impl UsersPackage {
     /// Parse the act's params as a [`CandidateExpr`]. The raw document is the
     /// documented form; `{ "candidates": … }` is accepted so a step can name
     /// the expression the same way `assign.candidates.params` does; a plain
@@ -51,7 +51,7 @@ impl CandidatesPackage {
     pub(crate) fn expression(params: &JsonValue) -> Result<CandidateExpr> {
         let invalid = |detail: &str| {
             ActError::Package(format!(
-                "invalid ActPackage(acts.core.candidates) params: {detail}"
+                "invalid ActPackage(acts.core.users) params: {detail}"
             ))
         };
         match params {
@@ -85,11 +85,11 @@ impl CandidatesPackage {
 }
 
 #[async_trait::async_trait]
-impl ActPackage for CandidatesPackage {
+impl ActPackage for UsersPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
-            id: CANDIDATES_PACKAGE,
-            name: "Candidates",
+            id: USERS_PACKAGE,
+            name: "Users",
             desc: "send a candidate expression to the business system and receive the participants (id, code, name)",
             version: "0.1.0",
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>"#,
@@ -231,16 +231,16 @@ fn participants_to_expr(participants: &[Participant]) -> CandidateExpr {
     }
 }
 
-inventory::submit!(crate::package::ActPackageRegister::new::<CandidatesPackage>());
+inventory::submit!(crate::package::ActPackageRegister::new::<UsersPackage>());
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_candidates_package_is_an_irq_request() {
-        let meta = CandidatesPackage::definition();
-        assert_eq!(meta.id, "acts.core.candidates");
+    fn the_users_package_is_an_irq_request() {
+        let meta = UsersPackage::definition();
+        assert_eq!(meta.id, "acts.core.users");
         assert_eq!(meta.run_as, ActRunAs::Irq);
         assert_eq!(meta.catalog, ActPackageCatalog::Core);
     }
@@ -252,10 +252,10 @@ mod tests {
             json!("alice"),
             json!({ "candidates": { "kind": "role", "name": "reviewer" } }),
         ] {
-            assert!(CandidatesPackage::expression(&params).is_ok(), "{params}");
+            assert!(UsersPackage::expression(&params).is_ok(), "{params}");
         }
         for params in [JsonValue::Null, json!({ "name": "x" }), json!(3)] {
-            assert!(CandidatesPackage::expression(&params).is_err(), "{params}");
+            assert!(UsersPackage::expression(&params).is_err(), "{params}");
         }
     }
 

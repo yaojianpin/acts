@@ -5,7 +5,7 @@
 //! atoms (`user`, `context`, user-valued variables, and the set operations);
 //! everything that needs business data (roles, groups, resource owners and
 //! relations) is sent to the business system by the `assign.candidates`
-//! spec's `uses` package (`acts.core.candidates` by default), which answers
+//! spec's `uses` package (`acts.core.users` by default), which answers
 //! with the participants. A local evaluation that meets one of those atoms
 //! fails instead of silently computing an empty pool.
 
@@ -208,7 +208,7 @@ impl Duty {
 /// The type a `ContextVar::Var` names. User/Users read the value as a person
 /// or a person list and resolve locally; Role/Group and Project/Department/Unit
 /// name business data and are resolved by the business system through the
-/// `assign.candidates` spec's uses package (`acts.core.candidates` by
+/// `assign.candidates` spec's uses package (`acts.core.users` by
 /// default; a local evaluation refuses them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

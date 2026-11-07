@@ -5,7 +5,7 @@
 //! variables holding users, and the set operations. Business-data atoms
 //! (roles, groups, resource owners and relations) are deliberately not
 //! resolved here: an `assign.candidates` spec sends the expression to its
-//! `uses` package (`acts.core.candidates` by default) and the business
+//! `uses` package (`acts.core.users` by default) and the business
 //! system's answer carries the participants. A local evaluation that meets
 //! one of those atoms fails — the start treats the failure as "not locally
 //! computable" and asks the package instead.
@@ -178,13 +178,13 @@ fn context_participants(ctx: &Context, var: &ContextVar) -> Result<Vec<Participa
 
 fn business_atom(kind: &str, name: &str) -> ActError {
     ActError::Action(format!(
-        "candidates atom '{kind}' ('{name}') names business data; the pool computes through the spec's uses package (acts.core.candidates by default), which passes this expression to the business system and its answer carries the participants"
+        "candidates atom '{kind}' ('{name}') names business data; the pool computes through the spec's uses package (acts.core.users by default), which passes this expression to the business system and its answer carries the participants"
     ))
 }
 
 fn business_variable(ty: VarType, name: &str, duty: &crate::model::Duty) -> ActError {
     ActError::Action(format!(
-        "candidates variable '{name}' is typed {ty:?} under duty {duty:?}, which names business data; the pool computes through the spec's uses package (acts.core.candidates by default)"
+        "candidates variable '{name}' is typed {ty:?} under duty {duty:?}, which names business data; the pool computes through the spec's uses package (acts.core.users by default)"
     ))
 }
 
@@ -234,6 +234,6 @@ mod tests {
     #[test]
     fn a_business_atom_names_the_irq_package() {
         let error = super::business_atom("role", "reviewer");
-        assert!(error.to_string().contains("acts.core.candidates"));
+        assert!(error.to_string().contains("acts.core.users"));
     }
 }

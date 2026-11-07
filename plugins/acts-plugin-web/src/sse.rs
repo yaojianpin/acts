@@ -429,7 +429,7 @@ mod tests {
         let workflow = Workflow::new().with_id("sse-assignment").with_step(|step| {
             step.with_id("step1")
                 .with_uses("acts.core.irq", Vars::new().with("key", "sse-assignment"))
-                .with_assign("alice")
+                .with_owner("alice")
         });
         engine
             .executor(&acts::Principal::unrestricted())

@@ -337,6 +337,97 @@ pub(super) fn find_step<'a>(
     None
 }
 
+/// The nearest `assign.owner` declaration along one node's ancestor chain in
+/// the model tree, self included: what a step without its own owner inherits
+/// from the container steps above it (a container's `assign.owner` is a
+/// template its generated children resolve, never the container's own
+/// assignment).
+pub(super) fn nearest_declared_owner(
+    model: &crate::model::Workflow,
+    target: &str,
+) -> Option<String> {
+    fn walk(
+        steps: &[crate::model::Step],
+        inherited: Option<&str>,
+        target: &str,
+    ) -> Option<Option<String>> {
+        for step in steps {
+            let here = step
+                .assign
+                .as_ref()
+                .and_then(|assign| assign.owner.as_deref())
+                .or(inherited);
+            if step.id == target {
+                return Some(here.map(str::to_string));
+            }
+            for branch in model::step_branches(step).unwrap_or_default() {
+                if let Some(found) = walk(&branch.steps, here, target) {
+                    return Some(found);
+                }
+            }
+            for catch in &step.catches {
+                if let Some(found) = walk(std::slice::from_ref(catch), here, target) {
+                    return Some(found);
+                }
+            }
+            for timeout in &step.timeouts {
+                if let Some(found) = walk(std::slice::from_ref(timeout), here, target) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    walk(&model.steps, None, target).flatten()
+}
+
+/// The assign pool declarations along one node's ancestor chain (self
+/// included), keyed by declaration key (`candidates` for the canonical pool,
+/// the key itself for a named one): what a step inherits for every key it
+/// does not declare itself. A nearer step's key wins.
+pub(super) fn nearest_declared_pools(
+    model: &crate::model::Workflow,
+    target: &str,
+) -> std::collections::BTreeMap<String, crate::model::Candidates> {
+    fn walk(
+        steps: &[crate::model::Step],
+        mut inherited: std::collections::BTreeMap<String, crate::model::Candidates>,
+        target: &str,
+    ) -> Option<std::collections::BTreeMap<String, crate::model::Candidates>> {
+        for step in steps {
+            if let Some(assign) = &step.assign {
+                if let Some(candidates) = &assign.candidates {
+                    inherited.insert(CANONICAL_POOL.to_string(), (**candidates).clone());
+                }
+                for (name, candidates) in &assign.others {
+                    inherited.insert(name.clone(), candidates.clone());
+                }
+            }
+            if step.id == target {
+                return Some(inherited);
+            }
+            for branch in model::step_branches(step).unwrap_or_default() {
+                if let Some(found) = walk(&branch.steps, inherited.clone(), target) {
+                    return Some(found);
+                }
+            }
+            for catch in &step.catches {
+                if let Some(found) = walk(std::slice::from_ref(catch), inherited.clone(), target) {
+                    return Some(found);
+                }
+            }
+            for timeout in &step.timeouts {
+                if let Some(found) = walk(std::slice::from_ref(timeout), inherited.clone(), target)
+                {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    walk(&model.steps, std::collections::BTreeMap::new(), target).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -676,9 +676,9 @@ pub(crate) fn headless_scope(
         Some(content) => content,
         // A pushed act's node exists only as its own fact (see
         // [`ScopeSpec::pushed`]).
-        None => NodeContent::Step(spec.pushed.clone().ok_or_else(|| {
+        None => NodeContent::Step(Box::new(spec.pushed.clone().ok_or_else(|| {
             crate::ActError::Runtime(format!("model has no node '{}'", spec.node))
-        })?),
+        })?)),
     };
     // A `$`-prefixed name is an engine-scope object (`$parent`, `$root`),
     // never workflow data: a predicate scope seeds it because it carries no
@@ -735,11 +735,11 @@ pub(super) fn node_content(model: &Workflow, target: &str) -> Option<NodeContent
 
 fn node_content_in_step(step: &crate::model::Step, target: &str) -> Option<NodeContent> {
     if step.id == target {
-        return Some(NodeContent::Step(step.clone()));
+        return Some(NodeContent::Step(Box::new(step.clone())));
     }
     for branch in crate::scheduler::shell::model::step_branches(step).unwrap_or_default() {
         if branch.id == target {
-            return Some(NodeContent::Branch(branch.clone()));
+            return Some(NodeContent::Branch(Box::new(branch.clone())));
         }
         if let Some(content) = branch
             .steps

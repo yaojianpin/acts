@@ -966,7 +966,7 @@ fn assigned_workflow(id: &str, owner: &str) -> Workflow {
             .with_id("s1")
             .with_name("s1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-            .with_assign(owner),
+            .with_owner(owner),
     );
     workflow
 }
@@ -1061,30 +1061,20 @@ async fn sch_act_assign_empty_owner_fails_the_act() {
     fixture.close().await;
 }
 
-/// `assign` is refused at act start on everything that is not a human
-/// decision leaf; the failure names the node.
+/// `assign.owner` is refused at act start on a package whose run-bound
+/// self-completes (`Func`/`Msg` — it never waits for a client decision) and
+/// on the waiting subflow; the failure names the node. A container's
+/// declaration is its children's template and starts fine instead (see
+/// `sch_container_owner_is_inherited_by_ownerless_children`).
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_assign_is_refused_on_non_human_nodes() {
-    let mut container = block_workflow(
-        "flow-act-assign-container",
-        vec![
-            Step::new()
-                .with_uses(USES_MSG, Vars::new())
-                .with_id("inner"),
-        ],
-    );
-    container.steps[0].assign = Some(crate::model::Assign {
-        owner: Some("alice".to_string()),
-        candidates: None,
-    });
-
     let mut func = Workflow::new().with_id("flow-act-assign-func");
     func.steps.push(
         Step::new()
             .with_id("f1")
             .with_uses(USES_SET, Vars::new().with("a", 1))
-            .with_assign("alice"),
+            .with_owner("alice"),
     );
 
     let mut msg = Workflow::new().with_id("flow-act-assign-msg");
@@ -1092,10 +1082,10 @@ async fn sch_act_assign_is_refused_on_non_human_nodes() {
         Step::new()
             .with_id("m1")
             .with_uses(USES_MSG, Vars::new())
-            .with_assign("alice"),
+            .with_owner("alice"),
     );
 
-    for (node, workflow) in [("step1", container), ("f1", func), ("m1", msg)] {
+    for (node, workflow) in [("f1", func), ("m1", msg)] {
         let mut fixture = FlowFixture::deploy(&workflow).await;
         fixture.start(Vars::new()).await;
         let failed = fixture.wait_message(node, MessageState::Error).await;
@@ -1123,7 +1113,7 @@ async fn sch_act_assign_resolves_a_deduplicated_owner() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign("${{ reviewers }}")
+                .with_owner("${{ reviewers }}")
         });
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture
@@ -1145,7 +1135,7 @@ async fn sch_act_assign_rejects_multiple_participants() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign("${{ reviewers }}")
+                .with_owner("${{ reviewers }}")
         });
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture
@@ -1176,7 +1166,7 @@ async fn sch_act_assign_current_actor_falls_back_to_the_initiator() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign("${{ $actor }}")
+                .with_owner("${{ $actor }}")
         });
     let fixture = FlowFixture::deploy(&workflow).await;
     let starter = Principal::from_policy(&UserPolicy {
@@ -1210,17 +1200,17 @@ async fn sch_act_assign_previous_approver_follows_the_chain() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign("u1")
+                .with_owner("u1")
         })
         .with_step(|step| {
             step.with_id("s2")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign("u2")
+                .with_owner("u2")
         })
         .with_step(|step| {
             step.with_id("s3")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_assign("${{ $previous_approver() }}")
+                .with_owner("${{ $previous_approver() }}")
         });
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;

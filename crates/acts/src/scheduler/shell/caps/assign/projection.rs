@@ -88,10 +88,14 @@ impl Assign {
         for name in ["owner", "assignee", "delegator", "delegatee"] {
             fields.insert(name.to_string(), Value::Null);
         }
-        for name in ["candidates", "ids", "participants"] {
+        for name in ["ids", "participants"] {
             fields.insert(name.to_string(), Value::list(Vec::<Value>::new()));
         }
         fields.insert("count".to_string(), Value::Null);
+        fields.insert(
+            "candidates".to_string(),
+            Self::pool_object(&JsonValue::Null),
+        );
         fields
     }
 
@@ -127,7 +131,9 @@ impl Assign {
     }
 
     /// The assignment and pool facts of the acting execution and its nearest
-    /// assignment ancestor, as expression fields.
+    /// assignment ancestor, as expression fields. Named pools
+    /// (`assign.<key>`) ride the same scope chain; a nearer answer wins a
+    /// duplicate name.
     fn nearest_fields(snapshot: &ProcessSnapshot, current: &TaskId) -> Map {
         let mut fields = Self::empty_map();
         if let Some((assignment, delegation)) = Self::nearest_assignment(snapshot, current) {
@@ -135,6 +141,9 @@ impl Assign {
         }
         if let Some(pool) = Self::nearest_pool(snapshot, current) {
             Self::insert_pool(&mut fields, &pool);
+        }
+        for (name, pool) in Self::nearest_named_pools(snapshot, current) {
+            fields.insert(name, pool);
         }
         fields
     }
@@ -149,7 +158,52 @@ impl Assign {
         if let Some(pool) = Self::own_pool(snapshot, task) {
             Self::insert_pool(&mut fields, &pool);
         }
+        for (name, pool) in Self::own_named_pools(snapshot, task) {
+            fields.insert(name, Self::pool_object(&pool));
+        }
         fields
+    }
+
+    /// The named pools (`__pool_<name>` markers) along the acting
+    /// execution's scope chain, nearest answer first: the first entry per
+    /// name wins. Each field is the pool object (`$assign.<name>.users`,
+    /// `.ids`, `.count`).
+    fn nearest_named_pools(snapshot: &ProcessSnapshot, current: &TaskId) -> Vec<(String, Value)> {
+        let mut pools: Vec<(String, Value)> = Vec::new();
+        let mut cursor = Some(current.clone());
+        while let Some(id) = cursor {
+            for (name, pool) in Self::own_named_pools(snapshot, &id) {
+                if !pools.iter().any(|(existing, _)| *existing == name) {
+                    pools.push((name, Self::pool_object(&pool)));
+                }
+            }
+            cursor = snapshot.tasks.get(&id).and_then(|task| task.parent.clone());
+        }
+        pools
+    }
+
+    /// The computed named pools of one execution: every `__pool_<name>`
+    /// marker except the wait markers, as `(name, pool JSON)`.
+    fn own_named_pools(snapshot: &ProcessSnapshot, task: &TaskId) -> Vec<(String, JsonValue)> {
+        let mut pools = Vec::new();
+        for ((scope, name), raw) in snapshot.variables.iter() {
+            if scope != task {
+                continue;
+            }
+            let Some(key) = name
+                .strip_prefix("__pool_")
+                .filter(|key| !key.starts_with("wait_"))
+            else {
+                continue;
+            };
+            let Ok(pool) = serde_json::from_str::<JsonValue>(raw) else {
+                continue;
+            };
+            if pool.is_object() {
+                pools.push((key.to_string(), pool));
+            }
+        }
+        pools
     }
 
     fn insert_assignment(
@@ -174,7 +228,36 @@ impl Assign {
         }
     }
 
+    /// The canonical pool's fields: the nested `candidates` object
+    /// (`$assign.candidates.users` / `.ids` / `.count`) plus the legacy
+    /// top-level `ids`/`participants`/`count` aliases the existing flows
+    /// read.
     fn insert_pool(fields: &mut Map, pool: &JsonValue) {
+        fields.insert("candidates".to_string(), Self::pool_object(pool));
+        let participants = pool
+            .get("participants")
+            .filter(|value| value.is_array())
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Array(Vec::new()));
+        let ids = pool
+            .get("ids")
+            .filter(|value| value.is_array())
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Array(Vec::new()));
+        // `ids` is the canonical list under the answer's own name.
+        fields.insert("ids".to_string(), Value::from(ids));
+        fields.insert("participants".to_string(), Value::from(participants));
+        fields.insert(
+            "count".to_string(),
+            Value::from(pool.get("count").cloned().unwrap_or(JsonValue::Null)),
+        );
+    }
+
+    /// One pool as the object its key projects: the participant records
+    /// (`users`), the id list (`ids`) and the answer's `count`. This is the
+    /// shape under `$assign.candidates` and under every named key
+    /// (`$assign.<name>`).
+    fn pool_object(pool: &JsonValue) -> Value {
         let participants = pool
             .get("participants")
             .filter(|value| value.is_array())
@@ -186,12 +269,11 @@ impl Assign {
             .cloned()
             .unwrap_or_else(|| JsonValue::Array(Vec::new()));
         let count = pool.get("count").cloned().unwrap_or(JsonValue::Null);
-        // `candidates` is the canonical list a fan-out and an owner
-        // expression read; `ids` is the same list under the answer's name.
-        fields.insert("candidates".to_string(), Value::from(ids.clone()));
+        let mut fields = Map::new();
+        fields.insert("users".to_string(), Value::from(participants));
         fields.insert("ids".to_string(), Value::from(ids));
-        fields.insert("participants".to_string(), Value::from(participants));
         fields.insert("count".to_string(), Value::from(count));
+        Self::object(fields)
     }
 
     /// One execution's computed pool marker, when it holds one.
@@ -297,10 +379,20 @@ mod tests {
         assert_eq!(eval(value.clone(), "$assign.delegator"), json!(null));
         assert_eq!(eval(value.clone(), "$assign.delegatee"), json!(null));
         assert_eq!(
-            eval(value.clone(), "$assign.candidates"),
+            eval(value.clone(), "$assign.candidates.users"),
+            json!([{ "id": "u1" }])
+        );
+        assert_eq!(
+            eval(value.clone(), "$assign.candidates.ids"),
             json!(["u1", "u2"])
         );
+        assert_eq!(eval(value.clone(), "$assign.candidates.count"), json!(2));
+        // The legacy top-level aliases keep reading the canonical pool.
         assert_eq!(eval(value.clone(), "$assign.ids"), json!(["u1", "u2"]));
+        assert_eq!(
+            eval(value.clone(), "$assign.participants"),
+            json!([{ "id": "u1" }])
+        );
         assert_eq!(eval(value.clone(), "$assign.count"), json!(2));
 
         // The explicit form reads the named execution's own facts only.
@@ -318,17 +410,102 @@ mod tests {
             eval(value.clone(), &format!("$assign.at('{wire}').owner")),
             json!("u7")
         );
-        assert_eq!(eval(value, "$assign.at('missing').candidates"), json!([]));
+        assert_eq!(
+            eval(value, "$assign.at('missing').candidates.ids"),
+            json!([])
+        );
     }
 
-    /// No assign fact anywhere answers nulls and empty lists, never an error.
+    /// A named pool rides the scope chain like the canonical one and
+    /// projects under its own key with the same object shape; a nearer
+    /// answer wins a duplicate name.
+    #[test]
+    fn projection_resolves_named_pools_under_their_keys() {
+        {
+            let mut snapshot = snapshot();
+            let parent = TaskId::new("a", 0).unwrap();
+            let child = child(&mut snapshot);
+            snapshot.variables.insert(
+                (parent.clone(), "__pool_cc".to_string()),
+                json!({"participants": [{"id": "u9"}], "ids": ["u9"], "count": 1}).to_string(),
+            );
+            snapshot.variables.insert(
+                (child.clone(), "__pool_cc".to_string()),
+                json!({"participants": [{"id": "u3"}], "ids": ["u3"], "count": 1}).to_string(),
+            );
+            snapshot.variables.insert(
+                (child.clone(), "__pool_wait_cc".to_string()),
+                json!("x").to_string(),
+            );
+
+            let value = Assign::projection(Some(Arc::new(snapshot)), "p", &child);
+            // The child's own answer wins the name; the wait marker is not a
+            // pool.
+            assert_eq!(eval(value.clone(), "$assign.cc.ids"), json!(["u3"]));
+            assert_eq!(
+                eval(value.clone(), "$assign.cc.users"),
+                json!([{ "id": "u3" }])
+            );
+            assert_eq!(eval(value.clone(), "$assign.cc.count"), json!(1));
+        }
+
+        // The parent's scope chain answers with its own execution's pool.
+        {
+            let mut chain = snapshot();
+            let top = TaskId::new("a", 0).unwrap();
+            chain.variables.insert(
+                (top.clone(), "__pool_cc".to_string()),
+                json!({"participants": [{"id": "u9"}], "ids": ["u9"], "count": 1}).to_string(),
+            );
+            let value = Assign::projection(Some(Arc::new(chain)), "p", &top);
+            assert_eq!(eval(value.clone(), "$assign.cc.ids"), json!(["u9"]));
+
+            // The explicit form reads the named execution's own pool.
+            let top = TaskId::new("a", 0).unwrap();
+            let mut chain = snapshot();
+            let inner = {
+                let inner = TaskId::new("a#item", 0).unwrap();
+                chain.tasks.insert(
+                    inner.clone(),
+                    TaskSnapshot {
+                        model_node: crate::scheduler::core::model::model_graph::NodeId::parse(
+                            "a#item",
+                        )
+                        .unwrap(),
+                        parent: Some(top.clone()),
+                        predecessors: Vec::new(),
+                        state: TaskState::Running,
+                        revision: 0,
+                    },
+                );
+                inner
+            };
+            chain.variables.insert(
+                (top.clone(), "__pool_cc".to_string()),
+                json!({"participants": [{"id": "u9"}], "ids": ["u9"], "count": 1}).to_string(),
+            );
+            chain.variables.insert(
+                (inner.clone(), "__pool_cc".to_string()),
+                json!({"participants": [{"id": "u3"}], "ids": ["u3"], "count": 1}).to_string(),
+            );
+            let value = Assign::projection(Some(Arc::new(chain)), "p", &top);
+            assert_eq!(
+                eval(value.clone(), "$assign.at('a#item').cc.ids"),
+                json!(["u3"])
+            );
+            assert_eq!(eval(value, "$assign.at('a').cc.ids"), json!(["u9"]));
+        }
+    }
+
+    /// No assign fact anywhere answers nulls and empty pools, never an error.
     #[test]
     fn projection_without_assign_facts_is_empty() {
         let mut snapshot = snapshot();
         let child = child(&mut snapshot);
         let value = Assign::projection(Some(Arc::new(snapshot)), "p", &child);
         assert_eq!(eval(value.clone(), "$assign.owner"), json!(null));
-        assert_eq!(eval(value.clone(), "$assign.candidates"), json!([]));
+        assert_eq!(eval(value.clone(), "$assign.candidates.ids"), json!([]));
+        assert_eq!(eval(value.clone(), "$assign.candidates.users"), json!([]));
         assert_eq!(eval(value, "$assign.count"), json!(null));
     }
 }

@@ -140,7 +140,7 @@ use self::pool::{Enqueued, JobSource, LanePool};
 use self::{action::*, errors::*, facts::*, planning::*};
 pub(crate) use admission::{AdmissionCaps, Admissions};
 pub(crate) use caps::assign::{
-    ASSIGNMENT_VAR, Assign, Assignment, CANDIDATES_WAIT_VAR, DELEGATION_VAR, Delegation,
+    ASSIGNMENT_VAR, Assign, Assignment, CANONICAL_POOL, DELEGATION_VAR, Delegation,
     RuntimeAssignmentResolver, names_business_data,
 };
 pub(crate) use caps::delivery::ShadowTransport;

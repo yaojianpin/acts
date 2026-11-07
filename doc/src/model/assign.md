@@ -34,10 +34,37 @@
 
 - 表达式在活动启动时通过和 `params` 相同的表达式路径解析。
 - 解析结果为空（或不是字符串）时活动失败，不会退化成“无人审批”。
-- `assign` 不允许写在 `acts.core.block` / `acts.core.parallel` / `acts.core.sequence` 容器本身，也不允许写在 `Func`/`Msg` 活动上。
+- 容器（`acts.core.block` / `acts.core.parallel` / `acts.core.sequence`）可以声明
+  `assign.owner`——它是**子步骤的模板**，不是容器自己的承办关系：容器本身不产生
+  `__assignment`；通过它生成的子活动（`block` 的 steps、`parallel`/`sequence`
+  的 fan-out）里**没有单独声明 `assign.owner` 的**，在各自启动时继承最近的祖先
+  容器的 owner 表达式，并在自己的作用域里解析（所以 `$item.value`、
+  `$initiator`、工作流变量都能用）；自己声明了 `assign.owner` 的子活动用自己的。
+  继承不会落到自完成的活动上（`Func`/`Msg` 不等待决策，不带承办关系）。
+- 池的声明同样被继承：子活动**声明了 assign**（owner 或任一池 key）时，它没有
+  声明的池 key 从最近的祖先容器补齐——在自己的作用域里按同一套“先本地、后
+  uses”计算，应答落在子活动自己的 `$assign.candidates.*` / `$assign.<key>.*`
+  下；自己声明了的 key 用自己的。完全没有声明 assign 的子活动不继承池声明
+  （容器 fan-out 生成的子活动由此不会重复计算父容器已算出的池），沿作用域链
+  直接读到祖先的池。自完成的活动（`Func`/`Msg`）和不带包的子活动跳过继承。
+- `assign.owner` 直接写在 `Func`/`Msg` 活动或 subflow 上仍然被拒绝。
 - 未声明 `assign` 的活动保持旧行为：拥有 `@execute` 的主体可以决策。
 
-容器中的写法：每个叶子的 `assign` 写在 `params.steps[]` 的元素上，按该元素自己的作用域解析。
+容器中的写法：每个叶子的 `assign` 写在 `params.steps[]` 的元素上，按该元素自己的作用域解析；容器自己的 `assign.owner` 是没有声明的叶子的缺省值。
+
+```yml
+# block：a1 继承容器的 owner，a2 用自己的
+- uses: acts.core.block
+  assign:
+    owner: "$root.finance_lead"     # 子步骤的模板
+  params:
+    mode: parallel
+    steps:
+      - uses: acts.core.irq         # owner = $root.finance_lead（继承）
+      - uses: acts.core.irq
+        assign:
+          owner: "$root.cfo"        # 自己的声明优先
+```
 
 ```yml
 # block：每个叶子独立解析
@@ -124,7 +151,7 @@ a multi-approver step
 ```
 
 多人审批用 `assign.candidates` 声明候选池，`uses` 包（默认
-`acts.core.candidates`）计算，容器再按结果展开：
+`acts.core.users`）计算，容器再按结果展开：
 
 ```yml
 - id: approve
@@ -136,7 +163,7 @@ a multi-approver step
         operands:
           - { kind: context, var: { type: current_actor } }
           - { kind: role, name: reviewer }
-      uses: acts.core.candidates   # 默认值，可省略；可指向自己的包
+      uses: acts.core.users   # 默认值，可省略；可指向自己的包
   params:
     in: "${{ candidates }}"
     join: any
@@ -146,7 +173,7 @@ a multi-approver step
           owner: "${{ value.id }}"
 ```
 
-`acts.core.candidates` 是 **IRQ 活动**：引擎把表达式作为请求发给业务系统，业务
+`acts.core.users` 是 **IRQ 活动**：引擎把表达式作为请求发给业务系统，业务
 系统用自己的用户目录（角色、组、资源负责人、关系）解析，完成活动并返回。请求
 发出前，表达式里引擎能算的部分先在本地算好——上下文原子（`initiator`、
 `current_actor`、`previous_approver`、`user`/`users` 变量）替换成解析出的
@@ -193,17 +220,52 @@ a multi-approver step
 ```
 
 不走 `assign.candidates` 也可以直接把池计算做成一个普通步骤：
-`uses: acts.core.candidates` + `params`（CandidateExpr 文档）。这是一个普通
+`uses: acts.core.users` + `params`（CandidateExpr 文档）。这是一个普通
 IRQ 活动——参数在本地准备好（`${{ }}` 与上下文原子已解析）后发给业务系统，
 应答作为活动自己的输出落地，引擎不做本地折叠、也没有 `__candidates` 标记：
 
 ```yml
 - id: pool
-  uses: acts.core.candidates
+  uses: acts.core.users
   params:
     kind: role
     name: reviewers
 ```
+
+## 命名池（`assign` 下的其他 key）
+
+`assign` 里除 `owner` 与 `candidates` 外的每个 key 都是一个命名池，处理逻辑与
+`candidates` 完全一致：先本地、后 `uses`（缺省同为 `acts.core.users`），请求
+同样压在声明活动之下（`<act>#candN`），应答落到**自己的 key** 下——
+`$assign.<key>.users`、`$assign.<key>.ids`、`$assign.<key>.count`，与
+`$assign.candidates.*` 同构。key 的声明形式与 `candidates` 相同：裸表达式
+（字符串——用户 id 或 `${{ }}` 表达式——或 `kind` 对象）或 `{ params, uses }`：
+
+```yml
+assign:
+  owner: "${{ reviewer }}"
+  candidates:
+    params: { kind: role, name: reviewer }
+  cc: "u9"                                   # 裸表达式：单个用户，本地计算
+  my_name:
+    params: { kind: context, var: { type: current_actor } }
+    uses: corp.directory                     # 可选，缺省 acts.core.users
+```
+
+规则：
+
+- 每个池独立计算、独立等待；声明了多个池时，启动逐个结算（本地算或请求），
+  全部就绪后才继续——fan-out 与 owner 表达式在重入的启动里读到全部池。
+- 池的声明沿模型树继承：子活动声明了 assign 时，它没有声明的池 key 从最近的
+  祖先容器补齐（在自己作用域里按同样的“先本地、后 uses”计算）；自己声明了的
+  key 用自己的。没有声明 assign 的子活动沿作用域链读到祖先已算出的池。
+- 池的名字必须是字母开头的 `[A-Za-z0-9_]*` 标识符，不得使用保留名（`assignee`、
+  `delegator`、`delegatee`、`ids`、`participants`、`count`、`at`）；非法名字在
+  活动启动时拒绝。
+- 读池：`$assign.<key>.ids` 做 fan-out（或裸变量 `<key>`，与裸 `candidates`
+  一样由引擎写入活动变量），`$assign.<key>.users` 取参与人对象。
+- `$assign.ids` / `$assign.participants` / `$assign.count` 仍指向
+  `candidates` 池（兼容别名）；命名池只在自己的 key 下。
 
 ## 承办关系
 
@@ -295,8 +357,9 @@ act:undelegate {pid,tid}
 | --- | --- |
 | `$assign.owner` / `$assign.assignee` | 最近一个持 `__assignment` 的执行 |
 | `$assign.delegator` / `$assign.delegatee` | 该执行自己的 `__delegation`；无有效代办为 `null` |
-| `$assign.candidates` / `$assign.ids` | 最近一个已算出候选池（`__candidates`）的执行的 ids 列表 |
-| `$assign.participants` / `$assign.count` | 同一池的参与人对象与数量 |
+| `$assign.candidates.users` / `.ids` / `.count` | 最近一个已算出候选池（`__candidates`）的执行的参与人、ids 列表与数量 |
+| `$assign.ids` / `$assign.participants` / `$assign.count` | 同一 candidates 池的顶层别名（兼容） |
+| `$assign.<key>.users` / `.ids` / `.count` | 命名池（`assign` 下除 `owner`/`candidates` 外的 key）在自己的 key 下的同一形状 |
 | `$assign.at("<step-id>")` | 显式指定执行：node id 取该节点最新 generation，也接受 wire `tid`；只读该执行自身的事实 |
 
 身份字段与候选池**各自**沿 scope 链就近解析：容器生成的子活动
@@ -310,13 +373,13 @@ act:undelegate {pid,tid}
     candidates:
       params: { kind: role, name: reviewers }
   params:
-    in: "${{ $assign.candidates }}"     # 本容器算出的池
+    in: "${{ $assign.candidates.ids }}"     # 本容器算出的池
     steps:
       - uses: acts.core.irq
         assign:
           owner: "${{ $item.value }}"
         params:
-          peers: "${{ $assign.candidates }}"            # 父容器的池
+          peers: "${{ $assign.candidates.ids }}"            # 父容器的池
           peers_explicit: "${{ $assign.at('approve').ids }}"
 ```
 

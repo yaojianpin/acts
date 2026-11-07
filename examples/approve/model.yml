@@ -26,7 +26,7 @@ steps:
   #
   # `assign.candidates` asks the client's business directory for the pm users
   # (`{kind: role, name: pm}`); the answer lands in the act's variables as the
-  # candidate pool, and the fan-out (`in: "${{ $assign.candidates }}"`) reads
+  # candidate pool, and the fan-out (`in: "${{ $assign.candidates.ids }}"`) reads
   # the act's own pool. `join: all` is the countersign: every pm user must
   # approve.
   #
@@ -39,7 +39,7 @@ steps:
     desc: every pm user approves (join all); the pool is computed by assign.candidates
     uses: acts.core.parallel
     params:
-      in: '${{ $assign.candidates }}'
+      in: '${{ $assign.candidates.ids }}'
       join: all
       steps:
         - uses: acts.core.irq
@@ -65,7 +65,7 @@ steps:
     desc: any one gm user's vote passes the step (join any)
     uses: acts.core.parallel
     params:
-      in: '${{ $assign.candidates }}'
+      in: '${{ $assign.candidates.ids }}'
       join: any
       steps:
         - uses: acts.core.irq
@@ -94,7 +94,7 @@ steps:
     desc: an or-sign over the department and unit principals; one person holding both posts votes once
     uses: acts.core.parallel
     params:
-      in: '${{ $assign.candidates }}'
+      in: '${{ $assign.candidates.ids }}'
       join: any
       steps:
         - uses: acts.core.irq
@@ -122,7 +122,7 @@ steps:
     desc: skipped when the amount is within the limit; otherwise any finance principal approves
     uses: acts.core.parallel
     params:
-      in: '${{ $assign.candidates }}'
+      in: '${{ $assign.candidates.ids }}'
       join: any
       steps:
         - uses: acts.core.irq

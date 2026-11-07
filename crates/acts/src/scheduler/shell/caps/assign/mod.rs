@@ -28,7 +28,7 @@ mod owner;
 mod projection;
 mod resolver;
 
-pub(crate) use candidates::CANDIDATES_WAIT_VAR;
+pub(crate) use candidates::CANONICAL_POOL;
 pub(crate) use delegate::{DELEGATION_VAR, Delegation};
 pub(crate) use evaluate::{evaluate, names_business_data};
 pub(crate) use owner::{ASSIGNMENT_VAR, Assignment};
@@ -266,11 +266,14 @@ impl Assign {
             })
     }
 
-    /// The `assign.owner` string one act declares, after refusing the
-    /// declaration where it cannot mean an owner: a package-less node, a
-    /// `block`/`parallel`/`sequence` container, a `Func`/`Msg` leaf, or the
-    /// waiting subflow. Only a human decision leaf (`ActRunAs::Irq`) may carry
-    /// one. The refusal names the node.
+    /// The `assign.owner` one act resolves at start: its own declaration, or
+    /// — when the step declares none — the nearest ancestor container's
+    /// `assign.owner` (a container's declaration is a template its generated
+    /// children resolve, never the container's own assignment). The own
+    /// declaration is refused where it cannot mean an owner: a package-less
+    /// node, a `Func`/`Msg` leaf, or the waiting subflow. An inherited owner
+    /// rides the same refusals except the auto ones — a self-completing
+    /// child simply carries no assignment. The refusal names the node.
     pub(crate) fn declared_owner(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -285,55 +288,85 @@ impl Assign {
             // the execution's durable `__act` fact.
             return Self::pushed_declared_owner(snapshot, task_id);
         };
-        let Some(assign) = &step.assign else {
-            return Ok(None);
-        };
         let node = task_id.node.as_str();
-        if assign.owner.is_none() && assign.candidates.is_none() {
+        if let Some(assign) = &step.assign
+            && assign.owner.is_none()
+            && assign.candidates.is_none()
+            && assign.others.is_empty()
+        {
             return Err(crate::ActError::Action(format!(
-                "act '{node}' declares an empty assign: name an owner or a candidates pool"
+                "act '{node}' declares an empty assign: name an owner or a pool"
             )));
         }
-        // A candidates-only declaration carries no owner to resolve; its own
-        // placement (containers welcome) is `declared_candidates`'s to judge.
-        let Some(owner) = assign.owner.clone() else {
-            return Ok(None);
-        };
         let uses = step
             .uses
             .as_deref()
             .map(str::trim)
-            .filter(|uses| !uses.is_empty())
-            .ok_or_else(|| {
+            .filter(|uses| !uses.is_empty());
+        let container = matches!(
+            uses,
+            Some(crate::scheduler::shell::model::BLOCK_PACKAGE)
+                | Some(crate::scheduler::shell::model::PARALLEL_PACKAGE)
+                | Some(crate::scheduler::shell::model::SEQUENCE_PACKAGE)
+        );
+        // The node's own declaration: a container never holds its own
+        // assignment — its owner declaration is what its children inherit.
+        // A pool-only declaration carries no owner to resolve; its own
+        // placement (containers welcome) is `declared_pools`'s to judge.
+        let own_owner = if container {
+            None
+        } else {
+            step.assign.as_ref().and_then(|assign| assign.owner.clone())
+        };
+        if let Some(owner) = own_owner {
+            let uses = uses.ok_or_else(|| {
                 crate::ActError::Action(format!(
                     "act '{node}' declares assign but is not a human decision act: it has no package"
                 ))
             })?;
-        if matches!(
-            uses,
-            crate::scheduler::shell::model::BLOCK_PACKAGE
-                | crate::scheduler::shell::model::PARALLEL_PACKAGE
-                | crate::scheduler::shell::model::SEQUENCE_PACKAGE
-        ) {
-            return Err(crate::ActError::Action(format!(
-                "act '{node}' is container '{uses}'; declare assign on its human decision steps, not on the container"
-            )));
+            if uses == crate::scheduler::shell::model::SUBFLOW_PACKAGE {
+                return Err(crate::ActError::Action(format!(
+                    "act '{node}' uses '{uses}', which is not a human decision act (ActRunAs::Irq)"
+                )));
+            }
+            // The import's auto decision is the package's run-bound: `Func`
+            // and `Msg` self-complete, only `Irq` waits for a client decision.
+            if crate::scheduler::shell::auto_decision(snapshot, model_node.as_str())? {
+                return Err(crate::ActError::Action(format!(
+                    "act '{node}' uses '{uses}', which is not a human decision act (ActRunAs::Irq)"
+                )));
+            }
+            return Ok(Some(owner));
         }
-        if uses == crate::scheduler::shell::model::SUBFLOW_PACKAGE {
-            return Err(crate::ActError::Action(format!(
-                "act '{node}' uses '{uses}', which is not a human decision act (ActRunAs::Irq)"
-            )));
+        // A container's own start carries no assignment; the walk below is
+        // its children's business, and a container has no parent template to
+        // inherit.
+        if container {
+            return Ok(None);
         }
-        // The import's auto decision is the package's run-bound: `Func` and
-        // `Msg` self-complete, only `Irq` waits for a client decision.
-        if crate::scheduler::shell::auto_decision(snapshot, model_node.as_str())? {
-            return Err(crate::ActError::Action(format!(
-                "act '{node}' uses '{uses}', which is not a human decision act (ActRunAs::Irq)"
-            )));
+        // No own owner: the nearest ancestor container's declaration applies,
+        // resolved in this child's own scope at its start. An auto child
+        // (a `Func`/`Msg` run-bound) self-completes and carries no
+        // assignment; a subflow child decides in its own model.
+        if let Some(owner) =
+            crate::scheduler::shell::nearest_declared_owner(&model, model_node.as_str())
+        {
+            let uses = uses.ok_or_else(|| {
+                crate::ActError::Action(format!(
+                    "act '{node}' inherits an assign owner but is not a human decision act: it has no package"
+                ))
+            })?;
+            if uses == crate::scheduler::shell::model::SUBFLOW_PACKAGE {
+                return Err(crate::ActError::Action(format!(
+                    "act '{node}' uses '{uses}', which cannot inherit an assign owner (ActRunAs::Irq)"
+                )));
+            }
+            if crate::scheduler::shell::auto_decision(snapshot, model_node.as_str())? {
+                return Ok(None);
+            }
+            return Ok(Some(owner));
         }
-        // `Some` when the act declares an owner; `None` is a candidates-only
-        // declaration (the pool the act computes at start, no single owner).
-        Ok(Some(owner))
+        Ok(None)
     }
 
     /// The `assign.owner` of a pushed act: refused on a container or the
