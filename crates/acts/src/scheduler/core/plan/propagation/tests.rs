@@ -157,6 +157,45 @@ fn dead_predecessor_puts_success_join_into_the_skip_cascade() {
 }
 
 #[test]
+fn a_client_skipped_predecessor_falls_through_to_the_join() {
+    // The client skipped the predecessor (`act:skip`): a fall-through, not a
+    // dead path — the join is admitted and *runs* once the other side settles.
+    let mut snap = snapshot(TaskState::Skipped, TaskState::Completed);
+    snap.variables.insert(
+        (
+            id("a"),
+            crate::scheduler::core::plan::propagation::CLIENT_SKIP_VAR.to_string(),
+        ),
+        "true".into(),
+    );
+    let plan = Propagate::plan((&graph(), &snap), &command("b", JoinPolicy::AllSucceeded)).unwrap();
+    assert_eq!(plan.state_changes.len(), 1);
+    assert_eq!(plan.state_changes[0].task, id("join"));
+    assert_eq!(plan.state_changes[0].to, TaskState::Ready);
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(plan.operations[0].kind, OperationKind::ExecuteTask);
+}
+
+#[test]
+fn a_cascade_skipped_predecessor_still_puts_the_join_into_the_skip_cascade() {
+    // A `Skipped` without the client's marker is the deadness cascade's own
+    // skip: the join is admitted and handed a SkipTask, like any dead path.
+    let plan = Propagate::plan(
+        (
+            &graph(),
+            &snapshot(TaskState::Skipped, TaskState::Completed),
+        ),
+        &command("b", JoinPolicy::AllSucceeded),
+    )
+    .unwrap();
+    assert_eq!(plan.state_changes.len(), 1);
+    assert_eq!(plan.state_changes[0].task, id("join"));
+    assert_eq!(plan.state_changes[0].to, TaskState::Ready);
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
+}
+
+#[test]
 fn a_needs_successor_is_admitted_once_every_predecessor_settled() {
     // A branch's `needs` is ordering, not success: a predecessor that failed
     // has still settled, so the dependent branch runs.

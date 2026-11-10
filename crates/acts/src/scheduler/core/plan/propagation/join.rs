@@ -33,8 +33,11 @@ pub(super) fn readiness(
         }
         // A step its own `if`/`while` guard skipped is the legacy
         // fall-through, not a dead path: its successor runs (the guard said
-        // "not now", not "everything below is dead").
-        if state == TaskState::Skipped && is_guard_skip(snapshot, predecessor) {
+        // "not now", not "everything below is dead"). A step the client
+        // skipped (`act:skip`) falls through the same way.
+        if state == TaskState::Skipped
+            && (is_guard_skip(snapshot, predecessor) || is_client_skip(snapshot, predecessor))
+        {
             continue;
         }
         if policy == JoinPolicy::AllSucceeded && !is_success(state) {

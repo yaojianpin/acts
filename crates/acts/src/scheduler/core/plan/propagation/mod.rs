@@ -71,11 +71,28 @@ pub(crate) struct FlowTarget {
 /// space and the read model, durable so a replay reads the same verdict.
 pub(crate) const GUARD_SKIP_VAR: &str = "__guard_skip";
 
+/// The private variable an execution carries when the *client* skipped it
+/// (`act:skip`): the same fall-through a guard skip is — the flow goes on
+/// into the next declared step — as opposed to a skip the deadness cascade
+/// flowed in. Kept apart from [`GUARD_SKIP_VAR`] because one join reads the
+/// two differently: a catch handler the client skipped *was* selected (its
+/// step is caught, the error absorbed), while a handler its own guard skipped
+/// was never selected. A `__` fact like the guard's.
+pub(crate) const CLIENT_SKIP_VAR: &str = "__client_skip";
+
 /// Whether one execution was skipped by its own guard (see [`GUARD_SKIP_VAR`]).
 pub(crate) fn is_guard_skip(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {
     snapshot
         .variables
         .contains_key(&(task.clone(), GUARD_SKIP_VAR.to_string()))
+}
+
+/// Whether one execution was skipped by the client (`act:skip`, see
+/// [`CLIENT_SKIP_VAR`]).
+pub(crate) fn is_client_skip(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {
+    snapshot
+        .variables
+        .contains_key(&(task.clone(), CLIENT_SKIP_VAR.to_string()))
 }
 
 pub(crate) struct Propagate;

@@ -818,6 +818,375 @@ async fn sch_act_approvers_authorizes_only_the_owner() {
     legacy.close().await;
 }
 
+/// The chain leaves are decided by their own owners through authenticated
+/// principals (a real approver's client) — the drained queue still finishes
+/// the target: `before` and `after` chains settle with authenticated
+/// deciders exactly like the unrestricted path.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_approvers_chain_settles_with_authenticated_deciders() {
+    let workflow = assigned_workflow("flow-act-approvers-chain-auth", "alice");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    // The owner signs an after-chain: the leaves are [alice, bob].
+    fixture
+        .engine()
+        .executor(&approver("alice"))
+        .act()
+        .push(
+            fixture.pid(),
+            &created.tid,
+            Vars::new()
+                .with("owners", serde_json::json!(["bob"]).to_string())
+                .with("mode", "after"),
+        )
+        .await
+        .unwrap();
+    let first = fixture.wait_created("s1#push1").await;
+    assert_eq!(first.owner.as_deref(), Some("alice"));
+
+    // Alice's own answer admits the next leaf.
+    fixture
+        .engine()
+        .executor(&approver("alice"))
+        .act()
+        .complete(fixture.pid(), &first.tid, Vars::new())
+        .await
+        .unwrap();
+    let second = fixture.wait_created("s1#push2").await;
+    assert_eq!(second.owner.as_deref(), Some("bob"));
+
+    // Bob answers through his own authenticated principal — never the
+    // unrestricted system caller.
+    fixture
+        .engine()
+        .executor(&approver("bob"))
+        .act()
+        .complete(fixture.pid(), &second.tid, Vars::new())
+        .await
+        .unwrap();
+
+    // The drained queue finishes the target.
+    fixture.wait_state("s1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// Back from inside a candidates fan-out to the head step: the rewind
+/// recreates the whole forward closure — the fan-out's parallel item
+/// instances included, each with its own fresh generation (a node shared by
+/// two live instances must not map both onto one new generation) — and the
+/// head re-enters as a new instance whose completion re-runs the
+/// countersign.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_back_from_a_fanout_vote_reenters_the_head_step() {
+    let workflow = Workflow::new()
+        .with_id("flow-act-back-fanout")
+        .with_step(|step| step.with_id("prepare").with_uses(USES_IRQ, Vars::new()))
+        .with_step(|step| {
+            step.with_id("approve")
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new()
+                        .with("in", "${{ candidates }}")
+                        .with("join", "all")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new()
+                                    .with_id("vote")
+                                    .with_uses(USES_IRQ, Vars::new().with("key", "pm_vote"))
+                                    .with_owner("${{ $item.value }}"),
+                            ],
+                        ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let prepare = fixture.wait_created("prepare").await;
+    fixture
+        .complete(&prepare.pid, &prepare.tid, Vars::new())
+        .await;
+
+    // The countersign fans out; the vote starts at once (the container's
+    // pool is never re-asked under it) and waits for its decision.
+    let request = fixture.wait_created("approve#cand1").await;
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    json!([{ "id": "u1", "code": "alice", "name": "Alice" }]),
+                )
+                .with("ids", json!(["u1"]))
+                .with("count", 1),
+        )
+        .await;
+    let vote = fixture.wait_created("vote").await;
+
+    // Back the waiting vote to the head step.
+    fixture
+        .engine()
+        .executor(&Principal::unrestricted())
+        .act()
+        .back(fixture.pid(), &vote.tid, Vars::new().with("to", "prepare"))
+        .await
+        .expect("the rewind re-enters the head step");
+    let redo = fixture.wait_created_except("prepare", &prepare.tid).await;
+    // The graph's own cell pins both generations' hierarchy across this
+    // rewind (`sch_graph_keeps_the_hierarchy_across_a_rewind`).
+    fixture
+        .engine()
+        .executor(&Principal::unrestricted())
+        .act()
+        .complete(&redo.pid, &redo.tid, Vars::new())
+        .await
+        .expect("complete the re-entered head");
+
+    // The countersign re-runs: the container re-asks its pool as the next
+    // request instance (`approve#cand2` — the ask counter moves on), and a
+    // fresh vote announces next to the dead one and decides the step again.
+    let redo_request = fixture.wait_created("approve#cand2").await;
+    fixture
+        .engine()
+        .executor(&Principal::unrestricted())
+        .act()
+        .complete(
+            &redo_request.pid,
+            &redo_request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    json!([{ "id": "u1", "code": "alice", "name": "Alice" }]),
+                )
+                .with("ids", json!(["u1"]))
+                .with("count", 1),
+        )
+        .await
+        .expect("complete the re-asked container pool");
+    let redo_vote = fixture.wait_created_except("vote", &vote.tid).await;
+    fixture
+        .engine()
+        .executor(&Principal::unrestricted())
+        .act()
+        .complete(&redo_vote.pid, &redo_vote.tid, Vars::new())
+        .await
+        .expect("complete the re-run vote");
+    // The re-entered countersign settles again, and the rewind's walk closed
+    // the path it passed (the old container `Backed`, its sibling branches
+    // `Skipped`), so the run finishes.
+    fixture.wait_state("approve", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// The example's sign chain step: two single-owner acts in a sequence block,
+/// each signed through an authenticated principal — the first act completes,
+/// the second gains the chain and drains it, and the block settles.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_approvers_chain_inside_a_sequence_block() {
+    let workflow = Workflow::new()
+        .with_id("flow-act-approvers-chain-block")
+        .with_step(|step| {
+            step.with_id("sign_demo").with_uses(
+                USES_BLOCK,
+                Vars::new().with("mode", "sequence").with(
+                    "steps",
+                    vec![
+                        Step::new()
+                            .with_id("before_sign")
+                            .with_uses(USES_IRQ, Vars::new())
+                            .with_owner("alice"),
+                        Step::new()
+                            .with_id("after_sign")
+                            .with_uses(USES_IRQ, Vars::new())
+                            .with_owner("carol"),
+                    ],
+                ),
+            )
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let first = fixture.wait_created("before_sign").await;
+    fixture
+        .engine()
+        .executor(&approver("alice"))
+        .act()
+        .complete(fixture.pid(), &first.tid, Vars::new())
+        .await
+        .unwrap();
+
+    // The second act gains an after-chain signed by its own owner.
+    let second = fixture.wait_created("after_sign").await;
+    fixture
+        .engine()
+        .executor(&approver("carol"))
+        .act()
+        .push(
+            fixture.pid(),
+            &second.tid,
+            Vars::new().with("owners", serde_json::json!(["bob"]).to_string()),
+        )
+        .await
+        .unwrap();
+    let leaf = fixture.wait_created("after_sign#push1").await;
+    assert_eq!(leaf.owner.as_deref(), Some("carol"));
+    fixture
+        .engine()
+        .executor(&approver("carol"))
+        .act()
+        .complete(fixture.pid(), &leaf.tid, Vars::new())
+        .await
+        .unwrap();
+    let added = fixture.wait_created("after_sign#push2").await;
+    assert_eq!(added.owner.as_deref(), Some("bob"));
+    fixture
+        .engine()
+        .executor(&approver("bob"))
+        .act()
+        .complete(fixture.pid(), &added.tid, Vars::new())
+        .await
+        .unwrap();
+
+    fixture.wait_state("sign_demo", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// A container step never holds its own assignment (an owner declaration is
+/// inherited by the children), so the added-approvers chain push — the
+/// before/after signs — is refused on it with `ENOTOWNER`: a chain needs a
+/// single-owner act. The step still announces its Created to the client once
+/// its pool resolves, a refusal decides nothing, and the container's own sign
+/// spelling is the classic push (uses/params): the kernel hangs the added
+/// approver under the step and the join waits for her vote too.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_approvers_refuse_on_a_container_and_the_classic_push_signs_it() {
+    // The countersign shape: a parallel fan-out over an answered candidate
+    // pool, one irq vote per candidate, no container owner.
+    let workflow = Workflow::new()
+        .with_id("flow-act-approvers-container")
+        .with_step(|step| {
+            step.with_id("approve")
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new()
+                        .with("in", "${{ candidates }}")
+                        .with("join", "all")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new()
+                                    .with_id("vote")
+                                    .with_uses(USES_IRQ, Vars::new().with("key", "pm_vote"))
+                                    .with_owner("${{ $item.value }}"),
+                            ],
+                        ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    // The pool request first; the container announces nothing while it waits
+    // for its pool.
+    let request = fixture.wait_created("approve#cand1").await;
+    assert!(fixture.message("approve", MessageState::Created).is_none());
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    json!([{ "id": "u1", "code": "alice", "name": "Alice" }]),
+                )
+                .with("ids", json!(["u1"]))
+                .with("count", 1),
+        )
+        .await;
+
+    // The pool resolved, and the container announces Created — the message a
+    // client's sign demo drives from. The fan-out runs in the announcing
+    // operation's commit, and the vote starts at once (the container's pool
+    // is never re-asked under it): its owner resolves from the item and the
+    // vote announces itself.
+    let container = fixture.wait_created("approve").await;
+    assert_eq!(container.r#type, "step");
+    assert_eq!(container.uses.as_deref(), Some(USES_PARALLEL));
+
+    let mut acts = fixture.wait_created_uses(USES_IRQ, 1).await;
+    let vote = acts.remove(0);
+
+    // The chain push names the container's tid and is refused: the container
+    // holds no assignment to sign with.
+    let error = fixture
+        .engine()
+        .executor(&approver("alice"))
+        .act()
+        .push(
+            fixture.pid(),
+            &container.tid,
+            Vars::new()
+                .with("owners", serde_json::json!(["bob"]).to_string())
+                .with("mode", "before"),
+        )
+        .await
+        .expect_err("a container holds no owner for a sign chain");
+    assert!(error.to_string().contains("ENOTOWNER"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("has no owner to add approvers to"),
+        "{error}"
+    );
+
+    // The classic push is the container's sign spelling: it hangs the added
+    // approver under the step.
+    fixture
+        .engine()
+        .executor(&approver("alice"))
+        .act()
+        .push(
+            fixture.pid(),
+            &container.tid,
+            Vars::new()
+                .with("uses", USES_IRQ)
+                .with("params", Vars::new().with("key", "added")),
+        )
+        .await
+        .expect("the classic push signs the container");
+    let added = fixture.wait_created("approve#push1").await;
+    assert_eq!(
+        added
+            .params()
+            .and_then(|params| params.get::<String>("key")),
+        Some("added".to_string())
+    );
+
+    // The join: all waits for the added approver as much as for the
+    // candidate's vote; both answered, the step finishes.
+    fixture.complete(&vote.pid, &vote.tid, Vars::new()).await;
+    fixture.complete(&added.pid, &added.tid, Vars::new()).await;
+    fixture.wait_state("approve", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
 /// Malformed added-approvers inputs are caller-correctable refusals: nothing
 /// durable exists afterwards and the act keeps waiting.
 #[serial]
@@ -1366,6 +1735,38 @@ async fn sch_act_skip_on_the_acts_tid_joins_the_step() {
     fixture.wait_message("act1", MessageState::Skipped).await;
     assert_eq!(fixture.state("act1").await, TaskState::Skipped);
     fixture.wait_state("step1", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// A client's own `skip` on a plain top-level step's act is a fall-through,
+/// not a dead path: only the skipped step closes `Skipped`, the next declared
+/// step still runs, and finishing it completes the run (nothing downstream
+/// joins a skip cascade).
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_skip_falls_through_to_the_next_step() {
+    let workflow = Workflow::new()
+        .with_id("flow-act-skip-fall-through")
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("step1").await;
+    fixture.skip(&created.pid, &created.tid).await.unwrap();
+    fixture.wait_message("step1", MessageState::Skipped).await;
+    fixture.wait_state("step1", TaskState::Skipped).await;
+
+    let next = fixture.wait_created("step2").await;
+    fixture.complete(&next.pid, &next.tid, Vars::new()).await;
+    fixture.wait_state("step2", TaskState::Completed).await;
     fixture.wait_completed().await;
     fixture.close().await;
 }

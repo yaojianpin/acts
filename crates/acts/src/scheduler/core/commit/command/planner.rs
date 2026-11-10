@@ -66,12 +66,14 @@ impl ActionPlanner {
             .checked_add(1)
             .ok_or(CommandError::SequenceOverflow)?;
         // A decision hands its propagation to the planner's pure hand-off,
-        // which the committing operation folds into its own transition. `Back`
-        // has nothing to propagate: it closes the source generation (`Backed`)
-        // and its re-entry is the `ReenterTask` the deciding call plans two
-        // sequences on (the slot the propagation hand-off would have taken is
-        // kept, so the rewind's outbox key does not move).
-        let operations = if matches!(command.action, ActionKind::Back) {
+        // which the committing operation folds into its own transition. A
+        // rewind (`Back`/`Cancel`) has nothing to propagate: the re-entry the
+        // deciding call plans two sequences on (the slot the propagation
+        // hand-off would have taken is kept, so the rewind's outbox key does
+        // not move) closes the superseded work itself — the walked ancestors
+        // `Backed`, the abandoned branches `Skipped`/`Cancelled` — and a
+        // second walk over the same executions would decide them twice.
+        let operations = if matches!(command.action, ActionKind::Back | ActionKind::Cancel) {
             Vec::new()
         } else {
             vec![OperationIntent {
@@ -182,6 +184,20 @@ fn variable_writes(command: &ActionCommand) -> Result<Vec<VariableWrite>, Comman
             scope: command.task.clone(),
             name: "error.message".into(),
             value: message.clone(),
+        });
+    }
+    // A client's own `skip` is the fall-through a guard skip is: the flow
+    // goes on into the next declared step, not a dead path whose successors
+    // join the skip cascade. The marker is the client's own fact
+    // (`CLIENT_SKIP_VAR`) — kept apart from the guard's because the catch
+    // join reads the two differently (a handler the client skipped was
+    // selected; its step is caught). The cascade's own `SkipTask`s write no
+    // marker and stay deadly.
+    if matches!(&command.action, ActionKind::Skip) {
+        writes.push(VariableWrite {
+            scope: command.task.clone(),
+            name: crate::scheduler::core::plan::propagation::CLIENT_SKIP_VAR.to_string(),
+            value: serde_json::json!(true).to_string(),
         });
     }
     Ok(writes)

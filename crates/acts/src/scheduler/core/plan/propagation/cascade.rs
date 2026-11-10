@@ -37,8 +37,11 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
         // Whether the source's death flows on as a cascade (a dead source's
         // admitted successors join it) or the source is merely *done*: a step
         // its own guard skipped is the legacy fall-through — its flow runs on
-        // into the next declared step.
-        let source_alive = is_success(source.state) || is_guard_skip(snapshot, &command.task);
+        // into the next declared step — and so is a step the client skipped
+        // (`act:skip`).
+        let source_alive = is_success(source.state)
+            || is_guard_skip(snapshot, &command.task)
+            || is_client_skip(snapshot, &command.task);
         // The targets this propagation flows into: the one node the model
         // names when the host decided the flow (see [`PropagateCommand::flow`]),
         // otherwise the graph's own successors.

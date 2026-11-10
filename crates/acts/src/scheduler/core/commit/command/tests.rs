@@ -69,6 +69,44 @@ fn complete_generates_one_atomic_plan() {
     assert_eq!(plan.source_operation, Some(source()));
 }
 
+/// A client's own `skip` carries its fall-through marker (`CLIENT_SKIP_VAR`)
+/// beside its inputs: the propagation reads the execution as *done*, not as a
+/// dead path, so the next declared step runs instead of joining a skip
+/// cascade. Every other deciding action writes no marker.
+#[test]
+fn a_client_skip_marks_the_fall_through() {
+    let plan =
+        ActionPlanner::plan(&snapshot(TaskState::Running), &command(ActionKind::Skip)).unwrap();
+    assert_eq!(plan.state_changes[0].to, TaskState::Skipped);
+    assert_eq!(
+        plan.variable_writes,
+        vec![
+            VariableWrite {
+                scope: task(),
+                name: "answer".into(),
+                value: "42".into(),
+            },
+            VariableWrite {
+                scope: task(),
+                name: crate::scheduler::core::plan::propagation::CLIENT_SKIP_VAR.to_string(),
+                value: "true".into(),
+            },
+        ]
+    );
+
+    let complete = ActionPlanner::plan(
+        &snapshot(TaskState::Waiting),
+        &command(ActionKind::Complete),
+    )
+    .unwrap();
+    assert!(
+        complete
+            .variable_writes
+            .iter()
+            .all(|write| write.name != crate::scheduler::core::plan::propagation::CLIENT_SKIP_VAR)
+    );
+}
+
 #[test]
 fn terminal_task_rejects_action() {
     assert!(matches!(
