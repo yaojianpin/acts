@@ -88,6 +88,7 @@ fn command() -> ReenterCommand {
         // Cancel re-enters the source itself; the target names the
         // re-entered task.
         target_task_id: "source".into(),
+        cancels_forward: false,
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
@@ -323,6 +324,7 @@ fn back_to_a_step_outside_the_redo_closure_is_refused() {
         process_id: "p1".into(),
         source: id("stray", 0),
         target_task_id: "target".into(),
+        cancels_forward: false,
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
@@ -471,5 +473,365 @@ fn the_source_operation_must_belong_to_the_command_process() {
     assert_eq!(
         Reenter::plan((&graph(), &snapshot()), &command),
         Err(GenerationError::SourceOperationTargetsDifferentTask)
+    );
+}
+
+/// A node with several live instances (a fan-out's parallel items share one
+/// node id) maps every closed-over instance onto its own fresh generation:
+/// mapping both onto one generation collides in the plan and refuses the
+/// whole rewind.
+#[test]
+fn multi_instance_nodes_recreate_one_generation_each() {
+    use crate::scheduler::core::model::task_graph::{TaskGraphBuilder, TaskNode};
+    let mut snapshot = ProcessSnapshot {
+        process_id: "p1".into(),
+        version: ProcessVersion {
+            graph: 3,
+            process: 8,
+            operations: 6,
+        },
+        tasks: HashMap::new(),
+        variables: BTreeMap::new(),
+        operations: HashMap::new(),
+        outbox: HashMap::new(),
+    };
+    // The rewind source, and one forward node with two live instances — the
+    // shape a candidates fan-out leaves behind.
+    snapshot.tasks.insert(
+        id("root", 0),
+        TaskSnapshot {
+            model_node: NodeId::parse("root").unwrap(),
+            parent: None,
+            predecessors: vec![],
+            state: TaskState::Backed,
+            revision: 0,
+        },
+    );
+    for generation in [0, 1] {
+        snapshot.tasks.insert(
+            id("branch", generation),
+            TaskSnapshot {
+                model_node: NodeId::parse("branch").unwrap(),
+                parent: None,
+                predecessors: vec![id("root", 0)],
+                state: TaskState::Waiting,
+                revision: 0,
+            },
+        );
+    }
+    let mut builder = TaskGraphBuilder::new("p1", 3).unwrap();
+    for (exec_id, task) in &snapshot.tasks {
+        builder
+            .add_node(TaskNode {
+                id: exec_id.clone(),
+                model_node: task.model_node.clone(),
+                state: task.state,
+                revision: task.revision,
+            })
+            .unwrap();
+    }
+    builder.set_root(id("root", 0)).unwrap();
+    // The instances hang off the root as its children and flow forward as
+    // successors — the shape a fan-out leaves in the execution graph. The
+    // reachability walk follows child edges; the closure follows successors.
+    for generation in [0, 1] {
+        builder
+            .add_child(id("root", 0), id("branch", generation))
+            .unwrap();
+        builder
+            .add_successor(id("root", 0), id("branch", generation))
+            .unwrap();
+    }
+    let graph = builder.build().unwrap();
+    let mut command = command();
+    command.source = id("root", 0);
+    command.target_task_id = "root".into();
+    command.source_operation.id.task = id("root", 0);
+    // The plan commits at all: the two instances no longer collide on one
+    // generation.
+    let plan = Reenter::plan((&graph, &snapshot), &command).unwrap();
+    let created: Vec<TaskId> = plan
+        .task_creates
+        .iter()
+        .map(|create| create.task.clone())
+        .collect();
+    assert_eq!(
+        created,
+        vec![id("root", 1), id("branch", 2), id("branch", 3)],
+        "each closed-over instance takes the generation after the last: {created:?}"
+    );
+    for generation in [2, 3] {
+        let branch = plan
+            .task_creates
+            .iter()
+            .find(|create| create.task == id("branch", generation))
+            .unwrap();
+        assert_eq!(
+            branch.predecessors,
+            vec![id("root", 1)],
+            "the instance's edge remaps onto the re-entered root"
+        );
+    }
+}
+
+/// Back walks from the source up to the named step and closes what it
+/// passes: the running containers on the path close `Backed`, the sibling
+/// branches beside the path close `Skipped` (their subtrees included); the
+/// source generation is already `Backed` by the decision, and the workflow
+/// root is never walked.
+#[test]
+fn back_closes_the_walked_path_and_skips_sibling_branches() {
+    use crate::scheduler::core::model::task_graph::{TaskGraphBuilder, TaskNode};
+    let mut snapshot = ProcessSnapshot {
+        process_id: "p1".into(),
+        version: ProcessVersion {
+            graph: 3,
+            process: 8,
+            operations: 6,
+        },
+        tasks: HashMap::new(),
+        variables: BTreeMap::new(),
+        operations: HashMap::new(),
+        outbox: HashMap::new(),
+    };
+    let task = |snapshot: &mut ProcessSnapshot, id: TaskId, parent: Option<TaskId>, state| {
+        let model_node = NodeId::parse(id.node.as_str()).unwrap();
+        snapshot.tasks.insert(
+            id,
+            TaskSnapshot {
+                model_node,
+                parent,
+                predecessors: vec![],
+                state,
+                revision: 0,
+            },
+        );
+    };
+    // root -> prepare (the redo target) and root -> approve (running);
+    // approve fans out into two items, one per vote.
+    task(&mut snapshot, id("root", 0), None, TaskState::Completed);
+    task(
+        &mut snapshot,
+        id("prepare", 0),
+        Some(id("root", 0)),
+        TaskState::Completed,
+    );
+    task(
+        &mut snapshot,
+        id("approve", 0),
+        Some(id("root", 0)),
+        TaskState::Running,
+    );
+    task(
+        &mut snapshot,
+        id("item", 0),
+        Some(id("approve", 0)),
+        TaskState::Running,
+    );
+    task(
+        &mut snapshot,
+        id("item", 1),
+        Some(id("approve", 0)),
+        TaskState::Running,
+    );
+    // The source: the first vote, already closed by the decision.
+    task(
+        &mut snapshot,
+        id("vote", 0),
+        Some(id("item", 0)),
+        TaskState::Backed,
+    );
+    // Its sibling branch: the second vote, still waiting.
+    task(
+        &mut snapshot,
+        id("vote", 1),
+        Some(id("item", 1)),
+        TaskState::Waiting,
+    );
+    let mut builder = TaskGraphBuilder::new("p1", 3).unwrap();
+    for (exec_id, task) in &snapshot.tasks {
+        builder
+            .add_node(TaskNode {
+                id: exec_id.clone(),
+                model_node: task.model_node.clone(),
+                state: task.state,
+                revision: task.revision,
+            })
+            .unwrap();
+    }
+    builder.set_root(id("root", 0)).unwrap();
+    for (parent, child) in [
+        (id("root", 0), id("prepare", 0)),
+        (id("root", 0), id("approve", 0)),
+        (id("approve", 0), id("item", 0)),
+        (id("approve", 0), id("item", 1)),
+        (id("item", 0), id("vote", 0)),
+        (id("item", 1), id("vote", 1)),
+    ] {
+        builder.add_child(parent, child).unwrap();
+    }
+    builder
+        .add_successor(id("prepare", 0), id("approve", 0))
+        .unwrap();
+    builder
+        .add_successor(id("approve", 0), id("item", 0))
+        .unwrap();
+    builder
+        .add_successor(id("approve", 0), id("item", 1))
+        .unwrap();
+    builder.add_successor(id("item", 0), id("vote", 0)).unwrap();
+    builder.add_successor(id("item", 1), id("vote", 1)).unwrap();
+    let graph = builder.build().unwrap();
+    let mut command = command();
+    command.source = id("vote", 0);
+    command.target_task_id = "prepare".into();
+    command.source_operation.id.task = id("vote", 0);
+    let plan = Reenter::plan((&graph, &snapshot), &command).unwrap();
+    let changes: Vec<(TaskId, TaskState, TaskState)> = plan
+        .state_changes
+        .iter()
+        .map(|change| (change.task.clone(), change.from, change.to))
+        .collect();
+    assert_eq!(
+        changes,
+        vec![
+            // The walked path: the container above the source and the item
+            // holding it (in the closure's breadth-first order).
+            (id("approve", 0), TaskState::Running, TaskState::Backed),
+            (id("item", 0), TaskState::Running, TaskState::Backed),
+            // The sibling branch beside the path, its vote included.
+            (id("item", 1), TaskState::Running, TaskState::Skipped),
+            (id("vote", 1), TaskState::Waiting, TaskState::Skipped),
+        ],
+        "the rewind closes the path and the sibling branches: {changes:?}"
+    );
+    // The fresh generations: the target runs again and the whole forward
+    // closure is recreated beside the closed one.
+    let created: Vec<TaskId> = plan
+        .task_creates
+        .iter()
+        .map(|create| create.task.clone())
+        .collect();
+    assert_eq!(
+        created,
+        vec![
+            id("prepare", 1),
+            id("approve", 1),
+            id("item", 2),
+            id("item", 3),
+            id("vote", 2),
+            id("vote", 3),
+        ],
+        "the recreated closure maps every closed-over instance: {created:?}"
+    );
+    assert_eq!(
+        plan.task_creates[0].initial_state,
+        TaskState::Ready,
+        "the named redo step runs again immediately"
+    );
+}
+
+/// Cancel closes the work ahead of the cancelled act: the running forward
+/// executions — the container and its subtree — close `Cancelled`, while the
+/// cancelled act itself is already `Backed` by the decision and the root is
+/// never walked.
+#[test]
+fn cancel_closes_the_running_work_ahead() {
+    use crate::scheduler::core::model::task_graph::{TaskGraphBuilder, TaskNode};
+    let mut snapshot = ProcessSnapshot {
+        process_id: "p1".into(),
+        version: ProcessVersion {
+            graph: 3,
+            process: 8,
+            operations: 6,
+        },
+        tasks: HashMap::new(),
+        variables: BTreeMap::new(),
+        operations: HashMap::new(),
+        outbox: HashMap::new(),
+    };
+    let task = |snapshot: &mut ProcessSnapshot, id: TaskId, parent: Option<TaskId>, state| {
+        let model_node = NodeId::parse(id.node.as_str()).unwrap();
+        snapshot.tasks.insert(
+            id,
+            TaskSnapshot {
+                model_node,
+                parent,
+                predecessors: vec![],
+                state,
+                revision: 0,
+            },
+        );
+    };
+    // root -> step (the cancelled act, already Backed) -> next (running)
+    // -> leaf (waiting).
+    task(&mut snapshot, id("root", 0), None, TaskState::Completed);
+    task(
+        &mut snapshot,
+        id("step", 0),
+        Some(id("root", 0)),
+        TaskState::Backed,
+    );
+    task(
+        &mut snapshot,
+        id("next", 0),
+        Some(id("step", 0)),
+        TaskState::Running,
+    );
+    task(
+        &mut snapshot,
+        id("leaf", 0),
+        Some(id("next", 0)),
+        TaskState::Waiting,
+    );
+    let mut builder = TaskGraphBuilder::new("p1", 3).unwrap();
+    for (exec_id, task) in &snapshot.tasks {
+        builder
+            .add_node(TaskNode {
+                id: exec_id.clone(),
+                model_node: task.model_node.clone(),
+                state: task.state,
+                revision: task.revision,
+            })
+            .unwrap();
+    }
+    builder.set_root(id("root", 0)).unwrap();
+    for (parent, child) in [
+        (id("root", 0), id("step", 0)),
+        (id("step", 0), id("next", 0)),
+        (id("next", 0), id("leaf", 0)),
+    ] {
+        builder.add_child(parent.clone(), child.clone()).unwrap();
+        builder.add_successor(parent, child).unwrap();
+    }
+    let graph = builder.build().unwrap();
+    let mut command = command();
+    command.source = id("step", 0);
+    command.target_task_id = "step".into();
+    command.cancels_forward = true;
+    command.source_operation.id.task = id("step", 0);
+    let plan = Reenter::plan((&graph, &snapshot), &command).unwrap();
+    let changes: Vec<(TaskId, TaskState, TaskState)> = plan
+        .state_changes
+        .iter()
+        .map(|change| (change.task.clone(), change.from, change.to))
+        .collect();
+    assert_eq!(
+        changes,
+        vec![
+            (id("next", 0), TaskState::Running, TaskState::Cancelled),
+            (id("leaf", 0), TaskState::Waiting, TaskState::Cancelled),
+        ],
+        "the work ahead closes cancelled: {changes:?}"
+    );
+    let created: Vec<TaskId> = plan
+        .task_creates
+        .iter()
+        .map(|create| create.task.clone())
+        .collect();
+    assert_eq!(
+        created,
+        vec![id("step", 1), id("next", 1), id("leaf", 1)],
+        "the cancelled step re-enters with its forward closure: {created:?}"
     );
 }

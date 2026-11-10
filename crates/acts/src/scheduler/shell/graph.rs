@@ -93,6 +93,19 @@ impl<'a> GraphContext<'a> {
             .unwrap_or_default()
     }
 
+    /// Whether one execution is an item of a parameter fan-out: the container
+    /// action writes the item binding (`__fanout_index`/`__fanout_value`) on
+    /// the template execution, so a node shared by concurrent items is told
+    /// apart from a node that merely has several generations (a rewind, a
+    /// `while` turn). Only the concurrent items suppress their unreached
+    /// children — one template's declaration would otherwise repeat per item.
+    fn is_fanout_item(&self, id: &TaskId) -> bool {
+        self.snapshot.variables.contains_key(&(
+            id.clone(),
+            crate::utils::consts::FANOUT_INDEX_VAR.to_string(),
+        ))
+    }
+
     /// The children of one execution the model does not declare, in a stable
     /// order: a client's pushed acts and the delegated join's requests. The
     /// walk descends into each (a push may sit under a pushed act).
@@ -238,11 +251,10 @@ pub(crate) fn process_graph(
             walk_step(&mut nodes, &context, step, root, None, true)?;
         }
     } else {
-        let repeated = roots.len() > 1;
         for execution in roots {
             push_execution(&mut nodes, &context, root_spec.clone(), execution);
             for step in &model.steps {
-                walk_step(&mut nodes, &context, step, root, Some(execution), !repeated)?;
+                walk_step(&mut nodes, &context, step, root, Some(execution), true)?;
             }
             for dynamic in context.dynamic_children(execution) {
                 walk_dynamic(&mut nodes, &context, dynamic)?;
@@ -298,15 +310,32 @@ pub(crate) fn process_graph(
             node.messages = std::mem::take(records);
         }
     }
+    // The tree reads in event time: a rewind's generations appear where the
+    // flow actually ran them — the completed head first, the closed round
+    // next, then the re-entered head and the redo behind it — instead of
+    // every generation of one declaration side by side. The messages pin
+    // each execution's first event; a node the flow never reached stays at
+    // the end, in declaration order.
+    graph.nodes.sort_by_key(|node| {
+        node.messages
+            .first()
+            .map(|message| message.timestamp)
+            .unwrap_or(i64::MAX)
+    });
     Ok(graph)
 }
 
 /// One step and everything it declares: its branches (each a node over its own
 /// steps), then its catch handlers and timeout branches — the shape the
 /// import's materialized copy carries. Each node emits one graph node per
-/// execution under `parent_tid`; a node without executions is emitted once,
-/// with no state, when its parent is not a fan-out (a fan-out's items only
-/// show the executions they actually admitted).
+/// execution under `parent_tid`, and every execution renders the declaration's
+/// shape beneath it: a node no execution reached is emitted once, with no
+/// state, exactly like the flow ahead. Concurrent fan-out items are the one
+/// exception — one template's declaration would repeat per item, so an item
+/// shows only the children it actually admitted. A node with several
+/// *generations* (a rewind, a `while` turn) renders each generation's shape;
+/// suppressing those is what used to flatten a rewind's re-created step into
+/// a bare line.
 fn walk_step(
     nodes: &mut Vec<crate::GraphNode>,
     context: &GraphContext<'_>,
@@ -342,16 +371,33 @@ fn walk_step(
         }
         return Ok(());
     }
-    let repeated = executions.len() > 1;
+    // Only concurrent fan-out items hide their unreached children; a node
+    // with several generations (a rewind/`while` turn) renders each
+    // generation's whole declaration.
+    let show_children =
+        !(executions.len() > 1 && executions.iter().all(|id| context.is_fanout_item(id)));
     for execution in executions {
         push_execution(nodes, context, spec.clone(), execution);
-        // The declaration's own shape under this execution. A fan-out's
-        // repeated template shows only the children it actually admitted.
+        // The declaration's own shape under this execution.
         for branch in super::model::step_branches(step).unwrap_or_default() {
-            walk_branch(nodes, context, branch, &step.id, Some(execution), !repeated)?;
+            walk_branch(
+                nodes,
+                context,
+                branch,
+                &step.id,
+                Some(execution),
+                show_children,
+            )?;
         }
         for catch in &step.catches {
-            walk_step(nodes, context, catch, &step.id, Some(execution), !repeated)?;
+            walk_step(
+                nodes,
+                context,
+                catch,
+                &step.id,
+                Some(execution),
+                show_children,
+            )?;
         }
         for timeout in &step.timeouts {
             walk_step(
@@ -360,7 +406,7 @@ fn walk_step(
                 timeout,
                 &step.id,
                 Some(execution),
-                !repeated,
+                show_children,
             )?;
         }
         for dynamic in context.dynamic_children(execution) {
@@ -398,13 +444,17 @@ fn walk_branch(
         if !show_unreached {
             return Ok(());
         }
+        // The declaration's bridge node: a virtual container (`<step>#in`)
+        // whose own execution the kernel never admits still holds the step
+        // its children run as, so keep walking under this parent.
         push_placeholder(nodes, spec, parent_tid, &context.snapshot.process_id);
         for inner in &branch.steps {
             walk_step(nodes, context, inner, &branch.id, parent_tid, true)?;
         }
         return Ok(());
     }
-    let repeated = executions.len() > 1;
+    let show_children =
+        !(executions.len() > 1 && executions.iter().all(|id| context.is_fanout_item(id)));
     for execution in executions {
         push_execution(nodes, context, spec.clone(), execution);
         for inner in &branch.steps {
@@ -414,7 +464,7 @@ fn walk_branch(
                 inner,
                 &branch.id,
                 Some(execution),
-                !repeated,
+                show_children,
             )?;
         }
         for dynamic in context.dynamic_children(execution) {

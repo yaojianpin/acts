@@ -15,7 +15,7 @@ use serde_json::json;
 use serial_test::serial;
 
 use crate::{
-    MessageState, Step, Vars, Workflow,
+    MessageState, Principal, Step, Vars, Workflow,
     event::EventAction,
     scheduler::core::model::task_graph::TaskState,
     utils::test::{USES_IRQ, USES_MSG, USES_PARALLEL},
@@ -343,6 +343,552 @@ async fn sch_graph_expands_a_param_fanout_over_its_items() {
         ),
         "the two items stay visible"
     );
+    fixture.close().await;
+}
+
+/// A `Back` from inside a candidates fan-out re-enters the head step as a new
+/// generation. The graph keeps the original hierarchy in both rounds: the
+/// closed countersign and its item/vote subtree stay under the backed
+/// generation, and the re-created countersign renders the same item/vote
+/// subtree under the re-entered head. Losing the virtual `<step>#in` bridge
+/// (the kernel never admits it as an execution) used to drop the whole
+/// template subtree and flatten both generations into bare lines.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_graph_keeps_the_hierarchy_across_a_rewind() {
+    let workflow = Workflow::new()
+        .with_id("flow-graph-rewind")
+        .with_step(|step| step.with_id("prepare").with_uses(USES_IRQ, Vars::new()))
+        .with_step(|step| {
+            step.with_id("approve")
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new()
+                        .with("in", "${{ candidates }}")
+                        .with("join", "all")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new()
+                                    .with_id("vote")
+                                    .with_uses(USES_IRQ, Vars::new().with("key", "pm_vote"))
+                                    .with_owner("${{ $item.value }}"),
+                            ],
+                        ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let prepare = fixture.wait_created("prepare").await;
+    fixture
+        .complete(&prepare.pid, &prepare.tid, Vars::new())
+        .await;
+
+    // The countersign asks its pool, then fans the template out to one vote,
+    // which starts at once (the container's pool is never re-asked under it).
+    let answers = Vars::new()
+        .with(
+            "participants",
+            json!([{ "id": "u1", "code": "alice", "name": "Alice" }]),
+        )
+        .with("ids", json!(["u1"]))
+        .with("count", 1);
+    let request = fixture.wait_created("approve#cand1").await;
+    fixture.complete(&request.pid, &request.tid, answers).await;
+    let vote = fixture.wait_created("vote").await;
+
+    // Back the waiting vote to the head: the old round closes `backed` and a
+    // fresh `prepare`/`approve` generation is created.
+    fixture.back(&vote.pid, &vote.tid, "prepare").await.unwrap();
+    fixture.wait_created_except("prepare", &prepare.tid).await;
+
+    let graph = fixture
+        .engine()
+        .runtime()
+        .graph(fixture.pid())
+        .await
+        .unwrap();
+    // The hierarchy is the executions' own edges, not the rendering: each
+    // generation owns its template/vote chain, so a rewind never reparents
+    // the closed round's subtree onto the re-created one.
+    let node = |nid: &str, parent_tid: Option<&str>| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.nid == nid && node.parent_tid.as_deref() == parent_tid)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the graph has no {nid} under {parent_tid:?}: {}",
+                    graph.tree_output()
+                )
+            })
+    };
+    let root = node("$", None);
+    assert!(root.tid.is_some(), "the root execution");
+
+    // The closed head and the re-entered one are both root executions.
+    let closed_head = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.nid == "prepare"
+                && node.parent_tid == root.tid
+                && node.state.as_deref() == Some("completed")
+        })
+        .expect("the closed head completed before the rewind");
+    let redo_head = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.nid == "prepare"
+                && node.parent_tid == root.tid
+                && node.state.as_deref() == Some("interrupted")
+        })
+        .expect("the re-entered head waits for its decision");
+    assert_ne!(redo_head.tid, closed_head.tid);
+
+    let approvals: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.nid == "approve" && node.parent_tid == root.tid)
+        .collect();
+    assert_eq!(approvals.len(), 2, "the closed and the re-created round");
+    let closed = approvals
+        .iter()
+        .find(|node| node.state.as_deref() == Some("backed"))
+        .expect("the closed generation is backed");
+    let redo = approvals
+        .iter()
+        .find(|node| node.state.is_none())
+        .expect("the re-created generation is the flow ahead");
+    assert_ne!(closed.tid, redo.tid);
+
+    for (generation, closed_round) in [(closed, true), (redo, false)] {
+        // The model's virtual bridge (`<step>#in`) has no execution of its
+        // own; it must still be emitted under each generation, or its real
+        // `<step>#item` children are never walked.
+        let bridge = node("approve#in", generation.tid.as_deref());
+        assert_eq!(bridge.tid, None);
+        assert_eq!(bridge.kind, "block");
+        let item = node("approve#item", generation.tid.as_deref());
+        assert_eq!(item.parent.as_deref(), Some("approve#in"));
+        let branch = node("approve#item#act0", item.tid.as_deref());
+        assert_eq!(branch.parent.as_deref(), Some("approve#item"));
+        let vote = node("vote", branch.tid.as_deref());
+        assert_eq!(vote.parent.as_deref(), Some("approve#item#act0"));
+        if closed_round {
+            assert_eq!(item.state.as_deref(), Some("backed"));
+            assert_eq!(vote.state.as_deref(), Some("backed"));
+        } else {
+            assert_eq!(item.state, None, "a seeded item is still the flow ahead");
+            assert_eq!(vote.state, None);
+        }
+    }
+    // The closed round's pool request stays under the closed generation; the
+    // re-created round has not asked yet.
+    let request = node("approve#cand1", closed.tid.as_deref());
+    assert_eq!(request.parent.as_deref(), Some("approve"));
+    assert_eq!(request.state.as_deref(), Some("completed"));
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .all(|node| node.nid != "approve#cand1" || node.parent_tid != redo.tid),
+        "the re-created round asks its pool only when it runs"
+    );
+    fixture.close().await;
+}
+
+/// The action matrix's shape: one container step owning the act every client
+/// action decides or assigns. The container is the parent edge the graph must
+/// keep whatever the action does.
+fn action_workflow(id: &str) -> Workflow {
+    let mut workflow = Workflow::new().with_id(id);
+    workflow
+        .steps
+        .push(Step::new().with_id("approval").with_uses(
+            USES_BLOCK,
+            Vars::new().with("mode", "sequence").with(
+                "steps",
+                vec![
+                    Step::new()
+                        .with_id("s1")
+                        .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+                        .with_owner("alice"),
+                ],
+            ),
+        ));
+    workflow
+}
+
+/// The act under one container execution, through the kernel's virtual
+/// `<step>#acts` branch: the branch is a graph node of its own (the execution
+/// authority is `parent_tid`), and the act is its child. The tree folds the
+/// branch's line, not the edge.
+fn act_under<'a>(
+    graph: &'a crate::ProcessGraph,
+    container: &crate::GraphNode,
+) -> (&'a crate::GraphNode, &'a crate::GraphNode) {
+    let branch = graph
+        .nodes
+        .iter()
+        .find(|node| node.nid == "approval#acts" && node.parent_tid == container.tid)
+        .unwrap_or_else(|| panic!("the container's virtual branch: {}", graph.tree_output()));
+    let act = graph
+        .nodes
+        .iter()
+        .find(|node| node.nid == "s1" && node.parent_tid == branch.tid)
+        .unwrap_or_else(|| panic!("the act under the virtual branch: {}", graph.tree_output()));
+    (branch, act)
+}
+
+/// The hierarchy every client action must leave intact: the container hangs
+/// off the root, and the act stays under the container's own virtual branch.
+fn assert_action_hierarchy(graph: &crate::ProcessGraph) {
+    let root = graph
+        .nodes
+        .iter()
+        .find(|node| node.nid == "$" && node.tid.is_some())
+        .expect("the run's root execution");
+    let approval = graph
+        .nodes
+        .iter()
+        .find(|node| node.nid == "approval" && node.tid.is_some())
+        .expect("the container execution");
+    assert_eq!(
+        approval.parent_tid.as_deref(),
+        root.tid.as_deref(),
+        "the container stays under the root"
+    );
+    let (branch, act) = act_under(graph, approval);
+    assert!(branch.tid.is_some(), "the container branch's execution");
+    assert_eq!(branch.kind, "block", "the kernel's virtual container");
+    assert_eq!(branch.parent.as_deref(), Some("approval"));
+    assert_eq!(act.parent.as_deref(), Some("approval#acts"));
+}
+
+/// `Next`/`skip`/`error`/`abort` only change the act's state: the graph keeps
+/// the container's and act's executions and their parent edges.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_graph_keeps_the_hierarchy_through_terminal_actions() {
+    for (action, state) in [
+        ("complete", TaskState::Completed),
+        ("skip", TaskState::Skipped),
+        ("error", TaskState::Failed),
+        ("abort", TaskState::Aborted),
+    ] {
+        let workflow = action_workflow(&format!("flow-graph-action-{action}"));
+        let mut fixture = FlowFixture::deploy(&workflow).await;
+        fixture.start(Vars::new()).await;
+        let created = fixture.wait_created("s1").await;
+        match action {
+            "complete" => {
+                fixture
+                    .complete(&created.pid, &created.tid, Vars::new())
+                    .await
+            }
+            "skip" => fixture.skip(&created.pid, &created.tid).await.unwrap(),
+            "error" => fixture
+                .fail(&created.pid, &created.tid, "rejected", "not approved")
+                .await
+                .unwrap(),
+            "abort" => fixture.abort(&created.pid, &created.tid).await.unwrap(),
+            other => panic!("unexpected action {other}"),
+        }
+        fixture.wait_state("s1", state).await;
+
+        let graph = fixture
+            .engine()
+            .runtime()
+            .graph(fixture.pid())
+            .await
+            .unwrap();
+        assert_action_hierarchy(&graph);
+        assert_eq!(fixture.state("s1").await, state, "{action}: act state");
+        fixture.close().await;
+    }
+}
+
+/// `transfer`/`delegate` only move the assignment (owner/assignee); the act's
+/// execution and the graph's parent edges are untouched.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_graph_keeps_the_hierarchy_through_assignment_actions() {
+    for action in ["transfer", "delegate"] {
+        let workflow = action_workflow(&format!("flow-graph-assign-{action}"));
+        let mut fixture = FlowFixture::deploy(&workflow).await;
+        fixture.start(Vars::new()).await;
+        let created = fixture.wait_created("s1").await;
+        let decider = fixture.engine().executor(&Principal::unrestricted());
+        match action {
+            "transfer" => decider
+                .act()
+                .transfer(&created.pid, &created.tid, Vars::new().with("to", "bob"))
+                .await
+                .unwrap(),
+            "delegate" => decider
+                .act()
+                .delegate(
+                    &created.pid,
+                    &created.tid,
+                    Vars::new().with("delegatee", "bob"),
+                )
+                .await
+                .unwrap(),
+            other => panic!("unexpected action {other}"),
+        }
+        assert_eq!(fixture.state("s1").await, TaskState::Waiting);
+
+        let graph = fixture
+            .engine()
+            .runtime()
+            .graph(fixture.pid())
+            .await
+            .unwrap();
+        assert_action_hierarchy(&graph);
+        fixture.close().await;
+    }
+}
+
+/// `Push` creates a dynamic act under the act that created it, `Remove`
+/// decides that instance `removed`, and `Remind` is a record on the owner's
+/// act: none of them reparents the container's act or its children.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_graph_keeps_the_hierarchy_through_push_remove_and_remind() {
+    let workflow = action_workflow("flow-graph-push-remind");
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let created = fixture.wait_created("s1").await;
+
+    // Push an act the model does not declare: it becomes a child execution of
+    // the act that created it.
+    fixture
+        .act(
+            &created.pid,
+            &created.tid,
+            EventAction::Push,
+            Vars::new()
+                .with("name", "added approver")
+                .with("uses", USES_IRQ)
+                .with("params", Vars::new().with("key", "act2")),
+        )
+        .await
+        .unwrap();
+    let pushed = fixture.wait_created("s1#push1").await;
+
+    // A non-owner reminds the assigned act: the record folds onto the node.
+    fixture
+        .engine()
+        .executor(&super::act::approver("carol"))
+        .act()
+        .remind(
+            fixture.pid(),
+            &created.tid,
+            Vars::new().with("message", "hurry"),
+        )
+        .await
+        .unwrap();
+
+    // Remove the pushed act: the execution stays in the graph as `removed`.
+    fixture
+        .act(&pushed.pid, &pushed.tid, EventAction::Remove, Vars::new())
+        .await
+        .unwrap();
+    fixture.wait_state("s1#push1", TaskState::Removed).await;
+    fixture
+        .wait_message("s1#push1", MessageState::Removed)
+        .await;
+
+    let graph = fixture
+        .engine()
+        .runtime()
+        .graph(fixture.pid())
+        .await
+        .unwrap();
+    assert_action_hierarchy(&graph);
+
+    let act = graph
+        .nodes
+        .iter()
+        .find(|node| node.nid == "s1" && node.tid.is_some())
+        .expect("the assigned act's execution");
+    let pushed = graph
+        .nodes
+        .iter()
+        .find(|node| node.nid == "s1#push1")
+        .expect("the pushed act's execution");
+    assert_eq!(pushed.parent.as_deref(), Some("s1"));
+    assert_eq!(pushed.parent_tid, act.tid);
+    assert_eq!(pushed.state.as_deref(), Some("removed"));
+    let remind = act
+        .messages
+        .iter()
+        .find(|message| message.r#type == "remind")
+        .expect("the remind record folded onto the assigned act");
+    assert_eq!(remind.owner.as_deref(), Some("alice"));
+    assert_eq!(remind.state, "created");
+    fixture.close().await;
+}
+
+/// A single-owner `push` builds a sign chain in either mode: `before` runs
+/// the added owner's leaf first, `after` runs the target owner's first. The
+/// leaves are child executions of the act in both orders — the mode decides
+/// which leaf is admitted first, not the hierarchy.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_graph_keeps_the_hierarchy_through_both_push_modes() {
+    for (mode, first_owner, second_owner) in [("before", "bob", "alice"), ("after", "alice", "bob")]
+    {
+        let workflow = action_workflow(&format!("flow-graph-push-{mode}"));
+        let mut fixture = FlowFixture::deploy(&workflow).await;
+        fixture.start(Vars::new()).await;
+        let act = fixture.wait_created("s1").await;
+
+        fixture
+            .act(
+                &act.pid,
+                &act.tid,
+                EventAction::Push,
+                Vars::new()
+                    .with("owners", json!(["bob"]).to_string())
+                    .with("mode", mode),
+            )
+            .await
+            .unwrap();
+        let first = fixture.wait_created("s1#push1").await;
+
+        let graph = fixture
+            .engine()
+            .runtime()
+            .graph(fixture.pid())
+            .await
+            .unwrap();
+        assert_action_hierarchy(&graph);
+        let target = graph
+            .nodes
+            .iter()
+            .find(|node| node.nid == "s1" && node.tid.is_some())
+            .expect("the assigned act's execution");
+        let first_leaf = graph
+            .nodes
+            .iter()
+            .find(|node| node.nid == "s1#push1")
+            .expect("the first sign leaf");
+        assert_eq!(first_leaf.parent.as_deref(), Some("s1"));
+        assert_eq!(first_leaf.parent_tid, target.tid);
+        assert_eq!(
+            first_leaf
+                .messages
+                .first()
+                .and_then(|message| message.owner.as_deref()),
+            Some(first_owner),
+            "{mode}: the first leaf runs {first_owner} first"
+        );
+
+        // Removing the first leaf admits the next one under the same parent.
+        fixture
+            .act(&first.pid, &first.tid, EventAction::Remove, Vars::new())
+            .await
+            .unwrap();
+        fixture.wait_state("s1#push1", TaskState::Removed).await;
+        fixture.wait_created("s1#push2").await;
+
+        let graph = fixture
+            .engine()
+            .runtime()
+            .graph(fixture.pid())
+            .await
+            .unwrap();
+        let second_leaf = graph
+            .nodes
+            .iter()
+            .find(|node| node.nid == "s1#push2")
+            .expect("the second sign leaf");
+        assert_eq!(second_leaf.parent.as_deref(), Some("s1"));
+        assert_eq!(second_leaf.parent_tid, target.tid);
+        assert_eq!(
+            second_leaf
+                .messages
+                .first()
+                .and_then(|message| message.owner.as_deref()),
+            Some(second_owner),
+            "{mode}: the second leaf runs {second_owner}"
+        );
+        fixture.close().await;
+    }
+}
+
+/// `Cancel` is the other rewind: it closes the finished container `Backed`
+/// and re-enters it as a new generation. Both generations keep the container
+/// and its act under their own execution — the closed round as it ran, the
+/// re-entered one with the act's fresh instance behind it.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_graph_keeps_the_hierarchy_across_a_cancel() {
+    let mut workflow = action_workflow("flow-graph-cancel");
+    workflow.steps.push(
+        Step::new()
+            .with_id("tail")
+            .with_uses(USES_IRQ, Vars::new().with("key", "tail")),
+    );
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let act = fixture.wait_created("s1").await;
+
+    // The container's execution is the cancel target once it has finished.
+    let before = fixture
+        .engine()
+        .runtime()
+        .graph(fixture.pid())
+        .await
+        .unwrap();
+    let approval = before
+        .nodes
+        .iter()
+        .find(|node| node.nid == "approval")
+        .expect("the container execution")
+        .tid
+        .clone()
+        .expect("the container's tid");
+    fixture.complete(&act.pid, &act.tid, Vars::new()).await;
+    fixture.wait_created("tail").await;
+
+    fixture.cancel(fixture.pid(), &approval).await.unwrap();
+    // The re-entered container re-runs its act as a fresh instance.
+    fixture.wait_created_except("s1", &act.tid).await;
+
+    let graph = fixture
+        .engine()
+        .runtime()
+        .graph(fixture.pid())
+        .await
+        .unwrap();
+    let approvals: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.nid == "approval")
+        .collect();
+    assert_eq!(approvals.len(), 2, "the closed and the re-entered round");
+    let closed = approvals
+        .iter()
+        .find(|node| node.state.as_deref() == Some("backed"))
+        .expect("the cancelled generation is backed");
+    let redo = approvals
+        .iter()
+        .find(|node| node.state.as_deref() != Some("backed"))
+        .expect("the re-entered generation");
+    let (closed_branch, closed_act) = act_under(&graph, closed);
+    let (redo_branch, redo_act) = act_under(&graph, redo);
+    assert_ne!(closed_branch.tid, redo_branch.tid);
+    // The closed round kept the act's completed instance; the redo waits.
+    assert_eq!(closed_act.state.as_deref(), Some("completed"));
+    assert_eq!(redo_act.state.as_deref(), Some("interrupted"));
     fixture.close().await;
 }
 

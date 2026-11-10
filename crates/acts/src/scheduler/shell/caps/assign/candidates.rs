@@ -128,14 +128,16 @@ impl Assign {
 
     /// The pool specs one act resolves at start — its own declarations and,
     /// for every key it does not declare itself, the nearest ancestor's
-    /// declaration (the same inheritance the owner template gets). The own
+    /// declaration. The chain stops at a container: a container's pools are
+    /// its own (its fan-out `in` and join read them), so its children inherit
+    /// the computed result through the scope chain (`$assign.candidates.*`)
+    /// and never re-ask the pool their container already asked. The own
     /// declarations are refused where they cannot mean a pool: a
     /// package-less node, the waiting subflow, or a `Func`/`Msg` leaf. An
     /// inherited pool rides the same placements except it skips silently on
     /// them — a self-completing or package-less child carries no pool.
-    /// Containers are legitimate pool holders, so they inherit and declare
-    /// alike. Pushed acts read their own declarations off the durable
-    /// `__act` fact only.
+    /// Pushed acts read their own declarations off the durable `__act` fact
+    /// only.
     pub(crate) fn declared_pools(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -176,9 +178,11 @@ impl Assign {
         // does not declare itself from the nearest ancestor that declares
         // it, computed in this act's own scope at its start. A step without
         // an own assign declares nothing — it reads its ancestors' pools
-        // through the scope chain, which is what keeps a container's fan-out
-        // children (each generated from the container's own pool) from
-        // re-declaring the pool.
+        // through the scope chain. The chain stops at containers (see
+        // `nearest_declared_pools`), which is what keeps a container's
+        // fan-out children from re-asking the pool their container computed:
+        // whatever assign the child declares, the container's declaration
+        // never crosses into it.
         let own_pools = !own.is_empty();
         if step.assign.is_some()
             && !matches!(

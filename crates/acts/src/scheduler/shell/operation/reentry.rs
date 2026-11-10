@@ -46,11 +46,26 @@ impl ActOperation for ReenterTask {
                 .get(&(task_id.clone(), REENTER_TARGET_VAR.to_string()))
                 .cloned()
                 .unwrap_or_else(|| id.task.node.as_str().to_owned());
+            // A `Back` re-enters an earlier step and closes the branches
+            // beside the path; a `Cancel` closes the work ahead of the
+            // cancelled act. The decision's own outbox record (`task.backed`
+            // / `task.cancelled`) is the durable fact that tells them apart.
+            let decision_key = format!(
+                "action:{}:{}:{}:{}",
+                id.process_id,
+                id.task.node.as_str(),
+                id.task.generation,
+                claim.id.sequence
+            );
+            let cancels_forward = snapshot.outbox.iter().any(|(outbox_id, record)| {
+                outbox_id.key == decision_key && record.topic == "task.cancelled"
+            });
             let graph = task_graph(snapshot)?;
             let command = crate::scheduler::core::plan::generation::ReenterCommand {
                 process_id: id.process_id.clone(),
                 source: task_id.clone(),
                 target_task_id: target,
+                cancels_forward,
                 source_operation: claim.clone(),
             };
             Reenter::plan((&graph, snapshot), &command).map_err(runtime)?

@@ -1,6 +1,6 @@
 name: approve
 id: approve
-ver: 0.2.0
+ver: 0.4.0
 # The demo's business facts: the expense is above the limit, so its approval
 # runs; a lower `amount` would skip it.
 vars:
@@ -30,14 +30,22 @@ steps:
   # the act's own pool. `join: all` is the countersign: every pm user must
   # approve.
   #
-  # On the first `pm_vote` the client also demonstrates the added-approver
-  # pair: it pushes an extra approver under the vote and removes it again
-  # before answering.
+  # The step's Created message carries the step's identity (its tid). The
+  # step declares `announce: true`, so the Created arrives the moment the
+  # step starts — before its candidate pool resolves, with the raw declared
+  # params — and the interactive client sees the countersign from its first
+  # breath. (A container itself holds no assignment — an owner declaration
+  # would be inherited by the children — so `add approver` on it hangs a
+  # plain member act under it, whom the join: all then waits for; on an
+  # owned act the menu builds a before/after sign chain instead.) Each vote
+  # is answered in the terminal menu, where the supervisor can also urge
+  # (act:remind) a pending act.
   # ---------------------------------------------------------------------------
   - name: pm countersign
     id: pm_approval
-    desc: every pm user approves (join all); the pool is computed by assign.candidates
+    desc: every pm user approves (join all); answer the votes in the menu
     uses: acts.core.parallel
+    announce: true
     params:
       in: '${{ $assign.candidates.ids }}'
       join: all
@@ -93,6 +101,7 @@ steps:
     id: post_approval
     desc: an or-sign over the department and unit principals; one person holding both posts votes once
     uses: acts.core.parallel
+    announce: true
     params:
       in: '${{ $assign.candidates.ids }}'
       join: any
@@ -121,6 +130,7 @@ steps:
     id: expense_approval
     desc: skipped when the amount is within the limit; otherwise any finance principal approves
     uses: acts.core.parallel
+    announce: true
     params:
       in: '${{ $assign.candidates.ids }}'
       join: any
@@ -154,6 +164,7 @@ steps:
     id: board_approval
     desc: the client decides the delegated join; the chair's approval passes the step
     uses: acts.core.block
+    announce: true
     params:
       mode: parallel
       join:
@@ -174,19 +185,18 @@ steps:
   # ---------------------------------------------------------------------------
   # step 7 · assignment demo — transfer and delegate
   #
-  # Two assigned approvals demonstrate the assignment actions without
-  # changing their own execution:
-  #   * `transfer_vote` starts owned by user 1; the client transfers it to
-  #     user 3 (`act:transfer`) and user 3's answer completes the same act.
-  #   * `delegate_vote` starts owned by user 2; the client delegates it to
-  #     user 4 (`act:delegate`) and the delegatee completes it. A transfer
-  #     would clear the delegation; a delegate keeps the owner and adds an
-  #     assignee.
+  # Two assigned approvals whose owners are set up for the assignment
+  # actions: in the menu, `transfer` moves `transfer_vote` (owned by user 1)
+  # to another user and the new owner answers the same act; `delegate` lets
+  # another user decide `delegate_vote` (owned by user 2) for the owner. A
+  # transfer would clear a delegation; a delegate keeps the owner and adds
+  # an assignee.
   # ---------------------------------------------------------------------------
   - name: assignment demo
     id: assignment_demo
-    desc: demonstrate act:transfer and act:delegate on human approvals
+    desc: transfer and delegate these human approvals in the menu
     uses: acts.core.block
+    announce: true
     params:
       mode: sequence
       steps:
@@ -200,3 +210,37 @@ steps:
             owner: '2'
           params:
             key: delegate_vote
+
+  # ---------------------------------------------------------------------------
+  # step 8 · sign chain demo — the before and after signs
+  #
+  # Two single-owner approvals to try the sign chains on. A container never
+  # holds its own assignment, so the chains ride these one-person acts: in
+  # the menu, `add approver` on `before_sign` (owned by user 1) with mode
+  # `before` runs the added approver ahead of the owner; on `after_sign`
+  # (owned by user 3) the default `after` runs the owner first, the added
+  # approver behind him. Each chain leaf is an irq act named after its
+  # owner; the owner's own answer is absorbed on the push, `remove approver`
+  # drops a leaf and the kernel admits the next, and the drained chain
+  # completes the act.
+  # ---------------------------------------------------------------------------
+  - name: sign chain demo
+    id: sign_demo
+    desc: try the before/after sign chains on these single-owner acts
+    uses: acts.core.block
+    announce: true
+    params:
+      mode: sequence
+      steps:
+        - uses: acts.core.irq
+          id: before_sign
+          assign:
+            owner: '1'
+          params:
+            key: before_sign
+        - uses: acts.core.irq
+          id: after_sign
+          assign:
+            owner: '3'
+          params:
+            key: after_sign

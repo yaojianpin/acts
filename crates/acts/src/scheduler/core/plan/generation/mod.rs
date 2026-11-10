@@ -4,8 +4,8 @@ use crate::scheduler::core::{
         operation::{OperationId, OperationKind},
         task_graph::{TaskGraph, TaskId, TaskState},
         transition_plan::{
-            OperationCommit, OperationIntent, OutboxIntent, TaskCreate, TransitionPlan,
-            VariableWrite,
+            OperationCommit, OperationIntent, OutboxIntent, StateChange, TaskCreate,
+            TransitionPlan, VariableWrite,
         },
     },
 };
@@ -22,6 +22,10 @@ pub(crate) struct ReenterCommand {
     pub(crate) source: TaskId,
     /// Stable logical task identity to instantiate again.
     pub(crate) target_task_id: String,
+    /// Whether the rewind is a `Cancel`: it closes the work ahead of the
+    /// cancelled act (`Cancelled`), where a `Back` closes the branches beside
+    /// its path (`Skipped`).
+    pub(crate) cancels_forward: bool,
     pub(crate) source_operation: OperationCommit,
 }
 
@@ -116,25 +120,87 @@ impl ActPlan for Reenter {
         // One fresh generation per closed-over task, remapping every
         // predecessor edge onto the new generations (edges from outside the
         // closure - typically the completed root - keep pointing at
-        // themselves through the identity map below).
+        // themselves through the identity map below). A node may appear
+        // several times in the closure (a fan-out's parallel items share one
+        // node id), so the allocation carries per node: the second
+        // closed-over instance takes the generation after the first, and
+        // recreating both as the same generation would refuse the plan.
+        let mut allocated: HashMap<String, u64> = HashMap::new();
         let mut remap: HashMap<TaskId, TaskId> = HashMap::new();
         let mut closure: Vec<(TaskId, &TaskSnapshot, TaskId)> = Vec::with_capacity(order.len());
         for old_id in &order {
             let old = &snapshot.tasks[old_id];
-            let generation = snapshot
-                .tasks
-                .keys()
-                .filter(|id| id.node == old_id.node)
-                .map(|id| id.generation)
-                .max()
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or(GenerationError::GenerationOverflow)?;
+            let generation = {
+                let next = allocated
+                    .entry(old_id.node.as_str().to_string())
+                    .or_insert_with(|| {
+                        snapshot
+                            .tasks
+                            .keys()
+                            .filter(|id| id.node == old_id.node)
+                            .map(|id| id.generation)
+                            .max()
+                            .unwrap_or(0)
+                    });
+                *next = next
+                    .checked_add(1)
+                    .ok_or(GenerationError::GenerationOverflow)?;
+                *next
+            };
             let new_id = TaskId::new(old_id.node.as_str(), generation)
                 .map_err(|_| GenerationError::EmptyTargetTaskId)?;
             remap.insert(old_id.clone(), new_id.clone());
             closure.push((old_id.clone(), old, new_id));
         }
+        // The rewind walks from the source up to the re-entered step and
+        // settles what it passes: the source generation is already `Backed`
+        // (the decision closed it), the running containers on the path below
+        // the workflow root close `Backed`, and the branches beside the path
+        // — the sibling subtrees of the walked containers and the abandoned
+        // descendants of the source — close `Skipped`. The workflow root is
+        // never walked: it outlives the rewind and decides when the recreated
+        // generations settle.
+        let source_task = &snapshot.tasks[&command.source];
+        let mut ancestors: Vec<TaskId> = Vec::new();
+        let mut cursor = source_task.parent.clone();
+        while let Some(id) = cursor {
+            let Some(task) = snapshot.tasks.get(&id) else {
+                break;
+            };
+            // The workflow root (and anything above it) is not a task the
+            // rewind closes.
+            if task.parent.is_none() {
+                break;
+            }
+            ancestors.push(id.clone());
+            cursor = task.parent.clone();
+        }
+        let state_changes: Vec<StateChange> = closure
+            .iter()
+            .filter(|(old_id, old, _)| *old_id != command.source && !old.state.is_terminal())
+            .map(|(old_id, old, _)| {
+                let to = if ancestors.contains(old_id) {
+                    // The containers the walk passes close `Backed`.
+                    TaskState::Backed
+                } else if command.cancels_forward {
+                    // A `Cancel` closes the work ahead of the cancelled act.
+                    TaskState::Cancelled
+                } else {
+                    // A `Back` closes every other superseded execution — the
+                    // sibling branches beside its path and the forward work
+                    // the flow had seeded but never ran — as `Skipped`, so
+                    // the joins above the rewind see them settled.
+                    TaskState::Skipped
+                };
+                StateChange {
+                    task: old_id.clone(),
+                    expected_revision: old.revision,
+                    from: old.state,
+                    to,
+                }
+            })
+            .collect();
+
         // The re-entered root generation is admitted immediately (`Ready`,
         // carried by its `ExecuteTask` operation); the recreated downstream
         // starts `Created`, so ordinary propagation admits each of them in
@@ -200,7 +266,7 @@ impl ActPlan for Reenter {
             process_id: command.process_id.clone(),
             expected: snapshot.version.clone(),
             task_creates,
-            state_changes: Vec::new(),
+            state_changes,
             variable_writes,
             source_operation: Some(command.source_operation.clone()),
             operations: vec![OperationIntent {

@@ -6,7 +6,7 @@
 //! an owner that references the pool resolve on the re-entered start.
 
 use super::*;
-use crate::MessageState;
+use crate::{MessageState, Principal};
 use crate::{
     Step, Vars, Workflow, scheduler::core::model::task_graph::TaskState, utils::consts,
     utils::test::USES_BLOCK, utils::test::USES_IRQ,
@@ -16,6 +16,237 @@ use serial_test::serial;
 
 const USES_USERS: &str = "acts.core.users";
 const USES_PARALLEL: &str = "acts.core.parallel";
+
+/// A container that declares `announce` speaks at the pool wait: its act
+/// `Created` rides the wait itself, carrying the raw declared params (the
+/// pool has not resolved), and the answer never re-announces — the fan-out
+/// and the join proceed unchanged.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_candidates_announce_speaks_at_the_pool_wait() {
+    let workflow =
+        Workflow::new()
+            .with_id("sch-candidates-announce")
+            .with_step(|step| {
+                step.with_id("approve")
+                    .with_announce(true)
+                    .with_uses(
+                        USES_PARALLEL,
+                        Vars::new().with("in", "${{ candidates }}").with(
+                            "steps",
+                            vec![Step::new().with_id("vote").with_uses(
+                                USES_IRQ,
+                                Vars::new().with("value", "${{ $item.value }}"),
+                            )],
+                        ),
+                    )
+                    .with_candidates(crate::model::CandidateExpr::Role {
+                        name: "reviewers".to_string(),
+                    })
+            });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    // The container announces Created while its pool is still pending: the
+    // payload carries the raw declaration, not a resolution of it.
+    let container = fixture.wait_created("approve").await;
+    let params = container.params().expect("the declared params");
+    assert_eq!(
+        params.get::<String>("in").as_deref(),
+        Some("${{ candidates }}")
+    );
+
+    // The pool resolves, one vote fans out, and the act completes; the
+    // announcement stays a single Created.
+    let request = fixture.wait_created("approve#cand1").await;
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    json!([{ "id": "u1", "code": "alice", "name": "Alice" }]),
+                )
+                .with("ids", json!(["u1"]))
+                .with("count", 1),
+        )
+        .await;
+    let vote = fixture.wait_created_uses(USES_IRQ, 1).await.remove(0);
+    fixture.complete(&vote.pid, &vote.tid, Vars::new()).await;
+    fixture.wait_state("approve", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    assert_eq!(
+        fixture.announced("approve"),
+        vec![MessageState::Created, MessageState::Completed],
+        "the announce step speaks once at the wait, once at its completion"
+    );
+    fixture.close().await;
+}
+
+/// The example's shape: the container announces at the pool wait and the
+/// client records its tid; the pool answers, the fan-out runs and the vote
+/// starts at once — it inherits the pool's computed result through the scope
+/// chain, so no `#cand` request rides under it — and joins the pushed act
+/// before the container finishes.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_candidates_push_at_the_announce_wait_fans_out_after_the_answer() {
+    let workflow = Workflow::new()
+        .with_id("sch-candidates-push-wait")
+        .with_step(|step| {
+            step.with_id("approve")
+                .with_announce(true)
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new()
+                        .with("in", "${{ $assign.candidates.ids }}")
+                        .with("join", "all")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new()
+                                    .with_id("vote")
+                                    .with_uses(USES_IRQ, Vars::new().with("key", "pm_vote"))
+                                    .with_owner("${{ $item.value }}"),
+                            ],
+                        ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    // The announcement rides the wait: the step speaks before its pool
+    // resolves, and nothing announces the vote yet.
+    let container = fixture.wait_created("approve").await;
+    assert!(fixture.message("vote", MessageState::Created).is_none());
+
+    // The pool answers; the fan-out runs and the vote starts at once — the
+    // container's pool is never re-asked under the vote, whose owner
+    // resolves from the item on the scope chain.
+    let request = fixture.wait_created("approve#cand1").await;
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    json!([{ "id": "u1", "code": "alice", "name": "Alice" }]),
+                )
+                .with("ids", json!(["u1"]))
+                .with("count", 1),
+        )
+        .await;
+    let vote = fixture.wait_created_uses(USES_IRQ, 1).await.remove(0);
+
+    // Every vote is in: the classic push lands on the step's recorded tid,
+    // and the join: all waits for the added approver as much as for the
+    // vote.
+    fixture
+        .engine()
+        .executor(&Principal::unrestricted())
+        .act()
+        .push(
+            fixture.pid(),
+            &container.tid,
+            Vars::new()
+                .with("uses", USES_IRQ)
+                .with("params", Vars::new().with("key", "added")),
+        )
+        .await
+        .expect("the classic push signs the container after the fan-out");
+    let added = fixture.wait_created("approve#push1").await;
+    fixture.complete(&vote.pid, &vote.tid, Vars::new()).await;
+    fixture.complete(&added.pid, &added.tid, Vars::new()).await;
+    fixture.wait_state("approve", TaskState::Completed).await;
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
+/// The container's pool is asked exactly once, under the container. The
+/// fan-out items inherit the pool's *computed result* through the scope
+/// chain, so an owned vote starts the moment the pool answers — its owner
+/// resolves from its item — and no `#cand` request ever rides under a vote.
+/// (The regression for the per-item re-ask the approve demo showed: every
+/// `pm_vote` minted its own `<vote>#cand<N>` because the child inherited the
+/// container's declaration instead of its answer.)
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_container_pool_is_asked_once_and_the_item_votes_never_re_ask() {
+    let workflow = Workflow::new()
+        .with_id("sch-candidates-single-ask")
+        .with_step(|step| {
+            step.with_id("approve")
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new()
+                        .with("in", "${{ $assign.candidates.ids }}")
+                        .with("join", "all")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new()
+                                    .with_id("vote")
+                                    .with_uses(USES_IRQ, Vars::new().with("key", "pm_vote"))
+                                    .with_owner("${{ $item.value }}"),
+                            ],
+                        ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    // The container asks its pool; the answer fans the template out.
+    let request = fixture.wait_created("approve#cand1").await;
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    json!([
+                        { "id": "u1", "code": "alice", "name": "Alice" },
+                        { "id": "u2", "code": "bob", "name": "Bob" }
+                    ]),
+                )
+                .with("ids", json!(["u1", "u2"]))
+                .with("count", 2),
+        )
+        .await;
+
+    // Both votes start at once, each owned by its item's value, and no
+    // `#cand` request exists under either — the pool's answer is inherited,
+    // not re-asked.
+    let votes = fixture.wait_created_uses(USES_IRQ, 2).await;
+    let mut owners: Vec<_> = votes.iter().map(|vote| vote.owner.clone()).collect();
+    owners.sort();
+    assert_eq!(
+        owners,
+        vec![Some("u1".to_string()), Some("u2".to_string())],
+        "each vote's owner is its item value, resolved without a pool ask"
+    );
+    for vote in &votes {
+        assert_eq!(vote.nid, "vote");
+        assert!(
+            fixture
+                .message("vote#cand1", MessageState::Created)
+                .is_none()
+                && fixture
+                    .message("vote#cand2", MessageState::Created)
+                    .is_none(),
+            "the container's pool is never re-asked under a vote"
+        );
+    }
+    fixture.close().await;
+}
 
 /// The declaring container waits for the pool, then fans it out: one owner
 /// act per candidate, the request answered by the business system.
@@ -698,10 +929,11 @@ async fn sch_container_owner_is_inherited_by_ownerless_children() {
     fixture.close().await;
 }
 
-/// A container's pools are inherited like its owner: `candidates` and every
-/// named key reach the children that do not declare the key themselves, and
-/// each child computes the inherited declaration in its own scope — a key
-/// the child declares itself wins over the inherited one.
+/// A container's pools are its own: the container computes them (locally
+/// here — every atom is a literal) and its children inherit the computed
+/// result through the scope chain. A key a child declares itself is
+/// computed in the child's own scope and wins over the container's answer
+/// for that child. No child ever re-asks the container's declaration.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_container_pools_are_inherited_by_children() {
@@ -768,6 +1000,16 @@ async fn sch_container_pools_are_inherited_by_children() {
             "{node} candidates"
         );
         assert_eq!(params.get::<serde_json::Value>("cc"), Some(cc), "{node} cc");
+    }
+    // The container's declarations never cross into its children: no child
+    // mints a `#cand` request of its own, whatever assign it declares.
+    for node in ["a1", "a2", "a3"] {
+        assert!(
+            fixture
+                .message(&format!("{node}#cand1"), MessageState::Created)
+                .is_none(),
+            "{node} never re-asks the container's pool"
+        );
     }
     fixture.close().await;
 }

@@ -54,10 +54,12 @@ default = []
 test-utils = []
 
 [dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
 criterion = { version = "0.8", features = ["async_tokio", "async_futures"] }
 serial_test = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 parking_lot = { workspace = true }
+dialoguer = { workspace = true }
 
 [[bench]]
 harness = false

@@ -58,6 +58,12 @@ tracing-subscriber = "0.3"
 # errors
 anyhow = "1.0.100"
 thiserror = "2"
+# command line
+clap = { version = "4.5.21", features = ["derive", "color", "env"] }
+clap-cargo = "0.19.0"
+# terminal prompts: the demo clients' menus are arrow-key selects; the
+# default features pull an editor and password hashing this repo never uses
+dialoguer = { version = "0.12", default-features = false }
 # utilities
 chrono = "0.4"
 regex = "1.11"

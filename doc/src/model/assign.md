@@ -41,12 +41,17 @@
   容器的 owner 表达式，并在自己的作用域里解析（所以 `$item.value`、
   `$initiator`、工作流变量都能用）；自己声明了 `assign.owner` 的子活动用自己的。
   继承不会落到自完成的活动上（`Func`/`Msg` 不等待决策，不带承办关系）。
-- 池的声明同样被继承：子活动**声明了 assign**（owner 或任一池 key）时，它没有
-  声明的池 key 从最近的祖先容器补齐——在自己的作用域里按同一套“先本地、后
+- 池的声明不跨容器传递：容器（`acts.core.block` / `acts.core.parallel` /
+  `acts.core.sequence`）声明的池是容器**自己的**——fan-out 的 `in` 和 join 读的
+  就是它，容器只发一次 `<act>#candN` 请求。容器生成的子活动（`block` 的 steps、
+  `parallel`/`sequence` 的 item 及其 steps）沿作用域链继承池的**计算结果**
+  （`$assign.candidates.*` / `$assign.<key>.*`）：无论子活动自己声明了什么
+  `assign`（如 `owner`），都不会在容器之下重复发 `#cand` 请求。非容器祖先声明的
+  池 key 仍被子活动继承：子活动**声明了 assign**（owner 或任一池 key）时，它
+  没有声明的 key 从最近的非容器祖先补齐——在自己的作用域里按同一套“先本地、后
   uses”计算，应答落在子活动自己的 `$assign.candidates.*` / `$assign.<key>.*`
-  下；自己声明了的 key 用自己的。完全没有声明 assign 的子活动不继承池声明
-  （容器 fan-out 生成的子活动由此不会重复计算父容器已算出的池），沿作用域链
-  直接读到祖先的池。自完成的活动（`Func`/`Msg`）和不带包的子活动跳过继承。
+  下；自己声明了的 key 用自己的。自完成的活动（`Func`/`Msg`）和不带包的子活动
+  跳过继承。
 - `assign.owner` 直接写在 `Func`/`Msg` 活动或 subflow 上仍然被拒绝。
 - 未声明 `assign` 的活动保持旧行为：拥有 `@execute` 的主体可以决策。
 

@@ -385,6 +385,16 @@ pub(super) fn nearest_declared_owner(
 /// included), keyed by declaration key (`candidates` for the canonical pool,
 /// the key itself for a named one): what a step inherits for every key it
 /// does not declare itself. A nearer step's key wins.
+///
+/// The chain stops at a container step (`block`/`parallel`/`sequence`): a
+/// container's pool declarations are its own — its fan-out `in` and its join
+/// read them — so they never cross into the container's children. The
+/// children inherit the *computed result* through the scope chain
+/// (`$assign.candidates.*`), and none of them — however much of an `assign`
+/// it declares itself — re-asks the pool its container already asked. This is
+/// the opposite of `nearest_declared_owner`, whose chain crosses containers
+/// on purpose: a container's owner declaration is the template its children
+/// resolve.
 pub(super) fn nearest_declared_pools(
     model: &crate::model::Workflow,
     target: &str,
@@ -395,6 +405,10 @@ pub(super) fn nearest_declared_pools(
         target: &str,
     ) -> Option<std::collections::BTreeMap<String, crate::model::Candidates>> {
         for step in steps {
+            let container = matches!(
+                step.uses.as_deref().map(str::trim),
+                Some(model::BLOCK_PACKAGE | model::PARALLEL_PACKAGE | model::SEQUENCE_PACKAGE)
+            );
             if let Some(assign) = &step.assign {
                 if let Some(candidates) = &assign.candidates {
                     inherited.insert(CANONICAL_POOL.to_string(), (**candidates).clone());
@@ -406,18 +420,23 @@ pub(super) fn nearest_declared_pools(
             if step.id == target {
                 return Some(inherited);
             }
+            let descended = if container {
+                std::collections::BTreeMap::new()
+            } else {
+                inherited.clone()
+            };
             for branch in model::step_branches(step).unwrap_or_default() {
-                if let Some(found) = walk(&branch.steps, inherited.clone(), target) {
+                if let Some(found) = walk(&branch.steps, descended.clone(), target) {
                     return Some(found);
                 }
             }
             for catch in &step.catches {
-                if let Some(found) = walk(std::slice::from_ref(catch), inherited.clone(), target) {
+                if let Some(found) = walk(std::slice::from_ref(catch), descended.clone(), target) {
                     return Some(found);
                 }
             }
             for timeout in &step.timeouts {
-                if let Some(found) = walk(std::slice::from_ref(timeout), inherited.clone(), target)
+                if let Some(found) = walk(std::slice::from_ref(timeout), descended.clone(), target)
                 {
                     return Some(found);
                 }
@@ -500,6 +519,59 @@ mod tests {
                     })
                 })
         })
+    }
+
+    /// A container's pool declarations are its own — its fan-out `in` and its
+    /// join read them — so nothing inside the container inherits them, however
+    /// much assign the child declares itself: the children get the pool's
+    /// computed result through the scope chain, never the declaration. A
+    /// declaration on a non-container step still reaches its descendants.
+    #[test]
+    fn a_containers_pool_declaration_never_crosses_into_its_children() {
+        // The fan-out: the container declares the pool its `in` reads.
+        let model = Workflow::new().with_step(|step| {
+            step.with_id("fan")
+                .with_uses("acts.core.parallel", Vars::new())
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+                .with_branch(|branch| {
+                    branch.with_id("fan#in").with_if("true").with_step(|inner| {
+                        inner
+                            .with_id("vote")
+                            .with_uses("acts.core.irq", Vars::new())
+                            .with_owner("${{ $item.value }}")
+                    })
+                })
+        });
+        assert!(
+            nearest_declared_pools(&model, "vote").is_empty(),
+            "the owned vote inherits the container pool's answer, not its declaration"
+        );
+        // The container itself still resolves its own declaration.
+        let own = nearest_declared_pools(&model, "fan");
+        assert_eq!(own.len(), 1);
+        assert!(own.contains_key("candidates"));
+
+        // A non-container ancestor's declaration still reaches its handlers.
+        let model = Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.core.irq", Vars::new())
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "reviewers".to_string(),
+                })
+                .with_catch(|catch| {
+                    catch.with_id("c1").with_branch(|branch| {
+                        branch
+                            .with_id("cb")
+                            .with_if("true")
+                            .with_step(|inner| inner.with_id("ci").with_owner("u1"))
+                    })
+                })
+        });
+        let pools = nearest_declared_pools(&model, "ci");
+        assert_eq!(pools.len(), 1);
+        assert!(pools.contains_key("candidates"));
     }
 
     /// A timeout branch is a container like any other: the fan-out looks its

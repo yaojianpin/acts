@@ -262,7 +262,13 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
             | (S::Waiting, S::Running)
             | (
                 S::Running,
-                S::Completed | S::Submitted | S::Failed | S::Aborted | S::Skipped
+                S::Completed
+                    | S::Submitted
+                    | S::Backed
+                    | S::Cancelled
+                    | S::Failed
+                    | S::Aborted
+                    | S::Skipped
             )
             // A `Cancel` *is* the legacy rewind: the legacy handler refuses
             // unless the act's step already finished its own work, then closes
@@ -276,11 +282,16 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
                 S::Completed
                     | S::Submitted
                     | S::Backed
+                    | S::Cancelled
                     | S::Failed
                     | S::Aborted
                     | S::Skipped
                     | S::Removed
             )
+            // A rewind closes a seeded execution the flow never admitted
+            // (`Created`) as `Skipped`/`Cancelled`: the recreated generation
+            // carries the work instead.
+            | (S::Created, S::Skipped | S::Cancelled)
             | (S::Ready, S::Skipped | S::Removed)
             // A branch predicate is evaluated in the branch task's `init` (the
             // legacy `Branch::init`), before the task ever runs: one that
