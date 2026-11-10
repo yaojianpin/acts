@@ -35,7 +35,9 @@ enum Guard {
 /// otherwise re-derive both (a model decode, for the first).
 pub(in crate::scheduler::shell) enum Start {
     /// The step's own guard skipped it: phase 3 records the fall-through.
-    Skipped,
+    /// `Some` is a rule's reason for the skip, reported on the Skipped
+    /// record — the guard skip itself has none.
+    Skipped(Option<String>),
     /// The step failed before it started: phase 3 walks the error up (the
     /// legacy `emit_error` path).
     Failed(Failure),
@@ -52,10 +54,11 @@ pub(in crate::scheduler::shell) enum Start {
         /// Whether the act's `Created` record already exists.
         announced: bool,
         /// The client action a violated rule decided (`next`/`submit`/
-        /// `abort`/`remove`). The started act executes it as its first
-        /// decision instead of waiting for a client, in the same durable
-        /// intent shape a client command uses.
-        rule_action: Option<crate::event::EventAction>,
+        /// `abort`/`remove`) with the rule's own `params` as its inputs.
+        /// The started act executes it as its first decision instead of
+        /// waiting for a client, in the same durable intent shape a client
+        /// command uses.
+        rule_action: Option<(crate::event::EventAction, Vec<(String, String)>)>,
         /// The owner a declared `assign.owner` resolved to. `Some` only for a
         /// fresh start of an assigned act; its `__assignment` write rides
         /// this plan.
@@ -132,7 +135,7 @@ impl ActOperation for ExecuteTask {
             Guard::Run
         };
         match guard {
-            Guard::Skip => return Ok(Outcome::Start(Start::Skipped)),
+            Guard::Skip => return Ok(Outcome::Start(Start::Skipped(None))),
             Guard::Fail(failure) => return Ok(Outcome::Start(Start::Failed(failure))),
             Guard::Run => {}
         }
@@ -302,13 +305,13 @@ impl ActOperation for ExecuteTask {
                     {
                         return Ok(Outcome::Start(match verdict {
                             RuleVerdict::Failure(failure) => Start::Failed(failure),
-                            RuleVerdict::Skip => Start::Skipped,
-                            RuleVerdict::Action(action) => Start::Started {
+                            RuleVerdict::Skip(reason) => Start::Skipped(reason),
+                            RuleVerdict::Action(action, params) => Start::Started {
                                 facts,
                                 fresh: true,
                                 package,
                                 announced,
-                                rule_action: Some(action),
+                                rule_action: Some((action, params)),
                                 assignment: assignment.clone(),
                             },
                         }));
@@ -415,10 +418,18 @@ impl ActOperation for ExecuteTask {
                 )
                 .await;
             }
-            Start::Skipped => {
+            Start::Skipped(reason) => {
                 let task = task
                     .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
-                return Self::guard_skip_plan(host, snapshot, id, &task_id, task, claim);
+                return Self::guard_skip_plan(
+                    host,
+                    snapshot,
+                    id,
+                    &task_id,
+                    task,
+                    claim,
+                    reason.as_deref(),
+                );
             }
             Start::Pool { pool, participants } => {
                 // The kernel computed the pool locally (every atom of the
@@ -528,13 +539,17 @@ impl ActOperation for ExecuteTask {
             } => {
                 // A rule that failed with a decision action starts the act
                 // and pins that decision as its first durable intent; the
-                // apply operation replays it exactly like a client command.
+                // apply operation replays it exactly like a client command —
+                // the rule's `params` are the command's inputs.
                 let rule_action = match rule_action {
-                    Some(action) => Some(rule_action_kind(&action).ok_or_else(|| {
-                        ActError::Runtime(format!(
-                            "validation rule action '{action}' cannot be applied when the act starts"
-                        ))
-                    })?),
+                    Some((action, params)) => {
+                        let kind = rule_action_kind(&action).ok_or_else(|| {
+                            ActError::Runtime(format!(
+                                "validation rule action '{action}' cannot be applied when the act starts"
+                            ))
+                        })?;
+                        Some((kind, params))
+                    }
                     None => None,
                 };
                 let auto = auto && rule_action.is_none();
@@ -629,7 +644,7 @@ impl ActOperation for ExecuteTask {
                         None => false,
                     }
                 };
-                if let Some(kind) = &rule_action {
+                if let Some((kind, inputs)) = &rule_action {
                     let sequence = action_id.sequence;
                     let name = action_fact_var(sequence);
                     if !snapshot
@@ -639,7 +654,7 @@ impl ActOperation for ExecuteTask {
                         plan.variable_writes.push(VariableWrite {
                             scope: task_id.clone(),
                             name,
-                            value: action_fact(kind, &[], None, None),
+                            value: action_fact(kind, inputs, None, None),
                         });
                     }
                     if !action_exists {
@@ -785,6 +800,11 @@ impl ExecuteTask {
     /// private marker records that the flow goes on, the act's Skipped message
     /// is emitted, and the propagation carries the flow into the next declared
     /// step.
+    ///
+    /// `reason` is the triggered rule's own message (a guard skip has none):
+    /// it is written to the execution's scope as `message` and rides the
+    /// Skipped record's outputs, so the client can tell why the act was
+    /// dropped — the same name a failure record carries its reason under.
     fn guard_skip_plan(
         host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -792,6 +812,7 @@ impl ExecuteTask {
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         task: &crate::scheduler::core::commit::aggregate::TaskSnapshot,
         claim: &OperationCommit,
+        reason: Option<&str>,
     ) -> Result<TransitionPlan> {
         let propagate_id = OperationId {
             process_id: id.process_id.clone(),
@@ -814,13 +835,23 @@ impl ExecuteTask {
             name: crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR.to_string(),
             value: serde_json::json!(true).to_string(),
         });
+        if let Some(reason) = reason {
+            plan.variable_writes.push(VariableWrite {
+                scope: task_id.clone(),
+                name: crate::utils::consts::ACT_ERR_MESSAGE.to_string(),
+                value: serde_json::json!(reason).to_string(),
+            });
+        }
         // The act's own Skipped message, like the cascade's operation emits.
+        // The plan's writes answer its outputs; a guard skip's are all private
+        // engine facts, so it keeps the reasonless shape.
+        let outputs = reason.map(|_| plan.variable_writes.as_slice());
         if let Some(payload) = operation_message_payload(
             snapshot,
             task_id,
             id.task.node.as_str(),
             act_facts(snapshot, task_id).as_ref(),
-            None,
+            outputs,
             None,
         )? {
             plan.outbox[0].payload = payload.to_string();
@@ -925,7 +956,7 @@ mod tests {
         let claim = commit(&id);
         for outcome in [
             Outcome::Start(Start::Failed(Failure::new("E", "boom"))),
-            Outcome::Start(Start::Skipped),
+            Outcome::Start(Start::Skipped(None)),
             Outcome::Start(Start::Unresolved),
         ] {
             let mut lane = CommandLane::detached(&host);
@@ -1112,7 +1143,8 @@ mod tests {
         let claim = commit(&id);
         let task = snapshot.tasks.get(&task_id).unwrap().clone();
         let plan =
-            ExecuteTask::guard_skip_plan(&host, &snapshot, &id, &task_id, &task, &claim).unwrap();
+            ExecuteTask::guard_skip_plan(&host, &snapshot, &id, &task_id, &task, &claim, None)
+                .unwrap();
         assert!(plan.variable_writes.iter().any(|write| {
             write.name == crate::scheduler::core::plan::propagation::GUARD_SKIP_VAR
         }));
@@ -1143,7 +1175,8 @@ mod tests {
         let claim = commit(&id);
         let task = snapshot.tasks.get(&task_id).unwrap().clone();
         let plan =
-            ExecuteTask::guard_skip_plan(&host, &snapshot, &id, &task_id, &task, &claim).unwrap();
+            ExecuteTask::guard_skip_plan(&host, &snapshot, &id, &task_id, &task, &claim, None)
+                .unwrap();
         assert!(plan.operations.is_empty());
     }
 }

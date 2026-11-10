@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 
 use super::Variant;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct Vars {
     inner: JsonMap<String, JsonValue>,
 }

@@ -597,8 +597,8 @@ fn validate_join(step: &Step) -> Result<()> {
     let Some(join) = step.join.as_ref() else {
         return Ok(());
     };
-    for validation in &step.rules {
-        if validation.r#if.trim().is_empty() {
+    for rule in &step.rules {
+        if rule.r#if.trim().is_empty() {
             return Err(ActError::Model(format!(
                 "step '{}' declares a validation rule with an empty expression",
                 step.id

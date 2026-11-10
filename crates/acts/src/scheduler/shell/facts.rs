@@ -57,11 +57,15 @@ pub(super) enum RuleVerdict {
     /// The rule's action is `error` (the default): fail the act with
     /// `validation_failed`.
     Failure(Failure),
-    /// The rule's action is `skip`: skip the act and continue the flow.
-    Skip,
+    /// The rule's action is `skip`: skip the act and continue the flow. The
+    /// rule's reason (`params.message`, else its `message`) rides the
+    /// Skipped record.
+    Skip(Option<String>),
     /// The rule's action is a decision the started act executes: `next` and
-    /// `submit` auto-complete it, `abort`/`remove` close it.
-    Action(crate::event::EventAction),
+    /// `submit` auto-complete it, `abort`/`remove` close it. The rule's
+    /// `params` ride it as the decision's inputs, in the same name → JSON
+    /// text pairs a client command carries.
+    Action(crate::event::EventAction, Vec<(String, String)>),
 }
 
 /// The step's input rules, decided at act start: each rule's condition is
@@ -69,7 +73,12 @@ pub(super) enum RuleVerdict {
 /// `rules:` entry calls the act's parameters). The first condition that holds
 /// runs its action; a condition that does not hold moves on to the next rule,
 /// and an act whose rules never fire starts normally. `Some` is the first
-/// triggered rule's verdict — before the act ever reaches a client.
+/// triggered rule's verdict — before the act ever reaches a client. A
+/// decision action (`next`/`submit`/`abort`/`remove`) executes with the
+/// rule's own `params` as its inputs; an `error` rule's string
+/// `params.ecode`/`params.message` name its failure facts (winning over the
+/// rule's own `message`); a `skip` rule's string `params.message` wins over
+/// its `message` as the skip reason.
 ///
 /// The conditions run on the engine's environment (the same seam a branch
 /// guard uses), so a rule can read `$parent`/`$root` and the other built-ins.
@@ -104,13 +113,78 @@ pub(super) async fn input_rule_verdict(
             crate::scheduler::core::plan::branch::PredicateValue::True => {
                 use crate::event::EventAction as E;
                 return Ok(Some(match &rule.action {
-                    E::Error => RuleVerdict::Failure(Failure::new(
-                        "validation_failed",
-                        rule.failure_message(),
-                    )),
-                    E::Skip => RuleVerdict::Skip,
+                    E::Error => {
+                        // `params.ecode`/`params.message` name the failure
+                        // facts — the same names the failed record reports
+                        // (both strings; anything else is ignored). They win
+                        // over the defaults and over the rule's own `message`.
+                        let ecode = rule
+                            .params
+                            .as_ref()
+                            .and_then(|params| params.get_value(crate::utils::consts::ACT_ERR_CODE))
+                            .and_then(|value| value.as_str());
+                        let message = rule
+                            .params
+                            .as_ref()
+                            .and_then(|params| {
+                                params.get_value(crate::utils::consts::ACT_ERR_MESSAGE)
+                            })
+                            .and_then(|value| value.as_str());
+                        RuleVerdict::Failure(Failure::new(
+                            ecode.unwrap_or("validation_failed"),
+                            message
+                                .map(str::to_string)
+                                .unwrap_or_else(|| rule.failure_message()),
+                        ))
+                    }
+                    E::Skip => {
+                        // The skip's reason: a string `params.message` wins
+                        // over the rule's own `message` — the same
+                        // precedence a decision's inputs and an error's
+                        // failure facts follow.
+                        let message = rule
+                            .params
+                            .as_ref()
+                            .and_then(|params| {
+                                params.get_value(crate::utils::consts::ACT_ERR_MESSAGE)
+                            })
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                            .or_else(|| rule.message.clone());
+                        RuleVerdict::Skip(message)
+                    }
                     E::Next | E::Submit | E::Abort | E::Remove => {
-                        RuleVerdict::Action(rule.action.clone())
+                        // The rule's own params are the decision's inputs:
+                        // they land on the act's scope exactly like a
+                        // client's own inputs would. Its `message` rides
+                        // them the same way (`message` is the name every
+                        // terminal record reads a reason from), so the
+                        // decision's record tells the client why it was
+                        // decided — an explicit `params.message` wins.
+                        let mut inputs: Vec<(String, String)> = rule
+                            .params
+                            .as_ref()
+                            .map(|params| {
+                                params
+                                    .iter()
+                                    .map(|(name, value)| (name.clone(), value.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Some(message) = &rule.message
+                            && !inputs
+                                .iter()
+                                .any(|(name, _)| name == crate::utils::consts::ACT_ERR_MESSAGE)
+                        {
+                            inputs.insert(
+                                0,
+                                (
+                                    crate::utils::consts::ACT_ERR_MESSAGE.to_string(),
+                                    serde_json::json!(message).to_string(),
+                                ),
+                            );
+                        }
+                        RuleVerdict::Action(rule.action.clone(), inputs)
                     }
                     action => RuleVerdict::Failure(Failure::new(
                         "validation_failed",

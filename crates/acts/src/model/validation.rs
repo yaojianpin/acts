@@ -2,14 +2,18 @@
 //!
 //! `rules` on a step is a list of conditions over the step's resolved params
 //! and its scope, decided when the act starts — before it announces itself to
-//! a client or runs its package. The first condition that holds runs its
-//! `action`: `error` by default, which fails the step with the
-//! `validation_failed` error and the rule's own message (the standard error
-//! walk takes over, so a `catches` handler can pick the failure up like any
-//! other). `skip` drops the step and lets the flow continue; `next`/`submit`
-//! auto-complete the act. A condition that does not hold moves on to the next
-//! rule; when no rule fires, the act starts normally. A rule whose condition
-//! cannot be evaluated always fails the step, whatever its action.
+//! a client or runs its package. The first condition that holds runs its `action`:
+//! `error` by default, which fails the step with the `validation_failed`
+//! error and the rule's own message (the standard error walk takes over, so
+//! a `catches` handler can pick the failure up like any other). `skip` drops
+//! the step and lets the flow continue, reporting `params.message` (or its
+//! `message`) as the skip reason; `next`/`submit` auto-complete the
+//! act, carrying the rule's own `params` as the decision's inputs (its
+//! `message` rides them too, so the terminal record says why). An `error`
+//! rule may name its failure facts through `params.ecode`/`params.message`.
+//! A condition that does not hold moves on to the next rule; when no rule
+//! fires, the act starts normally. A rule whose condition cannot be
+//! evaluated always fails the step, whatever its action.
 //!
 //! ```yaml
 //! - id: review
@@ -23,14 +27,16 @@
 //!       message: amount must be positive
 //!     - if: "$parent.manager == director"  # concurrent post: drop this approval
 //!       action: skip
-//!     - if: "amount <= limit"   # under the limit: approve automatically
-//!       action: next
+//!     - if: "auto_submit"       # under the limit: submit automatically,
+//!       action: submit          # with the rule's params as its inputs
+//!       params:
+//!         auto_submit: false
 //! ```
 //!
 //! The design, evaluation order and durability rules are documented in
 //! `doc/design/rules.md`.
 
-use crate::event::EventAction;
+use crate::{Vars, event::EventAction};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -47,6 +53,14 @@ pub struct ValidationRule {
     /// What to do when the condition holds. Defaults to
     /// [`EventAction::Error`] (the step fails with `validation_failed`).
     pub action: EventAction,
+
+    /// What the triggered action consumes. The decision actions
+    /// (`next`/`submit`/`abort`/`remove`) take the entries as the
+    /// decision's inputs: they land on the act's scope exactly like a
+    /// client's own inputs. `error` reads the string `ecode`/`message`
+    /// entries as the failure facts; `skip` reads the string `message` as
+    /// the skip reason. `None` (the default) runs the action without them.
+    pub params: Option<Vars>,
 }
 
 impl ValidationRule {
@@ -56,6 +70,7 @@ impl ValidationRule {
         if_expr: &str,
         message: Option<String>,
         action: Option<EventAction>,
+        params: Option<Vars>,
     ) -> Result<Self, String> {
         let expr = if_expr.trim();
         if expr.is_empty() {
@@ -65,6 +80,7 @@ impl ValidationRule {
             r#if: expr.to_string(),
             message,
             action: action.unwrap_or(EventAction::Error),
+            params,
         })
     }
 
@@ -81,28 +97,28 @@ impl Serialize for ValidationRule {
     where
         S: Serializer,
     {
-        if self.action == EventAction::Error {
-            match &self.message {
-                None => serializer.serialize_str(&self.r#if),
-                Some(message) => {
-                    use serde::ser::SerializeStruct;
-                    let mut map = serializer.serialize_struct("ValidationRule", 2)?;
-                    map.serialize_field("if", &self.r#if)?;
-                    map.serialize_field("message", message)?;
-                    map.end()
-                }
-            }
-        } else {
-            use serde::ser::SerializeStruct;
-            let fields = 2 + usize::from(self.message.is_some());
-            let mut map = serializer.serialize_struct("ValidationRule", fields)?;
-            map.serialize_field("if", &self.r#if)?;
-            if let Some(message) = &self.message {
-                map.serialize_field("message", message)?;
-            }
-            map.serialize_field("action", &self.action)?;
-            map.end()
+        // The bare string form is only for the rule nothing else declares:
+        // the default `error` action, no message, no params.
+        if self.action == EventAction::Error && self.message.is_none() && self.params.is_none() {
+            return serializer.serialize_str(&self.r#if);
         }
+        use serde::ser::SerializeStruct;
+        let fields = 1
+            + usize::from(self.message.is_some())
+            + usize::from(self.action != EventAction::Error)
+            + usize::from(self.params.is_some());
+        let mut map = serializer.serialize_struct("ValidationRule", fields)?;
+        map.serialize_field("if", &self.r#if)?;
+        if let Some(message) = &self.message {
+            map.serialize_field("message", message)?;
+        }
+        if self.action != EventAction::Error {
+            map.serialize_field("action", &self.action)?;
+        }
+        if let Some(params) = &self.params {
+            map.serialize_field("params", params)?;
+        }
+        map.end()
     }
 }
 
@@ -122,7 +138,7 @@ impl<'de> serde::de::Visitor<'de> for ValidationRuleVisitor {
     where
         E: serde::de::Error,
     {
-        ValidationRule::parse(text, None, None).map_err(E::custom)
+        ValidationRule::parse(text, None, None, None).map_err(E::custom)
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -133,20 +149,22 @@ impl<'de> serde::de::Visitor<'de> for ValidationRuleVisitor {
         let mut if_expr: Option<String> = None;
         let mut message: Option<String> = None;
         let mut action: Option<EventAction> = None;
+        let mut params: Option<Vars> = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "if" => if_expr = Some(map.next_value()?),
                 "message" => message = Some(map.next_value()?),
                 "action" => action = Some(map.next_value()?),
+                "params" => params = Some(map.next_value()?),
                 other => {
                     return Err(A::Error::custom(format!(
-                        "unknown validation field '{other}': expected 'if', 'message' or 'action'"
+                        "unknown validation field '{other}': expected 'if', 'message', 'action' or 'params'"
                     )));
                 }
             }
         }
         let if_expr = if_expr.ok_or_else(|| A::Error::custom("a validation rule needs an 'if'"))?;
-        ValidationRule::parse(&if_expr, message, action).map_err(A::Error::custom)
+        ValidationRule::parse(&if_expr, message, action, params).map_err(A::Error::custom)
     }
 }
 
@@ -171,6 +189,7 @@ mod tests {
                 r#if: "amount > 0".into(),
                 message: None,
                 action: EventAction::Error,
+                params: None,
             }
         );
         assert_eq!(
@@ -183,18 +202,37 @@ mod tests {
                 r#if: "amount > 0".into(),
                 message: Some("must be positive".into()),
                 action: EventAction::Error,
+                params: None,
+            }
+        );
+
+        assert_eq!(
+            serde_json::from_value::<ValidationRule>(serde_json::json!({
+                "if": "amount > 0",
+                "message": "must be positive",
+                "action": "error",
+                "params": { "ecode": "value" }
+            }))
+            .unwrap(),
+            ValidationRule {
+                r#if: "amount > 0".into(),
+                message: Some("must be positive".into()),
+                action: EventAction::Error,
+                params: Some(serde_json::json!({ "ecode": "value" }).into()),
             }
         );
         assert_eq!(
             serde_json::from_value::<ValidationRule>(serde_json::json!({
                 "if": "$parent.manager != approver",
-                "action": "skip"
+                "action": "skip",
+                "params": { "reason": "not the approver" }
             }))
             .unwrap(),
             ValidationRule {
                 r#if: "$parent.manager != approver".into(),
                 message: None,
                 action: EventAction::Skip,
+                params: Some(serde_json::json!({ "reason": "not the approver" }).into()),
             }
         );
     }
@@ -221,21 +259,31 @@ mod tests {
                 r#if: "amount > 0".into(),
                 message: None,
                 action: EventAction::Error,
+                params: None,
             },
             ValidationRule {
                 r#if: "amount > 0".into(),
                 message: Some("must be positive".into()),
                 action: EventAction::Error,
+                params: None,
             },
             ValidationRule {
                 r#if: "$parent.manager != approver".into(),
                 message: None,
                 action: EventAction::Skip,
+                params: None,
             },
             ValidationRule {
                 r#if: "amount <= limit".into(),
                 message: Some("auto approve".into()),
                 action: EventAction::Next,
+                params: None,
+            },
+            ValidationRule {
+                r#if: "auto_submit".into(),
+                message: None,
+                action: EventAction::Submit,
+                params: Some(Vars::new().with("auto_submit", false)),
             },
         ] {
             let text = serde_json::to_string(&rule).unwrap();
@@ -253,10 +301,28 @@ mod tests {
             r#if: "a > 0".into(),
             message: None,
             action: EventAction::Skip,
+            params: None,
         };
         assert_eq!(
             serde_json::to_value(&skip).unwrap(),
             serde_json::json!({ "if": "a > 0", "action": "skip" })
+        );
+
+        // `params` keeps the object form even on the default action, and the
+        // bare-string form is reserved for the rule nothing else declares.
+        let submitted = ValidationRule {
+            r#if: "auto_submit".into(),
+            message: None,
+            action: EventAction::Submit,
+            params: Some(Vars::new().with("auto_submit", false)),
+        };
+        assert_eq!(
+            serde_json::to_value(&submitted).unwrap(),
+            serde_json::json!({
+                "if": "auto_submit",
+                "action": "submit",
+                "params": { "auto_submit": false }
+            })
         );
     }
 
@@ -267,6 +333,7 @@ mod tests {
                 r#if: "amount > 0".into(),
                 message: None,
                 action: EventAction::Error,
+                params: None,
             }
             .failure_message(),
             "validation failed: amount > 0"
@@ -276,6 +343,7 @@ mod tests {
                 r#if: "amount > 0".into(),
                 message: Some("must be positive".into()),
                 action: EventAction::Error,
+                params: None,
             }
             .failure_message(),
             "must be positive"

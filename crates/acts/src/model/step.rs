@@ -278,7 +278,7 @@ impl Step {
     }
 
     /// Add one input validation (see [`Step::rules`]).
-    pub fn with_validation(mut self, rule: ValidationRule) -> Self {
+    pub fn with_rule(mut self, rule: ValidationRule) -> Self {
         self.rules.push(rule);
         self
     }

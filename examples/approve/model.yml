@@ -1,13 +1,10 @@
 name: approve
 id: approve
 ver: 0.4.0
-# The demo's business facts: the expense is above the limit, so its approval
-# runs; a lower `amount` would skip it.
+
 vars:
   - name: amount
     value: 800
-  - name: expense_limit
-    value: 1000
 steps:
   # ---------------------------------------------------------------------------
   # step 1 · prepare
@@ -18,8 +15,19 @@ steps:
     id: prepare
     desc: mark the run started; the client completes it immediately
     uses: acts.core.irq
+    vars:
+      # the client can auto-submit the prepare act, when first starting the workflow, to avoid the extra click
+      - name: auto_submit
+        value: true
     params:
       key: prepare
+    rules:
+      - if: 'auto_submit'
+        message: auto submit the prepare act on workflow start
+        action: submit
+        params:
+          # auto close the auto_submit flag, so the next run of the workflow will not auto submit the prepare act
+          auto_submit: false
 
   # ---------------------------------------------------------------------------
   # step 2 · pm countersign — the pool comes from assign.candidates (join: all)
