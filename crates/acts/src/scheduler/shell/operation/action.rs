@@ -198,11 +198,14 @@ impl ApplyAction {
                         host, snapshot, id, task_id, task, claim, &inputs, subject,
                     );
                 }
-                // A client completion of a container dispatches its children
-                // instead of completing it (the legacy `Next` on a running
-                // step) — the step declaring `catches` included: the completion
-                // is its *act* completing, which then runs into its handlers.
-                if matches!(kind, ActionKind::Complete)
+                // A successful decision — a plain completion or a signed
+                // submit; the two differ only in the terminal word — of a
+                // container dispatches its children instead of completing it
+                // (the legacy `Next` on a running step) — the step declaring
+                // `catches` included: the completion is its *act* completing,
+                // which then runs into its handlers.
+                let success = matches!(kind, ActionKind::Complete | ActionKind::Submit);
+                if success
                     && let Some(command) = Self::fanout_command(
                         host,
                         snapshot,
@@ -215,16 +218,15 @@ impl ApplyAction {
                 {
                     return Self::container_fanout_plan(snapshot, &command);
                 }
-                // A completion of a step whose timeout branches are still in
-                // flight is its *act* completing, not the step: the execution
-                // waits for the branches it fired (see `park_for_children_plan`).
-                // A live pushed act parks it the same way — the added
-                // approver must act before the step completes.
-                if matches!(
-                    kind,
-                    crate::scheduler::core::commit::command::ActionKind::Complete
-                ) && (Self::waits_for_timeouts(snapshot, task_id, task)?
-                    || Self::waits_for_pushed(snapshot, task_id)?)
+                // A successful decision on a step whose timeout branches are
+                // still in flight is its *act* completing, not the step: the
+                // execution waits for the branches it fired (see
+                // `park_for_children_plan`). A live pushed act parks it the
+                // same way — the added approver must act before the step
+                // completes.
+                if success
+                    && (Self::waits_for_timeouts(snapshot, task_id, task)?
+                        || Self::waits_for_pushed(snapshot, task_id)?)
                 {
                     return Self::park_for_children_plan(
                         host,

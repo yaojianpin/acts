@@ -343,6 +343,83 @@ async fn sch_rules_execute_the_decision_with_the_rule_params() {
     fixture.close().await;
 }
 
+/// A rule-submitted act's data folds into the workflow root like a completion,
+/// and a rewind re-enters the step from its declared scope: the root-level
+/// `auto_submit` flag is false after the first submit, so the re-entered
+/// `prepare` generation reads false and waits for a client instead of
+/// auto-submitting again.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_rules_submitted_data_updates_the_root_and_survives_a_rewind() {
+    let workflow = Workflow::new()
+        .with_id("flow-rules-submit-rewind")
+        .with_var("auto_submit", true)
+        .with_step(|step| {
+            step.with_id("prepare")
+                .with_uses(USES_IRQ, Vars::new().with("key", "prepare"))
+                .with_rule(crate::ValidationRule {
+                    r#if: "auto_submit".into(),
+                    message: None,
+                    action: crate::event::EventAction::Submit,
+                    params: Some(Vars::new().with("auto_submit", false)),
+                })
+        })
+        .with_step(|step| {
+            step.with_id("next")
+                .with_uses(USES_IRQ, Vars::new().with("key", "next"))
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    // The first prepare auto-submits; its decision's `auto_submit: false`
+    // folds into the parent root.
+    fixture.wait_state("prepare", TaskState::Submitted).await;
+    let next = fixture.wait_created("next").await;
+    let snapshot = fixture.snapshot().await;
+    let root_flag = snapshot
+        .variables
+        .iter()
+        .find(|((task, name), _)| task.node.as_str() == "$" && name == "auto_submit")
+        .map(|(_, value)| value.as_str());
+    assert_eq!(
+        root_flag,
+        Some("false"),
+        "the submitted act's data folds into the workflow root"
+    );
+
+    // Back to prepare: the fresh generation starts from its declared vars
+    // (none), reads the root's false, and waits.
+    fixture.back(&next.pid, &next.tid, "prepare").await.unwrap();
+    fixture.wait_message("next", MessageState::Backed).await;
+    fixture.wait_state("prepare", TaskState::Waiting).await;
+    let reentered = fixture.wait_created("prepare").await;
+    assert_eq!(
+        reentered.pid, next.pid,
+        "the re-entered prepare announces itself as a fresh act"
+    );
+    assert_eq!(
+        fixture
+            .messages_of("prepare")
+            .iter()
+            .filter(|message| message.state == MessageState::Submitted)
+            .count(),
+        1,
+        "the re-entered prepare must not auto-submit a second time"
+    );
+    let snapshot = fixture.snapshot().await;
+    let root_flag = snapshot
+        .variables
+        .iter()
+        .find(|((task, name), _)| task.node.as_str() == "$" && name == "auto_submit")
+        .map(|(_, value)| value.as_str());
+    assert_eq!(
+        root_flag,
+        Some("false"),
+        "the rewind leaves the root flag untouched"
+    );
+    fixture.close().await;
+}
+
 /// A rule without `params` decides exactly as before: the auto-completion
 /// carries no inputs, and the act's scope keeps the declared variable.
 #[serial]

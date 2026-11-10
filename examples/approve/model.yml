@@ -5,28 +5,33 @@ ver: 0.4.0
 vars:
   - name: amount
     value: 800
+  # The prepare act auto-submits only on the workflow's first start. The flag
+  # lives on the root, not on the step: a re-entered generation starts from its
+  # declared vars, so a step-local flag would reset to true on every
+  # back/cancel. A submitted act folds its scope into its parent exactly like a
+  # completed one, which is how the rule's `auto_submit: false` reaches the
+  # root and survives the rewind.
+  - name: auto_submit
+    value: true
 steps:
   # ---------------------------------------------------------------------------
   # step 1 · prepare
-  # A plain irq act the client completes at once: it just marks the run as
-  # started.
+  # A plain irq act: its rule auto-submits it on the first start, and a
+  # re-entered generation (after back/cancel) waits for the client because the
+  # root flag is already false.
   # ---------------------------------------------------------------------------
   - name: prepare
     id: prepare
-    desc: mark the run started; the client completes it immediately
+    desc: mark the run started; the first execution auto-submits it
     uses: acts.core.irq
-    vars:
-      # the client can auto-submit the prepare act, when first starting the workflow, to avoid the extra click
-      - name: auto_submit
-        value: true
     params:
       key: prepare
     rules:
       - if: 'auto_submit'
-        message: auto submit the prepare act on workflow start
         action: submit
         params:
-          # auto close the auto_submit flag, so the next run of the workflow will not auto submit the prepare act
+          # Submit is a signed completion: its scope folds into the parent root
+          # like `next`'s, so a rewind reads auto_submit=false and asks.
           auto_submit: false
 
   # ---------------------------------------------------------------------------

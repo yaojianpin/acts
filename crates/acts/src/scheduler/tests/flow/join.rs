@@ -24,6 +24,28 @@ fn completed(terminal: &Terminal) {
     );
 }
 
+/// A rule `submit` on a container takes the same dispatch path as `next`: the
+/// act starts, its children are admitted, and the join settles the container
+/// from them instead of submitting it with its children unrun.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_rules_submit_fans_out_a_container_like_next() {
+    let step = block_step(None, &["c1"]).with_rule(crate::ValidationRule {
+        r#if: "true".into(),
+        message: None,
+        action: crate::event::EventAction::Submit,
+        params: None,
+    });
+    let workflow = workflow_with(step);
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let child = fixture.wait_created("c1").await;
+    fixture.next(&child.pid, &child.tid).await.unwrap();
+    completed(&fixture.wait_terminal().await);
+    fixture.close().await;
+}
+
 fn errored(terminal: &Terminal) {
     assert!(
         matches!(terminal, Terminal::Errored(_)),

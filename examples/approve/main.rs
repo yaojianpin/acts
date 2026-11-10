@@ -3,14 +3,16 @@
 //! Every act the engine announces waits for a decision. The demo answers in
 //! one of three ways: an interactive arrow-key menu, a script of recorded
 //! choices (`--script`, one line per prompt — a select's line is the item
-//! text or its 1-based position, a blank line takes the default), or the
-//! menu plus a recording (`--record` appends one line per answer, in the
-//! exact format `--script` consumes, so a misbehaving session hands over
-//! its own repro). The business system's own answers (candidate pools,
-//! delegated join verdicts) live in `sys.rs`; the menus live in `client.rs`.
+//! text, its 1-based position, or a stable key, a blank line takes the
+//! default), or the menu plus a recording (`--record` appends one line per
+//! answer, in the exact format `--script` consumes, so a misbehaving session
+//! hands over its own repro). The business system's own answers (candidate
+//! pools, delegated join verdicts) live in `sys.rs`; the menus live in
+//! `client.rs`.
 //!
-//! Exit codes: `0` the run completed, `2` it ended through its error walk
-//! (an `error`/`abort` decision), `1` a setup failure (model, script, IO).
+//! Exit codes: `0` the run completed (or a scripted session's choices ran
+//! out and the demo stopped), `2` it ended through its error walk (an
+//! `error`/`abort` decision), `1` a setup failure (model, script, IO).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,7 +65,11 @@ async fn main() -> Result<()> {
     // menu.
     let mut sys = sys::Sys::new();
     sys.init();
-    let mut client = client::Client::new();
+    // A script that runs out of answers leaves the rest to the engine; the
+    // demo stops waiting instead of parking forever on an act no one will
+    // decide.
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let mut client = client::Client::new().stop_when_exhausted(stop.clone());
     if let Some(script) = &cli.script {
         client = client.script(script).unwrap_or_else(|error| {
             eprintln!("cannot read the script '{script}': {error}");
@@ -165,7 +171,15 @@ async fn main() -> Result<()> {
     });
 
     executor.proc().start(&workflow.id, Vars::new()).await?;
-    sig.recv().await;
+    tokio::select! {
+        _ = sig.recv() => {}
+        _ = stop.notified() => {
+            println!(
+                "the script ran out of choices — the run is left incomplete; \
+                 extend the script to decide the remaining acts"
+            );
+        }
+    }
 
     if failed.load(Ordering::SeqCst) {
         std::process::exit(2);

@@ -10,9 +10,9 @@
 use acts::{Engine, Executor, Message, MessageState, Principal, Result, UserPolicy, Vars};
 use dialoguer::{Input, Select, theme::ColorfulTheme};
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// The demo actors' allowed actions: every human in the directory may
 /// decide, sign, urge, skip, fail, abort and cancel in this demo.
@@ -64,9 +64,10 @@ fn quit(message: &str) -> ! {
 ///   `--script` consumes, so an interactive session becomes its own repro
 ///   script.
 /// * `Script` — one line per prompt (`--script` file or stdin): a select's
-///   line is the item text or its 1-based position, a text prompt's line is
-///   the text itself, a blank line takes the default. The line is echoed,
-///   so the transcript reads like a typed session.
+///   line is the item text, its 1-based position, or a stable key (a history
+///   menu prints the task id but keys its entries by node name), a text
+///   prompt's line is the text itself, a blank line takes the default. The
+///   line is echoed, so the transcript reads like a typed session.
 pub enum Prompter {
     Terminal(Option<std::fs::File>),
     Script {
@@ -115,8 +116,9 @@ impl Prompter {
         Ok(Self::Terminal(Some(file)))
     }
 
-    /// Append one answer to the recording: `select` writes the item text,
-    /// `input` the typed line.
+    /// Append one answer to the recording: a select writes its stable key
+    /// (the item text unless the caller gave a separate key), an input the
+    /// typed line.
     fn record(record: &Option<std::fs::File>, answer: &str) {
         if let Some(record) = record {
             use std::io::Write;
@@ -130,22 +132,36 @@ impl Prompter {
     /// means the script ran out — the caller decides what that leaves to
     /// the engine.
     pub async fn select(&self, prompt: &str, items: &[&str], default: usize) -> Option<usize> {
+        self.select_keyed(prompt, items, items, default).await
+    }
+
+    /// One choice whose display label and stable script key may differ: a
+    /// history entry prints its task id, while `--record` writes the key, so
+    /// the script can replay on another run. A script line matches the label,
+    /// its 1-based position, or one key; `keys` has one entry per item.
+    pub async fn select_keyed(
+        &self,
+        prompt: &str,
+        items: &[&str],
+        keys: &[&str],
+        default: usize,
+    ) -> Option<usize> {
+        assert_eq!(items.len(), keys.len(), "every choice needs one key");
         match self {
             Self::Terminal(record) => {
                 let prompt = prompt.to_string();
                 let items: Vec<String> = items.iter().map(|item| item.to_string()).collect();
-                let (picked, answer) = tokio::task::spawn_blocking(move || {
-                    let picked = Select::with_theme(&ColorfulTheme::default())
+                let picked = tokio::task::spawn_blocking(move || {
+                    Select::with_theme(&ColorfulTheme::default())
                         .with_prompt(&prompt)
                         .items(&items)
                         .default(default)
-                        .interact()?;
-                    Ok::<_, std::io::Error>((picked, items[picked].clone()))
+                        .interact()
                 })
                 .await
                 .unwrap_or_else(|error| quit(&format!("the menu task failed: {error}")))
                 .unwrap_or_else(|error| quit(&format!("the menu failed: {error}")));
-                Self::record(record, &answer);
+                Self::record(record, keys[picked]);
                 Some(picked)
             }
             Self::Script { lines, number } => {
@@ -169,9 +185,22 @@ impl Prompter {
                 {
                     return Some(position - 1);
                 }
-                quit(&format!(
-                    "script line {line_no} is '{line}': no such choice here — one of {items:?} (exact text or 1-based position)"
-                ));
+                let matching: Vec<usize> = keys
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, key)| **key == line)
+                    .map(|(index, _)| index)
+                    .collect();
+                match matching.as_slice() {
+                    [index] => Some(*index),
+                    [] => quit(&format!(
+                        "script line {line_no} is '{line}': no such choice here — one of {items:?} (exact text, 1-based position or key)"
+                    )),
+                    _ => quit(&format!(
+                        "script line {line_no} is '{line}': {} choices share that key — use the exact label or its 1-based position",
+                        matching.len()
+                    )),
+                }
             }
         }
     }
@@ -220,6 +249,138 @@ fn refused_settled(error: &acts::ActError, nid: &str) -> bool {
     false
 }
 
+/// One execution on a run's history path: the task instance (`tid`) and the
+/// node it runs (`nid`, `name`).
+#[derive(Clone, Debug)]
+struct HistoryEntry {
+    nid: String,
+    tid: String,
+    name: String,
+}
+
+impl HistoryEntry {
+    /// The node's display name; a history entry without a declared name gets
+    /// its action key (or node id) at build time, so this is the final
+    /// fallback for a row that has neither.
+    fn display_name(&self) -> &str {
+        if self.name.is_empty() {
+            &self.nid
+        } else {
+            &self.name
+        }
+    }
+
+    /// The menu label: the node name and the task id, the two facts a user
+    /// needs to pick one instance among several generations.
+    fn label(&self) -> String {
+        format!("{}  task={}", self.display_name(), self.tid)
+    }
+}
+
+/// The history path from one execution back to the run's root: the task
+/// predecessor chain when the row names one (the flow order), and the
+/// execution's parent when it does not (a pushed act). Virtual `block`
+/// containers are walked through but not listed — they are the kernel's own
+/// grouping, not a node a user acts on.
+fn history_path(
+    graph: &acts::ProcessGraph,
+    tasks: &[acts::TaskInfo],
+    start: &str,
+) -> Vec<HistoryEntry> {
+    let mut by_tid: HashMap<&str, &acts::GraphNode> = HashMap::new();
+    for node in &graph.nodes {
+        if let Some(tid) = node.tid.as_deref() {
+            by_tid.insert(tid, node);
+        }
+    }
+    let mut path = Vec::new();
+    let mut current = start.to_string();
+    let mut seen = HashSet::new();
+    while seen.insert(current.clone()) {
+        let Some(task) = tasks.iter().find(|task| task.id == current) else {
+            break;
+        };
+        let node = by_tid.get(current.as_str()).copied();
+        if node.is_none_or(|node| node.kind != "block") {
+            // An unnamed act (a pushed vote, a fan-out leaf) carries the
+            // action key it runs in its params; that key is the name a user
+            // knows it by, and a stable script key across runs.
+            let name = if task.name.is_empty() {
+                node.and_then(|node| node.params.get("key"))
+                    .and_then(|key| key.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            } else {
+                task.name.clone()
+            };
+            path.push(HistoryEntry {
+                nid: task.nid.clone(),
+                tid: task.id.clone(),
+                name,
+            });
+        }
+        // The row's `prev` is the node the flow came from; with several
+        // generations of it, the latest one that started before this
+        // execution is the one it inherited. A pushed act has no predecessor
+        // row — its graph parent is the act it hangs under.
+        let previous = task.prev.as_ref().and_then(|prev| {
+            tasks
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| {
+                    &candidate.nid == prev
+                        && candidate.id != current
+                        && candidate.start_time > 0
+                        && candidate.start_time <= task.start_time
+                })
+                .max_by_key(|(index, candidate)| (candidate.start_time, candidate.end_time, *index))
+                .map(|(_, candidate)| candidate.id.clone())
+        });
+        let parent = node.and_then(|node| node.parent_tid.clone());
+        match previous.or(parent) {
+            Some(next) if next != current => current = next,
+            _ => break,
+        }
+    }
+    path
+}
+
+/// The stable script keys for a history menu: the node name while it is
+/// unique on the path, and `name#<index>` for a name that appears several
+/// times (a fan-out's repeated act), so `--record` never writes a tid that
+/// the next run cannot match.
+fn history_keys(path: &[HistoryEntry]) -> Vec<String> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for entry in path {
+        *counts.entry(entry.display_name()).or_default() += 1;
+    }
+    path.iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let name = entry.display_name();
+            if counts.get(name).copied().unwrap_or(0) == 1 {
+                name.to_string()
+            } else {
+                format!("{name}#{index}")
+            }
+        })
+        .collect()
+}
+
+/// Print one history path, the first entry marked with `first` (the act the
+/// menu is about); auxiliary evidence for rewinds and sign-chain actions.
+fn print_history(path: &[HistoryEntry], note: &str, first: &str) {
+    println!("   {note}");
+    for (index, entry) in path.iter().enumerate() {
+        let here = if index == 0 {
+            format!("  <- {first}")
+        } else {
+            String::new()
+        };
+        println!("     {}  task={}{here}", entry.display_name(), entry.tid);
+    }
+}
+
 #[derive(Default)]
 pub struct Client {
     /// node id → `(pid, tid)` of every step instance the demo has seen, so
@@ -249,6 +410,9 @@ pub struct Client {
     /// The demo directory: the sys users plus `boss` — the offered choices
     /// of every user-picking prompt (approver, transfer, delegate, urge).
     users: Vec<String>,
+    /// Raised when a script runs out of answers: the demo stops waiting for
+    /// a run no client will decide any further.
+    exhausted: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl Client {
@@ -269,6 +433,22 @@ impl Client {
     pub fn recording(mut self, path: &std::path::Path) -> std::io::Result<Self> {
         self.prompter = Prompter::recording(path)?;
         Ok(self)
+    }
+
+    /// Raise `stop` when a script runs out of answers: the caller stops
+    /// waiting instead of leaving the demo parked on an act no scripted
+    /// client will answer.
+    pub fn stop_when_exhausted(mut self, stop: Arc<tokio::sync::Notify>) -> Self {
+        self.exhausted = Some(stop);
+        self
+    }
+
+    /// The script had no line left for an act: the rest is left to the engine
+    /// and the caller is told it may stop waiting.
+    fn script_ran_out(&self) {
+        if let Some(stop) = &self.exhausted {
+            stop.notify_one();
+        }
     }
 
     /// Bind the demo's human actors to the running engine: every directory
@@ -325,6 +505,41 @@ impl Client {
             .get(tid)
             .map(|id| self.actor(id))
             .unwrap_or_else(|| system.clone())
+    }
+
+    /// The action just decided this act: record it as the cancel target now,
+    /// not only when its `Completed` message reaches the clerk — the next
+    /// act's menu can open before that message, and `cancel` must point at the
+    /// work just done.
+    fn note_completed(&self, nid: &str, pid: &str, tid: &str) {
+        *self.last_completed.lock().unwrap() =
+            Some((nid.to_string(), pid.to_string(), tid.to_string()));
+    }
+
+    /// The history path from one act back to the run's root, as the task rows
+    /// and the graph agree on it: each entry carries the task id and the node
+    /// name the menus print.
+    async fn history(
+        &self,
+        system: &Executor,
+        pid: &str,
+        tid: &str,
+    ) -> std::result::Result<Vec<HistoryEntry>, String> {
+        let graph = system
+            .proc()
+            .graph(pid)
+            .await
+            .map_err(|error| error.to_string())?;
+        let info = system
+            .proc()
+            .get(pid)
+            .await
+            .map_err(|error| error.to_string())?;
+        let path = history_path(&graph, &info.tasks, tid);
+        if path.is_empty() {
+            return Err(format!("no task history for {tid}"));
+        }
+        Ok(path)
     }
 
     pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
@@ -503,6 +718,7 @@ impl Client {
             let items: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
             let Some(picked) = self.prompter.select("decide:", &items, 0).await else {
                 println!("   the script ran out — the rest is left to the engine");
+                self.script_ran_out();
                 return;
             };
             match choices[picked].1 {
@@ -556,6 +772,7 @@ impl Client {
                 Menu::Complete => match self.decide_complete(&pid, &tid, &key, &decider).await {
                     Ok(line) => {
                         println!("   {line}");
+                        self.note_completed(&nid, &pid, &tid);
                         return;
                     }
                     Err(line) if line.contains("ActionNotAllowed") => {
@@ -583,7 +800,7 @@ impl Client {
                     }
                 }
                 Menu::RemoveApprover => {
-                    match self.decide_remove_approver(&nid, &tid, system).await {
+                    match self.decide_remove_approver(&nid, &pid, &tid, system).await {
                         Ok(line) => println!("   {line}"),
                         Err(line) if line.contains("ActionNotAllowed") => {
                             println!("   the act already settled — left to the engine");
@@ -607,6 +824,9 @@ impl Client {
                     // A submit settles the act like a completion — the flow
                     // moves on, only the label differs — so the menu ends.
                     let outcome = decider.act().submit(&pid, &tid, Vars::new()).await;
+                    if outcome.is_ok() {
+                        self.note_completed(&nid, &pid, &tid);
+                    }
                     if self.report(&outcome, &nid, "submitted") {
                         return;
                     }
@@ -694,6 +914,22 @@ impl Client {
         decider: &Executor,
         system: &Executor,
     ) -> std::result::Result<(String, bool), String> {
+        // The sign chain hangs on this act; print where it sits on the path
+        // back to the root, task id and node name on every entry.
+        let history = self.history(system, pid, tid).await;
+        match &history {
+            Ok(path) => print_history(
+                path,
+                "add approver: the sign chain hangs on this act; history to the root:",
+                "this act",
+            ),
+            Err(error) => println!("   history unavailable: {error}"),
+        }
+        let here = history
+            .ok()
+            .and_then(|path| path.into_iter().next())
+            .map(|entry| format!("{} (task {})", entry.display_name(), entry.tid))
+            .unwrap_or_else(|| format!("task {tid}"));
         // The two sign positions, spelled out first: the added approver signs
         // before the current decider, or after her (the default).
         let Some(mode) = self
@@ -734,11 +970,11 @@ impl Client {
             .await
             .map_err(|error| error.to_string())?;
         if assigned {
-            Ok((format!("added approver {approver} under {tid}"), true))
+            Ok((format!("added approver {approver} under {here}"), true))
         } else {
             Ok((
                 format!(
-                    "added approver {approver} under {tid} as a plain co-signer \
+                    "added approver {approver} under {here} as a plain co-signer \
                      (the act has no decider: before/after needs one, and the \
                      act's own decision is still due)"
                 ),
@@ -752,9 +988,27 @@ impl Client {
     async fn decide_remove_approver(
         &self,
         nid: &str,
+        pid: &str,
         tid: &str,
         system: &Executor,
     ) -> std::result::Result<String, String> {
+        // The removed act hangs under this one; print the path back to the
+        // root so the report names the node the sign chain was added to and
+        // the task id it is being removed from.
+        let history = self.history(system, pid, tid).await;
+        match &history {
+            Ok(path) => print_history(
+                path,
+                "remove approver: the pushed acts hang on this act; history to the root:",
+                "this act",
+            ),
+            Err(error) => println!("   history unavailable: {error}"),
+        }
+        let here = history
+            .ok()
+            .and_then(|path| path.into_iter().next())
+            .map(|entry| format!("{} (task {})", entry.display_name(), entry.tid))
+            .unwrap_or_else(|| format!("task {tid}"));
         let prefix = format!("{nid}#push");
         let mut leaves: Vec<(String, String, String)> = self
             .seen
@@ -768,8 +1022,17 @@ impl Client {
         if leaves.is_empty() {
             return Err(format!("no pushed act under {nid}"));
         }
-        let items: Vec<&str> = leaves.iter().map(|(seen, _, _)| seen.as_str()).collect();
-        let Some(picked) = self.prompter.select("remove which:", &items, 0).await else {
+        let items: Vec<String> = leaves
+            .iter()
+            .map(|(seen, _, leaf_tid)| format!("{seen}  task={leaf_tid}"))
+            .collect();
+        let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        let keys: Vec<&str> = leaves.iter().map(|(seen, _, _)| seen.as_str()).collect();
+        let Some(picked) = self
+            .prompter
+            .select_keyed("remove which:", &item_refs, &keys, 0)
+            .await
+        else {
             return Err("the script ran out — the rest is left to the engine".to_string());
         };
         let Some((seen, leaf_pid, leaf_tid)) = leaves
@@ -790,7 +1053,7 @@ impl Client {
             .remove(&leaf_pid, &leaf_tid, Vars::new())
             .await
             .map_err(|error| error.to_string())?;
-        Ok(format!("removed {seen}"))
+        Ok(format!("removed {seen} (task {leaf_tid}) from {here}"))
     }
 
     /// `remind`: a non-decider urges the act; the pick leaves the decider
@@ -896,10 +1159,13 @@ impl Client {
         Ok(format!("delegated {tid} to {delegatee}"))
     }
 
-    /// `back`: return the flow to an earlier node — the graph's predecessor
-    /// of this act by default. The rewind closes this act's generation and
-    /// re-enters the named node, which re-runs as a *new* instance: its new
-    /// `Created` carries a different `tid`, and the menu asks again on it.
+    /// `back`: return the flow to an earlier task on this act's history path
+    /// to the root. The rewind closes this act's generation and re-enters the
+    /// named node, which re-runs as a *new* instance: its new `Created`
+    /// carries a different `tid`, and the menu asks again on it. The menu
+    /// names every entry by its task id and node name, so one instance among
+    /// several generations can be picked; the nearest predecessor is the
+    /// default.
     async fn decide_back(
         &self,
         system: &Executor,
@@ -908,42 +1174,40 @@ impl Client {
         nid: &str,
         decider: &Executor,
     ) -> std::result::Result<String, String> {
-        let graph = system.proc().graph(pid).await.ok();
-        let previous = graph.as_ref().and_then(|graph| {
-            graph
-                .nodes
-                .iter()
-                .find(|node| node.next.as_deref() == Some(nid))
-                .map(|node| node.nid.clone())
-        });
-        let nodes: Vec<String> = graph
-            .iter()
-            .flat_map(|graph| graph.nodes.iter().map(|node| node.nid.clone()))
-            .collect();
-        if nodes.is_empty() {
-            return Err("no run graph to return within".to_string());
-        }
-        // The graph's predecessor of this act is the preselected default.
-        let default = nodes
-            .iter()
-            .position(|node| Some(node) == previous.as_ref())
-            .unwrap_or(0);
-        let node_refs: Vec<&str> = nodes.iter().map(String::as_str).collect();
+        let path = self.history(system, pid, tid).await?;
+        print_history(
+            &path,
+            "back: this act's history to the root (nearest predecessor first):",
+            "this act",
+        );
+        let labels: Vec<String> = path.iter().map(HistoryEntry::label).collect();
+        let keys = history_keys(&path);
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        // The act itself is entry 0; its nearest predecessor is the default.
+        let default = usize::from(path.len() > 1);
         let Some(picked) = self
             .prompter
-            .select("return to which node:", &node_refs, default)
+            .select_keyed(
+                "return to which task (back to the root):",
+                &label_refs,
+                &key_refs,
+                default,
+            )
             .await
         else {
             return Err("the script ran out — the rest is left to the engine".to_string());
         };
-        let to = nodes[picked].clone();
+        let target = &path[picked];
         decider
             .act()
-            .back(pid, tid, Vars::new().with("to", to.clone()))
+            .back(pid, tid, Vars::new().with("to", target.nid.clone()))
             .await
             .map_err(|error| error.to_string())?;
         Ok(format!(
-            "returned {nid} to {to} — it re-runs as a new instance (acts announced before the rewind may still ask: leave them to the engine)"
+            "returned {nid} to {} (task {}) — it re-runs as a new instance (acts announced before the rewind may still ask: leave them to the engine)",
+            target.display_name(),
+            target.tid
         ))
     }
 
@@ -988,59 +1252,59 @@ impl Client {
         tid: &str,
         nid: &str,
     ) -> std::result::Result<String, String> {
+        // The last act the flow moved past is the default target and the
+        // start of the history path; at the very first act there is none, so
+        // the current act's own path is the best available listing.
         let last = self.last_completed.lock().unwrap().clone();
-        let (default_nid, default) = match &last {
-            Some((nid, target_pid, target_tid)) if target_tid != tid && target_pid == pid => {
-                (nid.clone(), Some((target_pid.clone(), target_tid.clone())))
-            }
-            _ => (nid.to_string(), None),
+        let start = last
+            .as_ref()
+            .filter(|(_, target_pid, target_tid)| target_pid == pid && target_tid != tid)
+            .map(|(_, _, target_tid)| target_tid.clone())
+            .unwrap_or_else(|| tid.to_string());
+        let path = self.history(system, pid, &start).await?;
+        let marker = if start == tid {
+            "this act"
+        } else {
+            "last completed"
         };
-        // Every node the run has instantiated, the last-completed one (the
-        // default target) preselected.
-        let mut nodes: Vec<String> = self.seen.lock().unwrap().keys().cloned().collect();
-        nodes.sort();
-        if !nodes.iter().any(|node| node == &default_nid) {
-            nodes.insert(0, default_nid.clone());
-        }
-        let default_index = nodes
-            .iter()
-            .position(|node| node == &default_nid)
-            .unwrap_or(0);
-        let node_refs: Vec<&str> = nodes.iter().map(String::as_str).collect();
+        print_history(
+            &path,
+            "cancel: the history to the root (the default target first):",
+            marker,
+        );
+        let labels: Vec<String> = path.iter().map(HistoryEntry::label).collect();
+        let keys = history_keys(&path);
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
         let Some(picked) = self
             .prompter
-            .select("cancel which node:", &node_refs, default_index)
+            .select_keyed(
+                "cancel which task (back to the root):",
+                &label_refs,
+                &key_refs,
+                0,
+            )
             .await
         else {
             return Err("the script ran out — the rest is left to the engine".to_string());
         };
-        let target_nid = nodes[picked].clone();
-        let (target_pid, target_tid) = if let Some((target_pid, target_tid)) = default {
-            (target_pid, target_tid)
-        } else if target_nid == nid {
-            (pid.to_string(), tid.to_string())
-        } else {
-            self.seen
-                .lock()
-                .unwrap()
-                .get(&target_nid)
-                .cloned()
-                .ok_or_else(|| format!("no instance of {target_nid} has run yet"))?
-        };
+        let target = &path[picked];
         let executor = self
             .deciders
             .lock()
             .unwrap()
-            .get(&target_tid)
+            .get(&target.tid)
             .map(|id| self.actor(id))
             .unwrap_or_else(|| system.clone());
         executor
             .act()
-            .cancel(&target_pid, &target_tid, Vars::new())
+            .cancel(pid, &target.tid, Vars::new())
             .await
             .map_err(|error| error.to_string())?;
         Ok(format!(
-            "cancelled {target_nid} — it re-runs as a new instance (acts announced before the rewind may still ask: leave them to the engine)"
+            "cancelled {} (task {}) from {nid} — it re-runs as a new instance (acts announced before the rewind may still ask: leave them to the engine)",
+            target.display_name(),
+            target.tid
         ))
     }
 }

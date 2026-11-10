@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::scheduler::shell::*;
+use std::collections::HashMap;
 
 /// The rewind operation: `Back` to an earlier step, or `Cancel` of the closed
 /// execution itself.
@@ -61,11 +62,39 @@ impl ActOperation for ReenterTask {
                 outbox_id.key == decision_key && record.topic == "task.cancelled"
             });
             let graph = task_graph(snapshot)?;
+            // The declared model vars of every node the closure may recreate,
+            // read from the durable model: a re-entered generation starts with
+            // the scope the declaration gives it, exactly like generation 0.
+            let mut vars: HashMap<String, Vec<(String, String)>> = HashMap::new();
+            if let Some(model) = model_of(snapshot)? {
+                let mut nodes: Vec<&str> = snapshot
+                    .tasks
+                    .keys()
+                    .map(|task| task.node.as_str())
+                    .collect();
+                nodes.sort_unstable();
+                nodes.dedup();
+                for node in nodes {
+                    let Some(data) = model.node_data(node) else {
+                        continue;
+                    };
+                    let declared: Vec<(String, String)> = data
+                        .content
+                        .vars()
+                        .into_iter()
+                        .map(|(name, value)| (name, value.to_string()))
+                        .collect();
+                    if !declared.is_empty() {
+                        vars.insert(node.to_string(), declared);
+                    }
+                }
+            }
             let command = crate::scheduler::core::plan::generation::ReenterCommand {
                 process_id: id.process_id.clone(),
                 source: task_id.clone(),
                 target_task_id: target,
                 cancels_forward,
+                vars,
                 source_operation: claim.clone(),
             };
             Reenter::plan((&graph, snapshot), &command).map_err(runtime)?

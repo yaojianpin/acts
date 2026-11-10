@@ -12,7 +12,7 @@ use crate::scheduler::core::{
 
 use crate::scheduler::core::plan::ActPlan;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +26,11 @@ pub(crate) struct ReenterCommand {
     /// cancelled act (`Cancelled`), where a `Back` closes the branches beside
     /// its path (`Skipped`).
     pub(crate) cancels_forward: bool,
+    /// The declared model variables per node, seeded on every recreated
+    /// generation's own scope — the same fact the seed writes for generation 0
+    /// and the fan-out seeds on a child. A rewind must not leave a re-run
+    /// reading a scope the model declares it has.
+    pub(crate) vars: HashMap<String, Vec<(String, String)>>,
     pub(crate) source_operation: OperationCommit,
 }
 
@@ -241,10 +246,16 @@ impl ActPlan for Reenter {
         // The auto/waiting decision is durable per-execution state: recreated
         // generations inherit it from the generation they replace, or default
         // to self-completing when the replaced generation predates the
-        // variable.
-        let variable_writes: Vec<VariableWrite> = closure
-            .iter()
-            .map(|(old_id, _, new_id)| VariableWrite {
+        // variable. The declared model variables are seeded alongside it,
+        // exactly like the seed writes them for generation 0 and the fan-out
+        // writes them on a child: a re-entered generation is a NEW execution,
+        // so it starts from the declaration, never from the previous
+        // generation's mutations. State that must survive a rewind lives on a
+        // scope that outlives the generation (a workflow-level variable), not
+        // on the step.
+        let mut variable_writes: Vec<VariableWrite> = Vec::with_capacity(closure.len());
+        for (old_id, _, new_id) in &closure {
+            variable_writes.push(VariableWrite {
                 scope: new_id.clone(),
                 name: "auto".to_string(),
                 value: snapshot
@@ -252,8 +263,19 @@ impl ActPlan for Reenter {
                     .get(&((*old_id).clone(), "auto".to_string()))
                     .cloned()
                     .unwrap_or_else(|| "1".to_string()),
-            })
-            .collect();
+            });
+            let mut written = HashSet::from(["auto".to_string()]);
+            for (name, value) in command.vars.get(old_id.node.as_str()).into_iter().flatten() {
+                if !written.insert(name.clone()) {
+                    continue;
+                }
+                variable_writes.push(VariableWrite {
+                    scope: new_id.clone(),
+                    name: name.clone(),
+                    value: value.clone(),
+                });
+            }
+        }
 
         // The re-entered source generation is the one that runs again; the
         // recreated downstream waits for its propagation.

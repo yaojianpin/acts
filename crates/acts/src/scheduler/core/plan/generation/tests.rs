@@ -89,6 +89,7 @@ fn command() -> ReenterCommand {
         // re-entered task.
         target_task_id: "source".into(),
         cancels_forward: false,
+        vars: HashMap::new(),
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),
@@ -127,6 +128,37 @@ fn reentry_creates_new_generation_and_never_mutates_history() {
         .find(|create| create.task == id("target", 2))
         .unwrap();
     assert_eq!(target.predecessors, vec![id("source", 2)]);
+}
+
+#[test]
+fn reentry_seeds_the_declared_model_vars_on_every_recreated_generation() {
+    let mut command = command();
+    command.vars.insert(
+        "source".into(),
+        vec![
+            ("flag".into(), "true".into()),
+            // A declared var the engine also owns must not duplicate the
+            // auto write: the plan validator refuses duplicate writes.
+            ("auto".into(), "0".into()),
+        ],
+    );
+    command
+        .vars
+        .insert("target".into(), vec![("amount".into(), "42".into())]);
+    let plan = Reenter::plan((&graph(), &snapshot()), &command).unwrap();
+    let write = |scope: TaskId, name: &str| {
+        plan.variable_writes
+            .iter()
+            .find(|write| write.scope == scope && write.name == name)
+            .map(|write| write.value.as_str())
+    };
+    assert_eq!(write(id("source", 2), "flag"), Some("true"));
+    assert_eq!(
+        write(id("source", 2), "auto"),
+        Some("1"),
+        "the auto decision keeps its own write"
+    );
+    assert_eq!(write(id("target", 2), "amount"), Some("42"));
 }
 
 #[test]
@@ -325,6 +357,7 @@ fn back_to_a_step_outside_the_redo_closure_is_refused() {
         source: id("stray", 0),
         target_task_id: "target".into(),
         cancels_forward: false,
+        vars: HashMap::new(),
         source_operation: OperationCommit {
             id: OperationId {
                 process_id: "p1".into(),

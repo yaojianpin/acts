@@ -146,17 +146,23 @@ impl ActOperation for PropagateTask {
                 flow: PropagateTask::flow_of(host, snapshot, &task_id).await?,
             };
             let mut plan = Propagate::plan((&graph, snapshot), &command).map_err(runtime)?;
-            // A completed execution's own scope data folds into its parent
-            // — the legacy `Task::next` → `parent.update_data(&outputs)`:
+            // A completed or submitted execution's own scope data folds into
+            // its parent — the legacy `Task::next` → `parent.update_data(&outputs)`:
             // what a step's package wrote is what the step (and, up the
             // chain, the run) answers, which is what a workflow-level
-            // `exposes` judges and what `proc:get`'s data shows. Engine
-            // facts and anything this operation already writes for that scope
-            // are left out (the failure path owns its own error
-            // variables).
-            if task.as_ref().map(|e| e.state)
-                == Some(crate::scheduler::core::model::task_graph::TaskState::Completed)
-                && let Some(parent) = task.as_ref().and_then(|e| e.parent.clone())
+            // `exposes` judges and what `proc:get`'s data shows. A submit is a
+            // signed completion: its data reaches the parent exactly like a
+            // plain completion's (the approve demo's root-level `auto_submit`
+            // flag depends on it). Engine facts and anything this operation
+            // already writes for that scope are left out (the failure path
+            // owns its own error variables).
+            if matches!(
+                task.as_ref().map(|e| e.state),
+                Some(
+                    crate::scheduler::core::model::task_graph::TaskState::Completed
+                        | crate::scheduler::core::model::task_graph::TaskState::Submitted
+                )
+            ) && let Some(parent) = task.as_ref().and_then(|e| e.parent.clone())
             {
                 let mut carried: Vec<(String, String)> = Vec::new();
                 for ((scope, name), raw) in &snapshot.variables {
@@ -565,6 +571,62 @@ mod tests {
         attach_join_message(&snapshot, &mut plan, &id("a"), &intent(4)).unwrap();
         assert_eq!(plan.outbox.len(), 1);
         assert_eq!(plan.outbox[0].topic, "task.completed");
+    }
+
+    /// A submit is a signed completion: the settled execution's own scope data
+    /// folds into its parent exactly like a plain completion's — the approve
+    /// demo's root-level `auto_submit` flag depends on this.
+    #[tokio::test]
+    async fn a_submitted_execution_folds_its_scope_into_the_parent() {
+        let host = host();
+        let workflow = crate::model::Workflow::new().with_step(|step| step.with_id("s1"));
+        let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
+        let mut snapshot = spec.seed_snapshot().unwrap();
+        let source = id("s1");
+        snapshot.tasks.get_mut(&source).unwrap().state = TaskState::Submitted;
+        snapshot.variables.insert(
+            (source.clone(), "auto_submit".to_string()),
+            "false".to_string(),
+        );
+        let root = snapshot.tasks[&source]
+            .parent
+            .clone()
+            .expect("the seeded step hangs under the root");
+        let operation_id = OperationId {
+            process_id: "p".into(),
+            task: source.clone(),
+            sequence: 1,
+        };
+        let claim = OperationCommit {
+            id: operation_id.clone(),
+            claim: ClaimToken {
+                owner: "test".into(),
+                fence: 1,
+                lease_until_ms: i64::MAX,
+                heartbeat_revision: 0,
+            },
+        };
+        let mut lane = CommandLane::detached(&host);
+        let operation = Operation {
+            id: &operation_id,
+            claim: &claim,
+            task_id: source.clone(),
+            task: snapshot.tasks.get(&source).cloned(),
+            snapshot: std::sync::Arc::new(snapshot.clone()),
+            now_ms: 0,
+            lane: &mut lane,
+        };
+        let plan = PropagateTask
+            .next(&host, &operation, Outcome::Planned)
+            .await
+            .unwrap();
+        assert!(
+            plan.variable_writes.iter().any(|write| {
+                write.scope == root && write.name == "auto_submit" && write.value == "false"
+            }),
+            "the submitted scope must fold into the root: {:?}",
+            plan.variable_writes
+        );
     }
 
     /// A `uses` container announced its act at the fan-out; the join adds
