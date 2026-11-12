@@ -590,18 +590,28 @@ impl Client {
             return Ok(());
         }
 
-        // A remind record is the urge a user wrote on a pending act: it
-        // addresses the act's owner and decides nothing. The caller and the
-        // note ride `inputs.params`.
-        if message.r#type == "remind" {
-            let params = message.inputs.get::<Vars>("params").unwrap_or_default();
-            println!(
-                "remind: nid={} owner={:?} from={:?} message={:?}",
-                message.nid,
-                message.owner,
-                params.get::<String>("from"),
-                params.get::<String>("message")
-            );
+        // A notice is a message a step sent (`acts.core.msg` — its one
+        // delivery, with the computed params in `outputs`) or the urge a
+        // user wrote on a pending act (a remind: it addresses the act's
+        // owner, carries the caller and the note in `inputs.params`, and
+        // decides nothing).
+        if message.r#type == "notice" {
+            if message.is_msg() {
+                println!(
+                    "notice: id={} inputs={} outputs={}",
+                    message.tid, message.inputs, message.outputs
+                );
+            } else {
+                let params = message.inputs.get::<Vars>("params").unwrap_or_default();
+                println!(
+                    "remind: nid={} owner={:?} from={:?} message={:?} outputs={}",
+                    message.nid,
+                    message.owner,
+                    params.get::<String>("from"),
+                    params.get::<String>("message"),
+                    message.outputs
+                );
+            }
             return Ok(());
         }
 
@@ -636,10 +646,6 @@ impl Client {
             if message.is_state(MessageState::Created) && message.is_irq() {
                 self.interact(executor, message).await;
             }
-        }
-
-        if message.is_type("msg") {
-            println!("msg: id={} inputs={}", message.tid, message.inputs);
         }
 
         Ok(())

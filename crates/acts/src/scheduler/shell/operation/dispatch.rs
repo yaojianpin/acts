@@ -324,6 +324,18 @@ impl Workers {
         // direct row read during the failure window, which reports its own
         // lag).
         if projected {
+            // The commit's own outbox records are now visible to the
+            // transport — after the aggregate commit and after the projection
+            // — and their outcomes are persisted in one batch confirmation. A
+            // record the confirmation could not settle stays `Pending`; the
+            // outbox pass owns the retry.
+            //
+            // The records deliver before the lifecycle event: a client reads
+            // the run's message stream as the trace, so the terminal records —
+            // the root's own `completed` among them — are on the wire when the
+            // completion event closes the run. The per-process event workers
+            // keep this order on the client side.
+            self.deliver_committed_outbox(loaded, new_outbox).await;
             // The run's lifecycle, from the decision Core made about the
             // freshly committed state: a start while it is alive, one terminal
             // event once every execution settled. A closed sink or an absent
@@ -348,12 +360,6 @@ impl Workers {
                     "recording the subflow parent hand-back failed; the child remains retained"
                 );
             }
-            // The commit's own outbox records are now visible to the
-            // transport — after the aggregate commit and after the projection
-            // — and their outcomes are persisted in one batch confirmation. A
-            // record the confirmation could not settle stays `Pending`; the
-            // outbox pass owns the retry.
-            self.deliver_committed_outbox(loaded, new_outbox).await;
         } else if !new_outbox.is_empty() {
             // Keep the deliverable work visible to the outbox pass (the
             // records are already `Pending`; the pass re-reads them).

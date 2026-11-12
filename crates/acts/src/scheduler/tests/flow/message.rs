@@ -107,6 +107,61 @@ async fn sch_message_workflow_completion_reports_its_exposes() {
     fixture.close().await;
 }
 
+/// The run's message stream is complete when the completion event closes it:
+/// the settling commit's outbox records deliver before the lifecycle event,
+/// so the root's `workflow completed` message precedes
+/// `on_workflow_complete` — a client reading the stream sees the run end in
+/// its messages, and a client closing on the completion event has already
+/// read everything.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_message_workflow_completed_precedes_the_completion_event() {
+    let workflow = Workflow::new()
+        .with_id("flow-msg-root-order")
+        .with_step(|step| step.with_id("s1"));
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    // One shared log for both sinks: the per-process worker runs the handlers
+    // in emission order, so the log reads like a client's wire.
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let channel = fixture.engine().channel_with_options(&ChannelOptions {
+        id: "order-log".to_string(),
+        ..Default::default()
+    });
+    let message_log = order.clone();
+    channel.on_message(move |e| {
+        let log = message_log.clone();
+        async move {
+            log.lock().push(format!("msg {} {}", e.nid, e.state()));
+        }
+    });
+    let complete_log = order.clone();
+    channel.on_complete(move |e| {
+        let log = complete_log.clone();
+        async move {
+            log.lock().push(format!("complete {}", e.state()));
+        }
+    });
+    completed(&fixture.run(Vars::new()).await);
+
+    let log = order.lock().clone();
+    let complete_at = log
+        .iter()
+        .position(|entry| entry.starts_with("complete "))
+        .expect("the completion event is logged");
+    let root_completed_at = log
+        .iter()
+        .position(|entry| {
+            entry.as_str()
+                == format!("msg {} completed", crate::utils::consts::TASK_ROOT_TID).as_str()
+        })
+        .expect("the root's completed message is logged");
+    assert!(
+        root_completed_at < complete_at,
+        "the root's completed message precedes the completion event: {log:?}"
+    );
+    fixture.close().await;
+}
+
 /// The forwarder stamps the window on every announced record: `Created`
 /// carries a start, the terminal record closes it, and `cost()` is the window
 /// (the legacy `sch_message_time` cell, extended to the root).

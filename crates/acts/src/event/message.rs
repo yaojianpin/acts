@@ -127,11 +127,14 @@ impl Message {
     }
 
     /// Whether the message announces an act payload — a `uses` step's
-    /// message. The type word is `step` (the model's only step level); the
-    /// act shape is told by `uses`, never by the type word (see
-    /// `doc/design/message.md`).
+    /// message. The type word is the node level (`step`) or `notice` (a
+    /// `Msg` package's one delivery); the act shape is told by `uses`,
+    /// never by the type word (see `doc/design/message.md`). The one
+    /// exception is the `assignment` notification: it borrows the act
+    /// payload's facts (`uses` included) but is a projection *about* the
+    /// act — a consumer must not answer it like the act's own delivery.
     pub fn is_act(&self) -> bool {
-        self.r#type == "step"
+        self.uses.is_some() && self.r#type != "assignment"
     }
 
     pub fn is_uses(&self, uses: &str) -> bool {
@@ -357,8 +360,9 @@ mod tests {
         assert!(irq.is_irq());
         assert!(!irq.is_msg());
 
-        // `is_uses`/`is_irq` require an act payload: a task-level notice
-        // (`assignment`/`remind`) carries `uses` too but is not one.
+        // `is_uses`/`is_irq` require an act payload: the `assignment`
+        // notification borrows the act payload's `uses` but is a projection
+        // about the act, never one of its deliveries.
         let mut typed = message();
         typed.r#type = "assignment".to_string();
         assert!(!typed.is_uses("acts.core.msg"));

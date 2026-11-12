@@ -17,10 +17,10 @@ use serial_test::serial;
 const USES_USERS: &str = "acts.core.users";
 const USES_PARALLEL: &str = "acts.core.parallel";
 
-/// A container that declares `announce` speaks at the pool wait: its act
-/// `Created` rides the wait itself, carrying the raw declared params (the
-/// pool has not resolved), and the answer never re-announces — the fan-out
-/// and the join proceed unchanged.
+/// A container speaks at the pool wait: its act `Created` rides the wait
+/// itself, carrying the raw declared params (the pool has not resolved), and
+/// the answer never re-announces — the fan-out and the join proceed
+/// unchanged. Every declared node announces this way; there is no opt-out.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_candidates_announce_speaks_at_the_pool_wait() {
@@ -29,7 +29,6 @@ async fn sch_candidates_announce_speaks_at_the_pool_wait() {
             .with_id("sch-candidates-announce")
             .with_step(|step| {
                 step.with_id("approve")
-                    .with_announce(true)
                     .with_uses(
                         USES_PARALLEL,
                         Vars::new().with("in", "${{ candidates }}").with(
@@ -96,7 +95,6 @@ async fn sch_candidates_announce_container_speaks_only_the_declared_shape() {
         .with_id("sch-candidates-declared-shape")
         .with_step(|step| {
             step.with_id("department_manager_approval")
-                .with_announce(true)
                 .with_uses(
                     USES_PARALLEL,
                     Vars::new()
@@ -219,7 +217,6 @@ async fn sch_candidates_push_at_the_announce_wait_fans_out_after_the_answer() {
         .with_id("sch-candidates-push-wait")
         .with_step(|step| {
             step.with_id("approve")
-                .with_announce(true)
                 .with_uses(
                     USES_PARALLEL,
                     Vars::new()
@@ -678,8 +675,16 @@ async fn sch_candidates_owner_resolves_from_the_pool() {
         )
         .await;
 
+    // The `Created` the client saw spoke at the pool wait — before the pool
+    // resolved, so without the owner. The owner materializes with the
+    // act's own completion (the re-entered start resolved and persisted it).
     let created = fixture.wait_created("s1").await;
-    assert_eq!(created.owner.as_deref(), Some("u9"));
+    assert_eq!(created.owner, None);
+    fixture
+        .complete(&created.pid, &created.tid, Vars::new())
+        .await;
+    let completed = fixture.wait_message("s1", MessageState::Completed).await;
+    assert_eq!(completed.owner.as_deref(), Some("u9"));
     fixture.close().await;
 }
 
@@ -974,10 +979,21 @@ async fn sch_named_pools_use_their_own_packages() {
         )
         .await;
 
-    // With every pool computed, the act proceeds and reads each pool under
-    // its own key.
+    // The `Created` the client saw spoke at the first pool wait, with the
+    // raw declarations; the resolution shows on the act's completed message
+    // (the re-entered start pinned the resolved facts). The `irq` act still
+    // waits for its client, so the test decides it once here.
     let created = fixture.wait_created("s1").await;
-    let params = created.params().expect("the resolved params");
+    let params = created.params().expect("the declared params");
+    assert_eq!(
+        params.get::<String>("cc").as_deref(),
+        Some("${{ $assign.cc.ids }}")
+    );
+    fixture
+        .complete(&created.pid, &created.tid, Vars::new())
+        .await;
+    let completed = fixture.wait_message("s1", MessageState::Completed).await;
+    let params = completed.params().expect("the resolved params");
     assert_eq!(params.get::<serde_json::Value>("cc"), Some(json!(["u1"])));
     assert_eq!(
         params.get::<serde_json::Value>("approvers"),

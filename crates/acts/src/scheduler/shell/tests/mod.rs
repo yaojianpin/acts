@@ -7563,7 +7563,9 @@ async fn uses_steps_write_created_message_records() {
     let msg_message = record_of("s_msg", "task.completed");
     let msg_payload: serde_json::Value = serde_json::from_str(&msg_message.payload).unwrap();
     assert_eq!(msg_payload["uses"], "test.msg");
-    assert_eq!(msg_payload["kind"], "step");
+    // A `Msg` run-bound delivery is the notice itself, whatever package
+    // declared it — `test.msg` here, not just `acts.core.msg`.
+    assert_eq!(msg_payload["kind"], "notice");
     assert_eq!(msg_payload["inputs"]["params"]["key"], "msg-1");
 
     // The Irq execution is parked on its message; the plain leaf behind

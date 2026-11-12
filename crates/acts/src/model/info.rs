@@ -118,9 +118,10 @@ pub struct GraphNode {
     #[serde(default)]
     pub vars: Vec<crate::Variant>,
     /// The message records this execution announced, in delivery order — the
-    /// act/task messages (`step`/`workflow`/`branch`/`block`) and the
-    /// task-level notices (`assignment`/`remind`) alike, so a client reads
-    /// the stream off the node instead of joining `msg:ls` rows itself.
+    /// act/task messages (`step`/`workflow`/`branch`), the notices
+    /// (`notice`: an `acts.core.msg` delivery or a remind, plus the
+    /// task-level `assignment`) alike, so a client reads the stream off the
+    /// node instead of joining `msg:ls` rows itself.
     #[serde(default)]
     pub messages: Vec<GraphMessage>,
 }
@@ -131,8 +132,8 @@ pub struct GraphNode {
 pub struct GraphMessage {
     /// The message id (`Message.id`).
     pub id: String,
-    /// The message type (`workflow|step|branch|block`, or the task-level
-    /// notices `assignment`/`remind`).
+    /// The message type (`workflow|step|branch`, the notices `notice` and
+    /// the task-level `assignment`).
     pub r#type: String,
     /// The message state, in the wire vocabulary (`created|completed|…`).
     pub state: String,
@@ -151,13 +152,14 @@ pub struct GraphMessage {
     pub timestamp: i64,
 }
 
-/// The task-level notice types the display annotates (a `step`'s own
-/// lifecycle records are the step itself — they get no annotation).
-const NOTICE_TYPE_ORDER: [&str; 2] = ["remind", "assignment"];
+/// The task-level notice types the display annotates (`notice` covers an
+/// `acts.core.msg` delivery and a remind alike — a `step`'s own lifecycle
+/// records are the step itself and get no annotation).
+const NOTICE_TYPE_ORDER: [&str; 2] = ["notice", "assignment"];
 
 impl GraphNode {
     /// The node's notice counts as the tree display renders them —
-    /// `remind=2, assignment=1`, the vocabulary order, zero counts left
+    /// `notice=2, assignment=1`, the vocabulary order, zero counts left
     /// out — or an empty string when the execution announced no notice.
     pub fn message_counts(&self) -> String {
         let mut counts = Vec::new();

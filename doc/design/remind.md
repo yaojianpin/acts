@@ -9,9 +9,11 @@
 
 非节点 owner（发起人、监督者、管理员）可以催办一个人类审批活动：
 
-- **没有转办人**：通知该活动当前的 owner——`type=remind` 记录即通知，
-  记录的 `owner/assignee` 指向当前 owner，owner 的订阅（`type=remind`
-  glob）收到投递；
+- **没有转办人**：通知该活动当前的 owner——`type=notice` 记录即通知（2026-11-12 起
+  remind 词并入 `notice`，见 `message.md` §2/§3），记录的 `owner/assignee` 指向当前 owner，owner 的订阅（`type=notice`
+  glob）收到投递；催办的 params（`from`/`to`/`message`）在 `inputs.params`，
+  同时作为该通知的 `outputs`——与 `RunAs::Msg` 投递同一规则，区别只在
+  发送方是 `act:remind`；
 - **有转办人**（任务已被转办，`transferred_from` 非空）：向转办人
   （转办后的 owner，即当前 owner）再投递一条 `acts.core.msg` 消息；
 - 两种情况都保存催办记录（消息行 + `proc:graph` 折叠）。

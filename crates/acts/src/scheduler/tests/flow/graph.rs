@@ -188,7 +188,7 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
 
     // Every announced node is a graph node, and its message level is the
     // node's declared word — a `uses` step's act payload says `step` too.
-    // Task-level notices (`assignment`/`remind`) announce no level.
+    // The notices (`notice`, `assignment`) announce no level.
     for message in fixture.messages() {
         let level = message.r#type.as_str();
         if !matches!(level, "workflow" | "branch" | "step" | "block") {
@@ -227,7 +227,7 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
         concat!(
             "workflow id:$ name=Graph Block  uses=nil state=running next=nil\n",
             "└── step id:step1 name=step1  uses=acts.core.block state=running next=nil\n",
-            "    ├── step id:m1 name=  uses=acts.core.msg state=completed next=nil\n",
+            "    ├── step id:m1 name=  uses=acts.core.msg state=completed next=nil notice=1\n",
             "    └── step id:act1 name=  uses=acts.core.irq state=interrupted next=nil\n",
         )
     );
@@ -339,9 +339,9 @@ async fn sch_graph_expands_a_param_fanout_over_its_items() {
             "workflow id:$ name=Graph Fanout  uses=nil state=completed next=nil\n\
              └── step id:fan name=fan  uses=acts.core.parallel state=completed next=nil\n\
              \u{20}   ├── step id:fan#item name=  uses=acts.core.block state=completed next=nil\n\
-             \u{20}   │   └── step id:{leaf_nid} name=  uses=acts.core.msg state=completed next=nil\n\
+             \u{20}   │   └── step id:{leaf_nid} name=  uses=acts.core.msg state=completed next=nil notice=1\n\
              \u{20}   └── step id:fan#item name=  uses=acts.core.block state=completed next=nil\n\
-             \u{20}       └── step id:{leaf_nid} name=  uses=acts.core.msg state=completed next=nil\n"
+             \u{20}       └── step id:{leaf_nid} name=  uses=acts.core.msg state=completed next=nil notice=1\n"
         ),
         "the two items stay visible"
     );
@@ -731,7 +731,9 @@ async fn sch_graph_keeps_the_hierarchy_through_push_remove_and_remind() {
     let remind = act
         .messages
         .iter()
-        .find(|message| message.r#type == "remind")
+        .find(|message| {
+            message.r#type == "notice" && message.uses.as_deref() != Some("acts.core.msg")
+        })
         .expect("the remind record folded onto the assigned act");
     assert_eq!(remind.owner.as_deref(), Some("alice"));
     assert_eq!(remind.state, "created");
@@ -1042,7 +1044,7 @@ async fn sch_graph_folds_the_message_records_onto_their_nodes() {
     // pushed leaves settle.
     let s1 = node("s1");
     let types: Vec<&str> = s1.messages.iter().map(|m| m.r#type.as_str()).collect();
-    assert_eq!(types, vec!["step", "step", "remind", "step"], "{s1:?}");
+    assert_eq!(types, vec!["step", "step", "notice", "step"], "{s1:?}");
     assert_eq!(s1.messages[2].owner.as_deref(), Some("alice"));
     let remind = &s1.messages[2];
     assert_eq!(remind.state, "created");
@@ -1064,11 +1066,11 @@ async fn sch_graph_folds_the_message_records_onto_their_nodes() {
     // own lifecycle records are the step itself and get none.
     let tree = graph.tree_output();
     assert!(
-        tree.contains("step id:s1 name=s1  uses=acts.core.irq state=completed next=nil remind=1"),
+        tree.contains("step id:s1 name=s1  uses=acts.core.irq state=completed next=nil notice=1"),
         "the node line carries its notice counts: {tree}"
     );
     assert!(
-        tree.matches(" next=nil remind=1\n").count() == 1,
+        tree.matches(" next=nil notice=1\n").count() == 1,
         "only the reminded node carries an annotation: {tree}"
     );
     fixture.close().await;

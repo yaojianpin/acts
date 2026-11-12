@@ -42,7 +42,6 @@ steps:
     id: dept_approval
     desc: User's department manager in the department must approve
     uses: acts.core.parallel
-    announce: true
     params:
       in: '${{ $assign.candidates.ids }}'
       join: any

@@ -98,7 +98,7 @@ async fn sch_act_if_true_runs_the_inline_act() {
     assert_completed(fixture.run(Vars::new()).await);
 
     let completed = fixture.wait_message("msg1", MessageState::Completed).await;
-    assert_eq!(completed.r#type, "step");
+    assert_eq!(completed.r#type, "notice");
     assert_eq!(completed.nid, "msg1");
     assert!(completed.is_msg());
     assert_eq!(fixture.state("msg1").await, TaskState::Completed);
@@ -1102,10 +1102,21 @@ async fn sch_act_approvers_refuse_on_a_container_and_the_classic_push_signs_it()
     let mut fixture = FlowFixture::deploy(&workflow).await;
     fixture.start(Vars::new()).await;
 
-    // The pool request first; the container announces nothing while it waits
-    // for its pool.
+    // The container announces Created at the pool wait — every declared node
+    // speaks from its first moment, with the raw declared params (the pool
+    // has not resolved) — and the pool request rides under it.
+    let container = fixture.wait_created("approve").await;
+    assert_eq!(container.r#type, "step");
+    assert_eq!(container.uses.as_deref(), Some(USES_PARALLEL));
+    assert_eq!(
+        container
+            .params()
+            .and_then(|params| params.get::<String>("in"))
+            .as_deref(),
+        Some("${{ candidates }}"),
+        "the Created speaks the raw declaration"
+    );
     let request = fixture.wait_created("approve#cand1").await;
-    assert!(fixture.message("approve", MessageState::Created).is_none());
     fixture
         .complete(
             &request.pid,
@@ -1120,15 +1131,10 @@ async fn sch_act_approvers_refuse_on_a_container_and_the_classic_push_signs_it()
         )
         .await;
 
-    // The pool resolved, and the container announces Created — the message a
-    // client's sign demo drives from. The fan-out runs in the announcing
-    // operation's commit, and the vote starts at once (the container's pool
-    // is never re-asked under it): its owner resolves from the item and the
-    // vote announces itself.
-    let container = fixture.wait_created("approve").await;
-    assert_eq!(container.r#type, "step");
-    assert_eq!(container.uses.as_deref(), Some(USES_PARALLEL));
-
+    // The pool resolved, the fan-out runs in the answering operation's
+    // commit, and the vote starts at once (the container's pool is never
+    // re-asked under it): its owner resolves from the item and the vote
+    // announces itself.
     let mut acts = fixture.wait_created_uses(USES_IRQ, 1).await;
     let vote = acts.remove(0);
 
@@ -1238,17 +1244,17 @@ async fn remind_record_of(fixture: &FlowFixture, node: &str) -> crate::Message {
         fixture
             .messages_of(node)
             .iter()
-            .any(|message| message.r#type == "remind")
+            .any(|message| message.r#type == "notice" && !message.is_msg())
     })
     .await;
     fixture
         .messages_of(node)
         .into_iter()
-        .find(|message| message.r#type == "remind")
+        .find(|message| message.r#type == "notice" && !message.is_msg())
         .expect("the remind record")
 }
 
-/// A non-owner's urge writes a `type=remind` record addressed to the current
+/// A non-owner's urge writes a `type=notice` record addressed to the current
 /// owner and persists it; the owner themselves, an unauthenticated caller and
 /// an unassigned act are all refused, and the act is untouched.
 #[serial]
@@ -1298,6 +1304,14 @@ async fn sch_act_remind_records_the_owner_urged_by_a_non_owner() {
     assert_eq!(params.get::<String>("to").as_deref(), Some("alice"));
     assert_eq!(params.get::<String>("message").as_deref(), Some("hurry"));
     assert!(record.ref_msg_id.is_some(), "the record references the act");
+    // A notice's params are its data: the remind completes them as the
+    // message's `outputs`, the same rule a `Msg` delivery follows.
+    assert_eq!(record.outputs.get::<String>("from").as_deref(), Some("bob"));
+    assert_eq!(record.outputs.get::<String>("to").as_deref(), Some("alice"));
+    assert_eq!(
+        record.outputs.get::<String>("message").as_deref(),
+        Some("hurry")
+    );
 
     // The record is durable in the aggregate's outbox log (a canonical row
     // materializes per ack channel), and the act is untouched.

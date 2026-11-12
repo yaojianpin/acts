@@ -25,12 +25,25 @@ fn completed(terminal: &Terminal) {
 
 /// A step's own `if` is its entry guard: true runs it, false skips it and the
 /// flow falls through to the next declared step (the legacy `step/if` cells).
+/// The skip is the step's whole announcement: one `Skipped` message, the
+/// task-level payload (a package-less step carries no act shape), with no
+/// `Created` before it and no `Completed` in its place.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_step_if_guard_runs_or_skips_and_falls_through() {
-    for (id, guard, expected) in [
-        ("flow-step-if-true", "true", TaskState::Completed),
-        ("flow-step-if-false", "false", TaskState::Skipped),
+    for (id, guard, expected, trail) in [
+        (
+            "flow-step-if-true",
+            "true",
+            TaskState::Completed,
+            vec![MessageState::Created, MessageState::Completed],
+        ),
+        (
+            "flow-step-if-false",
+            "false",
+            TaskState::Skipped,
+            vec![MessageState::Skipped],
+        ),
     ] {
         let mut workflow = Workflow::new()
             .with_id(id)
@@ -45,6 +58,9 @@ async fn sch_step_if_guard_runs_or_skips_and_falls_through() {
             TaskState::Completed,
             "the flow continues past a skipped step"
         );
+        let mut announced = fixture.announced("s1");
+        announced.dedup();
+        assert_eq!(announced, trail, "{guard}: the step's whole announcement");
         fixture.close().await;
     }
 }
@@ -273,7 +289,7 @@ async fn sch_step_uses_packages_announce_and_settle() {
     let mut fixture = FlowFixture::deploy(&workflow).await;
     completed(&fixture.run(Vars::new()).await);
     let delivered = fixture.wait_message("msg1", MessageState::Completed).await;
-    assert_eq!(delivered.r#type, "step");
+    assert_eq!(delivered.r#type, "notice");
     assert!(delivered.is_msg());
     assert_eq!(
         delivered

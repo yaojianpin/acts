@@ -357,15 +357,6 @@ pub struct Step {
     #[serde(default)]
     pub exposes: Vec<Variant>,
 
-    /// Announce this step's act `Created` message at start even while a
-    /// declared candidate pool is still pending. The default defers the
-    /// announcement until the pool resolves (the fan-out's resolved facts
-    /// only exist then); a step that announces early speaks with its raw
-    /// declared params, and its `tid` is a client's handle for step-level
-    /// actions (an added-approver push) from the first moment.
-    #[serde(default)]
-    pub announce: bool,
-
     /// The kernel's own template step for a container package's `in` fan-out
     /// (`<step>#item`), set by the import
     /// ([`crate::scheduler::shell::model::materialize_container_acts`]) and
@@ -531,13 +522,6 @@ impl Step {
 
     pub fn with_expose(mut self, var: Variant) -> Self {
         self.exposes.push(var);
-        self
-    }
-
-    /// Declare `announce`: the step's act `Created` message rides the
-    /// candidate-pool wait instead of deferring to the pool's answer.
-    pub fn with_announce(mut self, announce: bool) -> Self {
-        self.announce = announce;
         self
     }
 

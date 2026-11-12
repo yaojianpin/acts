@@ -504,7 +504,10 @@ pub(super) fn exposed_variables(
 /// same variable space a branch predicate reads. `None` when the expression
 /// does not compile, names something the scope does not hold, or has no JSON
 /// value — the legacy projection completed such an entry as `null`.
-fn evaluate_expression(expr: &str, scope: &[(String, String)]) -> Option<serde_json::Value> {
+pub(super) fn evaluate_expression(
+    expr: &str,
+    scope: &[(String, String)],
+) -> Option<serde_json::Value> {
     let program = acts_expr::Expr::compile(expr).ok()?;
     let mut context = acts_expr::Context::new();
     for name in program.references() {

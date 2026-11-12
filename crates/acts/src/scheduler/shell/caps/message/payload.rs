@@ -21,7 +21,8 @@ use crate::{
             caps::assign::{Assign, Assignment},
             errors::runtime,
             facts::{
-                ActFacts, act_facts, input_vars, message_outputs, node_facts, node_is_virtual,
+                ActFacts, act_facts, evaluate_expression, input_vars, message_outputs,
+                msg_decision, node_facts, node_is_virtual, scope_vars,
             },
             find_step_in_model, model_of,
         },
@@ -103,6 +104,22 @@ fn act_message_payload(
     // `inject_payload_assignment`).
     let assignment = Assignment::of(snapshot, task_id)?;
 
+    // A `Msg` act's single delivery is the notice itself: the params it
+    // carries are the message's data, so they complete as the message's
+    // `outputs` too — the resolved values (the start evaluated the
+    // expressions against the act's scope when it pinned the facts), the
+    // step's `exposes` deciding what the notice exports when it declares
+    // one, the whole params bag otherwise. Computed before the params move
+    // into the inputs bag.
+    let notice = (msg_decision(snapshot, node_id).unwrap_or(false)).then(|| {
+        let exposes = model
+            .as_ref()
+            .and_then(|model| find_step_in_model(model, node_id))
+            .map(|step| step.exposes.clone())
+            .unwrap_or_default();
+        notice_outputs(&params, &exposes, snapshot, task_id)
+    });
+
     let mut inputs = input_vars(snapshot, task_id);
     // The act folds into its step node in the kernel, so the step the
     // legacy message pointed at is the node itself.
@@ -137,7 +154,16 @@ fn act_message_payload(
         // `kind` to the consumer's "act" default and later wrote `act`;
         // the model has no act level, so the word is the step itself —
         // the act shape is told by `uses` (see `doc/design/message.md`).
-        "kind": crate::NodeKind::Step.to_string(),
+        // A package whose run-bound is `Msg` is the exception: its one
+        // delivery IS the notice the step sends, so the word is `notice` —
+        // a consumer of notices reads every `Msg` delivery whatever package
+        // declared it. The msg map (the import for declared nodes, the push
+        // for dynamic ones) holds that run-bound decision per node.
+        "kind": if msg_decision(snapshot, node_id).unwrap_or(false) {
+            "notice".to_string()
+        } else {
+            crate::NodeKind::Step.to_string()
+        },
         "uses": uses,
         "mid": mid,
         // The commit's wall clock: the event time the record carries (the
@@ -154,7 +180,49 @@ fn act_message_payload(
     } else if let Some(outputs) = outputs {
         payload["outputs"] = message_outputs(outputs, task_id);
     }
+    if let Some(outputs) = notice {
+        payload["outputs"] = outputs;
+    }
     Ok(Some(payload))
+}
+
+/// The `outputs` bag of one notice delivery: the notice's computed params.
+/// `exposes` filters it the way a run's `exposes` answers a completion
+/// (`exposed_variables`): an entry with a literal value stands as it is, an
+/// entry with a `${{ }}` value evaluates against the acting execution's
+/// scope chain, a name-only entry reads the computed param of that name,
+/// and a name the params do not hold completes as `null`.
+fn notice_outputs(
+    params: &serde_json::Value,
+    exposes: &[crate::Variant],
+    snapshot: &ProcessSnapshot,
+    scope: &TaskId,
+) -> serde_json::Value {
+    let empty = serde_json::Map::new();
+    let bag = params.as_object().unwrap_or(&empty);
+    let mut outputs = serde_json::Map::new();
+    if exposes.is_empty() {
+        outputs.extend(bag.clone());
+        return serde_json::Value::Object(outputs);
+    }
+    let scope_pairs = scope_vars(snapshot, scope);
+    for expose in exposes {
+        let value = match &expose.value {
+            serde_json::Value::String(text) => match crate::utils::get_expr(text) {
+                Some(expr) => {
+                    evaluate_expression(&expr, &scope_pairs).unwrap_or(serde_json::Value::Null)
+                }
+                None => expose.value.clone(),
+            },
+            serde_json::Value::Null => bag
+                .get(&expose.name)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            value => value.clone(),
+        };
+        outputs.insert(expose.name.clone(), value);
+    }
+    serde_json::Value::Object(outputs)
 }
 
 /// The task-level message payload of one execution *without* a package: the

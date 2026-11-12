@@ -1047,7 +1047,7 @@ impl ApplyAction {
 
     /// The plan of a client `Remind`: a non-owner's urge on an assigned,
     /// live act. It decides nothing — the plan writes the reminder record
-    /// (`type=remind`, the current owner's address, the caller in `from`,
+    /// (`type=notice`, the current owner's address, the caller in `from`,
     /// `ref_msg_id` pointing at the original `Created`) and, on a task that
     /// has been transferred, announces an `acts.core.msg` child to the
     /// transfer target. State, owner and flow are untouched; the msg child
@@ -1113,7 +1113,7 @@ impl ApplyAction {
                         "act '{node}' has no message payload for its remind"
                     ))
                 })?;
-        payload["kind"] = serde_json::json!("remind");
+        payload["kind"] = serde_json::json!("notice");
         Assign::inject_payload_assignment(&mut payload, &assignment);
         payload["ref_msg_id"] = Assign::created_message_id(snapshot, task_id)
             .map(serde_json::Value::String)
@@ -1125,6 +1125,11 @@ impl ApplyAction {
         if !message.is_empty() {
             payload["inputs"]["params"]["message"] = serde_json::Value::String(message.to_string());
         }
+        // The notice's params are its data: they complete as the message's
+        // `outputs` too — the same rule a `Msg` delivery follows; the
+        // difference is only the sender (`act:remind` here, not a step's
+        // own delivery).
+        payload["outputs"] = payload["inputs"]["params"].clone();
         // The key is the operation's identity: deterministic on a replay,
         // unique per remind.
         plan.outbox.push(

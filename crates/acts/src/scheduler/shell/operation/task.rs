@@ -74,15 +74,14 @@ pub(in crate::scheduler::shell) enum Start {
     /// key the request answers); the settlement folds the answer into the
     /// act's variables under that key and re-enters this start (`first` =
     /// this is the first entry, which writes the wait marker; a re-entry
-    /// after a skipped request asks again). `announce` = the step declares
-    /// `announce`, so the act's `Created` message rides this wait instead of
-    /// deferring to the pool's answer.
+    /// after a skipped request asks again). The act's `Created` message
+    /// rides this wait — every declared node announces itself from the first
+    /// moment, with the raw declared params (the pool has not resolved).
     Waiting {
         pool: String,
         params: serde_json::Value,
         uses: String,
         first: bool,
-        announce: bool,
     },
     /// One of the act's assign pools (`pool`) resolved in the kernel — every
     /// atom was local — so that pool needs no round trip: the plan folds the
@@ -111,13 +110,6 @@ impl ActOperation for ExecuteTask {
         let snapshot = operation.snapshot();
         let task_id = &operation.task_id;
         let task = operation.task();
-        // Whether the step declares `announce`: its act `Created` message
-        // rides the pool wait (see `Start::Waiting`) instead of deferring to
-        // the pool's answer.
-        let announce = match task {
-            Some(task) => step_announces(snapshot, &task.model_node)?,
-            None => false,
-        };
         // A branch whose predicate could not be evaluated fails on its first
         // operation: the fan-out admitted it with the failure pinned (see
         // `fanout_command`), which is the legacy branch task erroring in its
@@ -198,7 +190,6 @@ impl ActOperation for ExecuteTask {
                 params: serde_json::to_value(&spec.params).unwrap_or(serde_json::Value::Null),
                 uses: spec.uses,
                 first,
-                announce,
             }));
         }
         // A declared `assign.owner` is a human decision act's owner. The
@@ -267,11 +258,11 @@ impl ActOperation for ExecuteTask {
             Some(task) => step_uses(snapshot, task_id, &task.model_node)?.is_some(),
             None => false,
         };
-        // A step that announced from its pool wait (`announce`) still resolves
-        // fresh facts on the re-entered start — the fan-out reads the pinned
-        // params, and its announcement itself is skipped by the durable key.
+        // A step that announced from its pool wait still resolves fresh facts
+        // on the re-entered start — the fan-out reads the pinned params, and
+        // its announcement itself is skipped by the durable key.
         let facts_pinned = act_facts(snapshot, task_id).is_some();
-        let start = if !package || (announced && (!announce || facts_pinned)) {
+        let start = if !package || (announced && facts_pinned) {
             Start::Started {
                 facts: act_facts(snapshot, task_id),
                 fresh: false,
@@ -446,7 +437,6 @@ impl ActOperation for ExecuteTask {
                 params,
                 uses,
                 first,
-                announce,
             } => {
                 // The act parks like a waiting package (it owes the pool
                 // request, not a client): without the park the ready pass
@@ -471,40 +461,38 @@ impl ActOperation for ExecuteTask {
                         value: params.to_string(),
                     });
                 }
-                // A step that declares `announce` speaks with the wait: its
-                // act `Created` rides this plan, carrying the raw declared
-                // params (the pool has not resolved). The durable key keeps a
-                // re-entry from re-announcing; the re-entered start still
-                // resolves and pins the facts the fan-out reads.
-                if announce {
-                    let created_key = format!(
-                        "message.created:{}:{}:{}",
-                        id.process_id,
+                // Every declared node announces itself from its first moment:
+                // the act's `Created` rides this wait, carrying the raw
+                // declared params (the pool has not resolved). The durable key
+                // keeps a re-entry from re-announcing; the re-entered start
+                // still resolves and pins the facts the fan-out reads.
+                let created_key = format!(
+                    "message.created:{}:{}:{}",
+                    id.process_id,
+                    id.task.node.as_str(),
+                    id.task.generation
+                );
+                if !snapshot
+                    .outbox
+                    .keys()
+                    .any(|outbox_id| outbox_id.key == created_key)
+                    && let Some(mut payload) = operation_message_payload(
+                        snapshot,
+                        &task_id,
                         id.task.node.as_str(),
-                        id.task.generation
+                        None,
+                        None,
+                        None,
+                    )?
+                {
+                    payload["msg_id"] = serde_json::Value::String(crate::utils::longid());
+                    plan.outbox.push(
+                        crate::scheduler::core::model::transition_plan::OutboxIntent {
+                            key: created_key,
+                            topic: "message.created".into(),
+                            payload: payload.to_string(),
+                        },
                     );
-                    if !snapshot
-                        .outbox
-                        .keys()
-                        .any(|outbox_id| outbox_id.key == created_key)
-                        && let Some(mut payload) = operation_message_payload(
-                            snapshot,
-                            &task_id,
-                            id.task.node.as_str(),
-                            None,
-                            None,
-                            None,
-                        )?
-                    {
-                        payload["msg_id"] = serde_json::Value::String(crate::utils::longid());
-                        plan.outbox.push(
-                            crate::scheduler::core::model::transition_plan::OutboxIntent {
-                                key: created_key,
-                                topic: "message.created".into(),
-                                payload: payload.to_string(),
-                            },
-                        );
-                    }
                 }
                 Assign::ask(snapshot, &mut plan, &task_id, &pool, params, uses)?;
                 return Ok(plan);
@@ -872,23 +860,6 @@ impl ExecuteTask {
         plan.validate().map_err(runtime)?;
         Ok(plan)
     }
-}
-
-/// Whether the acting node declares `announce`: its act `Created` message
-/// rides the candidate-pool wait (see `Start::Waiting`) instead of deferring
-/// to the pool's answer. A node without a model step (a pushed act) never
-/// declares it.
-fn step_announces(
-    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
-    model_node: &crate::scheduler::core::model::model_graph::NodeId,
-) -> Result<bool> {
-    let Some(model) = model_of(snapshot)? else {
-        return Ok(false);
-    };
-    let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
-        return Ok(false);
-    };
-    Ok(step.announce)
 }
 
 /// The kernel action a rule's `action` names when it executes at act start.
