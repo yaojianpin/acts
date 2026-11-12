@@ -105,7 +105,7 @@ bashkit = { version = "0.20", default-features = false, features = ["realfs"] }
 # system metrics (the engine's `sys:status` action reports the host process's
 # memory and cpu usage). `system` alone: memory, cpu and processes — no disks,
 # networks, components or users.
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 # pid → lane routing: the scheduler worker lanes and the store-writer shards.
 # XXH3-64 is a fast, stable, seedless hash — a pid's lane is identical in every
 # process and every restart, and independent of the order pids are first seen.
