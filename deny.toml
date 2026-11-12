@@ -63,7 +63,6 @@ skip = [
     { crate = "getrandom@0.3.4", reason = "ahash 0.8 and rand_core 0.9 (rand 0.9/0.10) resolve 0.3" },
     { crate = "hashbrown@0.14.5", reason = "dashmap 6.2" },
     { crate = "hashbrown@0.15.5", reason = "hashlink 0.10, petgraph 0.8 and sqlx-core 0.8" },
-    { crate = "itertools@0.13.0", reason = "bindgen 0.72 (the librocksdb-sys build dependency) and criterion 0.8 are on itertools 0.13; prost-build 0.14 uses 0.14" },
     { crate = "hmac@0.12.1", reason = "sqlx-postgres 0.8 through hkdf 0.12; bashkit's checksum builtins use hmac 0.13" },
     { crate = "md-5@0.10.6", reason = "sqlx-postgres 0.8; bashkit's md5sum builtin uses md-5 0.11" },
     { crate = "parking_lot@0.11.2", reason = "sled 0.34 has not moved past parking_lot 0.11" },
@@ -78,9 +77,10 @@ skip = [
     { crate = "syn@2.0.119", reason = "derive crates (prost-derive, tracing-attributes, rquickjs-macro, sqlx-macros, validator_derive, ...) are still on syn 2" },
     { crate = "webpki-roots@0.26.11", reason = "sqlx-core 0.8 and tokio-websockets 0.10 still use webpki-roots 0.26" },
     { crate = "winnow@0.7.15", reason = "cron 0.17 is on winnow 0.7; the toml 1.1.6-spec parser (toml_edit 0.25) uses 1.0" },
-    { crate = "windows-link@0.1.3", reason = "the windows 0.61 subtree sysinfo 0.37 pulls beside its windows-registry 0.2 set" },
-    { crate = "windows-result@0.3.4", reason = "the windows 0.61 subtree sysinfo 0.37 pulls beside its windows-registry 0.2 set" },
-    { crate = "windows-strings@0.4.2", reason = "the windows 0.61 subtree sysinfo 0.37 pulls beside its windows-registry 0.2 set" },
+    { crate = "windows-core@0.61.2", reason = "iana-time-zone 0.1 (chrono) stays on the windows 0.61 subtree; sysinfo 0.38's windows 0.62 subtree uses windows-core 0.62" },
+    { crate = "windows-link@0.1.3", reason = "iana-time-zone 0.1 (chrono) stays on the windows 0.61 subtree; sysinfo 0.38's windows 0.62 subtree uses windows-link 0.2" },
+    { crate = "windows-result@0.3.4", reason = "iana-time-zone 0.1 (chrono) stays on the windows 0.61 subtree; sysinfo 0.38's windows 0.62 subtree uses windows-result 0.4" },
+    { crate = "windows-strings@0.4.2", reason = "iana-time-zone 0.1 (chrono) stays on the windows 0.61 subtree; sysinfo 0.38's windows 0.62 subtree uses windows-strings 0.5" },
 ]
 
 # windows-sys bumps its major version faster than the ecosystem can agree on
