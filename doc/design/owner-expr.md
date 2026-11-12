@@ -162,7 +162,9 @@ pub enum CandidateExpr {
 - `Value` 保持旧 JSON：`"alice"`、`"${{ reviewer }}"`。
 - 对象形式用 `kind` 标签；`ResourceRef` 用 `resource` 标签；`ContextVar` 用
   `type` 标签。
-- `Duty`：`all`（默认）、`principal`、`deputy`、`member`、`{ custom = "…" }`。
+- `Duty`：`all`（默认）、`principal`、`deputy`、`member`、`{ custom = "…" }`；
+  模型里的任意其他裸词（`duty: assistant`）也解析为部署自定义的
+  `custom`，由业务目录决定其含义。
 - `Relation`：命名字符串（`department_of`、`manager_of`、…）或
   `{ "rel": "resource", "value": "department_of" }` 的部署自定义形式。
 - `VarType`：`user`（默认）、`users`、`role`、`group`、`project`、

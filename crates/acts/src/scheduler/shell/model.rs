@@ -202,6 +202,9 @@ fn materialize_one(step: &mut crate::model::Step) {
                 id: format!("{id}#item"),
                 uses: Some(BLOCK_PACKAGE.to_string()),
                 params: serde_json::json!({ "mode": mode, "steps": object.get("steps") }),
+                // The kernel's own template, not a declared step: it groups
+                // the per-item acts and speaks no message of its own.
+                r#virtual: true,
                 ..Default::default()
             };
             vec![container_branch(format!("{id}#in"), vec![template])]
@@ -1333,6 +1336,7 @@ steps:
         assert_eq!(fan.branches[0].steps.len(), 1);
         let template = &fan.branches[0].steps[0];
         assert_eq!(template.id, "fan#item");
+        assert!(template.r#virtual, "the template step is kernel-internal");
         assert_eq!(template.uses.as_deref(), Some(BLOCK_PACKAGE));
         assert_eq!(template.params["mode"], "parallel");
         assert_eq!(template.branches.len(), 1);

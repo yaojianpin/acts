@@ -28,10 +28,11 @@ use crate::{
 /// package and resolved params) and a *task* payload (a package-less step, a
 /// branch or the workflow root, which the legacy engine also announced — its
 /// `on_task` emits every state change that is not `pending`/`running`). The
-/// `type` is the node level (`workflow|branch|step|act`; the import's virtual
-/// container announces `block`); both shapes carry it explicitly since C6. A
-/// record an earlier kernel wrote omits it on the act shape, where `act`
-/// remains the default — the legacy act was the only shape without `kind`.
+/// `type` is the node level (`workflow|branch|step`; the import's virtual
+/// wrappers are graph-only and announce nothing); both shapes carry it
+/// explicitly since C6. A record an earlier kernel wrote omits it on the act
+/// shape, where `act` remains the default — the legacy act was the only shape
+/// without `kind`.
 pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
     let state = match record.topic.as_str() {
         "message.created" => MessageState::Created,

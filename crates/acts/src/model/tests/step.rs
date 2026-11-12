@@ -446,3 +446,45 @@ fn model_step_uses_code() {
     assert_eq!(step.uses.as_deref(), Some("acts.app.javascript"));
     assert_eq!(step.params, json!("print('x')"));
 }
+
+#[test]
+fn model_step_assign_named_pools_parse_without_flatten() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+      - id: a
+        uses: acts.core.block
+        assign:
+          candidates:
+            params:
+              kind: role
+              name: reviewer
+          cc:
+            kind: context
+            var:
+              type: initiator
+          notice:
+            params: user-a
+            uses: acts.core.users
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let assign = m.steps.first().unwrap().assign.as_ref().unwrap();
+    assert_eq!(
+        assign.candidates.as_ref().unwrap().params,
+        crate::model::CandidateExpr::Role {
+            name: "reviewer".to_string()
+        }
+    );
+    // The bare kind-tagged object form becomes the named pool's params.
+    assert!(matches!(
+        assign.others["cc"].params,
+        crate::model::CandidateExpr::Context { .. }
+    ));
+    // The spec form keeps a bare string as its params under a custom uses.
+    assert_eq!(
+        assign.others["notice"].params,
+        crate::model::CandidateExpr::Value("user-a".to_string())
+    );
+    assert_eq!(assign.others["notice"].uses, "acts.core.users");
+}

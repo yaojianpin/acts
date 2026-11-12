@@ -55,9 +55,10 @@ pub struct Message {
     pub state: MessageState,
 
     /// message type — the node level the message announces:
-    /// workflow | step | branch | block, plus the task-level notices
-    /// `assignment` and `remind`. A step carrying `uses` is a `step` too;
-    /// the act-payload shape is told by `uses`, not by the type word.
+    /// workflow | step | branch, plus the task-level notices `assignment` and
+    /// `remind`. A step carrying `uses` is a `step` too; the act-payload
+    /// shape is told by `uses`, not by the type word. The import's virtual
+    /// wrappers are graph-only and announce nothing.
     pub r#type: String,
 
     /// process id

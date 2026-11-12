@@ -2,6 +2,7 @@ use crate::JoinRule;
 use crate::ValidationRule;
 use crate::Variant;
 use crate::{ModelBase, Vars, model::Branch, model::CandidateExpr};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
@@ -29,7 +30,7 @@ use serde_json::{Value as JsonValue, json};
 ///   (`cc: "abc"`) or the full spec (`my_name: { params, uses }`).
 /// - delegation — runtime state (`delegator`/`delegatee`), moved with
 ///   `act:delegate`/`act:undelegate`, never declared in the model.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct Assign {
     /// The owner: a literal user id, a `${{ … }}` expression, or absent. The
     /// resolution must contain exactly one participant — a human act has one
@@ -45,8 +46,53 @@ pub struct Assign {
     /// exactly like `candidates` (see [`Assign`]). `owner` and `candidates`
     /// are the named fields and never appear here; the runtime refuses the
     /// engine-reserved names on the rest.
+    ///
+    /// `flatten` shapes the serialize side only — the declarations spread
+    /// next to `owner`/`candidates`. The deserialize side is the hand-written
+    /// map walk below, because flatten buffers every value into private
+    /// content and a buffered value carries no YAML position.
     #[serde(flatten)]
     pub others: std::collections::BTreeMap<String, Candidates>,
+}
+
+impl<'de> Deserialize<'de> for Assign {
+    /// A hand-written map walk instead of the derive plus `#[serde(flatten)]`:
+    /// flatten buffers the whole map into `serde::de::Content` before the
+    /// named-pool values ever parse, and a buffered parse carries no YAML
+    /// position — a broken pool would report the start of the whole `assign`
+    /// map (`data did not match any variant of untagged enum Form`) instead
+    /// of the exact line that failed. Reading every value straight off the
+    /// live deserializer keeps [`Candidates`]'s errors on their own line.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AssignVisitor;
+
+        impl<'de> Visitor<'de> for AssignVisitor {
+            type Value = Assign;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an assignment declaration: an owner, a pool or named pools")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut assign = Assign::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "owner" => assign.owner = map.next_value()?,
+                        "candidates" => assign.candidates = map.next_value()?,
+                        _ => {
+                            assign.others.insert(key, map.next_value()?);
+                        }
+                    }
+                }
+                Ok(assign)
+            }
+        }
+
+        deserializer.deserialize_map(AssignVisitor)
+    }
 }
 
 /// One act's candidate-pool declaration (see [`Assign::candidates`]).
@@ -73,31 +119,147 @@ impl<'de> Deserialize<'de> for Candidates {
     /// itself, its bare forms: a string (`cc: "abc"`) or a `kind`-tagged
     /// object (`my_name: { kind: context, var: … }`) — both become `params`
     /// under the default `uses`.
+    ///
+    /// The shape is decided from the first key — `kind` starts a bare
+    /// expression, `params`/`uses` a spec, anything else a declaration whose
+    /// keys are ordered otherwise and must be buffered before the two shapes
+    /// are told apart — instead of an untagged enum: an untagged enum buffers
+    /// the value before it tries the variants, and a buffered value carries
+    /// no YAML position, so every failure reported as `data did not match
+    /// any variant of untagged enum Form` at the value's start. Parsed this
+    /// way, the common shapes read straight off the live deserializer and
+    /// their errors keep the exact line and column.
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Form {
-            /// A bare expression: a string or a `kind`-tagged object.
-            Raw(CandidateExpr),
-            /// The full spec: `{ params, uses }`.
-            Spec {
-                #[serde(default)]
-                params: CandidateExpr,
-                #[serde(default = "default_users_uses")]
-                uses: String,
-            },
+        struct CandidatesVisitor;
+
+        impl<'de> Visitor<'de> for CandidatesVisitor {
+            type Value = Candidates;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a candidate expression or a { params, uses } spec")
+            }
+
+            fn visit_str<E: serde::de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(Candidates {
+                    params: CandidateExpr::Value(value.to_string()),
+                    uses: default_users_uses(),
+                })
+            }
+
+            fn visit_string<E: serde::de::Error>(
+                self,
+                value: String,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(Candidates {
+                    params: CandidateExpr::Value(value),
+                    uses: default_users_uses(),
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let Some(first) = map.next_key::<String>()? else {
+                    // An empty declaration is an empty spec: default params
+                    // and the default users package.
+                    return Ok(Candidates::default());
+                };
+                match first.as_str() {
+                    // A bare expression: the tag opens the object, its word
+                    // picks the payload, and the remaining entries are the
+                    // payload's fields — live, so a bad field reports its
+                    // own line.
+                    "kind" => {
+                        let kind: String = map.next_value()?;
+                        let params = crate::model::owner::dispatch_expression(
+                            &kind,
+                            serde::de::value::MapAccessDeserializer::new(map),
+                        )?;
+                        Ok(Candidates {
+                            params,
+                            uses: default_users_uses(),
+                        })
+                    }
+                    // A spec: `params` and `uses` parse live; anything else
+                    // is not this declaration's business and is ignored,
+                    // exactly as the previous spec shape did.
+                    "params" | "uses" => {
+                        let mut params: Option<CandidateExpr> = None;
+                        let mut uses: Option<String> = None;
+                        match first.as_str() {
+                            "params" => params = Some(map.next_value()?),
+                            _ => uses = Some(map.next_value()?),
+                        }
+                        while let Some(key) = map.next_key::<String>()? {
+                            match key.as_str() {
+                                "params" => params = Some(map.next_value()?),
+                                "uses" => uses = Some(map.next_value()?),
+                                _ => {
+                                    map.next_value::<IgnoredAny>()?;
+                                }
+                            }
+                        }
+                        Ok(Candidates {
+                            params: params.unwrap_or_default(),
+                            uses: uses.unwrap_or_else(default_users_uses),
+                        })
+                    }
+                    // Neither shape opens the object: the declaration's keys
+                    // are ordered otherwise (a value map built sorted, for
+                    // example). Buffer the object and let the tag decide
+                    // between the two shapes; buffered values carry no parse
+                    // position anyway.
+                    other => {
+                        let mut object = serde_json::Map::new();
+                        object.insert(other.to_string(), map.next_value::<serde_json::Value>()?);
+                        while let Some(key) = map.next_key::<String>()? {
+                            object.insert(key, map.next_value::<serde_json::Value>()?);
+                        }
+                        if let Some(kind) = object.remove("kind") {
+                            let serde_json::Value::String(kind) = kind else {
+                                return Err(serde::de::Error::custom(
+                                    "the 'kind' of a candidate expression must be a word",
+                                ));
+                            };
+                            let params = crate::model::owner::dispatch_expression(
+                                &kind,
+                                serde_json::Value::Object(object),
+                            )
+                            .map_err(serde::de::Error::custom)?;
+                            Ok(Candidates {
+                                params,
+                                uses: default_users_uses(),
+                            })
+                        } else {
+                            let SpecExpr { params, uses } =
+                                SpecExpr::deserialize(serde_json::Value::Object(object))
+                                    .map_err(serde::de::Error::custom)?;
+                            Ok(Candidates { params, uses })
+                        }
+                    }
+                }
+            }
         }
-        match Form::deserialize(deserializer)? {
-            Form::Raw(params) => Ok(Self {
-                params,
-                uses: default_users_uses(),
-            }),
-            Form::Spec { params, uses } => Ok(Self { params, uses }),
-        }
+
+        deserializer.deserialize_any(CandidatesVisitor)
     }
+}
+
+/// The `{ params, uses }` spec shape, for declarations that arrive with the
+/// keys ordered otherwise than by this module and had to be buffered.
+#[derive(Deserialize)]
+struct SpecExpr {
+    #[serde(default)]
+    params: CandidateExpr,
+    #[serde(default = "default_users_uses")]
+    uses: String,
 }
 
 impl Default for Candidates {
@@ -203,6 +365,14 @@ pub struct Step {
     /// actions (an added-approver push) from the first moment.
     #[serde(default)]
     pub announce: bool,
+
+    /// The kernel's own template step for a container package's `in` fan-out
+    /// (`<step>#item`), set by the import
+    /// ([`crate::scheduler::shell::model::materialize_container_acts`]) and
+    /// never by a declaration. It groups the per-item acts the run fans out;
+    /// it is not a declared node, so it speaks no message of its own.
+    #[serde(default)]
+    pub r#virtual: bool,
 }
 
 impl ModelBase for Step {

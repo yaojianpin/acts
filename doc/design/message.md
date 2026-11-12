@@ -31,9 +31,13 @@
 | `workflow` | 运行根本身的状态消息 |
 | `branch` | 分支（含 catches/timeouts 声明分支）的终态消息 |
 | `step` | step：无 `uses` 的 task payload 与带 `uses` 的 act payload 统一 |
-| `block` | 内核虚拟容器分支 |
 | `assignment` | 转办/代办/撤销代办通知（`ref_msg_id` 指向原 `Created`） |
 | `remind` | 催办记录（见 `design/remind.md`） |
+
+内核物化的包装节点只存在于图/行投影，不产生消息：`<step>#item` 模板
+step，以及 `<step>#acts`/`<step>#in`/`<step>#act<N>` 虚拟分支。虚拟分支
+的图 kind 仍是 `block`（`NodeKind::Block`），但消息流只承载声明的节点与
+运行动态生成的活动。
 
 ## 3. 兼容
 
@@ -54,3 +58,5 @@
 | 旧行（`type=act`） | 读出 `type=step` |
 | `is_msg()` | 对 `type=step` 且 `uses=acts.core.msg` 为真；对 `assignment`/`remind` 为假 |
 | 订阅 | glob `step*` 收到 act 级消息；`assignment`/`remind` 各自订阅 |
+| 容器 `in` 展开 | 客户端只见容器与生成的 item 活动；`#item` 模板与虚拟分支不发消息 |
+| 容器完成 | 子活动 join 落定后才发 `Completed`，fan-out 时不发 |

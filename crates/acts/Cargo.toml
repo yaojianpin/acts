@@ -95,10 +95,6 @@ name = "actions"
 path = "../../examples/actions/main.rs"
 
 [[example]]
-name = "approve"
-path = "../../examples/approve/main.rs"
-
-[[example]]
 name = "catches"
 path = "../../examples/catches/main.rs"
 

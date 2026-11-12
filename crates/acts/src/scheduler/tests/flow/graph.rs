@@ -120,12 +120,11 @@ async fn sch_graph_answers_every_declared_node_with_its_state() {
 /// The graph is the same materialized model the messages name: a container
 /// step's inline acts appear as their kernel children (`<step>#acts`, the
 /// act's own id) with their own states, and every announced node folds onto
-/// the graph by `nid` — its message level is `act` exactly when the node
-/// carries `uses`. That is the join that makes the message stream a trace
+/// the graph by `nid`. That is the join that makes the message stream a trace
 /// over the graph. The materialized container itself is the kernel's own
 /// virtual node (the declaration declares no branch): kind `block` on the
-/// graph and in its messages, and no line of its own in the tree — its acts
-/// fold into the parent step, which is where the declared flow puts them.
+/// graph, no line of its own in the tree, and silent — its acts fold into the
+/// parent step, which is where the declared flow puts them.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
@@ -212,12 +211,15 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
             .iter()
             .any(|message| message.nid == "step1")
     );
-    // The virtual container announces as `block` — its graph kind.
+    // The kernel's own wrappers — the virtual branch here — are not declared
+    // nodes of the flow and announce nothing; they stay graph-only.
     assert!(
         fixture
             .messages()
             .iter()
-            .any(|message| message.nid == "step1#acts" && message.r#type == "block")
+            .all(|message| message.nid != "step1#acts" && message.r#type != "block"),
+        "a virtual wrapper must not announce: {:?}",
+        fixture.messages()
     );
 
     assert_eq!(
@@ -1035,15 +1037,16 @@ async fn sch_graph_folds_the_message_records_onto_their_nodes() {
             .unwrap_or_else(|| panic!("the graph names no node '{nid}'"))
     };
 
-    // The target: its created, the absorbed answer (the push resolves the
-    // act's message once — the join finishes the parked execution without a
-    // second record) and the remind record addressed to the owner.
+    // The target: its created, the absorbed answer, the remind record
+    // addressed to the owner, and the completion its join announces once the
+    // pushed leaves settle.
     let s1 = node("s1");
     let types: Vec<&str> = s1.messages.iter().map(|m| m.r#type.as_str()).collect();
-    assert_eq!(types, vec!["step", "step", "remind"], "{s1:?}");
+    assert_eq!(types, vec!["step", "step", "remind", "step"], "{s1:?}");
     assert_eq!(s1.messages[2].owner.as_deref(), Some("alice"));
     let remind = &s1.messages[2];
     assert_eq!(remind.state, "created");
+    assert_eq!(s1.messages[3].state, "completed");
 
     // The chain's leaves read by instance, created before completed.
     let pushed = node("s1#push1");

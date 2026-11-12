@@ -97,6 +97,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "acts-example-approve"
+version = "0.1.0"
+dependencies = [
+ "acts",
+ "anyhow",
+ "clap",
+ "clap-cargo",
+ "dialoguer",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "acts-example-package-http"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,152 @@
+name: Expense approval workflow
+id: approve
+ver: 0.4.0
+
+vars:
+  - name: amount
+    value: 800
+  - name: limit_vp
+    value: 10000
+  - name: limit_president
+    value: 20000
+  # The prepare act auto-submits only on the workflow's first start. The flag
+  # lives on the root, not on the step: a re-entered generation starts from its
+  # declared vars, so a step-local flag would reset to true on every
+  # back/cancel. A submitted act folds its scope into its parent exactly like a
+  # completed one, which is how the rule's `auto_submit: false` reaches the
+  # root and survives the rewind.
+  - name: auto_submit
+    value: true
+steps:
+  # ---------------------------------------------------------------------------
+  # step 1 · prepare
+  # A plain irq act: its rule auto-submits it on the first start, and a
+  # re-entered generation (after back/cancel) waits for the client because the
+  # root flag is already false.
+  # ---------------------------------------------------------------------------
+  - name: submit preparation
+    id: prepare
+    desc: Prepare the expense approval
+    uses: acts.core.irq
+    params:
+      key: prepare
+    rules:
+      - if: 'auto_submit'
+        action: submit
+        params:
+          # Submit is a signed completion: its scope folds into the parent root
+          # like `next`'s, so a rewind reads auto_submit=false and asks.
+          auto_submit: false
+
+  - name: Department approval
+    id: dept_approval
+    desc: User's department manager in the department must approve
+    uses: acts.core.parallel
+    announce: true
+    params:
+      in: '${{ $assign.candidates.ids }}'
+      join: any
+      steps:
+        - uses: acts.core.irq
+          params:
+            key: department_manager_vote
+          assign:
+            owner: '${{ $item.value }}'
+    assign:
+      candidates:
+        params:
+          kind: relate
+          from: 
+            kind: context
+            var:
+              type: current_actor
+          rel: department_of
+          duty: principal
+
+  - name: Executive Officer approval
+    id: executive_vp_approval
+    desc: User's executive officer any of the vice presidents must approve
+    if: 'amount > limit_vp'
+    uses: acts.core.parallel
+    assign:
+      candidates:
+        params:
+          kind: role
+          name: Vice President
+    params:
+      in: '${{ $assign.candidates.ids }}'
+      join: any
+      steps:
+        - uses: acts.core.irq
+          params:
+            key: executive_vp_approval
+
+  - name: Unit president approval
+    id: unit_president_approval
+    desc: User's unit president must approve if the amount exceeds the limit
+    if: 'amount > limit_president'
+    params:
+      key: unit_president_approval
+    
+  - name: Finance check and notification
+    id: finance_check_and_notification
+    desc: User's finance principal must approve
+    assign:
+      candidates:
+        params:
+          kind: owners_of
+          resource: { resource: department, name: Finance Department }
+          duty: principal
+      # cc to Executive Officer's assistant
+      cc:
+        params:
+          kind: owners_of
+          resource: { resource: department, name: Executive Office }
+          duty: assistant
+      notice:
+        params:
+          kind: context
+          var:
+            type: initiator
+          
+    uses: acts.core.block
+    params:
+      mode: sequence
+      steps:
+        - name: Finance check
+          id: finance_check
+          desc: any finance principal checks and approves
+          uses: acts.core.parallel
+          params:
+            in: '${{ $assign.candidates.ids }}'
+            join: any
+            steps:
+              - uses: acts.core.irq
+                assign:
+                  owner: '${{ $item.value }}'
+                params:
+                  key: finance_approval
+        - name: CC to Executive Officer's assistant
+          id: cc_to_assistant
+          desc: cc to Executive Officer's assistant
+          uses: acts.core.parallel
+          params:
+            in: '${{ $assign.cc.ids }}'
+            join: any
+            steps:
+              - uses: acts.core.msg
+                params:
+                  key: cc_to_assistant
+                  content: 'Please note that the finance approval has been completed.'
+        - name: Notice to initiator
+          id: notice_to_initiator
+          desc: notice to initiator
+          uses: acts.core.parallel
+          params:
+            in: '${{ $assign.notice.ids }}'
+            join: any
+            steps:
+              - uses: acts.core.msg
+                params:
+                  key: notice_to_initiator
+                  content: 'The finance approval has been completed.'

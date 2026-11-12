@@ -10,7 +10,7 @@
 //! fails instead of silently computing an empty pool.
 
 use crate::{ActError, Result};
-use serde::de::{self, MapAccess, Visitor};
+use serde::de::{self, MapAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value as JsonValue;
 use std::fmt;
@@ -182,7 +182,14 @@ impl ResourceRef {
 }
 
 /// The duty a resource owner is selected by.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+///
+/// A model writes a duty as a bare word (`duty: principal`). The four known
+/// words parse to their variants; any other word is a deployment-defined
+/// duty the directory decides the meaning of, so it deserializes to
+/// [`Duty::Custom`] unchanged — a duty the model invented (`assistant`,
+/// `on_call`) must not fail the model's parse. The explicit `{ custom: … }`
+/// form this enum itself serializes is accepted too.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Duty {
     /// Every owner of the resource, whatever the duty.
@@ -196,6 +203,82 @@ pub enum Duty {
     Member,
     /// A deployment-defined duty; the directory decides what it means.
     Custom(String),
+}
+
+impl<'de> Deserialize<'de> for Duty {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DutyVisitor;
+
+        impl<'de> Visitor<'de> for DutyVisitor {
+            type Value = Duty;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a duty name or an object with a 'custom' duty")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+                Ok(match value.trim() {
+                    "" | "all" => Duty::All,
+                    "principal" => Duty::Principal,
+                    "deputy" => Duty::Deputy,
+                    "member" => Duty::Member,
+                    custom => Duty::Custom(custom.to_string()),
+                })
+            }
+
+            fn visit_string<E: de::Error>(
+                self,
+                value: String,
+            ) -> std::result::Result<Self::Value, E> {
+                self.visit_str(&value)
+            }
+
+            /// The explicit wire form `{ custom: <name> }`.
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let Some(key) = map.next_key::<String>()? else {
+                    return Err(de::Error::custom(
+                        "expected a 'custom' duty, found an empty map",
+                    ));
+                };
+                if key != "custom" {
+                    return Err(de::Error::invalid_value(
+                        de::Unexpected::Str(&key),
+                        &"the key 'custom'",
+                    ));
+                }
+                Ok(Duty::Custom(map.next_value::<String>()?))
+            }
+
+            /// The form serde_yaml itself serializes this enum to — a tagged
+            /// `!custom <name>` value. The model-to-YAML-to-model round trip
+            /// (`to_yml` then `from_yml`) re-reads exactly that.
+            fn visit_enum<A: de::EnumAccess<'de>>(
+                self,
+                data: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let (name, variant) = data.variant::<String>()?;
+                match name.as_str() {
+                    "custom" => variant.newtype_variant::<String>().map(Duty::Custom),
+                    "all" => variant.unit_variant().map(|()| Duty::All),
+                    "principal" => variant.unit_variant().map(|()| Duty::Principal),
+                    "deputy" => variant.unit_variant().map(|()| Duty::Deputy),
+                    "member" => variant.unit_variant().map(|()| Duty::Member),
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &["all", "principal", "deputy", "member", "custom"],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(DutyVisitor)
+    }
 }
 
 impl Duty {
@@ -254,6 +337,18 @@ impl RelationName {
             Self::AssistantOf => "assistant_of",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "department_of" => Self::DepartmentOf,
+            "unit_of" => Self::UnitOf,
+            "project_of" => Self::ProjectOf,
+            "manager_of" => Self::ManagerOf,
+            "reports_of" => Self::ReportsOf,
+            "assistant_of" => Self::AssistantOf,
+            _ => return None,
+        })
+    }
 }
 
 /// A deployment-defined relation: `{"rel": "resource", "value":
@@ -279,6 +374,15 @@ impl Relation {
         match self {
             Self::Named(name) => name.as_str(),
             Self::Ref(reference) => &reference.value,
+        }
+    }
+
+    /// Resolve a deployment-defined reference to a built-in relation when the
+    /// wire word matches; unknown relations stay unresolved.
+    pub fn as_builtin(&self) -> Option<RelationName> {
+        match self {
+            Self::Named(name) => Some(name.clone()),
+            Self::Ref(r) => RelationName::parse(&r.value),
         }
     }
 }
@@ -338,7 +442,7 @@ pub enum CandidateExpr {
     /// A literal user id or an engine expression string.
     Value(String),
     User {
-        name: String,
+        value: String,
     },
     Role {
         name: String,
@@ -432,7 +536,7 @@ impl Serialize for CandidateExpr {
     {
         match self {
             Self::Value(value) => serializer.serialize_str(value),
-            Self::User { name } => CandidateExprSer::User { name }.serialize(serializer),
+            Self::User { value: name } => CandidateExprSer::User { name }.serialize(serializer),
             Self::Role { name } => CandidateExprSer::Role { name }.serialize(serializer),
             Self::Group { name } => CandidateExprSer::Group { name }.serialize(serializer),
             Self::OwnersOf { resource, duty } => {
@@ -462,59 +566,134 @@ impl Serialize for CandidateExpr {
     }
 }
 
+/// The wire payloads of the `kind`-tagged expression objects. They are the
+/// single definition of each object's fields; the expression's `Deserialize`
+/// reads them live off the map after the `kind` tag, so a bad field reports
+/// its own line and full path. serde's internally-tagged derive cannot: it
+/// buffers the whole object into private content before it parses, and a
+/// buffered value carries no YAML position.
 #[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum CandidateExprDe {
-    User {
-        name: String,
-    },
-    Role {
-        name: String,
-    },
-    Group {
-        name: String,
-    },
-    OwnersOf {
-        resource: ResourceRef,
-        #[serde(default)]
-        duty: Duty,
-    },
-    Context {
-        var: ContextVar,
-    },
-    Relate {
-        from: Box<CandidateExpr>,
-        rel: Relation,
-        #[serde(default)]
-        duty: Option<Duty>,
-    },
-    AnyOf {
-        operands: Vec<CandidateExpr>,
-    },
-    AllOf {
-        operands: Vec<CandidateExpr>,
-    },
-    Except {
-        base: Box<CandidateExpr>,
-        minus: Box<CandidateExpr>,
-    },
+struct UserExpr {
+    name: String,
 }
 
-impl From<CandidateExprDe> for CandidateExpr {
-    fn from(value: CandidateExprDe) -> Self {
-        match value {
-            CandidateExprDe::User { name } => Self::User { name },
-            CandidateExprDe::Role { name } => Self::Role { name },
-            CandidateExprDe::Group { name } => Self::Group { name },
-            CandidateExprDe::OwnersOf { resource, duty } => Self::OwnersOf { resource, duty },
-            CandidateExprDe::Context { var } => Self::Context { var },
-            CandidateExprDe::Relate { from, rel, duty } => Self::Relate { from, rel, duty },
-            CandidateExprDe::AnyOf { operands } => Self::AnyOf { operands },
-            CandidateExprDe::AllOf { operands } => Self::AllOf { operands },
-            CandidateExprDe::Except { base, minus } => Self::Except { base, minus },
+#[derive(Deserialize)]
+struct RoleExpr {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct GroupExpr {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct OwnersOfExpr {
+    resource: ResourceRef,
+    #[serde(default)]
+    duty: Duty,
+}
+
+#[derive(Deserialize)]
+struct ContextExpr {
+    var: ContextVar,
+}
+
+#[derive(Deserialize)]
+struct RelateExpr {
+    from: Box<CandidateExpr>,
+    rel: Relation,
+    #[serde(default)]
+    duty: Option<Duty>,
+}
+
+#[derive(Deserialize)]
+struct AnyOfExpr {
+    operands: Vec<CandidateExpr>,
+}
+
+#[derive(Deserialize)]
+struct AllOfExpr {
+    operands: Vec<CandidateExpr>,
+}
+
+#[derive(Deserialize)]
+struct ExceptExpr {
+    base: Box<CandidateExpr>,
+    minus: Box<CandidateExpr>,
+}
+
+/// Dispatches on the `kind` word and reads the payload's fields from `payload`
+/// — the map access after the tag, still live and located, or a buffered
+/// object when the tag was not the first key. Shared with
+/// [`Candidates`](crate::model::Candidates)'s bare-expression shape.
+pub(crate) fn dispatch_expression<'de, D>(
+    kind: &str,
+    payload: D,
+) -> std::result::Result<CandidateExpr, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match kind {
+        "user" => UserExpr::deserialize(payload)
+            .map(|UserExpr { name }| CandidateExpr::User { value: name }),
+        "role" => {
+            RoleExpr::deserialize(payload).map(|RoleExpr { name }| CandidateExpr::Role { name })
         }
+        "group" => {
+            GroupExpr::deserialize(payload).map(|GroupExpr { name }| CandidateExpr::Group { name })
+        }
+        "owners_of" => OwnersOfExpr::deserialize(payload)
+            .map(|OwnersOfExpr { resource, duty }| CandidateExpr::OwnersOf { resource, duty }),
+        "context" => ContextExpr::deserialize(payload)
+            .map(|ContextExpr { var }| CandidateExpr::Context { var }),
+        "relate" => RelateExpr::deserialize(payload)
+            .map(|RelateExpr { from, rel, duty }| CandidateExpr::Relate { from, rel, duty }),
+        "any_of" => AnyOfExpr::deserialize(payload)
+            .map(|AnyOfExpr { operands }| CandidateExpr::AnyOf { operands }),
+        "all_of" => AllOfExpr::deserialize(payload)
+            .map(|AllOfExpr { operands }| CandidateExpr::AllOf { operands }),
+        "except" => ExceptExpr::deserialize(payload)
+            .map(|ExceptExpr { base, minus }| CandidateExpr::Except { base, minus }),
+        other => Err(de::Error::unknown_variant(other, &EXPRESSION_KINDS)),
     }
 }
+
+/// An object entry whose key is not the tag: buffered as a JSON value and
+/// re-dispatched after the tag is taken out of place. Value maps built by
+/// `serde_json::json!` (a sorted map) put `duty` before `kind`; such values
+/// carry no parse position anyway.
+fn buffered_expression<'de, A: MapAccess<'de>>(
+    first: String,
+    mut map: A,
+) -> std::result::Result<CandidateExpr, A::Error> {
+    let mut object = serde_json::Map::new();
+    object.insert(first, map.next_value::<serde_json::Value>()?);
+    while let Some(key) = map.next_key::<String>()? {
+        object.insert(key, map.next_value::<serde_json::Value>()?);
+    }
+    let Some(kind) = object.remove("kind") else {
+        return Err(de::Error::missing_field("kind"));
+    };
+    let serde_json::Value::String(kind) = kind else {
+        return Err(de::Error::custom(
+            "the 'kind' of an owner expression must be a word",
+        ));
+    };
+    dispatch_expression(&kind, serde_json::Value::Object(object)).map_err(de::Error::custom)
+}
+
+const EXPRESSION_KINDS: [&str; 9] = [
+    "user",
+    "role",
+    "group",
+    "owners_of",
+    "context",
+    "relate",
+    "any_of",
+    "all_of",
+    "except",
+];
 
 impl<'de> Deserialize<'de> for CandidateExpr {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
@@ -541,12 +720,22 @@ impl<'de> Deserialize<'de> for CandidateExpr {
                 Ok(CandidateExpr::Value(value))
             }
 
+            /// The tag-key dispatch: `kind` opens the object (the wire form
+            /// this module writes does), its word picks the payload, and the
+            /// remaining entries are the payload's fields — read live, so a
+            /// bad field reports its own line.
             fn visit_map<A: MapAccess<'de>>(
                 self,
-                map: A,
+                mut map: A,
             ) -> std::result::Result<Self::Value, A::Error> {
-                CandidateExprDe::deserialize(de::value::MapAccessDeserializer::new(map))
-                    .map(CandidateExpr::from)
+                let Some(first) = map.next_key::<String>()? else {
+                    return Err(de::Error::missing_field("kind"));
+                };
+                if first != "kind" {
+                    return buffered_expression(first, map);
+                }
+                let kind: String = map.next_value()?;
+                dispatch_expression(&kind, de::value::MapAccessDeserializer::new(map))
             }
         }
 
@@ -689,6 +878,29 @@ mod tests {
         assert_eq!(participants.len(), 2);
         assert_eq!(participants[1].name, "Bob");
         assert!(participants_from_json(&json!(1)).is_err());
+    }
+
+    #[test]
+    fn a_duty_takes_known_words_and_bare_custom_words() {
+        assert_eq!(
+            serde_json::from_value::<Duty>(json!("principal")).unwrap(),
+            Duty::Principal
+        );
+        // An unknown word is a deployment-defined duty, not a parse failure.
+        assert_eq!(
+            serde_json::from_value::<Duty>(json!("assistant")).unwrap(),
+            Duty::Custom("assistant".to_string())
+        );
+        // The explicit form the enum itself serializes.
+        assert_eq!(
+            serde_json::from_value::<Duty>(json!({"custom": "on_call"})).unwrap(),
+            Duty::Custom("on_call".to_string())
+        );
+        assert_eq!(serde_json::to_value(Duty::All).unwrap(), json!("all"));
+        assert_eq!(
+            serde_json::to_value(Duty::Custom("assistant".to_string())).unwrap(),
+            json!({"custom": "assistant"})
+        );
     }
 
     #[test]

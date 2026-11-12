@@ -7,6 +7,7 @@ members = [
     "examples/plugins/*",
     "examples/packages/*",
     "examples/stress",
+    "examples/approve",
 ]
 resolver = "3"
 

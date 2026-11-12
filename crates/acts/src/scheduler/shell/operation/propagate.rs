@@ -629,10 +629,10 @@ mod tests {
         );
     }
 
-    /// A `uses` container announced its act at the fan-out; the join adds
-    /// nothing for it.
+    /// A `uses` container announces completion when its join settles it, not
+    /// at the fan-out where it is still running for its children.
     #[tokio::test]
-    async fn a_package_parent_suppresses_the_join_message() {
+    async fn a_package_parent_announces_its_join() {
         let workflow = crate::model::Workflow::new()
             .with_step(|step| step.with_id("s1").with_uses("pkg.test", crate::Vars::new()));
         let spec = ProcessSpec::from_workflow("p", &workflow, &|_| None).unwrap();
@@ -648,6 +648,7 @@ mod tests {
             outbox: Vec::new(),
         };
         attach_join_message(&snapshot, &mut plan, &id("s1"), &intent(5)).unwrap();
-        assert!(plan.outbox.is_empty());
+        assert_eq!(plan.outbox.len(), 1);
+        assert_eq!(plan.outbox[0].topic, "task.completed");
     }
 }

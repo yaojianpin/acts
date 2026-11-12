@@ -82,7 +82,7 @@ pub(crate) fn evaluate(ctx: &Context, expr: &CandidateExpr) -> Result<Vec<Partic
             }
             checked(participants_from_json(&resolved)?)
         }
-        CandidateExpr::User { name } => {
+        CandidateExpr::User { value: name } => {
             if name.trim().is_empty() {
                 return Ok(Vec::new());
             }

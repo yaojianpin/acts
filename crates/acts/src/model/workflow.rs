@@ -65,11 +65,8 @@ pub struct Workflow {
 
 impl Workflow {
     pub fn from_yml(s: &str) -> Result<Self> {
-        let workflow = serde_yaml::from_str::<Workflow>(s);
-        match workflow {
-            Ok(v) => Ok(v),
-            Err(e) => Err(ActError::Model(format!("{e}"))),
-        }
+        serde_yaml::from_str::<Workflow>(s)
+            .map_err(|error| ActError::Model(locate_yaml_error(s, &error)))
     }
 
     pub fn from_json(s: &str) -> Result<Self> {
@@ -723,6 +720,26 @@ fn write_tree_output(
     }
 }
 
+/// The model-parse error with the failing line quoted and marked.
+///
+/// serde_yaml's message already carries the model path (`steps[2].assign.cc`)
+/// and the line and column; the excerpt pins the spot in the source a model
+/// author opened. Without the position — an error that surfaced before the
+/// loader ever read an event — the message passes through unchanged.
+fn locate_yaml_error(source: &str, error: &serde_yaml::Error) -> String {
+    let Some(location) = error.location() else {
+        return error.to_string();
+    };
+    let line = location.line();
+    let column = location.column();
+    let text = source.lines().nth(line.saturating_sub(1)).unwrap_or("");
+    let caret = " ".repeat(column.saturating_sub(1));
+    format!(
+        "{error}\n{:>4} |\n{:>4} | {text}\n{:>4} | {caret}^",
+        "", line, ""
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,5 +766,28 @@ mod tests {
             "a visited node is not written twice"
         );
         parent.clear();
+    }
+
+    #[test]
+    fn parse_error_quotes_and_marks_the_failing_line() {
+        let text = "id: m1\nsteps:\n  - id: a\n    uses: acts.core.irq\n    assign:\n      cc:\n        params:\n          kind: owners_of\n          resource: { resource: department, name: finance }\n          duty: 3\n";
+        let error = Workflow::from_yml(text).unwrap_err().to_string();
+        // The exact failing value: the model path names the field, the
+        // position is the `duty` scalar on line 10 — not the start of the
+        // assign map (line 5) or of the expression object (line 8) — and the
+        // excerpt quotes and marks the line.
+        assert!(error.contains("steps[0].assign.cc.params.duty"), "{error}");
+        assert!(error.contains("line 10 column 17"), "{error}");
+        assert!(error.contains("duty: 3"), "{error}");
+        assert!(error.contains("  10 | "), "{error}");
+        assert!(error.contains('^'), "{error}");
+    }
+
+    #[test]
+    fn parse_error_names_the_model_path_and_line_of_a_direct_field() {
+        let text = "id: m1\nsteps:\n  - id: a\n    assign:\n      owner:\n        - alice\n";
+        let error = Workflow::from_yml(text).unwrap_err().to_string();
+        assert!(error.contains("steps[0].assign.owner"), "{error}");
+        assert!(error.contains("line 6"), "{error}");
     }
 }

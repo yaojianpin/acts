@@ -851,6 +851,43 @@ pub(super) struct NodeFacts {
     pub(super) name: String,
 }
 
+/// Whether one model node is a kernel-materialized wrapper — a virtual branch
+/// (`<step>#acts`/`<step>#in`/`<step>#act<N>`) or the template step
+/// (`<step>#item`) — rather than a declared node. Those wrappers exist only to
+/// group the declaration's acts; they are not part of the client's flow, so
+/// they announce no message of their own.
+pub(super) fn node_is_virtual(model: &crate::model::Workflow, node: &str) -> bool {
+    fn in_step(step: &crate::model::Step, target: &str) -> Option<bool> {
+        if step.id == target {
+            return Some(step.r#virtual);
+        }
+        for branch in model::step_branches(step).unwrap_or_default() {
+            if branch.id == target {
+                return Some(branch.r#virtual);
+            }
+            if let Some(is_virtual) = branch.steps.iter().find_map(|inner| in_step(inner, target)) {
+                return Some(is_virtual);
+            }
+        }
+        for catch in &step.catches {
+            if let Some(is_virtual) = in_step(catch, target) {
+                return Some(is_virtual);
+            }
+        }
+        for timeout in &step.timeouts {
+            if let Some(is_virtual) = in_step(timeout, target) {
+                return Some(is_virtual);
+            }
+        }
+        None
+    }
+    model
+        .steps
+        .iter()
+        .find_map(|step| in_step(step, node))
+        .unwrap_or(false)
+}
+
 /// The single derivation of a model node's name and kinds. The row projection
 /// takes `declared_kind`/`name`; the message payload takes
 /// `message_kind`/`name` — one traversal, one name source (the root's name is

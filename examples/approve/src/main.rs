@@ -63,8 +63,7 @@ async fn main() -> Result<()> {
     // The business system answers what needs no user (the candidate pools,
     // the delegated join verdicts); the client puts every human act to the
     // menu.
-    let mut sys = sys::Sys::new();
-    sys.init();
+    let sys = sys::Sys::new();
     // A script that runs out of answers leaves the rest to the engine; the
     // demo stops waiting instead of parking forever on an act no one will
     // decide.
@@ -170,7 +169,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    executor.proc().start(&workflow.id, Vars::new()).await?;
+    executor
+        .proc()
+        .start(&workflow.id, Vars::new().with("actor", "101"))
+        .await?;
     tokio::select! {
         _ = sig.recv() => {}
         _ = stop.notified() => {

@@ -20,7 +20,9 @@ use crate::{
         shell::{
             caps::assign::{Assign, Assignment},
             errors::runtime,
-            facts::{ActFacts, input_vars, message_outputs, node_facts},
+            facts::{
+                ActFacts, act_facts, input_vars, message_outputs, node_facts, node_is_virtual,
+            },
             find_step_in_model, model_of,
         },
     },
@@ -75,6 +77,15 @@ fn act_message_payload(
     error: Option<(&str, &str)>,
 ) -> Result<Option<serde_json::Value>> {
     let node = NodeId::parse(node_id).map_err(runtime)?;
+    let model = model_of(snapshot)?;
+    // The import's own wrappers (`<step>#item`, the virtual branches) group
+    // the declaration's acts but are not nodes of the declared flow: they
+    // announce nothing, so the stream stays the declaration's shape.
+    if let Some(model) = &model
+        && node_is_virtual(model, node_id)
+    {
+        return Ok(None);
+    }
     let Some((uses, raw_params, name, mid)) = step_uses(snapshot, task_id, &node)? else {
         return Ok(None);
     };
@@ -105,7 +116,7 @@ fn act_message_payload(
             crate::utils::consts::STEP_TASK_ID: task_id.wire(&snapshot.process_id),
         }),
     );
-    if let Some(model) = model_of(snapshot)? {
+    if let Some(model) = &model {
         inputs.insert(
             crate::utils::consts::WORKFLOW_MODEL_KEY.to_string(),
             serde_json::json!({
@@ -165,6 +176,12 @@ fn task_message_payload(
     let Some(model) = model_of(snapshot)? else {
         return Ok(None);
     };
+    // A kernel-materialized wrapper (`<step>#item` or a virtual branch) is
+    // graph-only; it is not a node of the declared flow, so it announces
+    // nothing (see [`operation_message_payload`]).
+    if node_is_virtual(&model, node) {
+        return Ok(None);
+    }
     let facts = node_facts(&model, node);
     let mut inputs = input_vars(snapshot, task_id);
     // The workflow model rides every legacy message; a package-less task
@@ -224,26 +241,29 @@ pub(crate) fn operation_message_payload(
     task_message_payload(snapshot, task_id, node, outputs, error)
 }
 
-/// The joined container's own completion message: a package-less
-/// container speaks here (its children settled and it reached its terminal
-/// state — the record is sequence-qualified, so a container that also
-/// announced an act keeps both). A `uses` step's act announced itself at
-/// the fan-out, so the join adds nothing for it: the legacy step's own
-/// messages are suppressed once it carries an act.
+/// The joined container's own completion message, for both payload shapes: a
+/// `uses` container speaks its act payload, a package-less one its task
+/// payload. The container announces completion here — when its join actually
+/// settles it — never at the fan-out, where it is still `Running` for the
+/// children it admitted. Kernel-materialized wrappers are silent (see
+/// [`operation_message_payload`]).
 pub(crate) fn attach_join_message(
     snapshot: &ProcessSnapshot,
     plan: &mut crate::scheduler::core::model::transition_plan::TransitionPlan,
     parent: &TaskId,
     operation: &OperationIntent,
 ) -> Result<()> {
-    let Some(task) = snapshot.tasks.get(parent) else {
-        return Ok(());
-    };
-    if step_uses(snapshot, parent, &task.model_node)?.is_some() {
+    if !snapshot.tasks.contains_key(parent) {
         return Ok(());
     }
-    if let Some(payload) = task_message_payload(snapshot, parent, parent.node.as_str(), None, None)?
-    {
+    if let Some(payload) = operation_message_payload(
+        snapshot,
+        parent,
+        parent.node.as_str(),
+        act_facts(snapshot, parent).as_ref(),
+        None,
+        None,
+    )? {
         plan.outbox.push(OutboxIntent {
             key: format!(
                 "completed:{}:{}:{}:{}",

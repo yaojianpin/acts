@@ -84,6 +84,129 @@ async fn sch_candidates_announce_speaks_at_the_pool_wait() {
     fixture.close().await;
 }
 
+/// The approve demo's `department_manager_approval` shape: the client sees
+/// exactly the declared stream — the container `Created`, its pool request
+/// `Created`/`Completed`, the vote `Created` — with no kernel wrapper
+/// (`<step>#item`, its virtual branches) announcing and no container
+/// `Completed` before the vote settles it.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_candidates_announce_container_speaks_only_the_declared_shape() {
+    let workflow = Workflow::new()
+        .with_id("sch-candidates-declared-shape")
+        .with_step(|step| {
+            step.with_id("department_manager_approval")
+                .with_announce(true)
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new()
+                        .with("in", "${{ $assign.candidates.ids }}")
+                        .with("join", "any")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new()
+                                    .with_id("department_manager_vote")
+                                    .with_uses(
+                                        USES_IRQ,
+                                        Vars::new().with("key", "department_manager_vote"),
+                                    )
+                                    .with_owner("${{ $item.value }}"),
+                            ],
+                        ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "manager".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    // The container announces at the wait; the pool request is answered and
+    // fans the template out to one vote.
+    fixture.wait_created("department_manager_approval").await;
+    let request = fixture
+        .wait_created("department_manager_approval#cand1")
+        .await;
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    json!([{ "id": "101", "code": "101", "name": "Eve Chen" }]),
+                )
+                .with("ids", json!(["101"]))
+                .with("count", 1),
+        )
+        .await;
+    fixture
+        .wait_message("department_manager_approval#cand1", MessageState::Completed)
+        .await;
+    fixture.wait_created("department_manager_vote").await;
+
+    // Only the declared nodes spoke: the container and its pool request and
+    // the vote. The materialized template (`#item`) and its virtual branches
+    // (`#in`, `#item#act0`) are kernel-internal and silent, and the container
+    // is still running for its vote.
+    let trail: Vec<(String, MessageState)> = fixture
+        .messages()
+        .into_iter()
+        .filter(|message| {
+            message.nid == "department_manager_approval"
+                || message.nid.starts_with("department_manager_approval#")
+                || message.nid == "department_manager_vote"
+        })
+        .map(|message| (message.nid, message.state))
+        .collect();
+    assert_eq!(
+        trail,
+        vec![
+            (
+                "department_manager_approval".to_string(),
+                MessageState::Created
+            ),
+            (
+                "department_manager_approval#cand1".to_string(),
+                MessageState::Created
+            ),
+            (
+                "department_manager_approval#cand1".to_string(),
+                MessageState::Completed
+            ),
+            ("department_manager_vote".to_string(), MessageState::Created),
+        ],
+        "only the declared nodes announce"
+    );
+    assert!(
+        fixture
+            .messages()
+            .iter()
+            .all(|message| message.r#type != "block"),
+        "a virtual wrapper must not announce: {:?}",
+        fixture.messages()
+    );
+    assert_eq!(
+        fixture.announced("department_manager_approval"),
+        vec![MessageState::Created],
+        "the container is running for its vote, not completed"
+    );
+
+    // The vote settles the join; the container's completion speaks now.
+    let vote = fixture.wait_created("department_manager_vote").await;
+    fixture.complete(&vote.pid, &vote.tid, Vars::new()).await;
+    fixture
+        .wait_state("department_manager_approval", TaskState::Completed)
+        .await;
+    fixture.wait_completed().await;
+    assert_eq!(
+        fixture.announced("department_manager_approval"),
+        vec![MessageState::Created, MessageState::Completed]
+    );
+    fixture.close().await;
+}
+
 /// The example's shape: the container announces at the pool wait and the
 /// client records its tid; the pool answers, the fan-out runs and the vote
 /// starts at once — it inherits the pool's computed result through the scope
@@ -379,10 +502,10 @@ async fn sch_candidates_local_expression_computes_without_a_request() {
                     .with_candidates(crate::model::CandidateExpr::AnyOf {
                         operands: vec![
                             crate::model::CandidateExpr::User {
-                                name: "u1".to_string(),
+                                value: "u1".to_string(),
                             },
                             crate::model::CandidateExpr::User {
-                                name: "u2".to_string(),
+                                value: "u2".to_string(),
                             },
                         ],
                     })

@@ -389,11 +389,13 @@ impl ApplyAction {
         if !command.children.is_empty() {
             mark_parked_for_children(&mut plan, &command.source);
         }
-        // The container's own message, and only for a `uses` step: its act
-        // completed here (the legacy act's task event fired before the step's
-        // `auto_complete` saw the children). A package-less container is still
-        // `Running` — the legacy step's emit rule skips that state — and its
-        // task message belongs to the join that completes it.
+        // An empty `uses` container completes in this very operation, so its
+        // own act message rides the fan-out. A package-less source stays
+        // silent like any package-less container (its task message belongs to
+        // the join that completes it). A container with children parks
+        // `Running` for them and speaks completion only when its join settles
+        // it (see `caps::message::attach_join_message`): announcing here would
+        // tell the client of a completion while the votes still wait.
         let source_node = snapshot
             .tasks
             .get(&command.source)
@@ -402,7 +404,8 @@ impl ApplyAction {
             Some(node) => step_uses(snapshot, &command.source, node)?.is_some(),
             None => false,
         };
-        if source_has_package
+        if command.children.is_empty()
+            && source_has_package
             && let Some(payload) = operation_message_payload(
                 snapshot,
                 &command.source,
@@ -2621,10 +2624,11 @@ mod tests {
         );
     }
 
-    /// A `uses` container announces its own completion at the fan-out, and the
-    /// folded effect outcome rides the same plan.
+    /// A `uses` container fans out without announcing completion — the join
+    /// speaks once its children settle — and the folded effect outcome rides
+    /// the same plan.
     #[tokio::test]
-    async fn a_package_container_folds_its_effect_and_message() {
+    async fn a_package_container_folds_its_effect_without_a_fanout_message() {
         let host = host();
         let workflow = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1")
@@ -2670,7 +2674,9 @@ mod tests {
         assert!(
             plan.outbox
                 .iter()
-                .any(|record| record.topic == "task.completed")
+                .all(|record| record.topic != "task.completed"),
+            "the join announces completion, not the fan-out: {:?}",
+            plan.outbox
         );
     }
 

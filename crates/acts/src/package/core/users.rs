@@ -218,13 +218,13 @@ fn participants_to_expr(participants: &[Participant]) -> CandidateExpr {
             operands: Vec::new(),
         },
         [participant] => CandidateExpr::User {
-            name: participant.id.clone(),
+            value: participant.id.clone(),
         },
         participants => CandidateExpr::AnyOf {
             operands: participants
                 .iter()
                 .map(|participant| CandidateExpr::User {
-                    name: participant.id.clone(),
+                    value: participant.id.clone(),
                 })
                 .collect(),
         },
