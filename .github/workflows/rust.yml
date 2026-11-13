@@ -18,14 +18,17 @@ jobs:
       # Both ends of the range the manifests promise, so a regression fails here
       # instead of at whoever installs a crate: `stable` is what the project
       # develops against (and what `rust-toolchain.toml` selects locally),
-      # `1.88.0` is the floor `rust-version` in Cargo.toml declares — the
-      # version the locked graph's own dependencies already need (`async-nats`
-      # 0.50, `tonic` 0.14, `redis` 1.7, `time` 0.3.55, `globset` 0.4.20,
-      # `encoding_rs` 0.8.41 and `validator_derive` 0.20 each declare it, and
-      # edition 2024 needs 1.85). A bump whose own floor is above 1.88, or a
-      # language feature newer than it, breaks this leg rather than the promise.
+      # `1.91.0` is the floor `rust-version` in Cargo.toml declares — the
+      # version the locked graph's own dependencies already need. `bashkit` 0.20
+      # (the shell package's interpreter) calls `str::floor_char_boundary`,
+      # stabilized in Rust 1.91.0, and publishes no `rust-version` of its own;
+      # the crates that set the previous 1.88 floor (`async-nats` 0.50,
+      # `tonic` 0.14, `redis` 1.7, `time` 0.3.55, `globset` 0.4.20,
+      # `encoding_rs` 0.8.41, `validator_derive` 0.20; edition 2024 needs 1.85)
+      # stay below it. A bump whose own floor is above 1.91, or a language
+      # feature newer than it, breaks this leg rather than the promise.
       matrix:
-        toolchain: [stable, '1.88.0']
+        toolchain: [stable, '1.91.0']
     name: build (${{ matrix.toolchain }})
 
     steps:
@@ -43,7 +46,7 @@ jobs:
 
       # `+${{ matrix.toolchain }}` (not a bare `cargo`): `rust-toolchain.toml`
       # names a channel too, and the `+toolchain` argument is the one selector
-      # that outranks it — without it the 1.88.0 leg would run whatever the file
+      # that outranks it — without it the 1.91.0 leg would run whatever the file
       # says the moment the action's directory override stops applying, and the
       # leg would pass while measuring `stable` twice.
       #

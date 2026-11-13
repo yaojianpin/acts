@@ -67,8 +67,16 @@ jobs:
         run: cargo install cargo-audit
 
       # cargo-audit reads Cargo.lock directly, so unlike the graph-level `deny`
-      # job it also sees entries no feature set enables — `rsa` is one of those
-      # (neither `sqlx/postgres` nor `sqlx/sqlite` reaches it) and it is never
-      # used to decrypt, only to verify certificates.
+      # job it also sees entries no feature set enables. Its ignores, each
+      # reviewed on the weekly schedule:
+      # - RUSTSEC-2023-0071 (rsa): neither `sqlx/postgres` nor `sqlx/sqlite`
+      #   reaches it; it is never used to decrypt, only to verify certificates.
+      # - RUSTSEC-2026-0459 (libsqlite3-sys): same entry as deny.toml — every
+      #   published sqlx-sqlite caps the crate below the patched 0.39 line, so
+      #   the lock cannot move until sqlx allows it.
+      # - RUSTSEC-2025-0057 (fxhash) and RUSTSEC-2024-0384 (instant): unmaintained
+      #   leaves of the sled 0.34 subtree, which is itself archived upstream; no
+      #   fixed upgrade exists for either. They sit behind acts-store's optional
+      #   `sled` feature.
       - name: Audit Check
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384

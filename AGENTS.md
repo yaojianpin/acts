@@ -14,7 +14,7 @@ Guidance for coding agents working in this repository.
 Dependency versions are declared **only** in `[workspace.dependencies]` of the
 root `Cargo.toml`; members must use `workspace = true` and may only add
 features. `deny.toml` + `cargo deny check` enforce this (single-version policy,
-MSRV 1.88, license/advisory gates).
+MSRV 1.91, license/advisory gates).
 
 ## Commit requirements (mandatory)
 

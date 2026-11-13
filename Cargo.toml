@@ -23,14 +23,17 @@ repository = "https://github.com/yaojianpin/acts.git"
 # from each crate it installs, and `.github/workflows/rust.yml` builds this same
 # version in a leg beside `stable`.
 #
-# 1.88 is what the dependency graph already requires — `async-nats` 0.50,
-# `tonic` 0.14, `redis` 1.7, `time` 0.3.55, `globset` 0.4.20, `encoding_rs`
-# 0.8.41 and `validator_derive` 0.20 each declare it — so the declaration costs
-# nothing and buys two things: `cargo` refuses to build a crate whose dependency
-# outgrew the promise instead of failing at a user's machine, and the
-# MSRV-aware resolver (resolver "3" below) stops `cargo update` from resolving a
-# version the floor cannot compile.
-rust-version = "1.88"
+# 1.91 is what the dependency graph already requires — `bashkit` 0.20 (the
+# shell interpreter behind `acts-package-shell`) calls `str::floor_char_boundary`,
+# stabilized in Rust 1.91.0, and publishes no `rust-version` of its own, so the
+# MSRV-aware resolver cannot protect the floor for us. The crates that set the
+# previous 1.88 floor (`async-nats` 0.50, `tonic` 0.14, `redis` 1.7, `time`
+# 0.3.55, `globset` 0.4.20, `encoding_rs` 0.8.41 and `validator_derive` 0.20)
+# stay below it. The declaration still buys two things: `cargo` refuses to build
+# a crate whose dependency outgrew the promise instead of failing at a user's
+# machine, and the MSRV-aware resolver (resolver "3" below) stops `cargo update`
+# from resolving a version the floor cannot compile.
+rust-version = "1.91"
 version = "0.25.0"
 
 # Every version below is the single source of truth for the workspace: a member
@@ -50,7 +53,15 @@ async-stream = { version = "0.3.6" }
 # serialization / configuration
 serde = "1.0.219"
 serde_json = "1.0.140"
-serde_yaml = "0.9"
+# `serde_yaml` is archived upstream, and the fork lineage carries its own
+# advisories: `serde_yml` is RUSTSEC-2025-0068 (unsound, archived) and pins a
+# `noyalib` with RUSTSEC-2026-0333 it can never reach; `serde_yaml_ng` still
+# runs `unsafe-libyaml` (RUSTSEC-2024-0449). The workspace ships `serde_norway`
+# — the fork the RustSec advisory names first: the serde_yaml 0.9 API (tagged
+# enums, located errors) kept on a maintained engine (`unsafe-libyaml-norway`).
+# The dependency keeps the `serde_yaml` name, so member manifests and call
+# sites are untouched.
+serde_yaml = { version = "0.9.42", package = "serde_norway" }
 toml = "1.1.6"
 jsonschema = { version = "0.60.2", default-features = false }
 # logging
