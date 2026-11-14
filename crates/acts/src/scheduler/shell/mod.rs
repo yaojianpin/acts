@@ -1864,15 +1864,28 @@ impl Workers {
     /// container's children are not `next` tasks there) — and refuses both when
     /// there is none (`cannot find cancelled tasks`) and when every one of them
     /// already settled (`is_completed`, the duplicate-delivery guard: the
-    /// rewind it would run was already applied). A specification without a
-    /// model — the kernel's linear specs, which the legacy tree cannot express
-    /// — keeps the rule's spirit: any forward execution still live is work to
-    /// rewind.
+    /// rewind it would run was already applied). A cancel that already
+    /// recorded its rewind on the execution is refused before the walk, even
+    /// while that work ahead is still live: the finished origin keeps its
+    /// state, so its own state cannot be the duplicate's refusal. A
+    /// specification without a model — the kernel's linear specs, which the
+    /// legacy tree cannot express — keeps the rule's spirit: any forward
+    /// execution still live is work to rewind.
     fn validate_cancel_forward_work(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         source: &crate::scheduler::core::model::task_graph::TaskId,
     ) -> Result<()> {
+        // A duplicate delivery while the first rewind's work ahead is still
+        // live: the finished origin keeps its state, so the state table
+        // cannot refuse it. The deciding commit's own `#reenter_target` fact
+        // can — the execution already asked to be re-entered.
+        if reenter_recorded(snapshot, source) {
+            return Err(ActError::Action(format!(
+                "task('{}') is not allowed to cancel",
+                source.node.as_str()
+            )));
+        }
         let graph = task_graph(snapshot)?;
         let modelled = model_of(snapshot)?.is_some();
         let mut seen = std::collections::HashSet::new();

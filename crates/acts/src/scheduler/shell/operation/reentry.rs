@@ -48,19 +48,17 @@ impl ActOperation for ReenterTask {
                 .cloned()
                 .unwrap_or_else(|| id.task.node.as_str().to_owned());
             // A `Back` re-enters an earlier step and closes the branches
-            // beside the path; a `Cancel` closes the work ahead of the
-            // cancelled act. The decision's own outbox record (`task.backed`
-            // / `task.cancelled`) is the durable fact that tells them apart.
-            let decision_key = format!(
-                "action:{}:{}:{}:{}",
-                id.process_id,
-                id.task.node.as_str(),
-                id.task.generation,
-                claim.id.sequence
-            );
-            let cancels_forward = snapshot.outbox.iter().any(|(outbox_id, record)| {
-                outbox_id.key == decision_key && record.topic == "task.cancelled"
-            });
+            // beside the path; a `Cancel` closes the work ahead of the act it
+            // was issued from. The deciding commit pinned that difference as
+            // a private fact on the source's own scope (`#reenter_cancel`),
+            // so the direction survives a crash without depending on an
+            // outbox key the operation's sequence arithmetic would have to
+            // reproduce.
+            let cancels_forward = snapshot
+                .variables
+                .get(&(task_id.clone(), REENTER_CANCEL_VAR.to_string()))
+                .map(|value| value == "true")
+                .unwrap_or(false);
             let graph = task_graph(snapshot)?;
             // The declared model vars of every node the closure may recreate,
             // read from the durable model: a re-entered generation starts with
@@ -109,7 +107,8 @@ mod tests {
     use crate::scheduler::core::model::{operation::ClaimToken, task_graph::TaskState};
 
     /// Without the durable target the rewind re-enters the source node itself:
-    /// a `Cancel` closes the execution and names it as the target.
+    /// a `Cancel` names the finished execution it was issued from as the
+    /// target.
     #[tokio::test]
     async fn the_source_node_is_the_default_reenter_target() {
         let (host, _wake) = Workers::in_memory();
@@ -117,7 +116,11 @@ mod tests {
             .seed_snapshot()
             .unwrap();
         let task_id = crate::scheduler::core::model::task_graph::TaskId::new("a", 0).unwrap();
-        snapshot.tasks.get_mut(&task_id).unwrap().state = TaskState::Cancelled;
+        snapshot.tasks.get_mut(&task_id).unwrap().state = TaskState::Completed;
+        snapshot.variables.insert(
+            (task_id.clone(), REENTER_CANCEL_VAR.to_string()),
+            "true".to_string(),
+        );
         let id = OperationId {
             process_id: "p".into(),
             task: task_id.clone(),

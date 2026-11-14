@@ -267,12 +267,14 @@ impl ApplyAction {
                     source_operation: claim.clone(),
                 };
                 let mut plan = ActionPlanner::plan(snapshot, &command).map_err(runtime)?;
-                // A `Cancel`/`Back` rewinds: the decision closes the source
-                // generation and the re-entry that follows is a durable
+                // A `Cancel`/`Back` rewinds: the decision settles the source
+                // and the re-entry that follows is a durable
                 // operation created in this same commit, so the rewind can be
                 // neither lost to a crash nor confused with a state the
-                // client never decided. The target it names is a durable fact
-                // too (`Back` the client's `to`, `Cancel` this execution).
+                // client never decided. The target it names and its direction
+                // are durable facts too (`Back` the client's `to` closing the
+                // branches beside the path, `Cancel` this execution closing
+                // the work ahead of it).
                 if rewinds {
                     let target = if back {
                         command
@@ -290,6 +292,11 @@ impl ApplyAction {
                         scope: task_id.clone(),
                         name: REENTER_TARGET_VAR.to_string(),
                         value: target,
+                    });
+                    plan.variable_writes.push(VariableWrite {
+                        scope: task_id.clone(),
+                        name: REENTER_CANCEL_VAR.to_string(),
+                        value: (!back).to_string(),
                     });
                     let reenter_id = OperationId {
                         process_id: id.process_id.clone(),
@@ -1508,25 +1515,31 @@ impl ApplyAction {
     /// act's for a `uses` step, the task's for a package-less one — so a client
     /// action that decides it (complete/submit/skip/cancel/abort/fail) must
     /// speak the same message. The record's topic already names the state; its
-    /// opaque lifecycle payload becomes the operation's payload.
+    /// opaque lifecycle payload becomes the operation's payload. A `Cancel`
+    /// decides no state on its origin (it re-enters it), so its record's
+    /// topic is the topic the action already named.
     fn attach_operation_message(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         plan: &mut TransitionPlan,
         actor: Option<&str>,
     ) -> Result<()> {
-        let Some(change) = plan
-            .state_changes
-            .iter()
-            .find(|change| &change.task == task_id)
-        else {
-            return Ok(());
-        };
         if !snapshot.tasks.contains_key(task_id) {
             return Ok(());
         }
-        let Some(topic) = message_topic(change.to) else {
-            return Ok(());
+        let change = plan
+            .state_changes
+            .iter()
+            .find(|change| &change.task == task_id);
+        let topic: String = match change {
+            Some(change) => match message_topic(change.to) {
+                Some(topic) => topic.to_string(),
+                None => return Ok(()),
+            },
+            None => match plan.outbox.first() {
+                Some(record) if record.topic.starts_with("task.") => record.topic.clone(),
+                _ => return Ok(()),
+            },
         };
         // A `uses` step announces its act; a package-less execution announces
         // the task itself (`operation_message_payload` picks the shape).
@@ -1540,8 +1553,11 @@ impl ApplyAction {
                 .map(|write| json_text(&write.value))
                 .unwrap_or_default()
         };
-        let error = (change.to == crate::scheduler::core::model::task_graph::TaskState::Failed)
-            .then(|| (read("error.code"), read("error.message")));
+        let error = change
+            .filter(|change| {
+                change.to == crate::scheduler::core::model::task_graph::TaskState::Failed
+            })
+            .map(|_| (read("error.code"), read("error.message")));
         let error = error
             .as_ref()
             .map(|(code, message)| (code.as_str(), message.as_str()));
@@ -1568,7 +1584,7 @@ impl ApplyAction {
                             task_id.node.as_str(),
                             task_id.generation
                         ),
-                        topic: topic.to_string(),
+                        topic,
                         payload: payload.to_string(),
                     },
                 ),
@@ -2126,7 +2142,7 @@ impl ActOperation for ApplyAction {
         // whose deciding call never applied it (a crash, an expired lease) is
         // re-planned exactly like that call would have. The execution's own
         // state is not the verdict — a `Cancel`'s target is terminal by
-        // construction (`Completed|Submitted` -> `Backed`) — so reading the
+        // construction (it must already be `Completed|Submitted`) — so reading the
         // state first would silently drop a cancel the client was already told
         // about.
         let fact = snapshot
@@ -2153,7 +2169,18 @@ impl ActOperation for ApplyAction {
                         crate::scheduler::core::model::task_graph::TaskState::Running
                             | crate::scheduler::core::model::task_graph::TaskState::Waiting
                     );
+                // A second cancel of the same execution — a duplicate intent
+                // or a concurrent delivery racing the first rewind — finds
+                // the first decision's `#reenter_target` fact durable on the
+                // origin's scope. The origin keeps its state (that is the
+                // point of a cancel), so the state table cannot refuse it;
+                // this fact can.
+                let duplicate_rewind = matches!(
+                    &action,
+                    crate::scheduler::core::commit::command::ActionKind::Cancel
+                ) && reenter_recorded(snapshot, task_id);
                 if is_catch_decider(snapshot, task_id)
+                    || duplicate_rewind
                     || (!assignment_live
                         && !crate::scheduler::core::commit::command::action_allowed(
                             task.state, &action,

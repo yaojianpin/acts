@@ -18,7 +18,9 @@ use std::fmt;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReenterCommand {
     pub(crate) process_id: String,
-    /// The terminal execution requesting re-entry, normally a Backed task.
+    /// The terminal execution requesting re-entry: a `Back`'s `Backed`
+    /// source, or the finished (`Completed`/`Submitted`) act a `Cancel` was
+    /// issued from.
     pub(crate) source: TaskId,
     /// Stable logical task identity to instantiate again.
     pub(crate) target_task_id: String,
@@ -64,7 +66,17 @@ impl ActPlan for Reenter {
             .tasks
             .get(&command.source)
             .ok_or_else(|| GenerationError::TaskNotFound(command.source.clone()))?;
-        if !matches!(source.state, TaskState::Backed | TaskState::Cancelled) {
+        // A `Back` closes its source `Backed` and re-enters an earlier step.
+        // A `Cancel` leaves the finished act it was issued from in the state
+        // it already holds: that act is the origin of the rewind, and its
+        // fresh generation re-runs it. Both are re-enterable; no other state
+        // is.
+        let reenterable = if command.cancels_forward {
+            matches!(source.state, TaskState::Completed | TaskState::Submitted)
+        } else {
+            matches!(source.state, TaskState::Backed)
+        };
+        if !reenterable {
             return Err(GenerationError::SourceNotReenterable {
                 source: command.source.clone(),
                 state: source.state,
@@ -80,9 +92,8 @@ impl ActPlan for Reenter {
         // The closure roots at the re-entered task: a Cancel re-enters the
         // terminal source itself; a Back re-enters an EARLIER step named by
         // the client (`to`), so the root is that task's latest generation
-        // and the backed source must lie inside the closure it spawns (the
-        // redo re-runs everything downstream of the target, the source
-        // included).
+        // and the source must lie inside the closure it spawns (the redo
+        // re-runs everything downstream of the target, the source included).
         let root = if command.target_task_id == command.source.node.as_str() {
             command.source.clone()
         } else {
@@ -157,15 +168,27 @@ impl ActPlan for Reenter {
             remap.insert(old_id.clone(), new_id.clone());
             closure.push((old_id.clone(), old, new_id));
         }
-        // The rewind walks from the source up to the re-entered step and
-        // settles what it passes: the source generation is already `Backed`
-        // (the decision closed it), the running containers on the path below
-        // the workflow root close `Backed`, and the branches beside the path
-        // — the sibling subtrees of the walked containers and the abandoned
-        // descendants of the source — close `Skipped`. The workflow root is
-        // never walked: it outlives the rewind and decides when the recreated
-        // generations settle.
+        // What the rewind settles depends on its direction.
+        //
+        // A `Back` walks from the source up to the re-entered step: the
+        // containers on the path below the workflow root close `Backed`, and
+        // every other superseded execution — the sibling branches beside the
+        // path — closes `Skipped`.
+        //
+        // A `Cancel` marks the work *ahead* of the finished act it was issued
+        // from: that act's own state stands (it is the origin, re-entered as
+        // a new generation), the nearest forward tasks the flow admitted
+        // close `Cancelled`, and everything under them — their subtrees and
+        // the deeper seeded chain — closes `Skipped`. The cancelled front is
+        // the direct successor set of the source; a successor the flow only
+        // seeded (`Created`) never started, so it is skipped rather than
+        // cancelled.
         let source_task = &snapshot.tasks[&command.source];
+        let cancel_front: HashSet<TaskId> = if command.cancels_forward {
+            graph.successors(&command.source).iter().cloned().collect()
+        } else {
+            HashSet::new()
+        };
         let mut ancestors: Vec<TaskId> = Vec::new();
         let mut cursor = source_task.parent.clone();
         while let Some(id) = cursor {
@@ -184,12 +207,20 @@ impl ActPlan for Reenter {
             .iter()
             .filter(|(old_id, old, _)| *old_id != command.source && !old.state.is_terminal())
             .map(|(old_id, old, _)| {
-                let to = if ancestors.contains(old_id) {
+                let to = if command.cancels_forward {
+                    if cancel_front.contains(old_id)
+                        && matches!(
+                            old.state,
+                            TaskState::Ready | TaskState::Running | TaskState::Waiting
+                        )
+                    {
+                        TaskState::Cancelled
+                    } else {
+                        TaskState::Skipped
+                    }
+                } else if ancestors.contains(old_id) {
                     // The containers the walk passes close `Backed`.
                     TaskState::Backed
-                } else if command.cancels_forward {
-                    // A `Cancel` closes the work ahead of the cancelled act.
-                    TaskState::Cancelled
                 } else {
                     // A `Back` closes every other superseded execution — the
                     // sibling branches beside its path and the forward work

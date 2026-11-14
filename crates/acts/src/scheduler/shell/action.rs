@@ -8,6 +8,26 @@ use super::*;
 /// with.
 pub(super) const REENTER_TARGET_VAR: &str = "#reenter_target";
 
+/// Whether the rewind recorded by the deciding commit is a `Cancel` (`true`)
+/// or a `Back` (`false`): the durable direction fact, written beside the
+/// target so `ReenterTask` never has to reconstruct it from the outbox.
+pub(super) const REENTER_CANCEL_VAR: &str = "#reenter_cancel";
+
+/// Whether a rewind was already recorded for one execution: the deciding
+/// commit pins `#reenter_target` on its own scope, so its presence is the
+/// durable "this generation already asked to be re-entered" fact — the guard
+/// a duplicate delivery reads even while the rewind's forward work is still
+/// live (the source generation keeps its state, so the state table alone
+/// cannot refuse it).
+pub(super) fn reenter_recorded(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+    task: &crate::scheduler::core::model::task_graph::TaskId,
+) -> bool {
+    snapshot
+        .variables
+        .contains_key(&(task.clone(), REENTER_TARGET_VAR.to_string()))
+}
+
 /// The durable identity of one client action: the execution it targets and
 /// the operation that carries its intent. Pinned by the first attempt so
 /// every retry re-drives the same operation instead of re-deriving ids from a

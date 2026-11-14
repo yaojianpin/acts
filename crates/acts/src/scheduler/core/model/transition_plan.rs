@@ -270,12 +270,9 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
                     | S::Aborted
                     | S::Skipped
             )
-            // A `Cancel` *is* the legacy rewind: the legacy handler refuses
-            // unless the act's step already finished its own work, then closes
-            // that act `Backed` and redoes the step (see `ActionPlanner`). So
-            // the decided generation of a finished step moves to `Backed`,
-            // exactly like a `Back`'s source — never from `Ready`/`Running`/
-            // `Waiting`, which the legacy guard refuses.
+            // A `Back` closes its finished source `Backed` and re-enters an
+            // earlier step; it never starts from a live state, which the
+            // legacy guard refuses.
             | (S::Completed | S::Submitted, S::Backed)
             | (
                 S::Waiting,
@@ -292,7 +289,7 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
             // (`Created`) as `Skipped`/`Cancelled`: the recreated generation
             // carries the work instead.
             | (S::Created, S::Skipped | S::Cancelled)
-            | (S::Ready, S::Skipped | S::Removed)
+            | (S::Ready, S::Skipped | S::Cancelled | S::Removed)
             // A branch predicate is evaluated in the branch task's `init` (the
             // legacy `Branch::init`), before the task ever runs: one that
             // cannot be evaluated decides that branch `Error` straight from

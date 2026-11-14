@@ -15,10 +15,12 @@ pub(super) fn action_target(
         // work is done (`is_biz_success` = Completed/Submitted/Backed) — a
         // cancel redoes the step and undoes the chain forward from it, which
         // only makes sense once the step ran. The kernel's action targets the
-        // node the act folds into, so the same surface decides here: a
-        // finished node is closed `Backed` (the legacy cancelled act's own
-        // fact) and re-entered, everything else is refused.
-        (S::Completed | S::Submitted, A::Cancel) => Ok(S::Backed),
+        // node the act folds into. That node is the *origin* of the rewind:
+        // it keeps the finished state it already holds (the cancel marks the
+        // work ahead, not the act from which it was issued) and the
+        // `ReenterTask` operation its commit creates re-runs it as a fresh
+        // generation. Everything else is refused.
+        (S::Completed | S::Submitted, A::Cancel) => Ok(current),
         (S::Running | S::Waiting, A::Abort) => Ok(S::Aborted),
         (S::Waiting, A::Back) => Ok(S::Backed),
         (S::Running | S::Waiting, A::Fail { .. }) => Ok(S::Failed),

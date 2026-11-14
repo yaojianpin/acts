@@ -1,14 +1,15 @@
 //! CANCEL reliability cells: the `Cancel` client action — the decision that
-//! closes a finished step `Backed` and re-enters it with a fresh generation —
-//! under a duplicate delivery, a store fault, a race with `Next`, and a crash
-//! between its intent and its effect.
+//! re-enters a finished step with a fresh generation while marking the work
+//! ahead of it — under a duplicate delivery, a store fault, a race with
+//! `Next`, and a crash between its intent and its effect.
 //!
 //! The kernel decides a client action by committing against the aggregate and
 //! projects the rows from the committed snapshot afterwards. Its `Cancel` is
 //! strict: it needs a *finished* step with live forward work
-//! (`validate_cancel_forward_work`), its own commit closes the source
-//! generation `Backed` and creates the durable `ReenterTask` operation that
-//! plans the redo. So the cells here pin, on the surfaces the kernel has:
+//! (`validate_cancel_forward_work`). The finished step is the origin of the
+//! rewind and keeps its state; the commit creates the durable `ReenterTask`
+//! operation that plans the redo and closes the work ahead. So the cells here
+//! pin, on the surfaces the kernel has:
 //!
 //! - "exactly one redo" is a *generation* fact — the aggregate's generations
 //!   for the model node, plus the node's own `Created` message — never a task
@@ -179,10 +180,10 @@ async fn has_pending_operation(engine: &Engine, pid: &str, tid: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Delivering the same `Cancel` twice must rewind the head step exactly once:
-/// the first delivery closes the finished step `Backed` and re-enters it — one
-/// fresh generation, one fresh act `Created` — and the second delivery is
-/// refused, because the newest generation of the node is now the redo itself,
-/// still waiting on its own act, and only a *finished* step is cancelable.
+/// the first delivery re-enters the finished step — one fresh generation, one
+/// fresh act `Created` — while the step itself keeps its state; the second
+/// delivery is refused, because the forward work of the first rewind is now
+/// terminal and only live work ahead is cancelable.
 ///
 /// The legacy duplicate slipped past a guard checked on the parent step (which
 /// stays finished after the first cancel) and created a second redo path; the
@@ -345,9 +346,10 @@ async fn a_store_that_refuses_the_cancel_commit_surfaces_and_the_rewind_lands_on
 /// completion had propagated the next act — a cancel needs the head step
 /// finished *and* live forward work, and the completion is what finishes it,
 /// while the forward step only exists once the completion's propagation
-/// created it. So the head holds exactly one terminal decision (`Backed` with
-/// a redo, or `Completed` alone), the rewind happened iff the cancel won, and
-/// the run settles once either way. Several rounds cover the interleavings.
+/// created it. So the head holds exactly one terminal decision (`Completed`
+/// either way — the cancel re-enters it without changing that state — with a
+/// redo iff the cancel won), and the run settles once either way. Several
+/// rounds cover the interleavings.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_cancel_racing_next_converges_on_one_terminal_decision() {
@@ -415,12 +417,8 @@ async fn cancel_racing_next_converges_on_one_terminal_decision_inner() {
 
         assert_eq!(
             generation_state(&engine, &pid, &step1, 0).await,
-            Some(if redone {
-                TaskState::Backed
-            } else {
-                TaskState::Completed
-            }),
-            "round {round}: the head must hold exactly one terminal decision"
+            Some(TaskState::Completed),
+            "round {round}: the cancel origin keeps its finished state"
         );
         let expected = if redone { vec![0, 1] } else { vec![0] };
         assert_eq!(
@@ -448,9 +446,9 @@ async fn cancel_racing_next_converges_on_one_terminal_decision_inner() {
 /// A `Cancel` whose durable intent landed but whose effect never committed (a
 /// crash between the two, here a write cut) must be replayed by recovery
 /// exactly once: the intent is the durable decision, and the operation that follows
-/// it re-plans the action the client made — the head step `Backed` plus the
-/// `ReenterTask` rewind — so the rewind survives the crash instead of being
-/// silently dropped.
+/// it re-plans the action the client made — the head step re-entered plus the
+/// `ReenterTask` rewind that marks the work ahead — so the rewind survives the
+/// crash instead of being silently dropped.
 ///
 /// The cut is placed at the cancel's second durable write (the claim right
 /// after the intent), so the intent is durable and `Pending` while the effect
@@ -543,8 +541,8 @@ async fn a_cancel_whose_intent_landed_is_reapplied_exactly_once_on_recovery_inne
     );
     assert_eq!(
         generation_state(&reloaded, &pid, &step1, 0).await,
-        Some(TaskState::Backed),
-        "the replayed cancel must close the finished head step Backed"
+        Some(TaskState::Completed),
+        "the replayed cancel must keep the finished head step's state"
     );
     // the replayed rewind re-dispatches the head act, and the intent's
     // operation plus the `ReenterTask` it created are driven to completion —

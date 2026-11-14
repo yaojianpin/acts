@@ -5559,9 +5559,10 @@ async fn completing_a_terminal_task_is_rejected_without_consuming_state() {
     );
 }
 
-/// The skip cascade: cancelling the waiting head of a chain skips the
-/// rest instead of erroring the propagation. Every execution ends
-/// terminal, and the skipped task is identifiable by its state.
+/// The forward-work cascade: cancelling the waiting head of a chain cancels
+/// the nearest forward task and skips the rest instead of erroring the
+/// propagation. Every execution ends terminal, and each marked task is
+/// identifiable by its state.
 #[tokio::test]
 async fn cancelled_head_cascades_skip_through_the_chain() {
     let (host, mut wake_rx) = Workers::in_memory();
@@ -5585,9 +5586,9 @@ async fn cancelled_head_cascades_skip_through_the_chain() {
     .await
     .unwrap();
     host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
-    // The rewind: head gen0 keeps the legacy act's `Backed` fact, the
-    // chain forward of it is skipped, and a fresh head generation is
-    // already parked waiting for its own action.
+    // The rewind: head gen0 keeps its finished state, the nearest forward
+    // work (`mid`) is cancelled, the rest of the chain is skipped, and a
+    // fresh head generation is already parked waiting for its own action.
     host.apply_action(
         "p6",
         &tid_of("p6", "head", 0),
@@ -5608,15 +5609,18 @@ async fn cancelled_head_cascades_skip_through_the_chain() {
     };
     assert_eq!(
         state_of("head", 0),
-        crate::scheduler::core::model::task_graph::TaskState::Backed
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
+        "the cancel origin keeps the state it already held"
     );
     assert_eq!(
         state_of("mid", 0),
-        crate::scheduler::core::model::task_graph::TaskState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Cancelled,
+        "the nearest forward work is cancelled"
     );
     assert_eq!(
         state_of("tail", 0),
-        crate::scheduler::core::model::task_graph::TaskState::Skipped
+        crate::scheduler::core::model::task_graph::TaskState::Skipped,
+        "the work behind the cancelled front is skipped"
     );
     assert_eq!(
         state_of("head", 1),
@@ -6008,9 +6012,9 @@ async fn waiting_branched_step_fans_out_on_the_client_completion() {
 }
 
 /// Cancelling a step that finished its own work rewinds the chain (the
-/// legacy guard): the closed generation keeps the legacy act's own `Backed`
-/// fact, and the re-entered step fans out fresh generations of its branches
-/// when it completes again.
+/// legacy guard): the finished generation keeps its state as the origin of
+/// the rewind, and the re-entered step fans out fresh generations of its
+/// branches when it completes again.
 #[tokio::test]
 async fn cancelling_a_finished_container_rewinds_its_branches() {
     let workflow = crate::model::Workflow::new()
@@ -6078,8 +6082,8 @@ async fn cancelling_a_finished_container_rewinds_its_branches() {
     };
     assert_eq!(
         state_at("step1", 0),
-        crate::scheduler::core::model::task_graph::TaskState::Backed,
-        "the decided generation took the legacy cancelled act's fact"
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
+        "the cancel origin keeps its finished state and re-runs as a new generation"
     );
     assert_eq!(
         state_at("step1", 1),
@@ -6502,7 +6506,7 @@ fn tasks_of(snapshot: &Snapshot, task: &str) -> Vec<u64> {
 }
 
 /// A rewind is part of the decision that asks for it: the `Cancel`'s own
-/// atomic commit closes the source generation, pins the target fact and — since
+/// atomic commit pins the target and direction facts and — since
 /// the fold runs the pure `ReenterTask` and the fresh generation's start — creates
 /// the new generation already started (`Waiting` for this IRQ act), with its
 /// `Created` record in the same batch. Recovery alone no longer has to drive a
@@ -6538,14 +6542,15 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
     host.apply_action(PID, &tid_of(PID, "s1", 0), ActionKind::Cancel, Vec::new())
         .await
         .unwrap();
-    // Durable before any hop ran: the decision closed the source, pinned the
-    // rewind target and planned the re-entry inside its own commit.
+    // Durable before any hop ran: the decision pinned the rewind target and
+    // direction and planned the re-entry inside its own commit. The finished
+    // act it was issued from — the origin — keeps its state.
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     let source = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
     assert_eq!(
         snapshot.tasks[&source].state,
-        crate::scheduler::core::model::task_graph::TaskState::Backed,
-        "the deciding commit closes the source generation"
+        crate::scheduler::core::model::task_graph::TaskState::Completed,
+        "the cancel origin keeps the finished state it already held"
     );
     assert_eq!(
         snapshot
@@ -6554,6 +6559,14 @@ async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
             .map(String::as_str),
         Some("s1"),
         "the deciding commit pins the target the rewind re-enters"
+    );
+    assert_eq!(
+        snapshot
+            .variables
+            .get(&(source.clone(), REENTER_CANCEL_VAR.to_string()))
+            .map(String::as_str),
+        Some("true"),
+        "the deciding commit pins the rewind direction"
     );
     assert_eq!(
         tasks_of(&snapshot, "s1"),
@@ -11051,9 +11064,10 @@ async fn an_action_intent_that_is_already_closed_is_not_claimable() {
 
 /// The cancel guard's forward walk follows predecessor edges: it visits a
 /// successor reached from two parents once, skips a successor that is a
-/// container child, and only collects steps that own a package act.
+/// container child, and only collects steps that own a package act. A rewind
+/// the execution already recorded refuses the duplicate before the walk.
 #[tokio::test]
-async fn the_cancel_guard_walks_a_shared_successor_once_and_skips_child_work() {
+async fn the_cancel_guard_walks_a_shared_successor_once_and_refuses_a_recorded_rewind() {
     use crate::scheduler::core::model::task_graph::{TaskId, TaskState};
 
     const PID: &str = "p-cancel-forward";
@@ -11079,6 +11093,20 @@ async fn the_cancel_guard_walks_a_shared_successor_once_and_skips_child_work() {
 
     // `j` is live forward work, so the guard passes.
     assert!(host.validate_cancel_forward_work(&snapshot, &a).is_ok());
+
+    // A rewind already recorded on `a` refuses the duplicate even though the
+    // forward work is still live: the origin keeps its state, so the state
+    // table alone could not tell this delivery from the first.
+    snapshot
+        .variables
+        .insert((a.clone(), REENTER_TARGET_VAR.to_string()), "a".to_string());
+    let duplicate = host
+        .validate_cancel_forward_work(&snapshot, &a)
+        .unwrap_err();
+    assert!(
+        format!("{duplicate}").contains("not allowed to cancel"),
+        "a recorded rewind refuses a duplicate: {duplicate}"
+    );
 }
 
 /// A delivery claim that loses its guarded write is skipped (not a pass

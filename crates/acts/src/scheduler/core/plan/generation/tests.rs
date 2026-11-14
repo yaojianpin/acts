@@ -174,11 +174,14 @@ fn non_reenterable_source_cannot_reenter() {
 #[test]
 fn cancelled_source_reenters_and_recreates_the_forward_closure() {
     let mut snapshot = snapshot();
-    snapshot.tasks.get_mut(&id("source", 1)).unwrap().state = TaskState::Cancelled;
-    // The old target generation was skipped by the cascade that followed
-    // the cancellation.
+    // The cancel origin keeps the finished state it already held.
+    snapshot.tasks.get_mut(&id("source", 1)).unwrap().state = TaskState::Completed;
+    // The old target generation was skipped as the work behind the
+    // cancelled front.
     snapshot.tasks.get_mut(&id("target", 1)).unwrap().state = TaskState::Skipped;
-    let plan = Reenter::plan((&graph(), &snapshot), &command()).unwrap();
+    let mut command = command();
+    command.cancels_forward = true;
+    let plan = Reenter::plan((&graph(), &snapshot), &command).unwrap();
     // Both the target and the forward source generation are recreated.
     let created: Vec<TaskId> = plan
         .task_creates
@@ -764,10 +767,11 @@ fn back_closes_the_walked_path_and_skips_sibling_branches() {
     );
 }
 
-/// Cancel closes the work ahead of the cancelled act: the running forward
-/// executions — the container and its subtree — close `Cancelled`, while the
-/// cancelled act itself is already `Backed` by the decision and the root is
-/// never walked.
+/// Cancel marks the work ahead of the act it was issued from: the nearest
+/// admitted forward task closes `Cancelled`, everything below it — its own
+/// children included — closes `Skipped`, and the act itself keeps the state
+/// it already held (it is the origin of the rewind, re-entered as a fresh
+/// generation).
 #[test]
 fn cancel_closes_the_running_work_ahead() {
     use crate::scheduler::core::model::task_graph::{TaskGraphBuilder, TaskNode};
@@ -796,14 +800,14 @@ fn cancel_closes_the_running_work_ahead() {
             },
         );
     };
-    // root -> step (the cancelled act, already Backed) -> next (running)
+    // root -> step (the cancel origin, finished) -> next (running)
     // -> leaf (waiting).
     task(&mut snapshot, id("root", 0), None, TaskState::Completed);
     task(
         &mut snapshot,
         id("step", 0),
         Some(id("root", 0)),
-        TaskState::Backed,
+        TaskState::Completed,
     );
     task(
         &mut snapshot,
@@ -853,9 +857,9 @@ fn cancel_closes_the_running_work_ahead() {
         changes,
         vec![
             (id("next", 0), TaskState::Running, TaskState::Cancelled),
-            (id("leaf", 0), TaskState::Waiting, TaskState::Cancelled),
+            (id("leaf", 0), TaskState::Waiting, TaskState::Skipped),
         ],
-        "the work ahead closes cancelled: {changes:?}"
+        "the admitted front closes cancelled, its subtree skipped: {changes:?}"
     );
     let created: Vec<TaskId> = plan
         .task_creates

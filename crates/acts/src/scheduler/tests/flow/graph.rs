@@ -828,10 +828,10 @@ async fn sch_graph_keeps_the_hierarchy_through_both_push_modes() {
     }
 }
 
-/// `Cancel` is the other rewind: it closes the finished container `Backed`
-/// and re-enters it as a new generation. Both generations keep the container
-/// and its act under their own execution — the closed round as it ran, the
-/// re-entered one with the act's fresh instance behind it.
+/// `Cancel` is the other rewind: it marks the work ahead of the finished
+/// container and re-enters it as a new generation. Both generations keep the
+/// container and its act under their own execution — the finished round as it
+/// ran, the re-entered one with the act's fresh instance behind it.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_graph_keeps_the_hierarchy_across_a_cancel() {
@@ -881,11 +881,11 @@ async fn sch_graph_keeps_the_hierarchy_across_a_cancel() {
     assert_eq!(approvals.len(), 2, "the closed and the re-entered round");
     let closed = approvals
         .iter()
-        .find(|node| node.state.as_deref() == Some("backed"))
-        .expect("the cancelled generation is backed");
+        .find(|node| matches!(node.state.as_deref(), Some("completed" | "submitted")))
+        .expect("the cancel origin keeps its finished state");
     let redo = approvals
         .iter()
-        .find(|node| node.state.as_deref() != Some("backed"))
+        .find(|node| node.tid != closed.tid)
         .expect("the re-entered generation");
     let (closed_branch, closed_act) = act_under(&graph, closed);
     let (redo_branch, redo_act) = act_under(&graph, redo);

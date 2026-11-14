@@ -70,9 +70,10 @@ impl ActionPlanner {
         // rewind (`Back`/`Cancel`) has nothing to propagate: the re-entry the
         // deciding call plans two sequences on (the slot the propagation
         // hand-off would have taken is kept, so the rewind's outbox key does
-        // not move) closes the superseded work itself — the walked ancestors
-        // `Backed`, the abandoned branches `Skipped`/`Cancelled` — and a
-        // second walk over the same executions would decide them twice.
+        // not move) closes the superseded work itself — a `Back`'s walked
+        // ancestors `Backed`, a `Cancel`'s forward front `Cancelled`, and the
+        // work behind it `Skipped` — and a second walk over the same
+        // executions would decide them twice.
         let operations = if matches!(command.action, ActionKind::Back | ActionKind::Cancel) {
             Vec::new()
         } else {
@@ -87,12 +88,18 @@ impl ActionPlanner {
             }]
         };
         let mut plan = Self::bare_plan(snapshot, command)?;
-        plan.state_changes = vec![StateChange {
-            task: command.task.clone(),
-            expected_revision: current.revision,
-            from: current.state,
-            to: target,
-        }];
+        // A `Cancel` decides no state on its target: the finished act is the
+        // origin of the rewind, and the work it marks is the chain ahead
+        // (closed by the `ReenterTask` operation the deciding commit creates).
+        // Nothing is written for it, so the commit is not a no-op transition.
+        if target != current.state {
+            plan.state_changes = vec![StateChange {
+                task: command.task.clone(),
+                expected_revision: current.revision,
+                from: current.state,
+                to: target,
+            }];
+        }
         plan.variable_writes = writes;
         plan.operations = operations;
         plan.outbox = vec![OutboxIntent {

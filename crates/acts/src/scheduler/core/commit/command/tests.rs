@@ -126,17 +126,21 @@ fn terminal_task_rejects_action() {
 }
 
 /// `Cancel` is the legacy rewind, guard included: accepted where the legacy
-/// handler is (the target's own work done, `is_biz_success`), closing that
-/// generation `Backed` — the legacy cancelled act's own fact — and refused
-/// while the work is not done (`Ready`/`Running`/`Waiting`).
+/// handler is (the target's own work done, `is_biz_success`). The finished act
+/// is the *origin* of the rewind — it keeps its state and a `ReenterTask`
+/// re-runs it — so the decision marks no state on it; the work ahead is what
+/// the re-entry closes. A cancel whose work is not done
+/// (`Ready`/`Running`/`Waiting`) is refused.
 #[test]
 fn cancel_accepts_only_a_finished_task() {
-    let plan = ActionPlanner::plan(
-        &snapshot(TaskState::Completed),
-        &command(ActionKind::Cancel),
-    )
-    .unwrap();
-    assert_eq!(plan.state_changes[0].to, TaskState::Backed);
+    for state in [TaskState::Completed, TaskState::Submitted] {
+        let plan = ActionPlanner::plan(&snapshot(state), &command(ActionKind::Cancel)).unwrap();
+        assert!(
+            plan.state_changes.is_empty(),
+            "the cancel origin keeps its finished state ({state:?}): {:?}",
+            plan.state_changes
+        );
+    }
     for state in [TaskState::Ready, TaskState::Running, TaskState::Waiting] {
         assert!(
             matches!(

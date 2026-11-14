@@ -50,13 +50,15 @@ pub(crate) enum OperationKind {
     /// it retires once the execution is decided or every branch fired.
     DispatchTimeout,
     /// The durable rewind a `Cancel`/`Back` decision leaves behind: the
-    /// deciding commit closes the source generation (`Backed`) and creates
-    /// this operation in the *same* atomic batch, so the re-entry cannot be
-    /// lost to a crash or a lost compare-and-swap — its operation plans the fresh
-    /// generations ([`crate::scheduler::core::plan::generation::Reenter`]) and its
-    /// ready record re-drives it if that operation fails. The target task id is
-    /// the durable fact `#reenter_target` the deciding commit writes (`Back`
-    /// names an earlier step, `Cancel` the closed execution itself).
+    /// deciding commit records the rewind and creates this operation in the
+    /// *same* atomic batch, so the re-entry cannot be lost to a crash or a
+    /// lost compare-and-swap — its operation plans the fresh generations
+    /// ([`crate::scheduler::core::plan::generation::Reenter`]) and its ready
+    /// record re-drives it if that operation fails. The target task id and the
+    /// direction are the durable facts `#reenter_target`/`#reenter_cancel` the
+    /// deciding commit writes (`Back` names an earlier step and closes the
+    /// branches beside the path; `Cancel` names the finished execution it was
+    /// issued from and closes the work ahead).
     ReenterTask,
     /// A subflow child's hand-back: once the child run settled, the operation
     /// returns its outcome (outputs and terminal state) to the parent act that
