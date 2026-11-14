@@ -143,6 +143,7 @@ impl crate::scheduler::core::plan::ActPlan for Propagate {
                         for ((scope, name), value) in &snapshot.variables {
                             if scope != &command.task
                                 || crate::utils::consts::is_private_key(name)
+                                || crate::utils::consts::is_inheritable_key(name)
                                 || name == "auto"
                                 // The failure vocabulary travels up the
                                 // ancestor walk of its own operation (`plan_upward`'s

@@ -87,10 +87,6 @@ pub struct Message {
     #[serde(default)]
     pub delegator: Option<String>,
 
-    /// The delegatee of this decision, when one applies.
-    #[serde(default)]
-    pub delegatee: Option<String>,
-
     /// The assignment revision this message's act was at.
     #[serde(default)]
     pub rev: u64,
@@ -369,7 +365,6 @@ mod tests {
         assert_eq!(message.owner, None);
         assert_eq!(message.assignee, None);
         assert_eq!(message.delegator, None);
-        assert_eq!(message.delegatee, None);
         assert_eq!(message.rev, 0);
         assert_eq!(message.ref_msg_id, None);
     }

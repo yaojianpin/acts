@@ -102,6 +102,20 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
             inputs.set(key, value.clone());
         }
     }
+    // The assignment identities ride the inputs under `assign` as well as
+    // the message's own `owner`/`assignee`/`delegator` fields: `owner` is the
+    // act's owner, `assignee` is whoever executes it now (the owner, or the
+    // delegatee while a delegation is active), and `delegator` names the
+    // owner who granted that delegation (absent when none is active).
+    let mut assign = serde_json::Map::new();
+    for name in ["owner", "assignee", "delegator"] {
+        if let Some(value) = text(name) {
+            assign.insert(name.to_string(), serde_json::Value::String(value));
+        }
+    }
+    if !assign.is_empty() {
+        inputs.set("assign", serde_json::Value::Object(assign));
+    }
     // The failure facts an error record adds: `ecode`/`message` are what a
     // consumer reads the failure from, so they land in the message's `outputs`
     // as well as its `inputs`.
@@ -160,7 +174,6 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         owner: text("owner"),
         assignee: text("assignee"),
         delegator: text("delegator"),
-        delegatee: text("delegatee"),
         rev,
         ref_msg_id: text("ref_msg_id"),
     })

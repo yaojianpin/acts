@@ -29,9 +29,12 @@
 | 中文 | 字段 | 位置 | 含义 |
 | --- | --- | --- | --- |
 | 承办人 | `owner` | task 状态 | 任务责任人；转办时变更 |
-| 操作人 | `assignee` | task / decision | 当前实际操作人；默认等于 owner |
-| 代理人 | `delegatee` | delegation / decision | 受托代办的人 |
-| 委托人 | `delegator` | delegation / decision | 授权代办的承办人 |
+| 操作人 | `assignee` | task / decision | 当前实际操作人；默认等于 owner，代办时为受托人 |
+| 委托人 | `delegator` | delegation / decision | 授权代办的承办人（仅 delegation 生效时） |
+
+消息投影**不再单独投影 `delegatee`**：无论转办还是代办，`assignee` 就是当前执行人，
+`delegator` 标出代办是谁授权的。`#delegation` 持久事实内部仍保留
+`delegator`/`delegatee`（授权校验依据），它不出现在消息字段与 `inputs.assign` 里。
 | 候选人 | `candidates` | act 变量（列表） | `assign.candidates` 声明、`uses` 包计算出的候选池，供容器展开多人审批 |
 
 不再使用：
@@ -74,7 +77,7 @@
 在 task scope 增加私有变量：
 
 ```json
-"__assignment": {
+"#assignment": {
   "owner": "u1",
   "assignee": "u1",
   "revision": 0,
@@ -98,7 +101,7 @@
 同一 task 只保留一个有效 delegation：
 
 ```json
-"__delegation": {
+"#delegation": {
   "id": "dg1",
   "delegator": "u1",
   "delegatee": "u2",
@@ -114,7 +117,7 @@
 - `granted_by` 是实际调用者（业务系统或 owner）。
 - `expires_at` 可选；到期后 delegation 失效，决策被拒。
 - 新 `act:delegate` 替换旧 delegation；`act:undelegate` 清除。
-- 转办时清空 `__delegation`，避免 A 的代理人继承 B 的权限。
+- 转办时清空 `#delegation`，避免 A 的代理人继承 B 的权限。
 
 ### 5.3 Message / Delivery 投影
 
@@ -124,7 +127,6 @@
 owner: Option<String>,
 assignee: Option<String>,
 delegator: Option<String>,
-delegatee: Option<String>,
 assignment_rev: u64,
 ref_msg_id: Option<String>,
 ```
@@ -136,11 +138,18 @@ ref_msg_id: Option<String>,
   "options": {
     "owner": "u1",
     "assignee": "u1"
+  },
+  "assign": {
+    "owner": "u1",
+    "assignee": "u2",
+    "delegator": "u1"
   }
 }
 ```
 
-`options` 只用于现有 channel glob 路由，**不是授权依据**。
+`assign` 是消息载荷的身份投影：`owner` 责任人、`assignee` 当前执行人（代办时即受托人）、
+`delegator` 代办授权人（无代办时缺省）。`options` 只用于现有 channel glob 路由，
+**不是授权依据**。
 
 ### 5.4 模型声明
 
@@ -183,8 +192,8 @@ ref_msg_id: Option<String>,
 
 1. 校验调用者是当前 `owner`，或拥有 `assign` 能力。
 2. 校验 task 非终态、`expect_rev` 匹配、目标用户 enabled 且有决策权限。
-3. 写 `__assignment`：`owner=B`、`assignee=B`、`revision+1`、`transferred_from=A`。
-4. 清空 `__delegation`。
+3. 写 `#assignment`：`owner=B`、`assignee=B`、`revision+1`、`transferred_from=A`。
+4. 清空 `#delegation`。
 5. 关闭 A 的旧 delivery，标记 `Superseded`。
 6. 发送一条 `type=assignment` 消息给 B。
 7. **不修改 task state，不 complete，不生成新 task。**
@@ -205,16 +214,16 @@ act Completed (assignee=B) <- B 决策后
 
 1. 校验调用者是当前 `owner`，或拥有 `assign` 能力。
 2. `delegator` = 当前 `owner`；`granted_by` = 调用者。
-3. 写 `__delegation`，`assignee=delegatee`，`revision+1`。
+3. 写 `#delegation`，`assignee=delegatee`，`revision+1`。
 4. 发送 `type=assignment` 通知给 delegatee。
 5. owner 仍可决策；delegatee 在有效期内可决策。
 6. 决策记录 `owner`、`assignee`（本次实际操作人）、`delegator`、`delegatee`。
 
 撤销：
 
-- `act:undelegate {pid,tid}`：清空 `__delegation`，`assignee=owner`，`revision+1`。
+- `act:undelegate {pid,tid}`：清空 `#delegation`，`assignee=owner`，`revision+1`。
 - 到期：决策时检查 `now < expires_at`；可选清理变量，但不是授权依据。
-- 转办：清空 `__delegation`。
+- 转办：清空 `#delegation`。
 
 ### 6.3 决策记录
 
@@ -244,7 +253,7 @@ owner 自己操作时：
 ## 7. 容器中的 assign
 
 `assign.owner` 可以写在叶子人类 act 上（每个叶子自己的 start 时解析），也可以
-写在容器上——**容器的声明是子步骤的模板**：容器自身不产生 `__assignment`（没有
+写在容器上——**容器的声明是子步骤的模板**：容器自身不产生 `#assignment`（没有
 单 owner），不受决策授权约束；它生成的子活动里没有单独声明 `assign.owner` 的，
 在各自启动时继承最近的祖先容器的 owner 表达式，并在子活动自己的作用域里解析
 （`$item.value`、`$initiator`、工作流变量都可用）；自己声明了 owner 的子活动
@@ -316,7 +325,7 @@ uses 包），应答变量就位后容器才展开 fan-out，`params` 的模板�
 
 **授权（两种形态一致）**：加签/减签由"持有该活动的被指派执行"的 `owner`
 决定——被推活动（普通 pushed act、顺签链的叶子）从不为自己签名，其授权在
-最近的带 `__assignment` 的祖先上；非 pushed 的目标从自身起沿 parent 链找
+最近的带 `#assignment` 的祖先上；非 pushed 的目标从自身起沿 parent 链找
 最近的 assignment。`subject` 不是该 owner 时内核以 `ENOTOWNER` 拒绝。整条
 链上都没有 assignment 的活动（模型声明的无主容器、未声明 `assign` 的旧
 任务）保持旧行为（`@execute`）。委托代办人（delegatee）不获得加签/减签权：
@@ -332,7 +341,7 @@ uses 包），应答变量就位后容器才展开 fan-out，`params` 的模板�
 内核在目标下动态生成一条顺签链（行为等价 `acts.core.sequence`：逐个准入、
 顺序固定）。运行中的模型不可变、pushed 容器无法参数展开，所以顺签由内核
 排序的 pushed 活动链实现：每个 `<target>#push<n>` 是一个普通 pushed
-human leaf，`assign.owner` 为链上对应用户；目标 scope 的 `__sign` 队列
+human leaf，`assign.owner` 为链上对应用户；目标 scope 的 `#sign` 队列
 持有剩余顺序，前一个叶子落定（完成或被减签）后内核准入下一个。`mode`
 决定链序：
 
@@ -411,7 +420,7 @@ owner-only。
 - transfer 携带 `expect_rev`；task 终态或在途决策时拒绝。
 - decision 携带 `assignment_rev`；transfer 先提交则旧 actor 被拒，decision 先提交则 transfer 被拒。
 - delegation 撤销同样递增 revision；撤销先提交则旧决策被拒。
-- replay/restart 从 snapshot 恢复 `__assignment` / `__delegation`，不依赖内存。
+- replay/restart 从 snapshot 恢复 `#assignment` / `#delegation`，不依赖内存。
 - 旧 delivery 的 `Superseded` 是 read-model 投影；决策校验不依赖 delivery 状态。
 
 ## 11. API / 消息

@@ -4,7 +4,7 @@
 //! optional explicit join edges. The nested import (P2) keeps the same
 //! vocabulary — `crate::scheduler::core::model::model_graph::ModelGraph`/`crate::scheduler::core::model::task_graph::TaskGraph` — for the
 //! seeded top chain, and carries the nested structure (branch subtrees) as
-//! durable aggregate variables (`__model`, `__auto`): the fan-out operation reads
+//! durable aggregate variables (`#model`, `#auto`): the fan-out operation reads
 //! them from the snapshot, so recovery replays never need the declaring
 //! spec. Branch executions and their inner chains come alive through
 //! `crate::scheduler::core::plan::container::Fanout` fan-outs, never at seed time.
@@ -33,18 +33,18 @@ fn node_id(name: &str) -> Result<NodeId> {
 /// The root-scope variable holding the declaring workflow (JSON). The
 /// aggregate is the graph of record, so the nested model — which branches and
 /// inner chains a fan-out must admit — replays from here without the spec.
-pub(crate) const MODEL_VAR: &str = "__model";
+pub(crate) const MODEL_VAR: &str = "#model";
 
 /// The root-scope variable mapping every step node id to its durable
 /// auto/waiting decision (`is_auto` at import time). Dynamic fan-outs seed a
 /// created execution's `auto` variable from it.
-pub(crate) const AUTO_MAP_VAR: &str = "__auto";
+pub(crate) const AUTO_MAP_VAR: &str = "#auto";
 
 /// The root-scope variable mapping every step node id to its durable `Msg`
 /// run-bound decision (the package's `run_as` at import time): a node whose
 /// package runs as `Msg` is delivered once — its completion record — so its
 /// start announces no `Created` message.
-pub(crate) const MSG_MAP_VAR: &str = "__msg";
+pub(crate) const MSG_MAP_VAR: &str = "#msg";
 
 /// A flat process: `root` with `children` in declaration order (implicit
 /// successor chain) plus optional explicit edges, e.g. a join that both

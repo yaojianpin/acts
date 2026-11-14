@@ -233,7 +233,7 @@ pub(super) fn root_variable(
         .and_then(|root| snapshot.variables.get(&(root, name.to_string())).cloned()))
 }
 
-/// The run's `__created` stamp (milliseconds): the FIFO key of the parked
+/// The run's `#created` stamp (milliseconds): the FIFO key of the parked
 /// queue. A run seeded before the fact existed reads as `0` and outranks
 /// nothing.
 pub(super) fn created_stamp(
@@ -294,13 +294,13 @@ pub(super) fn msg_decision(
 /// into name→json-string pairs: the variable space an effect's params and a
 /// branch predicate resolve against.
 ///
-/// Private (`__`-prefixed) variables are the engine's own aggregate facts —
+/// Private (`#`-prefixed) variables are the engine's own aggregate facts —
 /// the declaring model, the auto map, the run's owner, the cost start of a
 /// timed-out execution — not the variable space a legacy task ever reads, so
-/// they are left out (a `${{ __model }}` in a step's params must not resolve
+/// they are left out (a ${{ #model }} in a step's params must not resolve
 /// where the legacy run would fail it).
 ///
-/// One name is the exception: `__cost` is the legacy task *datum* the engine's
+/// One name is the exception: `#cost` is the legacy task *datum* the engine's
 /// own `$cost()`/`$cost_in(...)` read (frozen by the tick that dispatched a
 /// timeout branch), so it travels with the scope — a timeout branch's effect
 /// params answer the same cost the legacy branch task did.
@@ -356,7 +356,7 @@ pub(super) fn owner_of(
 
 /// Whether a scope variable is an *engine* fact rather than workflow data.
 ///
-/// Private (`__`-prefixed) names are the engine's by convention; `auto` is the
+/// Private (`#`-prefixed) names are the engine's by convention; `auto` is the
 /// older spelling of the durable auto/waiting decision the seed and every
 /// fan-out write into the execution's own scope (it predates the convention,
 /// and the aggregate's variable map is keyed by name, so renaming it would
@@ -429,7 +429,9 @@ pub(super) fn scope_object(
 /// flow — the predecessors the aggregate recorded, nearest-wins in their
 /// declared order. A step with no flow predecessor (a container's first
 /// child) falls back to its task-tree parent, so `$parent` still names the
-/// node the execution runs under.
+/// node the execution runs under. An inheritable (`@`) variable is read only
+/// off the tree-parent fallback: a flow predecessor is not this scope's
+/// ancestor, so its subtree-local answers stop at it.
 pub(super) fn parent_scope_object(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task_id: &crate::scheduler::core::model::task_graph::TaskId,
@@ -441,7 +443,11 @@ pub(super) fn parent_scope_object(
         if snapshot.tasks.contains_key(predecessor) {
             found = true;
             if let serde_json::Value::Object(values) = scope_object(snapshot, predecessor) {
-                merged.extend(values);
+                merged.extend(
+                    values
+                        .into_iter()
+                        .filter(|(name, _)| !crate::utils::consts::is_inheritable_key(name)),
+                );
             }
         }
     }
@@ -586,14 +592,14 @@ pub(super) fn lifecycle_state(
 /// (completion, failure, skip) carries the facts the *start* operation resolved
 /// instead of re-running the headless scope, whose snapshot seal may fail
 /// (and must fail the act at start, never a later operation).
-pub(super) const PARAMS_VAR: &str = "__params";
-pub(super) const OPTIONS_VAR: &str = "__options";
+pub(super) const PARAMS_VAR: &str = "#params";
+pub(super) const OPTIONS_VAR: &str = "#options";
 
 /// The private execution variable a fan-out pins on a branch whose predicate
 /// could not be evaluated (`{"code":..,"message":..}`): the branch is admitted
 /// and fails on its first operation, exactly like the legacy branch task erroring in
 /// its `init`.
-pub(super) const BRANCH_ERROR_VAR: &str = "__branch_error";
+pub(super) const BRANCH_ERROR_VAR: &str = "#branch_error";
 
 /// One decided execution failure: the error variables a failure operation commits,
 /// plus the legacy task-data name a catch predicate reads.
@@ -698,15 +704,22 @@ pub(super) fn message_topic(
 
 /// The scope variables a legacy act message carries as `inputs`: the
 /// predecessor's own (its outputs) first, the acting execution's own on top —
-/// the legacy `Task::inputs` merges the node's vars last, so they win.
+/// the legacy `Task::inputs` merges the node's vars last, so they win. An
+/// inheritable (`@`) variable merges only from the acting execution's own
+/// scope: it belongs to that scope's subtree, and a flow predecessor is
+/// neither — its answers stop at it instead of riding into the next task.
 pub(super) fn input_vars(
     snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
     task: &crate::scheduler::core::model::task_graph::TaskId,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut inputs = serde_json::Map::new();
-    let mut merge = |scope: &crate::scheduler::core::model::task_graph::TaskId| {
+    let mut merge = |scope: &crate::scheduler::core::model::task_graph::TaskId,
+                     inheritable: bool| {
         for ((key_scope, name), raw) in &snapshot.variables {
-            if key_scope != scope || is_engine_fact(name) {
+            if key_scope != scope
+                || is_engine_fact(name)
+                || (inheritable && crate::utils::consts::is_inheritable_key(name))
+            {
                 continue;
             }
             inputs.insert(
@@ -717,10 +730,10 @@ pub(super) fn input_vars(
     };
     if let Some(task) = snapshot.tasks.get(task) {
         for predecessor in &task.predecessors {
-            merge(predecessor);
+            merge(predecessor, true);
         }
     }
-    merge(task);
+    merge(task, false);
     inputs
 }
 

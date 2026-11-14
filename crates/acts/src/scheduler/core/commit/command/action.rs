@@ -19,13 +19,13 @@ pub(crate) enum ActionKind {
     /// continues, exactly like the legacy `task.removed` walk.
     Remove,
     /// Transfer — move an assigned human act's owner to another user without
-    /// deciding it. The plan writes only `__assignment` (and the assignment
+    /// deciding it. The plan writes only `#assignment` (and the assignment
     /// notification); it never changes the task's state, never completes it
     /// and never creates another execution.
     Transfer,
     /// Delegate — let a business user decide the act for its owner until the
     /// delegation expires or is revoked. Like a transfer it writes assignment
-    /// state only: `__delegation` plus the assignee, no state change.
+    /// state only: `#delegation` plus the assignee, no state change.
     Delegate,
     /// Undelegate — revoke the act's delegation, restoring the owner as the
     /// assignee. No state change, no propagation.
@@ -39,7 +39,7 @@ pub(crate) enum ActionKind {
 
 impl ActionKind {
     /// Whether the action changes who may decide an act rather than deciding
-    /// it. Every such action writes `__assignment`/`__delegation` and
+    /// it. Every such action writes `#assignment`/`#delegation` and
     /// announces an `assignment` message, and is admissible on exactly the
     /// live states a decision may reach.
     pub(crate) fn moves_assignment(&self) -> bool {

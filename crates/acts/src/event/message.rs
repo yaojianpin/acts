@@ -92,7 +92,7 @@ pub struct Message {
     pub timestamp: i64,
 
     /// The human act's current owner — a projection of the task's
-    /// `__assignment`, never an authorization source on this struct.
+    /// `#assignment`, never an authorization source on this struct.
     #[serde(default)]
     pub owner: Option<String>,
 
@@ -103,10 +103,6 @@ pub struct Message {
     /// The delegator of the decision, when the assignee is acting for one.
     #[serde(default)]
     pub delegator: Option<String>,
-
-    /// The delegatee of the decision, when one is acting for the owner.
-    #[serde(default)]
-    pub delegatee: Option<String>,
 
     /// The assignment revision this message's act was at.
     #[serde(default)]
@@ -216,7 +212,6 @@ impl Message {
             owner: self.owner.clone(),
             assignee: self.assignee.clone(),
             delegator: self.delegator.clone(),
-            delegatee: self.delegatee.clone(),
             rev: self.rev,
             ref_msg_id: self.ref_msg_id.clone(),
             v: data::Message::version(),
@@ -241,7 +236,6 @@ impl Message {
             owner: self.owner.clone(),
             assignee: self.assignee.clone(),
             delegator: self.delegator.clone(),
-            delegatee: self.delegatee.clone(),
             rev: self.rev,
             ref_msg_id: self.ref_msg_id.clone(),
             v: data::Delivery::version(),
@@ -313,7 +307,6 @@ impl From<data::Message> for Message {
             owner: v.owner,
             assignee: v.assignee,
             delegator: v.delegator,
-            delegatee: v.delegatee,
             rev: v.rev,
             ref_msg_id: v.ref_msg_id,
         }

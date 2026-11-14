@@ -65,7 +65,7 @@ impl DispatchTimeout {
     ///
     /// The cost is what passed since the execution's own start operation (the legacy
     /// task's creation stamp); it is frozen into the branch's evaluation as the
-    /// `__cost` task datum `$cost()`/`$cost_in(...)` read.
+    /// `#cost` task datum `$cost()`/`$cost_in(...)` read.
     async fn timeout_round(
         host: &Workers,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,

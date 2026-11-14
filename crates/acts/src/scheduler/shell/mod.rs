@@ -2213,7 +2213,7 @@ impl Workers {
         ) {
             // Added/removed approvers manage the act's approver set, not its
             // decision: the assigned owner decides — the target's own
-            // `__assignment`, else the nearest ancestor's (a pushed act or a
+            // `#assignment`, else the nearest ancestor's (a pushed act or a
             // fan-out item answers to the assigned execution above it). A
             // chain with no assignment at all keeps the legacy authority
             // (`@execute`); a delegatee gains no right to add or remove approvers.

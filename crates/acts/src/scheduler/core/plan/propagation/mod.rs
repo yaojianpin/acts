@@ -54,7 +54,7 @@ pub(crate) struct FlowTarget {
     /// Its newest generation is already terminal: the flow re-enters the node,
     /// so a fresh generation is created (a backward `next`, a `while` turn).
     pub(crate) reopen: bool,
-    /// The node's durable auto decision (`__auto`) — what a re-entered
+    /// The node's durable auto decision (`#auto`) — what a re-entered
     /// generation's scope must carry, like every fan-out child does, or the
     /// engine would treat a waiting act as a self-completing one.
     pub(crate) auto: bool,
@@ -67,9 +67,9 @@ pub(crate) struct FlowTarget {
 /// The private variable an execution carries when its own `if`/`while` guard
 /// decided it `Skipped`: the guard *fell through* — the legacy step skipped by
 /// its condition, whose flow goes on to the next declared step — as opposed to
-/// a skip the deadness cascade flowed in. A `__` fact: out of the expression
+/// a skip the deadness cascade flowed in. A `#` fact: out of the expression
 /// space and the read model, durable so a replay reads the same verdict.
-pub(crate) const GUARD_SKIP_VAR: &str = "__guard_skip";
+pub(crate) const GUARD_SKIP_VAR: &str = "#guard_skip";
 
 /// The private variable an execution carries when the *client* skipped it
 /// (`act:skip`): the same fall-through a guard skip is — the flow goes on
@@ -77,8 +77,8 @@ pub(crate) const GUARD_SKIP_VAR: &str = "__guard_skip";
 /// flowed in. Kept apart from [`GUARD_SKIP_VAR`] because one join reads the
 /// two differently: a catch handler the client skipped *was* selected (its
 /// step is caught, the error absorbed), while a handler its own guard skipped
-/// was never selected. A `__` fact like the guard's.
-pub(crate) const CLIENT_SKIP_VAR: &str = "__client_skip";
+/// was never selected. A `#` fact like the guard's.
+pub(crate) const CLIENT_SKIP_VAR: &str = "#client_skip";
 
 /// Whether one execution was skipped by its own guard (see [`GUARD_SKIP_VAR`]).
 pub(crate) fn is_guard_skip(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {

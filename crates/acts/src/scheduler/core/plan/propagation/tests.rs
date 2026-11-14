@@ -610,7 +610,7 @@ fn a_reopen_with_settled_predecessors_is_admitted_and_carries_parent_data() {
             ((id("src"), "answer".to_string()), "\"42\"".to_string()),
             ((id("src"), "auto".to_string()), "1".to_string()),
             ((id("src"), "error.code".to_string()), "\"E\"".to_string()),
-            ((id("src"), "__private".to_string()), "true".to_string()),
+            ((id("src"), "#private".to_string()), "true".to_string()),
         ]),
         operations: HashMap::new(),
         outbox: HashMap::new(),
@@ -670,7 +670,7 @@ fn a_reopen_with_settled_predecessors_is_admitted_and_carries_parent_data() {
     assert!(
         plan.variable_writes
             .iter()
-            .all(|write| write.name != "error.code" && !write.name.starts_with("__")),
+            .all(|write| write.name != "error.code" && !write.name.starts_with("#")),
         "private and failure facts are carried by their own walks"
     );
 }

@@ -43,6 +43,93 @@ async fn sch_outputs_flow_along_the_declared_next_chain() {
     fixture.close().await;
 }
 
+/// An inheritable (`@`) variable stops at the declaring step: the successor
+/// reads neither the scope chain nor its `$inputs` from it, and the run's own
+/// outputs never carry it — the fold, the predecessor merge and the parent
+/// object all skip `@` names.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_inheritable_var_never_reaches_the_successor() {
+    let workflow = Workflow::new()
+        .with_id("flow-inheritable-stops")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_var("@answer", 42)
+                .with_uses(USES_SET, Vars::new().with("a", 5))
+        })
+        .with_step(|step| {
+            step.with_id("s2").with_uses(
+                USES_IRQ,
+                Vars::new()
+                    .with("key", "act")
+                    .with("seen", "${{ @answer }}"),
+            )
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("s2").await;
+    assert_eq!(
+        created.params().unwrap().get::<i32>("seen"),
+        None,
+        "the declaring step's @ variable is not in the successor's scope"
+    );
+    assert_eq!(
+        created.inputs.get::<i32>("@answer"),
+        None,
+        "the predecessor's @ variable does not ride the message inputs"
+    );
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+    let completion = fixture.wait_completed().await;
+    assert_eq!(
+        completion.outputs.get::<i32>("a"),
+        Some(5),
+        "the public output still folds to the run"
+    );
+    assert_eq!(
+        completion.outputs.get::<i32>("@answer"),
+        None,
+        "the run's outputs carry no @ variable"
+    );
+    fixture.close().await;
+}
+
+/// An inheritable (`@`) variable is visible down the declaring step's own
+/// subtree: a branch child reads it through the scope chain while the flow is
+/// still inside the declaration.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_inheritable_var_reads_in_the_declaring_subtree() {
+    let workflow = Workflow::new()
+        .with_id("flow-inheritable-children")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_var("@answer", 42)
+                .with_branch(|branch| {
+                    branch.with_id("b1").with_if("true").with_step(|inner| {
+                        inner.with_id("i1").with_uses(
+                            USES_IRQ,
+                            Vars::new()
+                                .with("key", "act")
+                                .with("seen", "${{ @answer }}"),
+                        )
+                    })
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+
+    let created = fixture.wait_created("i1").await;
+    assert_eq!(
+        created.params().unwrap().get::<i32>("seen"),
+        Some(42),
+        "the declaring step's child reads the @ variable"
+    );
+    fixture.next(&created.pid, &created.tid).await.unwrap();
+    fixture.wait_completed().await;
+    fixture.close().await;
+}
+
 /// A bare step id reads that step's own durable data: the legacy `step1.a`
 /// expression resolves through the shared aggregate, not through the acting
 /// task's local variable map.

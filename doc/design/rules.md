@@ -122,7 +122,7 @@ pub struct ValidationRule {
 | 其他动作 | 不执行；以 `validation_failed` 失败，文本点名“cannot be applied when the act starts” | 无 `Created` |
 
 决策动作按规则的 `params` 执行：`params` 是决策的 inputs，走和客户端命令
-完全相同的路径——`__action` 事实记录它们，`ApplyAction` 重放时由
+完全相同的路径——`#action` 事实记录它们，`ApplyAction` 重放时由
 `variable_writes` 写到活动自己的 scope 上（同名覆盖步骤变量）。`params` 是
 字面量，不做 `${{ }}` 解析：它们扮演的是“客户端这次决策带的输入”，而规则的
 条件表达式才是读取/计算上下文的地方。`skip` 不消费 `params`。
@@ -156,7 +156,7 @@ scope——它们不是一次决策输入。
 `next`/`submit`/`abort`/`remove` 不是“在内存里直接改状态”：
 
 - 启动计划把动作映射为 `ActionKind`（`Next→Complete`、`Submit`、`Abort`、
-  `Remove`），在活动自己的 scope 上写 `__action@<sequence>` 事实（规则的
+  `Remove`），在活动自己的 scope 上写 `#action@<sequence>` 事实（规则的
   `params` 就是事实的 inputs），并 seed 一个 `ApplyAction` 操作。
 - 重放/重启时 `action_exists` 为真，不会重复追加决策；动作按普通客户端决策的
   路径应用。
@@ -171,10 +171,10 @@ scope——它们不是一次决策输入。
   assign 的活动即使随后命中 `skip`/`error`，owner 也必须先解析成功；解析失败会
   以 `assignment_failed` 失败，而不是被规则吸收。这是当前实现的有意顺序：
   assignment 是活动启动的一部分，规则不改变承办人解析的失败语义。
-- 规则不改变授权：客户端决策仍按 `__assignment`/`__delegation` 检查；规则触发
+- 规则不改变授权：客户端决策仍按 `#assignment`/`#delegation` 检查；规则触发
   的 `next`/`submit` 等是引擎决策，不冒充 owner 的客户端操作。
 - 连岗审批、额度自动通过等参与人相关规则可以读取 `$parent`/`$root` 和
-  assignment 投影到消息的字段；规则自身不写 `__assignment`。
+  assignment 投影到消息的字段；规则自身不写 `#assignment`。
 - pushed act 不在模型里，`step_rules` 对它返回空；pushed act 仍可携带
   `assign`，但不能声明 `rules`（后续如需支持，应把规则放进 `PushedAct` 事实）。
 
@@ -213,7 +213,7 @@ scope——它们不是一次决策输入。
 | --- | --- | --- |
 | `ValidationRule` 模型 + serde | ~280 行（含测试） | 低：纯数据 |
 | 规则求值 + 动作映射 | ~120 行（`facts.rs`/`task.rs`） | 中：顺序、Created 抑制 |
-| 自动决策的持久化 | 复用 `ApplyAction`/`__action` | 低：无新操作类型 |
+| 自动决策的持久化 | 复用 `ApplyAction`/`#action` | 低：无新操作类型 |
 | 测试 | 4 个 flow cell + serde 单测 | 中：消息可见性断言 |
 
 风险与处理：

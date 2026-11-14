@@ -87,7 +87,7 @@ impl ProcRead {
     }
 
     /// The run's env, as the proc row carries it (owner authority, directory
-    /// and the durable `__env` map).
+    /// and the durable `#env` map).
     pub(crate) fn env(&self) -> &Vars {
         &self.env
     }

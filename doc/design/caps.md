@@ -172,7 +172,7 @@ transfer/delegate/undelegate/push/catch 等 plan 与 fanout）全部迁为
 | --- | --- | --- |
 | `shell/caps/assign/owner.rs` | 责任人 | `Assignment` 状态、决策/改派授权（owner 或有效 delegatee）、assignment payload 投影（`impl Assign`） |
 | `shell/caps/assign/delegate.rs` | 代办 | `Delegation` 状态、有效期语义、`expires_at`/`expect_rev` 传输形状解析、delegation payload 投影（`impl Assign`） |
-| `shell/caps/assign/candidates.rs` | 候选人 | 候选池契约：`__candidates_wait`/`__candidates_ask`/`__candidates` 标记与 spec（`{ params, uses }`） |
+| `shell/caps/assign/candidates.rs` | 候选人 | 候选池契约：`#candidates_wait`/`#candidates_ask`/`#candidates` 标记与 spec（`{ params, uses }`） |
 | `shell/caps/assign/resolver.rs` | owner 解析缝 | `AssignmentResolver` trait（Context 桥，§2.1） |
 | `shell/caps/join/` | 会合 | 身份 + 再导出 core `join_rules`（`decide`/`verdict`/`Decision`/`Verdict`）+ 编排（`Join` 的方法：`settlement`/`ask`/`apply_verdict`） |
 
@@ -235,7 +235,7 @@ step 自身的 `uses`/`params`、`assign.candidates` 的 `params`/`uses`、join
 
 有 assign 的 act，操作人（actor）必须与 `assignee` 一致（或与有效
 delegation 的 `delegatee` 一致）方可执行决策；转办/代办的管理授权
-（owner 或 `@assign` 能力）不变。容器 act 不产生自己的 `__assignment`
+（owner 或 `@assign` 能力）不变。容器 act 不产生自己的 `#assignment`
 （容器上的 `assign.owner` 是子步骤继承的模板），仅有 candidates、没有 owner
 的容器 act 保持"无 assign 即 `@execute`"的旧行为。
 
@@ -258,11 +258,11 @@ delegation 的 `delegatee` 一致）方可执行决策；转办/代办的管理�
 `Scope::assign_projection` 桥接，`env/functions.rs` 的 `$assign` builtin 暴露）：
 
 - 身份字段 `owner`/`assignee`/`delegator`/`delegatee`：取最近一个持
-  `__assignment` 的执行；delegator/delegatee 取该执行自己的 `__delegation`
+  `#assignment` 的执行；delegator/delegatee 取该执行自己的 `#delegation`
   （不从无关祖先继承）。
 - 池对象 `$assign.candidates`（`.users`/`.ids`/`.count`）与命名池
-  `$assign.<key>`：取最近一个已算出候选池（`__candidates` /
-  `__pool_<key>`）的执行。与身份字段**各自**就近解析：容器生成的子 act
+  `$assign.<key>`：取最近一个已算出候选池（`#candidates` /
+  `#pool_<key>`）的执行。与身份字段**各自**就近解析：容器生成的子 act
   带着自己的 owner，仍读到父容器的池；顶层 `ids`/`participants`/`count`
   是 candidates 池的兼容别名。
 - `$assign.at("<step-id>")`：显式指定执行（node id 取最新 generation，wire

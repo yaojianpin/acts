@@ -60,7 +60,7 @@ pub(in crate::scheduler::shell) enum Start {
         /// command uses.
         rule_action: Option<(crate::event::EventAction, Vec<(String, String)>)>,
         /// The owner a declared `assign.owner` resolved to. `Some` only for a
-        /// fresh start of an assigned act; its `__assignment` write rides
+        /// fresh start of an assigned act; its `#assignment` write rides
         /// this plan.
         assignment: Option<String>,
     },
@@ -592,7 +592,7 @@ impl ActOperation for ExecuteTask {
                     )?
                 {
                     // The payload was built before this plan writes
-                    // `__assignment`; the start's resolved owner is merged in.
+                    // `#assignment`; the start's resolved owner is merged in.
                     if let Some(owner) = &assignment {
                         Assign::inject_payload_assignment(&mut payload, &Assignment::new(owner));
                     }
@@ -816,7 +816,7 @@ impl ExecuteTask {
             "skipped",
             "task.skipped",
         )?;
-        // The marker the propagation and the join read (a `__` fact: out of
+        // The marker the propagation and the join read (a `#` fact: out of
         // the expression space and the read model).
         plan.variable_writes.push(VariableWrite {
             scope: task_id.clone(),

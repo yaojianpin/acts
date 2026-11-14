@@ -11,7 +11,7 @@
 //! `cache_cap` bounds the runs in flight at once — runs started and not yet
 //! terminal. A start beyond it is parked (its aggregate and `None` process row
 //! exist, but it runs no hop) until a settled run frees a slot; the parked run
-//! with the oldest `__created` stamp is admitted first. A negative value means
+//! with the oldest `#created` stamp is admitted first. A negative value means
 //! no bound.
 
 // `include_str!` is resolved against this file when the crate is built, and the

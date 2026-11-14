@@ -23,7 +23,7 @@ use std::fmt;
 /// `id`. The serialized shape always carries all three fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Participant {
-    /// The stable business user id a task's `__assignment.owner` stores.
+    /// The stable business user id a task's `#assignment.owner` stores.
     pub id: String,
     /// The business code (login/employee number) of the user.
     pub code: String,

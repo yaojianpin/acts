@@ -3,10 +3,10 @@ use super::*;
 /// The durable target of a `Cancel`/`Back` rewind, written by the deciding
 /// commit for the `ReenterTask` operation its batch creates: `Back` names an
 /// earlier step (the client's `to`), `Cancel` the closed execution itself.
-/// A private fact (the `__` prefix keeps it out of the expression space and
+/// A private fact (the `#` prefix keeps it out of the expression space and
 /// the read model), like every other engine fact the operations address each other
 /// with.
-pub(super) const REENTER_TARGET_VAR: &str = "__reenter_target";
+pub(super) const REENTER_TARGET_VAR: &str = "#reenter_target";
 
 /// The durable identity of one client action: the execution it targets and
 /// the operation that carries its intent. Pinned by the first attempt so
@@ -27,10 +27,10 @@ pub(super) enum ActionResume {
 
 /// The private variable a durable action intent pins its decision in, keyed by
 /// the intent operation's sequence so a later action on the same execution
-/// cannot be read in its place. A `__` fact: out of the expression space and
+/// cannot be read in its place. A `#` fact: out of the expression space and
 /// the read model.
 pub(super) fn action_fact_var(sequence: u64) -> String {
-    format!("__action@{sequence}")
+    format!("#action@{sequence}")
 }
 
 /// The durable spec of a pushed act, on the pushed execution's own
@@ -38,7 +38,7 @@ pub(super) fn action_fact_var(sequence: u64) -> String {
 /// kernel's model is immutable for the life of a run, so the act rides the
 /// execution instead, and every model lookup for the node falls back to it
 /// (`step_uses`/`step_effect`).
-pub(super) const PUSH_ACT_VAR: &str = "__act";
+pub(super) const PUSH_ACT_VAR: &str = "#act";
 
 /// The pushed act one execution was created for: the client inputs a `Push`
 /// carried, reduced to what an act's start and messages read off its model
@@ -199,7 +199,7 @@ pub(super) fn next_push_node(
 /// chain carries. The variable lives on the target's scope; each settled
 /// leaf pops its front
 /// ([`ApplyAction::approver_push_plan`](../operation/action/struct.ApplyAction.html)).
-pub(super) const APPROVER_CHAIN_VAR: &str = "__approver_chain";
+pub(super) const APPROVER_CHAIN_VAR: &str = "#approver_chain";
 
 /// The durable approver chain of one added-approvers push.
 #[derive(Clone, Debug)]
@@ -435,7 +435,7 @@ mod tests {
             assert_eq!(subject, None);
             assert_eq!(actor, None);
         }
-        assert_eq!(action_fact_var(7), "__action@7");
+        assert_eq!(action_fact_var(7), "#action@7");
     }
 
     /// A fact the engine cannot read back is an engine error naming the

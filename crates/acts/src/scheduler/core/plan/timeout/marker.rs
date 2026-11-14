@@ -4,14 +4,14 @@ use crate::scheduler::core::plan::ActPlan;
 
 /// The cost start of one execution, written by its own start operation (`Ready →
 /// Running`/`Waiting`). Not part of the expression variable space: it is a
-/// kernel fact, so it stays `__`-private and never reaches a headless scope.
+/// kernel fact, so it stays `#`-private and never reaches a headless scope.
 ///
 /// The legacy `Task` stamped its *creation* time and measured `cost()` from it.
 /// The kernel pre-creates a run's chain executions at seed time, so creation
 /// time would measure the whole run's age; the start operation is the closest durable
 /// analogue — it is the moment the execution began its own work, which is what
 /// the legacy stamp meant for a step its predecessor scheduled.
-pub(crate) const STARTED_VAR: &str = "__started";
+pub(crate) const STARTED_VAR: &str = "#started";
 
 /// One declared timeout branch's durable admission facts: the model-supplied
 /// parts (the guard itself is evaluated by the host, on the engine's own
@@ -41,7 +41,7 @@ pub(crate) enum TimeoutCandidate {
 }
 
 /// The branches that already fired for one execution, from the one-shot marker
-/// (the legacy `__timeouts` task datum, a JSON array).
+/// (the legacy `#timeouts` task datum, a JSON array).
 pub(crate) fn claimed(snapshot: &ProcessSnapshot, owner: &TaskId) -> Vec<String> {
     marker(snapshot, owner).unwrap_or_default()
 }

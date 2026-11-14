@@ -3,6 +3,8 @@ id: approve
 ver: 0.4.0
 
 vars:
+  # The expense amount: the demo asks for it at startup and starts the run
+  # with it, overriding this declared default.
   - name: amount
     value: 800
   - name: limit_vp

@@ -1,7 +1,7 @@
 //! The `ApplyAction` operation: replaying a durable decision, and running the act's
 //! effect.
 //!
-//! Phase 2 is the work: a client decision is read back from the `__action`
+//! Phase 2 is the work: a client decision is read back from the `#action`
 //! fact the deciding call committed before its claim (so a decision whose
 //! deciding call never applied it — a crash, an expired lease — is re-planned
 //! exactly like that call would have), and an auto-completion operation runs the
@@ -494,7 +494,7 @@ impl ApplyAction {
         Ok(plan)
     }
 
-    /// The plan of a client `Transfer`: rewrite the act's `__assignment`
+    /// The plan of a client `Transfer`: rewrite the act's `#assignment`
     /// and announce the new owner. No state change, no propagation and no new
     /// execution are part of it — the act is still the same instance waiting
     /// for its (new) owner's decision.
@@ -615,7 +615,7 @@ impl ApplyAction {
 
     /// The plan of a client `Delegate`: install one delegation and announce
     /// the delegatee. The owner, the act's state and its execution are all
-    /// unchanged — only `__delegation`, the assignee and the revision move.
+    /// unchanged — only `#delegation`, the assignee and the revision move.
     ///
     /// The delegator is the task's current owner (never a client field), the
     /// caller is the durable subject, and the delegation id derives from the
@@ -700,11 +700,7 @@ impl ApplyAction {
                 })?;
         payload["kind"] = serde_json::json!("assignment");
         Assign::inject_payload_assignment(&mut payload, &next);
-        Assign::inject_payload_delegation(
-            &mut payload,
-            &delegation.delegator,
-            &delegation.delegatee,
-        );
+        Assign::inject_payload_delegation(&mut payload, &delegation.delegator);
         payload["ref_msg_id"] = Assign::created_message_id(snapshot, task_id)
             .map(serde_json::Value::String)
             .unwrap_or(serde_json::Value::Null);
@@ -727,7 +723,7 @@ impl ApplyAction {
         Ok(plan)
     }
 
-    /// The plan of a client `Undelegate`: clear `__delegation` and restore the
+    /// The plan of a client `Undelegate`: clear `#delegation` and restore the
     /// owner as the assignee. The variable is written as `null` (the plan has
     /// no deletion), so a replayed or recovered state never resurrects the
     /// revoked delegatee.
@@ -1465,7 +1461,7 @@ impl ApplyAction {
                 // The deciding flow: durable plan state the catch join reads —
                 // it is what tells a failed step apart from a container parked
                 // for its children, both of which are `Running`. A raw engine
-                // fact (`__`-private, never part of a predicate's scope).
+                // fact (`#`-private, never part of a predicate's scope).
                 crate::scheduler::core::plan::container::FLOW_VAR.to_string(),
                 crate::scheduler::core::plan::container::FLOW_CATCHES.to_string(),
             ),
@@ -2125,7 +2121,7 @@ impl ActOperation for ApplyAction {
             .task()
             .cloned()
             .ok_or_else(|| ActError::Runtime(format!("execution {task_id:?} not found")))?;
-        // A durable client decision is what this operation replays: the `__action`
+        // A durable client decision is what this operation replays: the `#action`
         // fact is committed *before* the claim and the effect, so a decision
         // whose deciding call never applied it (a crash, an expired lease) is
         // re-planned exactly like that call would have. The execution's own
@@ -3340,7 +3336,7 @@ mod tests {
     }
 
     /// A durable transfer intent replays as the same assignment plan: the
-    /// execution keeps its state and operation set, and only `__assignment`
+    /// execution keeps its state and operation set, and only `#assignment`
     /// plus the assignment notification are written.
     #[tokio::test]
     async fn a_transfer_fact_replays_without_a_state_change() {
@@ -3409,7 +3405,7 @@ mod tests {
     }
 
     /// A durable delegation intent replays as the same assignment plan: no
-    /// state change, no new execution, and both `__delegation` and the
+    /// state change, no new execution, and both `#delegation` and the
     /// assignee are written with the durable caller as `granted_by`.
     #[tokio::test]
     async fn a_delegate_fact_replays_without_a_state_change() {
@@ -3550,7 +3546,10 @@ mod tests {
         assert_eq!(payload["owner"], serde_json::json!("alice"));
         assert_eq!(payload["assignee"], serde_json::json!("bob"));
         assert_eq!(payload["delegator"], serde_json::json!("alice"));
-        assert_eq!(payload["delegatee"], serde_json::json!("bob"));
+        assert!(
+            payload.get("delegatee").is_none(),
+            "the delegatee is not a message identity: the assignee is whoever executes now"
+        );
         assert_eq!(payload["rev"], serde_json::json!(1));
         assert_eq!(
             payload["inputs"]["options"]["owner"],

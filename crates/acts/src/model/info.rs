@@ -256,16 +256,62 @@ impl ProcessGraph {
         }
     }
 
-    /// The node's direct children by execution identity: an executed node's
-    /// children are the executions it admitted; a declaration with no
-    /// execution owns the placeholders sharing its enclosing execution.
+    /// The node's direct children by execution identity. An executed node's
+    /// real children are the executions it admitted (or dynamic acts pushed
+    /// under it), named by its own model id. A virtual level the kernel never
+    /// admitted (`#in`, the fan-out's item container) hangs off the same
+    /// enclosing execution as a *placeholder*, with the executions beneath it
+    /// parented by the placeholder's id — so each direct placeholder's chain
+    /// is walked and only the rows it terminates at are kept: a declaration
+    /// with no execution owns the placeholders sharing its enclosing
+    /// execution, and the rendered nesting stays the declared one (the
+    /// placeholder chain flattened into direct children would re-render the
+    /// whole subtree per folded level).
     fn children(&self, node: &GraphNode) -> Vec<&GraphNode> {
         match node.tid.as_deref() {
-            Some(tid) => self
-                .nodes
-                .iter()
-                .filter(|child| child.parent_tid.as_deref() == Some(tid))
-                .collect(),
+            Some(tid) => {
+                let mut closure: Vec<&GraphNode> = self
+                    .nodes
+                    .iter()
+                    .filter(|child| {
+                        child.parent_tid.as_deref() == Some(tid)
+                            && child.parent.as_deref() == Some(node.nid.as_str())
+                    })
+                    .collect();
+                loop {
+                    let mut pulled: Vec<&GraphNode> = Vec::new();
+                    for placeholder in closure.iter().filter(|row| row.tid.is_none()) {
+                        let name = placeholder.nid.as_str();
+                        for row in &self.nodes {
+                            if row.parent_tid.as_deref() == Some(tid)
+                                && row.parent.as_deref() == Some(name)
+                                && !closure.iter().any(|kept| kept.order == row.order)
+                                && !pulled.iter().any(|kept| kept.order == row.order)
+                            {
+                                pulled.push(row);
+                            }
+                        }
+                    }
+                    if pulled.is_empty() {
+                        break;
+                    }
+                    closure.extend(pulled);
+                }
+                // The visible children are the closure's leaves: a row some
+                // other closure row names as its model parent nests under
+                // that row instead.
+                let leaves: Vec<&GraphNode> = closure
+                    .iter()
+                    .filter(|row| {
+                        !closure.iter().any(|other| {
+                            other.order != row.order
+                                && other.parent.as_deref() == Some(row.nid.as_str())
+                        })
+                    })
+                    .copied()
+                    .collect();
+                leaves
+            }
             None => self
                 .nodes
                 .iter()
@@ -340,7 +386,6 @@ pub struct MessageInfo {
     pub owner: Option<String>,
     pub assignee: Option<String>,
     pub delegator: Option<String>,
-    pub delegatee: Option<String>,
     pub rev: u64,
     pub ref_msg_id: Option<String>,
 }
@@ -502,10 +547,6 @@ impl MessageInfo {
                 .delegator
                 .clone()
                 .or_else(|| delivery.delegator.clone()),
-            delegatee: message
-                .delegatee
-                .clone()
-                .or_else(|| delivery.delegatee.clone()),
             rev: if message.rev > 0 || message.owner.is_some() {
                 message.rev
             } else {

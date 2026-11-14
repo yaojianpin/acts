@@ -94,7 +94,7 @@ impl<'a> GraphContext<'a> {
     }
 
     /// Whether one execution is an item of a parameter fan-out: the container
-    /// action writes the item binding (`__fanout_index`/`__fanout_value`) on
+    /// action writes the item binding (`#fanout_index`/`#fanout_value`) on
     /// the template execution, so a node shared by concurrent items is told
     /// apart from a node that merely has several generations (a rewind, a
     /// `while` turn). Only the concurrent items suppress their unreached

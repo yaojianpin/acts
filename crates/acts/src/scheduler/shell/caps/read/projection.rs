@@ -9,7 +9,7 @@
 //!
 //! - one `procs` row per process: the root execution's state (the legacy
 //!   process state), the run's model, timings and the process env
-//!   (`__owner`, `__workdir`, and the package-written env map `__env`);
+//!   (`#owner`, `#workdir`, and the package-written env map `#env`);
 //! - one `tasks` row per model node — the *newest* generation, which is the
 //!   surviving instance of a re-entered node — carrying the node's own
 //!   `node_data` (built from the declaring model exactly like the legacy tree
@@ -93,10 +93,10 @@ use crate::{
 use std::sync::Arc;
 
 /// The root-scope variable holding the run's declared env (the workflow's
-/// `env` entries). Private (`__`-prefixed), so it never leaks into the
+/// `env` entries). Private (`#`-prefixed), so it never leaks into the
 /// expression variable space, but the effect seam seeds the headless scope's
 /// env from it — `$env.X` answers the same value for every task, read-only.
-pub(crate) const ENV_MAP_VAR: &str = "__env";
+pub(crate) const ENV_MAP_VAR: &str = "#env";
 
 /// The kernel's durable auto/waiting decision variable: engine state, not
 /// task data.
@@ -180,7 +180,7 @@ struct ProjectionCounters {
 /// form (what `node_data`/`node_facts` address) and the exact JSON the proc
 /// row carries.
 ///
-/// The model is immutable for the life of a run (`__model` is a private
+/// The model is immutable for the life of a run (`#model` is a private
 /// root-scope fact), so a projection derives it once instead of
 /// deserializing, cloning and validating the whole declaration on every
 /// commit. Entries are keyed by the raw durable value, so a deployment that
@@ -784,7 +784,7 @@ impl RowProjector {
 
     /// The process env, as the legacy proc row carries it: the caller
     /// authority, the run's directory, and the workflow's declared `env`
-    /// (the durable `__env` map).
+    /// (the durable `#env` map).
     fn proc_env(&self, snapshot: &ProcessSnapshot, root: &TaskId) -> Result<String> {
         let mut env = Vars::new();
         if let Some(owner) = snapshot

@@ -1064,12 +1064,12 @@ async fn second_restart_inner() {
 /// runs — the others take no operation at all, their aggregate staying exactly the
 /// seed the crash left — and as each admitted run is decided by the client and
 /// settles, the slot it frees admits the run that has waited longest
-/// (`__created` ascending): the second and third seatings are asserted in that
+/// (`#created` ascending): the second and third seatings are asserted in that
 /// order. The run waiting on the client takes no operation and no slot, and
 /// converges when its own act is decided.
 ///
 /// The kernel admits the *first* `cap` runs at boot in the order the scan
-/// returns them, not by `__created` (`Admissions` says so: the store keeps no
+/// returns them, not by `#created` (`Admissions` says so: the store keeps no
 /// boot index), so this cell asserts the admission it observes and the FIFO
 /// only where the kernel promises it — at a freed slot. Legacy deferred the
 /// replayed record of a process the resident set did not hold; the kernel holds
@@ -1132,7 +1132,7 @@ async fn boot_slot_inner() {
         .collect();
 
     // Decide the admitted run's act: it settles and frees the slot, which then
-    // admits the parked run that has waited longest — `__created` ascending.
+    // admits the parked run that has waited longest — `#created` ascending.
     complete_act(&engine2, &first, &tid_of(&first, "s1", 0))
         .await
         .unwrap();

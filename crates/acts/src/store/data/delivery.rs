@@ -51,8 +51,6 @@ pub struct Delivery {
     #[serde(default)]
     pub delegator: Option<String>,
     #[serde(default)]
-    pub delegatee: Option<String>,
-    #[serde(default)]
     pub rev: u64,
     #[serde(default)]
     pub ref_msg_id: Option<String>,

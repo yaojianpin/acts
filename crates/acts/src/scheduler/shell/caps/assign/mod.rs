@@ -1,8 +1,8 @@
 //! The assignment capability: a human act's owner, its delegation, and the
 //! per-task authorization rules.
 //!
-//! A human act's assignment is private durable state (`__assignment` /
-//! `__delegation`) plus the rules that read it: who may decide, transfer,
+//! A human act's assignment is private durable state (`#assignment` /
+//! `#delegation`) plus the rules that read it: who may decide, transfer,
 //! delegate or undelegate, and how the state projects onto the client
 //! payloads. The [`AssignmentResolver`] is the one replaceable seam — how a
 //! declared `assign.owner` string becomes its owner at start. The
@@ -12,7 +12,7 @@
 //!
 //! The declaration (`Step::assign`) is resolved at act start through the same
 //! headless scope and `fill_params` path the act's params use. The resolved
-//! `__assignment` is a private task variable — the only authorization source —
+//! `#assignment` is a private task variable — the only authorization source —
 //! and the message fields are its projection. An act that declares `assign`
 //! without resolving to an owner fails at start: the engine never produces an
 //! unowned approval.
@@ -320,7 +320,7 @@ impl Assign {
         let Some(step) = crate::scheduler::shell::find_step_in_model(&model, model_node.as_str())
         else {
             // A pushed act is not in the immutable model: its declaration rides
-            // the execution's durable `__act` fact.
+            // the execution's durable `#act` fact.
             return Self::pushed_declared_owner(snapshot, task_id);
         };
         let node = task_id.node.as_str();
@@ -469,7 +469,7 @@ impl Assign {
         } else if let Some(delegation) = Delegation::of(snapshot, task_id)?
             && delegation.delegatee == subject
         {
-            Self::inject_payload_delegation(payload, &delegation.delegator, subject);
+            Self::inject_payload_delegation(payload, &delegation.delegator);
         }
         Ok(())
     }

@@ -44,11 +44,11 @@ pub enum EventAction {
     Remove,
     /// Transfer — move an assigned human act's owner to another enabled user
     /// without deciding it. The act keeps its execution and state; only the
-    /// task's `__assignment` changes.
+    /// task's `#assignment` changes.
     Transfer,
     /// Delegate — let another business user decide an assigned human act for
     /// its owner until the delegation expires or is revoked. The act keeps its
-    /// execution, state and owner; only `__delegation` and the assignee change.
+    /// execution, state and owner; only `#delegation` and the assignee change.
     Delegate,
     /// Undelegate — revoke the act's delegation: the owner becomes the
     /// assignee again and the delegatee can no longer decide.

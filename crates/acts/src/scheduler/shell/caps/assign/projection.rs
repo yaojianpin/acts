@@ -8,12 +8,12 @@
 //!
 //! Resolution follows the scope chain, one field family at a time:
 //!
-//! - `owner`/`assignee` (and the delegation's `delegator`/`delegatee`) come
-//!   from the nearest execution carrying `__assignment`; that same execution
-//!   answers the delegation, so a child never inherits an unrelated
-//!   ancestor's delegatee.
+//! - `owner`/`assignee` (and the delegation's `delegator`) come from the
+//!   nearest execution carrying `#assignment`; `assignee` is whoever
+//!   executes the act now (the delegatee while a delegation is active), so
+//!   a child never inherits an unrelated ancestor's delegation.
 //! - `candidates`/`ids`/`participants`/`count` come from the nearest
-//!   execution whose pool was computed (`__candidates`) — a container's
+//!   execution whose pool was computed (`#candidates`) — a container's
 //!   generated child therefore reads the pool that generated it, even though
 //!   the child has its own assignment.
 //!
@@ -85,7 +85,7 @@ impl Assign {
     /// The empty shape: `null` identities and an empty pool, never an error.
     fn empty_map() -> Map {
         let mut fields = Map::new();
-        for name in ["owner", "assignee", "delegator", "delegatee"] {
+        for name in ["owner", "assignee", "delegator"] {
             fields.insert(name.to_string(), Value::Null);
         }
         for name in ["ids", "participants"] {
@@ -164,7 +164,7 @@ impl Assign {
         fields
     }
 
-    /// The named pools (`__pool_<name>` markers) along the acting
+    /// The named pools (`#pool_<name>` markers) along the acting
     /// execution's scope chain, nearest answer first: the first entry per
     /// name wins. Each field is the pool object (`$assign.<name>.users`,
     /// `.ids`, `.count`).
@@ -182,7 +182,7 @@ impl Assign {
         pools
     }
 
-    /// The computed named pools of one execution: every `__pool_<name>`
+    /// The computed named pools of one execution: every `#pool_<name>`
     /// marker except the wait markers, as `(name, pool JSON)`.
     fn own_named_pools(snapshot: &ProcessSnapshot, task: &TaskId) -> Vec<(String, JsonValue)> {
         let mut pools = Vec::new();
@@ -191,7 +191,7 @@ impl Assign {
                 continue;
             }
             let Some(key) = name
-                .strip_prefix("__pool_")
+                .strip_prefix("#pool_")
                 .filter(|key| !key.starts_with("wait_"))
             else {
                 continue;
@@ -220,10 +220,6 @@ impl Assign {
             fields.insert(
                 "delegator".to_string(),
                 Value::from(delegation.delegator.clone()),
-            );
-            fields.insert(
-                "delegatee".to_string(),
-                Value::from(delegation.delegatee.clone()),
             );
         }
     }
@@ -377,7 +373,6 @@ mod tests {
         assert_eq!(eval(value.clone(), "$assign.assignee"), json!("u8"));
         // The child has no delegation of its own: the parent's never leaks.
         assert_eq!(eval(value.clone(), "$assign.delegator"), json!(null));
-        assert_eq!(eval(value.clone(), "$assign.delegatee"), json!(null));
         assert_eq!(
             eval(value.clone(), "$assign.candidates.users"),
             json!([{ "id": "u1" }])
@@ -426,15 +421,15 @@ mod tests {
             let parent = TaskId::new("a", 0).unwrap();
             let child = child(&mut snapshot);
             snapshot.variables.insert(
-                (parent.clone(), "__pool_cc".to_string()),
+                (parent.clone(), "#pool_cc".to_string()),
                 json!({"participants": [{"id": "u9"}], "ids": ["u9"], "count": 1}).to_string(),
             );
             snapshot.variables.insert(
-                (child.clone(), "__pool_cc".to_string()),
+                (child.clone(), "#pool_cc".to_string()),
                 json!({"participants": [{"id": "u3"}], "ids": ["u3"], "count": 1}).to_string(),
             );
             snapshot.variables.insert(
-                (child.clone(), "__pool_wait_cc".to_string()),
+                (child.clone(), "#pool_wait_cc".to_string()),
                 json!("x").to_string(),
             );
 
@@ -454,7 +449,7 @@ mod tests {
             let mut chain = snapshot();
             let top = TaskId::new("a", 0).unwrap();
             chain.variables.insert(
-                (top.clone(), "__pool_cc".to_string()),
+                (top.clone(), "#pool_cc".to_string()),
                 json!({"participants": [{"id": "u9"}], "ids": ["u9"], "count": 1}).to_string(),
             );
             let value = Assign::projection(Some(Arc::new(chain)), "p", &top);
@@ -481,11 +476,11 @@ mod tests {
                 inner
             };
             chain.variables.insert(
-                (top.clone(), "__pool_cc".to_string()),
+                (top.clone(), "#pool_cc".to_string()),
                 json!({"participants": [{"id": "u9"}], "ids": ["u9"], "count": 1}).to_string(),
             );
             chain.variables.insert(
-                (inner.clone(), "__pool_cc".to_string()),
+                (inner.clone(), "#pool_cc".to_string()),
                 json!({"participants": [{"id": "u3"}], "ids": ["u3"], "count": 1}).to_string(),
             );
             let value = Assign::projection(Some(Arc::new(chain)), "p", &top);

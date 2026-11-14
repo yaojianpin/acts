@@ -428,7 +428,6 @@ async fn transfer_to_bob_end_to_end() {
     assert_eq!(completed.owner.as_deref(), Some("bob"));
     assert_eq!(completed.assignee.as_deref(), Some("bob"));
     assert_eq!(completed.delegator, None);
-    assert_eq!(completed.delegatee, None);
     assert_eq!(completed.rev, 1);
 
     wait_delivery_status(&engine, &tid, &created_id, "superseded").await;
@@ -486,7 +485,6 @@ async fn delegate_to_bob_end_to_end() {
     assert_eq!(notification.owner.as_deref(), Some("alice"));
     assert_eq!(notification.assignee.as_deref(), Some("bob"));
     assert_eq!(notification.delegator.as_deref(), Some("alice"));
-    assert_eq!(notification.delegatee.as_deref(), Some("bob"));
     assert_eq!(
         notification.ref_msg_id.as_deref(),
         Some(created_id.as_str())
@@ -518,7 +516,6 @@ async fn delegate_to_bob_end_to_end() {
     assert_eq!(completed.owner.as_deref(), Some("alice"));
     assert_eq!(completed.assignee.as_deref(), Some("bob"));
     assert_eq!(completed.delegator.as_deref(), Some("alice"));
-    assert_eq!(completed.delegatee.as_deref(), Some("bob"));
     assert_eq!(completed.rev, 1);
 
     // The owner's original delivery is kept (only a transfer supersedes it).

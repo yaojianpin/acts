@@ -1,6 +1,6 @@
 //! The assignment state of one human act and its rules.
 //!
-//! The durable `__assignment` fact ([`Assignment`]) and the rules reading
+//! The durable `#assignment` fact ([`Assignment`]) and the rules reading
 //! it: who may decide or re-assign an act, and how the assignment projects
 //! onto the client payloads — the assignment capability's pure semantics,
 //! methods on [`Assign`](super::Assign). The local half of an
@@ -17,7 +17,7 @@ use crate::Result;
 /// `{"owner","assignee","rev","transferred_from","updated_by",
 /// "updated_at"}`. It is the authorization source; the message fields are
 /// only its projection.
-pub(crate) const ASSIGNMENT_VAR: &str = "__assignment";
+pub(crate) const ASSIGNMENT_VAR: &str = "#assignment";
 
 /// The assignment state of one human decision execution.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -241,7 +241,7 @@ impl Assign {
 
     /// Merge one assignment into an already built act payload. The start
     /// operation uses this for the `Created` record: the payload is built
-    /// from the snapshot before the same commit writes `__assignment`.
+    /// from the snapshot before the same commit writes `#assignment`.
     pub(crate) fn inject_payload_assignment(
         payload: &mut serde_json::Value,
         assignment: &Assignment,
@@ -249,7 +249,6 @@ impl Assign {
         payload["owner"] = serde_json::Value::String(assignment.owner.clone());
         payload["assignee"] = serde_json::Value::String(assignment.assignee.clone());
         payload["delegator"] = serde_json::Value::Null;
-        payload["delegatee"] = serde_json::Value::Null;
         payload["rev"] = serde_json::json!(assignment.rev);
         payload["ref_msg_id"] = serde_json::Value::Null;
         if let Some(inputs) = payload

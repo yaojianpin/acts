@@ -2,7 +2,7 @@
 //! locally when every atom of the expression resolves in the kernel, and
 //! otherwise by the spec's `uses` package (default `acts.core.users`)
 //! over one IRQ request the declaring act pushes under itself. The act's
-//! start waits for that answer — the fan-out (`in: "${{ candidates }}"`) and
+//! start waits for that answer — the fan-out (`in: "${{ @candidates }}"`) and
 //! an owner that references the pool resolve on the re-entered start.
 
 use super::*;
@@ -31,7 +31,7 @@ async fn sch_candidates_announce_speaks_at_the_pool_wait() {
                 step.with_id("approve")
                     .with_uses(
                         USES_PARALLEL,
-                        Vars::new().with("in", "${{ candidates }}").with(
+                        Vars::new().with("in", "${{ @candidates }}").with(
                             "steps",
                             vec![Step::new().with_id("vote").with_uses(
                                 USES_IRQ,
@@ -52,7 +52,7 @@ async fn sch_candidates_announce_speaks_at_the_pool_wait() {
     let params = container.params().expect("the declared params");
     assert_eq!(
         params.get::<String>("in").as_deref(),
-        Some("${{ candidates }}")
+        Some("${{ @candidates }}")
     );
 
     // The pool resolves, one vote fans out, and the act completes; the
@@ -380,7 +380,7 @@ async fn sch_candidates_pool_fans_out_parallel_owners() {
                 step.with_id("approve")
                     .with_uses(
                         USES_PARALLEL,
-                        Vars::new().with("in", "${{ candidates }}").with(
+                        Vars::new().with("in", "${{ @candidates }}").with(
                             "steps",
                             vec![Step::new().with_id("vote").with_uses(
                                 USES_IRQ,
@@ -449,7 +449,7 @@ async fn sch_candidates_context_atoms_compute_locally() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_owner("${{ candidates[0] }}")
+                .with_owner("${{ @candidates[0] }}")
                 .with_candidates(crate::model::CandidateExpr::Context {
                     var: crate::model::ContextVar::Initiator,
                 })
@@ -488,7 +488,7 @@ async fn sch_candidates_local_expression_computes_without_a_request() {
                 step.with_id("approve")
                     .with_uses(
                         USES_PARALLEL,
-                        Vars::new().with("in", "${{ candidates }}").with(
+                        Vars::new().with("in", "${{ @candidates }}").with(
                             "steps",
                             vec![Step::new().with_id("vote").with_uses(
                                 USES_IRQ,
@@ -658,7 +658,7 @@ async fn sch_candidates_owner_resolves_from_the_pool() {
         .with_step(|step| {
             step.with_id("s1")
                 .with_uses(USES_IRQ, Vars::new())
-                .with_owner("${{ candidates[0] }}")
+                .with_owner("${{ @candidates[0] }}")
                 .with_candidates(crate::model::CandidateExpr::Role {
                     name: "reviewers".to_string(),
                 })
@@ -821,7 +821,7 @@ async fn sch_named_pools_land_under_their_keys() {
             step.with_id("approve")
                 .with_uses(
                     USES_PARALLEL,
-                    Vars::new().with("in", "${{ candidates }}").with(
+                    Vars::new().with("in", "${{ @candidates }}").with(
                         "steps",
                         vec![
                             Step::new().with_id("vote").with_uses(
@@ -1148,6 +1148,89 @@ async fn sch_container_pools_are_inherited_by_children() {
                 .message(&format!("{node}#cand1"), MessageState::Created)
                 .is_none(),
             "{node} never re-asks the container's pool"
+        );
+    }
+    fixture.close().await;
+}
+
+/// The pool answer is inheritable: it lands on the declaring container under
+/// the `@` names, and a completed run carries no pool answer upward — the
+/// public `candidates`/`ids`/`count`/`participants` used to fold to the root
+/// with the container's completion and ride every later step's scope.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_candidates_answer_is_inheritable_and_never_leaks_upward() {
+    let workflow = Workflow::new()
+        .with_id("sch-candidates-inheritable")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new()
+                        .with("in", "${{ $assign.candidates.ids }}")
+                        .with("join", "any")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new()
+                                    .with_id("vote")
+                                    .with_uses(USES_IRQ, Vars::new().with("key", "vote"))
+                                    .with_owner("${{ $item.value }}"),
+                            ],
+                        ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "manager".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    let request = fixture.wait_created("s1#cand1").await;
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    json!([{ "id": "101", "code": "101", "name": "Eve Chen" }]),
+                )
+                .with("ids", json!(["101"]))
+                .with("count", 1),
+        )
+        .await;
+    let vote = fixture.wait_created("vote").await;
+    fixture.next(&vote.pid, &vote.tid).await.unwrap();
+    fixture.wait_completed().await;
+
+    let outputs = fixture.outputs();
+    for name in ["candidates", "ids", "count", "participants", "@candidates"] {
+        assert!(
+            outputs.get_value(name).is_none(),
+            "the run's outputs carry no pool answer ({name})"
+        );
+    }
+    let snapshot = fixture.snapshot().await;
+    let container = crate::scheduler::core::model::task_graph::TaskId::new("s1", 0).unwrap();
+    assert!(
+        snapshot
+            .variables
+            .contains_key(&(container.clone(), "@candidates".to_string())),
+        "the answer lands on the declaring container under the @ name"
+    );
+    assert!(
+        !snapshot
+            .variables
+            .contains_key(&(container.clone(), "candidates".to_string())),
+        "no public duplicate of the answer"
+    );
+    let root = crate::scheduler::core::model::task_graph::TaskId::new("$", 0).unwrap();
+    for name in ["@candidates", "candidates", "ids", "count", "participants"] {
+        assert!(
+            !snapshot
+                .variables
+                .contains_key(&(root.clone(), name.to_string())),
+            "the root scope carries no pool answer ({name})"
         );
     }
     fixture.close().await;

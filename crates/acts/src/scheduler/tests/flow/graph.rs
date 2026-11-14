@@ -366,7 +366,7 @@ async fn sch_graph_keeps_the_hierarchy_across_a_rewind() {
                 .with_uses(
                     USES_PARALLEL,
                     Vars::new()
-                        .with("in", "${{ candidates }}")
+                        .with("in", "${{ @candidates }}")
                         .with("join", "all")
                         .with(
                             "steps",
@@ -1072,6 +1072,61 @@ async fn sch_graph_folds_the_message_records_onto_their_nodes() {
     assert!(
         tree.matches(" next=nil notice=1\n").count() == 1,
         "only the reminded node carries an annotation: {tree}"
+    );
+    fixture.close().await;
+}
+
+/// A skipped fan-out container renders its unreached declaration ONCE, in
+/// the declared nesting: the virtual wrappers (`#in`, the item template's
+/// kernel branch) fold away and the inner act is a single line. The
+/// placeholder chain carries the enclosing execution's `parent_tid` at every
+/// depth; a child match on the tid alone flattened the chain into the
+/// container's direct children and re-rendered the subtree per folded level
+/// — the duplicated, misnested tree a run that never reached the step
+/// printed.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_graph_skipped_fanout_renders_its_declaration_once() {
+    let mut workflow = Workflow::new()
+        .with_id("flow-graph-skip-parallel")
+        .with_name("Skip Parallel")
+        .with_var("amount", 800)
+        .with_var("limit_vp", 10000);
+    workflow.steps.push(crate::model::Step {
+        id: "exec".to_string(),
+        name: "exec".to_string(),
+        r#if: Some("amount > limit_vp".to_string()),
+        uses: Some(USES_PARALLEL.to_string()),
+        params: Vars::new()
+            .with("in", json!(["1", "2"]))
+            .with("join", "any")
+            .with(
+                "steps",
+                vec![
+                    Step::new()
+                        .with_id("vote")
+                        .with_uses(USES_IRQ, Vars::new().with("key", "vote")),
+                ],
+            )
+            .to_value(),
+        ..Default::default()
+    });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    fixture.start(Vars::new()).await;
+    fixture.wait_completed().await;
+    let graph = fixture
+        .engine()
+        .runtime()
+        .graph(fixture.pid())
+        .await
+        .unwrap();
+    assert_eq!(
+        graph.tree_output(),
+        concat!(
+            "workflow id:$ name=Skip Parallel  uses=nil state=completed next=nil\n",
+            "└── step id:exec name=exec  uses=acts.core.parallel state=skipped next=nil\n",
+            "    └── step id:vote name=  uses=acts.core.irq state=nil next=nil\n",
+        )
     );
     fixture.close().await;
 }

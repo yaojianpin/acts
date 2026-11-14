@@ -3,7 +3,7 @@
 //! and a crash at each write boundary of its durable operation.
 //!
 //! The kernel decides a client action in three writes against the aggregate:
-//! the durable *intent* (the operation plus the private `__action` fact its operation
+//! the durable *intent* (the operation plus the private `#action` fact its operation
 //! replays), the claim that prepares it, and the effect commit, which closes
 //! the operation inside the same batch. The read model is only projected from
 //! those commits afterwards, so a cell reads

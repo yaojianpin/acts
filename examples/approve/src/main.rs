@@ -8,7 +8,9 @@
 //! answer, in the exact format `--script` consumes, so a misbehaving session
 //! hands over its own repro). The business system's own answers (candidate
 //! pools, delegated join verdicts) live in `sys.rs`; the menus live in
-//! `client.rs`.
+//! `client.rs`. The run starts with the amount the demo asks for first — the
+//! **first line of a script** (blank keeps the model's default 800) — the one
+//! input that decides how far the expense travels.
 //!
 //! Exit codes: `0` the run completed (or a scripted session's choices ran
 //! out and the demo stopped), `2` it ended through its error walk (an
@@ -19,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use acts::{Engine, Result, Vars, Workflow};
 use clap::Parser;
+use serde_json::json;
 
 mod client;
 mod sys;
@@ -105,9 +108,10 @@ async fn main() -> Result<()> {
     let complete_signal = s.clone();
     let error_signal = s.clone();
     let complete_failed = failed.clone();
+    let client_for_message = client.clone();
     engine.channel().on_message(move |e| {
         let sys = sys.clone();
-        let client = client.clone();
+        let client = client_for_message.clone();
         let executor = message_executor.clone();
         async move {
             if let Err(err) = sys.process(&executor, &e).await {
@@ -171,7 +175,12 @@ async fn main() -> Result<()> {
 
     executor
         .proc()
-        .start(&workflow.id, Vars::new().with("actor", "101"))
+        .start(
+            &workflow.id,
+            Vars::new()
+                .with("actor", "101")
+                .with("amount", json!(client.ask_amount().await)),
+        )
         .await?;
     tokio::select! {
         _ = sig.recv() => {}

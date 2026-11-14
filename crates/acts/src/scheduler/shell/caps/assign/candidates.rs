@@ -3,7 +3,7 @@
 //! The pool is computed locally when every atom of the declared expression
 //! resolves in the kernel; a business atom makes it business data, so
 //! computing it is one IRQ round trip, and the act's start must wait for it:
-//! a container's fan-out (`in: "${{ candidates }}"`) and an owner expression
+//! a container's fan-out (`in: "${{ @candidates }}"`) and an owner expression
 //! referencing the pool resolve *after* the answer lands. The shape is the
 //! delegated join's ask: the waiting act pushes one request execution under
 //! itself (marked [`CANDIDATES_WAIT_VAR`]/[`CANDIDATES_ASK_VAR`]), the client
@@ -15,8 +15,8 @@
 //!
 //! Beyond the canonical `assign.candidates` pool, every other key of the
 //! declaration is a named pool processed exactly the same way: it gets its
-//! own request, its own computed/wait markers (`__pool_<name>` /
-//! `__pool_wait_<name>`), and its answer lands under its own key
+//! own request, its own computed/wait markers (`#pool_<name>` /
+//! `#pool_wait_<name>`), and its answer lands under its own key
 //! (`$assign.<name>.users` / `.ids`, the bare `<name>` ids variable). A start
 //! with several pools settles them one re-entry at a time; it proceeds only
 //! when every declared pool is computed.
@@ -40,28 +40,27 @@ use crate::{
 /// The private variable marking an act that waits for its candidate pool.
 /// Its value is the pool spec's params (what the request carries), so a
 /// replayed start re-derives the request without re-reading the model.
-pub(crate) const CANDIDATES_WAIT_VAR: &str = "__candidates_wait";
+pub(crate) const CANDIDATES_WAIT_VAR: &str = "#candidates_wait";
 /// The private variable marking a candidates request execution, and — on the
 /// waiting act — the durable "pool computed" marker its re-entered start
-/// reads (`__candidates` = the pool JSON).
-pub(crate) const CANDIDATES_ASK_VAR: &str = "__candidates_ask";
-pub(crate) const CANDIDATES_VAR: &str = "__candidates";
+/// reads (`#candidates` = the pool JSON).
+pub(crate) const CANDIDATES_ASK_VAR: &str = "#candidates_ask";
+pub(crate) const CANDIDATES_VAR: &str = "#candidates";
 
 /// The declaration key of the canonical pool. Every other key of `assign` is
 /// a named pool with the same processing; a named pool's markers and answer
 /// live under its own name.
 pub(crate) const CANONICAL_POOL: &str = "candidates";
 
-/// The names no pool key may take: `assignee`/`delegator`/`delegatee` are
-/// the `$assign` projection's identity fields, `ids`/`participants`/`count`
-/// the canonical pool's top-level aliases, and `at` its explicit lookup — a
-/// pool under such a key would be unreadable. `owner`/`candidates` need no
-/// reservation: the declaration routes them to their named fields, and the
-/// inherited canonical key is `candidates` itself.
-const RESERVED_POOL_NAMES: [&str; 7] = [
+/// The names no pool key may take: `assignee`/`delegator` are the `$assign`
+/// projection's identity fields, `ids`/`participants`/`count` the canonical
+/// pool's top-level aliases, and `at` its explicit lookup — a pool under such
+/// a key would be unreadable. `owner`/`candidates` need no reservation: the
+/// declaration routes them to their named fields, and the inherited canonical
+/// key is `candidates` itself.
+const RESERVED_POOL_NAMES: [&str; 6] = [
     "assignee",
     "delegator",
-    "delegatee",
     "ids",
     "participants",
     "count",
@@ -80,12 +79,12 @@ pub(crate) struct CandidatesSpec {
 
 impl Assign {
     /// The computed-pool marker variable of one pool: the canonical pool stays
-    /// on `__candidates`; a named pool gets `__pool_<name>`.
+    /// on `#candidates`; a named pool gets `#pool_<name>`.
     pub(crate) fn pool_var(pool: &str) -> String {
         if pool == CANONICAL_POOL {
             CANDIDATES_VAR.to_string()
         } else {
-            format!("__pool_{pool}")
+            format!("#pool_{pool}")
         }
     }
 
@@ -94,7 +93,7 @@ impl Assign {
         if pool == CANONICAL_POOL {
             CANDIDATES_WAIT_VAR.to_string()
         } else {
-            format!("__pool_wait_{pool}")
+            format!("#pool_wait_{pool}")
         }
     }
 
@@ -136,7 +135,7 @@ impl Assign {
     /// package-less node, the waiting subflow, or a `Func`/`Msg` leaf. An
     /// inherited pool rides the same placements except it skips silently on
     /// them — a self-completing or package-less child carries no pool.
-    /// Pushed acts read their own declarations off the durable `__act` fact
+    /// Pushed acts read their own declarations off the durable `#act` fact
     /// only.
     pub(crate) fn declared_pools(
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
@@ -149,7 +148,7 @@ impl Assign {
         let Some(step) = crate::scheduler::shell::find_step_in_model(&model, model_node.as_str())
         else {
             // A pushed act is not in the immutable model: its declaration
-            // rides the execution's durable `__act` fact.
+            // rides the execution's durable `#act` fact.
             return Self::pushed_declared_pools(snapshot, task_id);
         };
         let node = task_id.node.as_str();
@@ -431,8 +430,8 @@ impl Assign {
 
     /// One settlement under an act that waits for its pool: fold the
     /// request's answer into the act's variables under the request's own key
-    /// (`candidates` and the `__candidates` marker for the canonical pool,
-    /// `<name>` and `__pool_<name>` for a named one) and re-enter its start.
+    /// (`candidates` and the `#candidates` marker for the canonical pool,
+    /// `<name>` and `#pool_<name>` for a named one) and re-enter its start.
     /// A skipped request defers: the re-entered start asks again. A failed
     /// request is not ours — the ordinary error walk carries it. Returns
     /// whether the settlement was ours to handle.
@@ -473,7 +472,7 @@ impl Assign {
             crate::scheduler::core::model::task_graph::TaskState::Completed => {
                 // The answer's contract: `{ participants, ids, count }` —
                 // the pool the fan-out reads is the **ids list** (`in:
-                // "${{ candidates }}"`, `owner: "${{ candidates[0] }}"`);
+                // "${{ @candidates }}"`, `owner: "${{ @candidates[0] }}"`);
                 // `participants`/`count` ride along for the flows that want
                 // code/name or a quorum number. The propagate's carry
                 // already folds the request's own variables into the act's
@@ -562,13 +561,15 @@ impl Assign {
     }
 
     /// Write one computed pool into the act's variables under its own key:
-    /// the ids list (the bare `candidates`/`<name>` variable the fan-out and
-    /// owner expressions read), the durable `__candidates`/`__pool_<name>`
-    /// marker the re-entered start reads as "pool computed", and the wait
-    /// marker cleared. The canonical pool also writes the shared
-    /// `participants`/`count` answer fields, only when the plan does not
-    /// already carry them (a settled request's propagate folds the request's
-    /// own variables into the act's scope first).
+    /// the ids list (the bare `@candidates`/`@<name>` inheritable variable
+    /// the fan-out and owner expressions read), the durable `#candidates`/
+    /// `#pool_<name>` marker the re-entered start reads as "pool computed",
+    /// and the wait marker cleared. The canonical pool also writes the shared
+    /// `@participants`/`@count` answer fields, only when the plan does not
+    /// already carry them. Every answer name is *inheritable* (`@`): the pool
+    /// belongs to the declaring act and its children — it never folds into a
+    /// parent scope when the act settles, so no later task inherits a stale
+    /// pool from a step that ran before it.
     fn fold_pool(
         plan: &mut crate::scheduler::core::model::transition_plan::TransitionPlan,
         parent: &crate::scheduler::core::model::task_graph::TaskId,
@@ -581,7 +582,7 @@ impl Assign {
             .unwrap_or(serde_json::Value::Null);
         let mut writes = vec![
             (
-                pool.to_string(),
+                format!("@{pool}"),
                 serde_json::to_string(&ids).unwrap_or_default(),
             ),
             (Self::pool_var(pool), computed.to_string()),
@@ -596,10 +597,10 @@ impl Assign {
                 let carried = plan
                     .variable_writes
                     .iter()
-                    .any(|write| write.scope == *parent && write.name == name);
+                    .any(|write| write.scope == *parent && write.name == format!("@{name}"));
                 if !carried {
                     writes.push((
-                        name.to_string(),
+                        format!("@{name}"),
                         serde_json::to_string(&value).unwrap_or_default(),
                     ));
                 }

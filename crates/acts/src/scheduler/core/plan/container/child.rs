@@ -47,7 +47,7 @@ pub(crate) enum ContainerPredecessor {
 /// The private variable marking an execution whose predecessors are *ordering
 /// dependencies* (a branch's `needs`) rather than a success chain: propagation
 /// admits it once every predecessor is terminal, whatever their outcome.
-pub(crate) const NEEDS_VAR: &str = "__needs";
+pub(crate) const NEEDS_VAR: &str = "#needs";
 
 /// Whether one execution waits on ordering dependencies (see [`NEEDS_VAR`]).
 pub(crate) fn waits_for_needs(snapshot: &ProcessSnapshot, task: &TaskId) -> bool {

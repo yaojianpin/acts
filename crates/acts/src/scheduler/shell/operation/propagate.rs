@@ -156,17 +156,43 @@ impl ActOperation for PropagateTask {
             // flag depends on it). Engine facts and anything this operation
             // already writes for that scope are left out (the failure path
             // owns its own error variables).
+            //
+            // A candidates request (`<act>#cand<k>`) carries nothing: its
+            // answer enters the declaring act only through the pool keys the
+            // settlement writes (`@candidates` and friends) — the raw answer
+            // fields must not ride this fold into the act's scope and on to
+            // every later task from there.
+            let pool_ask = task.as_ref().is_some_and(|task| {
+                task.parent.as_ref().is_some_and(|parent| {
+                    let prefix = format!("{}#cand", parent.node.as_str());
+                    task_id
+                        .node
+                        .as_str()
+                        .strip_prefix(&prefix)
+                        .is_some_and(|rest| {
+                            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                        })
+                })
+            });
             if matches!(
                 task.as_ref().map(|e| e.state),
                 Some(
                     crate::scheduler::core::model::task_graph::TaskState::Completed
                         | crate::scheduler::core::model::task_graph::TaskState::Submitted
                 )
-            ) && let Some(parent) = task.as_ref().and_then(|e| e.parent.clone())
+            ) && !pool_ask
+                && let Some(parent) = task.as_ref().and_then(|e| e.parent.clone())
             {
                 let mut carried: Vec<(String, String)> = Vec::new();
                 for ((scope, name), raw) in &snapshot.variables {
-                    if scope != &task_id || is_engine_fact(name) {
+                    if scope != &task_id
+                        || is_engine_fact(name)
+                        // An inheritable (`@`) variable stops here: it belongs
+                        // to this scope and its children, and a settled
+                        // execution must not pass it onward — not even one
+                        // level up. The `assign` answers live on this rule.
+                        || crate::utils::consts::is_inheritable_key(name)
+                    {
                         continue;
                     }
                     let already = plan

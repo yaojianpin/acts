@@ -207,8 +207,8 @@ fn the_claim_appends_one_branch_and_never_repeats_it() {
     );
     assert_eq!(claim(&["t1".to_string()], "t1"), vec!["t1".to_string()]);
     // The marker is the legacy task datum, not a new key.
-    assert_eq!(consts::TASK_TIMEOUTS, "__timeouts");
-    assert_eq!(consts::TASK_COST, "__cost");
+    assert_eq!(consts::TASK_TIMEOUTS, "#timeouts");
+    assert_eq!(consts::TASK_COST, "#cost");
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn the_dispatch_admits_one_entry_child_and_freezes_the_cost_and_marker() {
             source_operation: commit("s1", 3),
             branch: &branch("t1"),
             extra_vars: vec![(
-                "__branch_error".into(),
+                "#branch_error".into(),
                 r#"{"code":"","message":"x"}"#.into(),
             )],
             claimed_after: &["t1".to_string()],
@@ -268,15 +268,15 @@ fn the_dispatch_admits_one_entry_child_and_freezes_the_cost_and_marker() {
     assert_eq!(
         child.vars,
         vec![(
-            "__branch_error".to_string(),
+            "#branch_error".to_string(),
             r#"{"code":"","message":"x"}"#.to_string()
         )]
     );
     assert_eq!(
         command.inputs,
         vec![
-            ("__cost".to_string(), "1617".to_string()),
-            ("__timeouts".to_string(), r#"["t1"]"#.to_string()),
+            ("#cost".to_string(), "1617".to_string()),
+            ("#timeouts".to_string(), r#"["t1"]"#.to_string()),
         ]
     );
     // The owner keeps the state it had: a timed-out execution is not parked
@@ -333,7 +333,7 @@ fn the_dispatch_reports_the_marker_it_leaves_behind() {
 #[test]
 fn the_start_write_stamps_the_tasks_own_scope() {
     let write = start_write(&id("s1", 0), 42);
-    assert_eq!(write.name, "__started");
+    assert_eq!(write.name, "#started");
     assert_eq!(write.value, "42");
     assert_eq!(write.scope, id("s1", 0));
 }

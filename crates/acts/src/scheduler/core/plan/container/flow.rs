@@ -5,7 +5,7 @@ use super::*;
 /// (legacy `TASK_SIGN = CATCH`). Both roles share one key and two values: the
 /// sign is durable plan state, so a replay — or the catch join — reads the
 /// decision from the aggregate instead of from the declaring spec.
-pub(crate) const SIGN_VAR: &str = "__sign";
+pub(crate) const SIGN_VAR: &str = "#sign";
 /// A child the failed step dispatched as a CATCH handler.
 ///
 /// The *role* fact: what this execution is to its parent. It is a separate axis
@@ -38,7 +38,7 @@ pub(crate) const SIGN_CATCH: &str = "catch";
 /// accurate expression of "a timeout is pending" is the timer operation itself
 /// ([`crate::scheduler::core::model::operation::OperationKind::DispatchTimeout`]), which holds the cadence and
 /// owns a deferred ready record.
-pub(crate) const FLOW_VAR: &str = "__flow";
+pub(crate) const FLOW_VAR: &str = "#flow";
 /// The value of [`FLOW_VAR`] on an execution waiting for the children it
 /// admitted.
 pub(crate) const FLOW_CHILDREN: &str = "children";

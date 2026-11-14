@@ -127,7 +127,7 @@ fn builtin(name: &str) -> Option<Value> {
         "$env" => from_json(JsonValue::from(env_map())),
         "$os" => Value::from(std::env::consts::OS),
         // `$assign`: the read-only assignment projection of the acting
-        // execution — `$assign.owner`/`assignee`/`delegator`/`delegatee`
+        // execution — `$assign.owner`/`assignee`/`delegator`
         // and the computed pools, each under its key as a pool object
         // (`$assign.candidates.users`/`.ids`/`.count`; every named key of
         // `assign` lands the same way), resolved along the scope chain;

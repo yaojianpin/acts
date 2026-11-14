@@ -27,7 +27,7 @@ pub struct ChannelOptions {
     pub ack: bool,
 
     /// use the glob pattern to match the message type
-    /// eg. {workflow,step,branch,req,msg}
+    /// eg. {workflow,step,branch,req,msg,notice,assignment}
     pub r#type: String,
     /// use the glob pattern to match the message state
     /// eg. {created,completed}

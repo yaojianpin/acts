@@ -1656,7 +1656,7 @@ A11 的存储目标是“恢复所需的最小状态”,不是历史归档;终�
 
 \- 写入点:`scheduler/shell/operation/action.rs::param\_fanout\_children` 为每个 `in` 项写
 
-&#x20; `__fanout_index`/`__fanout_value`(与模板 vars 一起)到 `<step>#item` 这一代的 scope。
+&#x20; `#fanout_index`/`#fanout_value`(与模板 vars 一起)到 `<step>#item` 这一代的 scope。
 
 \- 求值:act params / predicate / effect 的变量空间来自 `scheduler/shell/facts.rs::scope\_vars`
 

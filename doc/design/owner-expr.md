@@ -17,7 +17,7 @@ pub struct Assign {
 ```
 
 `Assign.owner` 在活动启动时通过 `fill_params` 解析成一个字符串，写入任务的私有变量
-`__assignment`，再投影到活动消息。它解决了“谁可以决策这个人类活动”，但没有解决
+`#assignment`，再投影到活动消息。它解决了“谁可以决策这个人类活动”，但没有解决
 “这个活动应该交给谁”：部门正职、项目负责人、当前操作人所在单位的负责人、上级
 等业务关系只能由调用方在启动前算好，写成一个用户 id。
 
@@ -37,7 +37,7 @@ pub struct Assign {
 4. 支持运行时上下文变量：`initiator`、`current_actor`、
    `previous_approver` / `previous_approver_nth`，以及持有用户的普通变量。
 5. 业务数据不进入核心，也不进入插件配置：由业务系统在 IRQ 应答里给出。
-6. 兼容现有的字符串 owner 和 `__assignment` 状态。
+6. 兼容现有的字符串 owner 和 `#assignment` 状态。
 
 ### 1.2 非目标
 
@@ -53,12 +53,12 @@ pub struct Assign {
   叶子在活动启动时被拒绝。
 - 启动解析发生在 `ExecuteTask` 的 shell 阶段：构造 headless scope、执行
   `prepare()`，再走和包参数相同的表达式路径。解析结果随启动提交写入
-  `__assignment`，重试会重新解析，提交后以持久状态为准。
+  `#assignment`，重试会重新解析，提交后以持久状态为准。
 - `acts.core.parallel{ in, steps }` / `sequence` 已经按 `in` 数组在运行期展开
   出多个子活动；`in` 在容器启动时解析并固定到 `act_facts.params`。因此
   “先算参与人，再 fan-out”不需要新的调度语义。
 - 核心没有用户目录：流程发起人/审批人是业务变量 `actor`（启动参数与 `act:*`
-  的 option），决策 actor 记录在每个任务的私有 `__action@<sequence>` 事实里；
+  的 option），决策 actor 记录在每个任务的私有 `#action@<sequence>` 事实里；
   `ScopePolicy.subject` 只是发起请求的 ACL 主体，与业务 actor 是两套概念。
 - IRQ 包是引擎既有的扩展方式：包定义 + 客户端决策，不需要核心理解业务。
 
@@ -229,7 +229,7 @@ pub enum CandidateExpr {
 | 变量 | 含义 |
 | --- | --- |
 | `initiator` | 流程发起人：启动时传入的业务变量 `actor`（root scope）；未传时为空。ACL 主体与它无关 |
-| `current_actor` | 最近一次决策的业务 actor：从当前执行沿**前驱图**（顶层步骤的父节点是流程根，不是上一步）找到的最新 `__action@N.actor`（旧事实回落到 `subject`）；尚无决策时回落到 `initiator` |
+| `current_actor` | 最近一次决策的业务 actor：从当前执行沿**前驱图**（顶层步骤的父节点是流程根，不是上一步）找到的最新 `#action@N.actor`（旧事实回落到 `subject`）；尚无决策时回落到 `initiator` |
 | `previous_approver` | `current_actor` 之前的那次决策的业务 actor；按决策计数而不是按人去重 |
 | `previous_approver_nth { back }` | 再往前 `back` 次决策 |
 | `var { name, ty, duty }` | 工作流变量；`user`/`users` 由核心读，角色/组/资源类型由业务系统解析 |
@@ -238,7 +238,7 @@ pub enum CandidateExpr {
 请求的 `actor` option 命名该次决策的操作人，两者进入 `$initiator`/`$actor`
 与 owner 表达式；命令授权和转办授权仍以服务端认证主体为准。
 
-决策链的走法：先读当前执行自己的 `__action@N`（新的在前），再按顺序走
+决策链的走法：先读当前执行自己的 `#action@N`（新的在前），再按顺序走
 `predecessors`；没有前驱时走 `parent`（嵌套流程的根）。并行 join 有多个前驱时
 按快照中的前驱顺序取，结果确定但“上一审批人”本身是业务上的近似——需要精确
 指定时用 `previous_approver_nth` 或显式变量。
@@ -370,7 +370,7 @@ pub enum CandidateExpr {
 ## 8. 兼容性
 
 - 旧工作流：`assign: { owner: "u1" }` / `assign: { owner: "${{ reviewer }}" }`
-  照常解析（owner 现在直接是字符串）；`__assignment` 结构不变。
+  照常解析（owner 现在直接是字符串）；`#assignment` 结构不变。
 - **破坏**（2026-10-31）：`assign.owner` 的对象形式
   （`{ kind: user, … }` 等 `CandidateExpr` 文档）不再接受——owner 收敛为
   字符串；结构化表达式只用于 `assign.candidates.params`。

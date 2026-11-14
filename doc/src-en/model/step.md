@@ -59,6 +59,27 @@ A step whose `if` condition fails is also skipped and falls through to the
 next declared step (a self/backward `next` is then not taken), so `if` and
 `next` keep their original meanings and `while` cannot be combined with `next`.
 
+## Variable Name Conventions
+
+A variable name's prefix decides its visibility and how it travels:
+
+| Prefix | Class | Rule |
+| ------ | ----- | ---- |
+| (none) | Public | Folds into the parent scope when the task completes; every later task reads it |
+| `@` | Inheritable | Visible only to **the declaring step and its descendants**: it never folds upward on completion and is never carried onto a re-entered ancestor (a `back`/`cancel` rewind, a `while` turn); successor tasks cannot see it |
+| `#` | Private | The engine's own facts (`#model`, `#candidates`, …): hidden from expressions, `$inputs`, outputs, row projections and `$env` alike |
+
+Notes:
+
+- An `@` variable lives on the declaring task's own scope; descendants read it
+  nearest-first along the scope chain. Once the declaring task settles it
+  stops moving up — the `assign` pool answers (`@candidates`, `@<pool>`,
+  `@participants`, `@count`) work exactly this way: they serve the declaring
+  container and its fan-out children and never leak into later steps.
+- `#` matches the kernel's synthesized node ids (`#cand`, `#push`, `#item`,
+  …): models must not declare variable names or node ids starting with `#`
+  or `@`.
+
 ## Multi-Act Steps
 
 When a step needs to execute multiple activities, use the `acts.core.block` package and nest child activity lists in `params`:

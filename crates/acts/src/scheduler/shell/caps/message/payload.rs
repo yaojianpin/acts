@@ -66,7 +66,7 @@ pub(crate) fn step_uses(
 /// carries, then the operation's own outputs or its error. `facts` are the
 /// start operation's pinned resolution
 /// (absent for a host without a runner or an aggregate seeded before it);
-/// `outputs` are the operation's own scope writes (`__`-private facts and the
+/// `outputs` are the operation's own scope writes (`#`-private facts and the
 /// error variables excluded); `error` is the failure the operation decided.
 #[allow(clippy::too_many_arguments)]
 fn act_message_payload(

@@ -53,6 +53,64 @@ fn errored(terminal: &Terminal) {
     );
 }
 
+/// The answered pool ask must never vote: `any` over an `assign.candidates`
+/// fan-out fails the container once every vote failed. The `#cand` request is
+/// the container's own asking — counted, it read as the one completion `any`
+/// needs, so the container completed on the answer alone and the vote's error
+/// never walked (the approve demo's department_manager_vote error used to
+/// complete `dept_approval` and finish the run).
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_join_any_with_candidates_fails_when_every_vote_fails() {
+    let workflow = Workflow::new()
+        .with_id("sch-join-candidates-fail")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(
+                    USES_PARALLEL,
+                    Vars::new()
+                        .with("in", "${{ $assign.candidates.ids }}")
+                        .with("join", "any")
+                        .with(
+                            "steps",
+                            vec![
+                                Step::new()
+                                    .with_id("vote")
+                                    .with_uses(USES_IRQ, Vars::new().with("key", "vote"))
+                                    .with_owner("${{ $item.value }}"),
+                            ],
+                        ),
+                )
+                .with_candidates(crate::model::CandidateExpr::Role {
+                    name: "manager".to_string(),
+                })
+        });
+    let mut fixture = FlowFixture::deploy(&workflow).await;
+    let pid = fixture.start(Vars::new()).await;
+    fixture.wait_created("s1").await;
+    let request = fixture.wait_created("s1#cand1").await;
+    fixture
+        .complete(
+            &request.pid,
+            &request.tid,
+            Vars::new()
+                .with(
+                    "participants",
+                    serde_json::json!([{ "id": "101", "code": "101", "name": "Eve Chen" }]),
+                )
+                .with("ids", serde_json::json!(["101"]))
+                .with("count", 1),
+        )
+        .await;
+
+    let vote = fixture.wait_created("vote").await;
+    fixture.fail(&pid, &vote.tid, "e1", "no").await.unwrap();
+
+    fixture.wait_state("s1", TaskState::Failed).await;
+    errored(&fixture.wait_terminal().await);
+    fixture.close().await;
+}
+
 /// A `acts.core.block{ mode: parallel }` step over one irq act per `key`,
 /// with the join (or none) in the params.
 fn block_step(join: Option<serde_json::Value>, keys: &[&str]) -> Step {

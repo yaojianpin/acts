@@ -42,7 +42,7 @@ pub(crate) enum OperationKind {
     AbortTask,
     /// The timer of an execution whose node declares `timeouts`: while that
     /// execution is `Running`/`Waiting`, the tick evaluates its declared
-    /// branches in declaration order (the one-shot `__timeouts` marker, the
+    /// branches in declaration order (the one-shot `#timeouts` marker, the
     /// in-flight check) and admits the first due one. The operation re-arms
     /// itself with a fresh intent after every dispatch and stays `Pending`
     /// while nothing is due; its ready record is deferred by one poll interval,
@@ -55,7 +55,7 @@ pub(crate) enum OperationKind {
     /// lost to a crash or a lost compare-and-swap — its operation plans the fresh
     /// generations ([`crate::scheduler::core::plan::generation::Reenter`]) and its
     /// ready record re-drives it if that operation fails. The target task id is
-    /// the durable fact `__reenter_target` the deciding commit writes (`Back`
+    /// the durable fact `#reenter_target` the deciding commit writes (`Back`
     /// names an earlier step, `Cancel` the closed execution itself).
     ReenterTask,
     /// A subflow child's hand-back: once the child run settled, the operation

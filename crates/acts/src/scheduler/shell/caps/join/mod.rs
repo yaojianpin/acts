@@ -24,9 +24,9 @@ use crate::scheduler::shell::*;
 /// The private variable marking a join-decision request execution. The
 /// container's join counts its real children only, and a settled request's
 /// own state is the verdict: completed = pass, failed = reject, skipped =
-/// defer. A `__` fact, like every engine fact the operations address each
+/// defer. A `#` fact, like every engine fact the operations address each
 /// other with.
-pub(super) const JOIN_ASK_VAR: &str = "__join_ask";
+pub(super) const JOIN_ASK_VAR: &str = "#join_ask";
 
 impl Join {
     /// One child of a delegated-rule container settled: either it carries the

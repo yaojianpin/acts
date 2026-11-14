@@ -722,7 +722,7 @@ mod tests {
         let task_id = TaskId::new("a", 0).unwrap();
         snapshot.tasks.get_mut(&task_id).unwrap().state = TaskState::Waiting;
         snapshot.variables.insert(
-            (task_id.clone(), "__action@0".to_string()),
+            (task_id.clone(), "#action@0".to_string()),
             serde_json::json!({ "kind": { "action": "back" }, "inputs": [] }).to_string(),
         );
         let id = op("a", 0, OperationKind::ApplyAction);

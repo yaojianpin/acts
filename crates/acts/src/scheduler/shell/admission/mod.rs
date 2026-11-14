@@ -148,7 +148,7 @@ pub(crate) struct AdmissionMetrics {
 /// row — and leaves that root's operation undriven, while a run that was
 /// already in flight keeps the row it had (the legacy boot-resume overflow's
 /// shape). Either way the run takes no operation, and the oldest parked run
-/// (`__created` ascending, the legacy row's `timestamp` order) is what a freed
+/// (`#created` ascending, the legacy row's `timestamp` order) is what a freed
 /// slot admits.
 ///
 /// The execution slot is *not* a lease on a run forever: a run that settles,
@@ -164,7 +164,7 @@ pub(crate) struct AdmissionMetrics {
 /// empty, and the runs still in flight take their slots again through
 /// [`Workers::place_run`] when the ready queue hands them their first turn.
 /// The first `cap` of them are admitted in the order the ready index returns
-/// them rather than by `__created` (the store keeps no boot index to sort by),
+/// them rather than by `#created` (the store keeps no boot index to sort by),
 /// while every later admission is by stamp, exactly like the legacy parked
 /// queue.
 #[derive(Default)]
@@ -178,7 +178,7 @@ pub(crate) struct Admissions {
     admitted: u64,
     /// Parked runs, oldest first, with the operation that admits each: the
     /// seeded root `ExecuteTask` whose operation starts the parked root. The key is
-    /// the run's `__created` stamp; two runs seeded in the same millisecond
+    /// the run's `#created` stamp; two runs seeded in the same millisecond
     /// are ordered by pid, so no run can hide behind an equal key.
     parked: std::collections::BTreeMap<(i64, String), OperationId>,
     /// Concurrent external effects.

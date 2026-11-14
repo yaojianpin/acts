@@ -4,9 +4,9 @@
 //! and the driver's passes over an already-settled run.
 //!
 //! The kernel keeps the legacy tick's three facts in the run's aggregate: the
-//! cost start (`__started`, stamped by the owner's own start operation), the frozen
-//! cost (written into the branch's scope as `__cost`, what `$cost()` reads) and
-//! the one-shot marker (`__timeouts`, the branch ids that already fired). The
+//! cost start (`#started`, stamped by the owner's own start operation), the frozen
+//! cost (written into the branch's scope as `#cost`, what `$cost()` reads) and
+//! the one-shot marker (`#timeouts`, the branch ids that already fired). The
 //! timer is a durable `DispatchTimeout` operation armed by that start operation and
 //! re-woken by the recovery scan on every tick (800 ms under `cfg(test)`), so a
 //! branch fires on the tick whose round admits it: one branch per round, in
@@ -174,7 +174,7 @@ async fn generation_state(
         .map(|(_, task)| task.state)
 }
 
-/// The branches the one-shot marker (`__timeouts`) holds for the owner node
+/// The branches the one-shot marker (`#timeouts`) holds for the owner node
 /// `owner` of generation 0: the claim the tick wrote. It advances one branch per
 /// round, and holds each branch at most once.
 async fn claimed(engine: &Engine, pid: &str, owner: &str) -> Vec<String> {

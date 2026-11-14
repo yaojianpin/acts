@@ -3,7 +3,7 @@
 //! finished run's own message and delivery rows.
 //!
 //! The kernel serves `Remove` as the legacy engine did: the wire decision is
-//! durable (the `__action` fact and its `ApplyAction` operation commit before
+//! durable (the `#action` fact and its `ApplyAction` operation commit before
 //! the act is decided), the act is decided `Removed`, its flow continues —
 //! `Removed` schedules the node's successor exactly like the legacy
 //! `push_next` — and the run's rows and aggregate carry the one decision. The

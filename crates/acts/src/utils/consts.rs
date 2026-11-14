@@ -19,24 +19,24 @@ pub const ACT_ERR_CODE: &str = "ecode";
 /// two are deliberately not the same concept.
 pub const ACT_ACTOR: &str = "actor";
 
-pub const TASK_COST: &str = "__cost";
+pub const TASK_COST: &str = "#cost";
 
 /// Node ids of the timeout branches that already fired for one task (the
 /// one-shot guard a timeout branch's evaluation keeps in the run's own
 /// state).
-pub const TASK_TIMEOUTS: &str = "__timeouts";
+pub const TASK_TIMEOUTS: &str = "#timeouts";
 
 /// The per-item bindings a param fan-out (`acts.core.parallel{in}` /
 /// `acts.core.sequence{in}`) pins on each item's template execution: the
 /// item's position and value.
 ///
-/// They are private (`__`-prefixed) on purpose — engine facts, not run data:
+/// They are private (`#`-prefixed) on purpose — engine facts, not run data:
 /// they never fold into an ancestor scope (`PropagateTask` skips private
 /// names), never reach a task's projected row, a run's outputs or a message's
 /// `inputs`. Expressions read them through the `$item` built-in
 /// (`$item.value`/`$item.index`), never as bare variables.
-pub(crate) const FANOUT_INDEX_VAR: &str = "__fanout_index";
-pub(crate) const FANOUT_VALUE_VAR: &str = "__fanout_value";
+pub(crate) const FANOUT_INDEX_VAR: &str = "#fanout_index";
+pub(crate) const FANOUT_VALUE_VAR: &str = "#fanout_value";
 
 pub const ACT_TO: &str = "to";
 
@@ -48,18 +48,18 @@ pub const MODEL_ID: &str = "mid";
 /// Process env key holding the owner's [`crate::acl::ScopePolicy`] as json.
 /// Private (see [`is_private_key`]): `$env` never exposes it, so a workflow
 /// cannot read or forge its own scope authority.
-pub const PROC_OWNER: &str = "__owner";
+pub const PROC_OWNER: &str = "#owner";
 
 /// Process env key holding the stable idempotency key of the effect currently
 /// executing. Private (see [`is_private_key`]): `$env` never exposes it and it
 /// is never written back as run data. Packages read it through
 /// `Context::effect_key`.
-pub const EFFECT_KEY: &str = "__effect_key";
+pub const EFFECT_KEY: &str = "#effect_key";
 
 /// Process env key holding the process's own directory
 /// (`<workdir>/<pid>`). Private like [`PROC_OWNER`]: `$env` never exposes it,
 /// and packages read it through `Context::workdir`.
-pub const PROC_WORKDIR: &str = "__workdir";
+pub const PROC_WORKDIR: &str = "#workdir";
 
 /// The name a workflow reads its process directory under: `$env.WORK_DIR` is
 /// the same `<root>/<pid>` that `Context::workdir()` answers, not the root the
@@ -92,6 +92,21 @@ pub const KEY_SEP_SUCC: &str = ".";
 
 /// check if the key is private
 /// these keys can only be as local data
+///
+/// `#`-prefixed names are the engine's own facts: hidden from expressions,
+/// from the read model, from outputs/inputs and from every upward fold.
 pub fn is_private_key(key: &str) -> bool {
-    key.starts_with("__")
+    key.starts_with('#')
+}
+
+/// Whether a variable is *inheritable* (`@`-prefixed): visible to the scope
+/// that declared it and everything below it, but never passed onward — it
+/// does not fold into a parent scope when the declaring execution settles
+/// ([`super::scheduler::core::commit::command::propagate`]) and is not
+/// carried onto a re-entered ancestor (the fan-out's turn, a `back`/`cancel`
+/// rewind). A successor task therefore never sees it: the `assign` answers
+/// (`@candidates` and friends) stop at the declaring step instead of riding
+/// every later task's scope.
+pub fn is_inheritable_key(key: &str) -> bool {
+    key.starts_with('@')
 }

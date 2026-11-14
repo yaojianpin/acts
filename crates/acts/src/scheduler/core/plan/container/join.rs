@@ -89,8 +89,33 @@ impl ActPlan for Join {
         if children.is_empty() {
             return Ok(None);
         }
+        // A candidates request the container minted to fill its pool
+        // (`<parent>#cand<k>`) is the container's own asking, not one of the
+        // votes the rule counts: its *answered* request must not read as a
+        // completion, or a `join: any` container completes on the answer
+        // alone — before any vote ran — and an all-votes-failed round never
+        // fails. A request that died (`Failed`/`Cancelled`) stays in the
+        // census: the pool can never fill, which is the container's own
+        // failure to propagate.
+        let ask_prefix = format!("{}#cand", command.parent.node.as_str());
+        let is_pool_ask = |child: &TaskId| {
+            child
+                .node
+                .as_str()
+                .strip_prefix(&ask_prefix)
+                .is_some_and(|rest| {
+                    !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        };
         let census: Vec<(TaskId, TaskState)> = children
             .iter()
+            .filter(|child| {
+                !(is_pool_ask(child)
+                    && matches!(
+                        snapshot.tasks.get(*child).map(|task| task.state),
+                        Some(TaskState::Completed | TaskState::Submitted)
+                    ))
+            })
             .map(|child| {
                 let state = snapshot
                     .tasks
@@ -100,6 +125,11 @@ impl ActPlan for Join {
                 Ok((child.clone(), state))
             })
             .collect::<Result<_, _>>()?;
+        // Every child was an answered pool ask (the answer is in, the
+        // fan-out has not run yet): nothing to decide on.
+        if census.is_empty() {
+            return Ok(None);
+        }
         let decision = super::join_rules::decide(command.join.as_ref(), &census);
         let sequence = next_sequence(snapshot, command)?;
         match decision {

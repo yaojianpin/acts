@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
 /// The declared assignment of one human decision act: the expression the act
-/// resolves at start into its persisted `__assignment` task state, and — for
+/// resolves at start into its persisted `#assignment` task state, and — for
 /// multi-approver steps — the candidate pool its `uses` package computes.
 /// Only a human decision leaf (`ActRunAs::Irq`) carries its own `owner`; a
 /// container step (`block`/`parallel`/`sequence`) may declare an `owner` as

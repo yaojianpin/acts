@@ -39,7 +39,7 @@ act:remind {pid, tid, message?}
 
 在 `apply_action`（拒绝不消耗 durable intent）与 plan（重放安全）各执行一遍：
 
-1. 活动存在、非终态、带 `__assignment`——没有 assignment 的活动没有可催办
+1. 活动存在、非终态、带 `#assignment`——没有 assignment 的活动没有可催办
    的 owner，拒绝。
 2. 调用者必须携带认证 subject，且 `subject != assignment.owner`：owner 无需
    自催；反向拒绝沿用 `ENOTOWNER` 词头（`the owner cannot remind their own

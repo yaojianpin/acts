@@ -1,6 +1,6 @@
 //! The delegation state of one human act and its rules.
 //!
-//! The durable `__delegation` fact ([`Delegation`], at most one active per
+//! The durable `#delegation` fact ([`Delegation`], at most one active per
 //! act) with the pure helpers around it — validity at a clock, the transport
 //! shapes of `expires_at` and `expect_rev`, and the payload projection — as
 //! methods on [`Assign`](super::Assign). The shell keeps the durable reads
@@ -12,7 +12,7 @@ use crate::{ActError, Result};
 /// `{"id","delegator","delegatee","granted_by","expires_at","reason"}`, or
 /// `null` once revoked. It is the authorization source for a delegatee; the
 /// message fields are only its projection.
-pub(crate) const DELEGATION_VAR: &str = "__delegation";
+pub(crate) const DELEGATION_VAR: &str = "#delegation";
 
 /// The per-task delegation of one human decision execution: at most one is
 /// active. The variable holds `null` after `act:undelegate` or a transfer, so
@@ -106,15 +106,11 @@ impl super::Assign {
         })
     }
 
-    /// Project an active delegation's delegator/delegatee onto a payload that
-    /// already carries the assignment fields. The owner and assignee stay
-    /// what [`Assign::inject_payload_assignment`] wrote.
-    pub(crate) fn inject_payload_delegation(
-        payload: &mut serde_json::Value,
-        delegator: &str,
-        delegatee: &str,
-    ) {
+    /// Project an active delegation's delegator onto a payload that already
+    /// carries the assignment fields. The owner and assignee stay what
+    /// [`Assign::inject_payload_assignment`] wrote; the delegatee is not a
+    /// separate field — the act's *assignee* is whoever executes it now.
+    pub(crate) fn inject_payload_delegation(payload: &mut serde_json::Value, delegator: &str) {
         payload["delegator"] = serde_json::Value::String(delegator.to_string());
-        payload["delegatee"] = serde_json::Value::String(delegatee.to_string());
     }
 }

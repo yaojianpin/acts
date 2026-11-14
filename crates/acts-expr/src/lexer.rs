@@ -133,7 +133,11 @@ impl<'a> Lexer<'a> {
         match c {
             b'0'..=b'9' => self.number(),
             b'\'' | b'"' => self.string(c),
-            b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'$' => Ok(self.ident()),
+            // A leading `@`/`#` names an inheritable/private variable
+            // (`@answer`, `#candidates`): the engine stores such names
+            // verbatim in the scope map, so an expression reads them under
+            // the marker it declared.
+            b'@' | b'#' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'$' => Ok(self.ident()),
             b'+' => self.punct(Token::Plus),
             b'-' => self.punct(Token::Minus),
             b'*' => self.punct(Token::Star),
@@ -322,6 +326,11 @@ impl<'a> Lexer<'a> {
 
     fn ident(&mut self) -> Token {
         let start = self.pos;
+        // A leading `@`/`#` marker is the identifier's first character (the
+        // dispatch sent the byte here): consume it, then read the name.
+        if matches!(self.peek(0), Some(b'@' | b'#')) {
+            self.pos += 1;
+        }
         while matches!(
             self.peek(0),
             Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'$')
@@ -408,6 +417,27 @@ mod tests {
         assert_eq!(
             lex("1e").unwrap(),
             [Token::Int(1), Token::Ident(Arc::from("e")), Token::End]
+        );
+    }
+
+    #[test]
+    fn a_marker_starts_an_identifier() {
+        // An inheritable (`@`) or private (`#`) variable is one identifier:
+        // the engine stores such names verbatim in the scope map, and the
+        // marker is the name's first character, never an operator.
+        assert_eq!(token("@answer"), Token::Ident(Arc::from("@answer")));
+        assert_eq!(token("#candidates"), Token::Ident(Arc::from("#candidates")));
+        // The marker is not part of the continuation, so `@answer1` keeps the
+        // digit and a second marker would be its own token.
+        assert_eq!(token("@answer1"), Token::Ident(Arc::from("@answer1")));
+        assert_eq!(
+            lex("@a == #b").unwrap(),
+            [
+                Token::Ident(Arc::from("@a")),
+                Token::EqEq,
+                Token::Ident(Arc::from("#b")),
+                Token::End
+            ]
         );
     }
 

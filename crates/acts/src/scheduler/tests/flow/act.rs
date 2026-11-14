@@ -891,7 +891,7 @@ async fn sch_act_back_from_a_fanout_vote_reenters_the_head_step() {
                 .with_uses(
                     USES_PARALLEL,
                     Vars::new()
-                        .with("in", "${{ candidates }}")
+                        .with("in", "${{ @candidates }}")
                         .with("join", "all")
                         .with(
                             "steps",
@@ -1083,7 +1083,7 @@ async fn sch_act_approvers_refuse_on_a_container_and_the_classic_push_signs_it()
                 .with_uses(
                     USES_PARALLEL,
                     Vars::new()
-                        .with("in", "${{ candidates }}")
+                        .with("in", "${{ @candidates }}")
                         .with("join", "all")
                         .with(
                             "steps",
@@ -1113,7 +1113,7 @@ async fn sch_act_approvers_refuse_on_a_container_and_the_classic_push_signs_it()
             .params()
             .and_then(|params| params.get::<String>("in"))
             .as_deref(),
-        Some("${{ candidates }}"),
+        Some("${{ @candidates }}"),
         "the Created speaks the raw declaration"
     );
     let request = fixture.wait_created("approve#cand1").await;
@@ -1844,7 +1844,7 @@ fn approved_user(name: &str) -> Principal {
     .unwrap()
 }
 
-/// The persisted `__assignment` of the newest execution of `node`.
+/// The persisted `#assignment` of the newest execution of `node`.
 async fn assignment_of(fixture: &FlowFixture, node: &str) -> serde_json::Value {
     let snapshot = fixture.snapshot().await;
     let task = snapshot
@@ -1856,7 +1856,7 @@ async fn assignment_of(fixture: &FlowFixture, node: &str) -> serde_json::Value {
         .unwrap_or_else(|| panic!("no execution of {node}"));
     let raw = snapshot
         .variables
-        .get(&(task, "__assignment".to_string()))
+        .get(&(task, "#assignment".to_string()))
         .unwrap_or_else(|| panic!("{node} has no __assignment"));
     serde_json::from_str(raw).unwrap()
 }
@@ -1876,7 +1876,6 @@ async fn sch_act_assign_resolves_and_projects_the_owner() {
     assert_eq!(created.assignee.as_deref(), Some("alice"));
     assert_eq!(created.rev, 0);
     assert_eq!(created.delegator, None);
-    assert_eq!(created.delegatee, None);
     let options = created.options().expect("the act options");
     assert_eq!(options.get::<String>("owner").as_deref(), Some("alice"));
     assert_eq!(options.get::<String>("assignee").as_deref(), Some("alice"));
@@ -2339,11 +2338,11 @@ async fn sch_act_transfer_moves_the_owner_without_deciding_the_act() {
     assert_eq!(assignment["updated_by"], json!("alice"));
     assert!(assignment["updated_at"].as_i64().unwrap() > 0);
 
-    // The transfer intent is a durable `__action` fact the operation replays.
+    // The transfer intent is a durable `#action` fact the operation replays.
     assert!(
         after.variables.iter().any(|((task, name), value)| {
             task == &task_id
-                && name.starts_with("__action@")
+                && name.starts_with("#action@")
                 && value.contains("\"transfer\"")
                 && value.contains("bob")
         }),
@@ -2366,6 +2365,17 @@ async fn sch_act_transfer_moves_the_owner_without_deciding_the_act() {
     let options = notification.options().expect("the notification options");
     assert_eq!(options.get::<String>("owner").as_deref(), Some("bob"));
     assert_eq!(options.get::<String>("assignee").as_deref(), Some("bob"));
+    let assign = notification
+        .inputs
+        .get::<serde_json::Value>("assign")
+        .expect("the assignment identities ride inputs.assign");
+    assert_eq!(assign["owner"], serde_json::json!("bob"));
+    assert_eq!(assign["assignee"], serde_json::json!("bob"));
+    assert_eq!(
+        assign.get("delegator"),
+        None,
+        "a transfer clears the delegation"
+    );
     // The original Created message stays as history.
     assert!(
         fixture
@@ -2627,7 +2637,7 @@ async fn sch_act_transfer_and_complete_have_one_winner() {
     fixture.close().await;
 }
 
-/// Restart: `__assignment`, the superseded delivery and the assignment
+/// Restart: `#assignment`, the superseded delivery and the assignment
 /// message are durable, and the new owner can decide the recovered act.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
@@ -2691,7 +2701,7 @@ async fn sch_act_transfer_survives_restart() {
         .expect("the recovered execution");
     let raw = snapshot
         .variables
-        .get(&(task.clone(), "__assignment".to_string()))
+        .get(&(task.clone(), "#assignment".to_string()))
         .expect("the recovered assignment");
     let assignment: serde_json::Value = serde_json::from_str(raw).unwrap();
     assert_eq!(assignment["owner"], json!("bob"));
@@ -2756,7 +2766,7 @@ async fn sch_act_transfer_survives_restart() {
 // Delegate (`act:delegate` / `act:undelegate`)
 // ---------------------------------------------------------------------------
 
-/// The persisted `__delegation` of the newest execution of `node`, if it is
+/// The persisted `#delegation` of the newest execution of `node`, if it is
 /// an active record (`null` reads as `None`).
 async fn delegation_of(fixture: &FlowFixture, node: &str) -> Option<serde_json::Value> {
     let snapshot = fixture.snapshot().await;
@@ -2767,9 +2777,7 @@ async fn delegation_of(fixture: &FlowFixture, node: &str) -> Option<serde_json::
         .max_by_key(|id| id.generation)
         .cloned()
         .unwrap_or_else(|| panic!("no execution of {node}"));
-    let raw = snapshot
-        .variables
-        .get(&(task, "__delegation".to_string()))?;
+    let raw = snapshot.variables.get(&(task, "#delegation".to_string()))?;
     serde_json::from_str::<Option<serde_json::Value>>(raw)
         .ok()
         .flatten()
@@ -2871,7 +2879,6 @@ async fn sch_act_delegate_admits_the_delegatee_and_projects_the_audit_fields() {
     assert_eq!(notification.owner.as_deref(), Some("alice"));
     assert_eq!(notification.assignee.as_deref(), Some("bob"));
     assert_eq!(notification.delegator.as_deref(), Some("alice"));
-    assert_eq!(notification.delegatee.as_deref(), Some("bob"));
     assert_eq!(notification.rev, 1);
     assert_eq!(
         notification.ref_msg_id.as_deref(),
@@ -2880,6 +2887,16 @@ async fn sch_act_delegate_admits_the_delegatee_and_projects_the_audit_fields() {
     let options = notification.options().expect("the notification options");
     assert_eq!(options.get::<String>("owner").as_deref(), Some("alice"));
     assert_eq!(options.get::<String>("assignee").as_deref(), Some("bob"));
+    // The identities ride the payload's `inputs.assign`: owner, the current
+    // executor (assignee — the delegatee while a delegation is active), and
+    // the delegator that granted it.
+    let assign = notification
+        .inputs
+        .get::<serde_json::Value>("assign")
+        .expect("the assignment identities ride inputs.assign");
+    assert_eq!(assign["owner"], serde_json::json!("alice"));
+    assert_eq!(assign["assignee"], serde_json::json!("bob"));
+    assert_eq!(assign["delegator"], serde_json::json!("alice"));
 
     // The delegatee decides, and the Completed record carries the delegation.
     fixture
@@ -2893,7 +2910,6 @@ async fn sch_act_delegate_admits_the_delegatee_and_projects_the_audit_fields() {
     assert_eq!(completed.owner.as_deref(), Some("alice"));
     assert_eq!(completed.assignee.as_deref(), Some("bob"));
     assert_eq!(completed.delegator.as_deref(), Some("alice"));
-    assert_eq!(completed.delegatee.as_deref(), Some("bob"));
     assert_eq!(completed.rev, 1);
     let options = completed.options().expect("the completed act options");
     assert_eq!(options.get::<String>("owner").as_deref(), Some("alice"));
@@ -2935,7 +2951,6 @@ async fn sch_act_delegate_keeps_the_owner_as_a_decider() {
     assert_eq!(completed.owner.as_deref(), Some("alice"));
     assert_eq!(completed.assignee.as_deref(), Some("alice"));
     assert_eq!(completed.delegator, None);
-    assert_eq!(completed.delegatee, None);
     assert_eq!(completed.rev, 1);
     fixture.close().await;
 }
@@ -3042,7 +3057,6 @@ async fn sch_act_undelegate_revokes_the_delegatee() {
     assert_eq!(notification.owner.as_deref(), Some("alice"));
     assert_eq!(notification.assignee.as_deref(), Some("alice"));
     assert_eq!(notification.delegator, None);
-    assert_eq!(notification.delegatee, None);
     assert_eq!(notification.rev, 2);
     assert_eq!(
         notification.ref_msg_id.as_deref(),
@@ -3070,7 +3084,6 @@ async fn sch_act_undelegate_revokes_the_delegatee() {
     let completed = fixture.wait_message("s1", MessageState::Completed).await;
     assert_eq!(completed.assignee.as_deref(), Some("alice"));
     assert_eq!(completed.delegator, None);
-    assert_eq!(completed.delegatee, None);
     fixture.close().await;
 }
 
@@ -3123,7 +3136,6 @@ async fn sch_act_transfer_clears_the_delegation() {
     let notification = wait_assignment_at(&fixture, 2).await;
     assert_eq!(notification.owner.as_deref(), Some("carol"));
     assert_eq!(notification.delegator, None);
-    assert_eq!(notification.delegatee, None);
 
     let refused = fixture
         .engine()
@@ -3147,7 +3159,6 @@ async fn sch_act_transfer_clears_the_delegation() {
     assert_eq!(completed.owner.as_deref(), Some("carol"));
     assert_eq!(completed.assignee.as_deref(), Some("carol"));
     assert_eq!(completed.delegator, None);
-    assert_eq!(completed.delegatee, None);
     fixture.close().await;
 }
 
@@ -3429,7 +3440,7 @@ async fn sch_act_delegate_survives_restart() {
         .expect("the recovered execution");
     let raw = snapshot
         .variables
-        .get(&(task.clone(), "__delegation".to_string()))
+        .get(&(task.clone(), "#delegation".to_string()))
         .expect("the recovered delegation");
     let delegation: serde_json::Value = serde_json::from_str(raw).unwrap();
     assert_eq!(delegation["delegator"], json!("alice"));
@@ -3481,7 +3492,7 @@ async fn sch_act_delegate_survives_restart() {
                 rows.rows.iter().any(|message| {
                     message.state == MessageState::Completed
                         && message.delegator.as_deref() == Some("alice")
-                        && message.delegatee.as_deref() == Some("bob")
+                        && message.assignee.as_deref() == Some("bob")
                 })
             })
     })

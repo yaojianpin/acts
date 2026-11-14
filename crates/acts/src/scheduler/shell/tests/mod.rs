@@ -2055,7 +2055,7 @@ async fn an_effect_releases_the_lane_for_a_concurrent_decision() {
 
 /// The slot cap (`Config::cache_cap`): with one slot the first run owns it, the
 /// runs started behind it park, and each freed slot admits the parked run that
-/// has waited longest (`__created` ascending — the legacy parked row's
+/// has waited longest (`#created` ascending — the legacy parked row's
 /// `timestamp` order). A parked run takes no hop at all and its root stays
 /// `Created`, which the read model writes as the `None` process state: exactly
 /// the shape of a legacy parked row.
@@ -2091,7 +2091,7 @@ async fn a_run_beyond_the_cache_cap_parks_until_a_slot_frees() {
     ));
 
     for pid in ["cap-a", "cap-b", "cap-c"] {
-        // Strictly increasing `__created` stamps: the parked order under test
+        // Strictly increasing `#created` stamps: the parked order under test
         // is then the start order, not a millisecond tie.
         let previous = crate::utils::time::time_millis();
         while crate::utils::time::time_millis() == previous {
@@ -7898,7 +7898,7 @@ async fn package_error_fails_the_task_and_walks_up() {
 
 /// `scope_vars` is the variable space an effect's params resolve against:
 /// the chain of the acting execution, with the engine's own aggregate
-/// facts (`__model`, `__auto`, `__owner`) left out — a legacy task never
+/// facts (`#model`, `#auto`, `#owner`) left out — a legacy task never
 /// reads them.
 #[test]
 fn scope_vars_carry_the_run_variables_without_the_engine_facts() {
@@ -7914,7 +7914,7 @@ fn scope_vars_carry_the_run_variables_without_the_engine_facts() {
         .collect();
     assert!(names.contains(&"v".to_string()), "{names:?}");
     assert!(
-        !names.iter().any(|name| name.starts_with("__")),
+        !names.iter().any(|name| name.starts_with("#")),
         "engine facts must not be variables: {names:?}"
     );
 }
@@ -9120,7 +9120,7 @@ async fn a_restart_catches_up_only_the_rows_that_lag() {
     );
 }
 
-/// The prepared model is cached by the durable `__model` value, not by pid:
+/// The prepared model is cached by the durable `#model` value, not by pid:
 /// a reclaimed pid that starts a different run projects the new model, never
 /// the previous run's cached declaration.
 #[tokio::test(flavor = "multi_thread")]

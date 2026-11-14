@@ -45,7 +45,7 @@ pub struct ScopeSpec {
     pub(crate) model: Workflow,
     /// The pushed act's synthetic step: the declaring model is
     /// immutable for the life of a run, so a pushed act's node is not in it —
-    /// the act rides its execution (`__act`), and this is the step the
+    /// the act rides its execution (`#act`), and this is the step the
     /// headless scope resolves its params and options through. `None` for
     /// every declared node.
     pub(crate) pushed: Option<crate::model::Step>,
@@ -58,7 +58,7 @@ pub struct ScopeSpec {
     /// demand. `None` keeps the legacy eager `vars` seed for contexts that
     /// carry no snapshot (read model, unit tests, predicate fallback).
     pub(crate) snapshot: Option<Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
-    /// The run's declared env map (`__env`), seeded into the headless process
+    /// The run's declared env map (`#env`), seeded into the headless process
     /// env so `$env.X` answers the workflow's `env` entries — read-only state,
     /// shared by every task.
     pub(crate) env: Vec<(String, serde_json::Value)>,
@@ -240,7 +240,7 @@ impl Scope {
     /// The server-attributed subjects of the decisions that led to `task_id`,
     /// newest decision first.
     ///
-    /// The durable action facts are private `__action@<sequence>` variables on
+    /// The durable action facts are private `#action@<sequence>` variables on
     /// the execution they decided. The flow history is the predecessor graph
     /// (a top-level step's parent is the run root, not the previous step), so
     /// the walk follows predecessors first and falls back to the tree parent
@@ -340,7 +340,7 @@ fn collect_decision_subjects(
             if scope != task_id {
                 return None;
             }
-            let sequence = name.strip_prefix("__action@")?.parse::<u64>().ok()?;
+            let sequence = name.strip_prefix("#action@")?.parse::<u64>().ok()?;
             Some((sequence, raw.as_str()))
         })
         .collect();
@@ -593,9 +593,11 @@ impl ScopeTask {
                 outputs.set(&var.name, var.value.clone());
             }
         } else {
-            // export all data except the private ones
+            // export all data except the private and inheritable ones: an
+            // `@` variable belongs to this scope's subtree, not to whatever
+            // reads this execution's outputs
             for (key, _) in self.data().iter() {
-                if !consts::is_private_key(key) {
+                if !consts::is_private_key(key) && !consts::is_inheritable_key(key) {
                     outputs.set(key, serde_json::json!(null))
                 }
             }
@@ -633,7 +635,7 @@ impl ScopeTask {
 }
 
 /// Whether a durable variable name is part of the expression-visible scope:
-/// the private `__` engine facts stay hidden, except the legacy `__cost`
+/// the private `#` engine facts stay hidden, except the legacy `#cost`
 /// datum read by `$cost()`/`$cost_in(...)`.
 fn scope_name_visible(name: &str) -> bool {
     !consts::is_private_key(name) || name == consts::TASK_COST
@@ -824,7 +826,7 @@ mod tests {
             pushed: None,
             vars: vec![
                 ("v".into(), "1".into()),
-                ("__private".into(), "2".into()),
+                ("#private".into(), "2".into()),
                 ("broken".into(), "{not json".into()),
             ],
             snapshot: None,
@@ -888,7 +890,7 @@ mod tests {
         assert_eq!(task.data().get::<i32>("v"), Some(1));
         // Private engine names are seeded like any other variable (the scope
         // chain carries them); the output surface is what filters them.
-        assert_eq!(task.data().get::<i32>("__private"), Some(2));
+        assert_eq!(task.data().get::<i32>("#private"), Some(2));
         assert!(task.data().get::<serde_json::Value>("broken").is_none());
         assert_eq!(
             scope.env().get::<String>("declared").as_deref(),
@@ -934,11 +936,11 @@ mod tests {
         let (_scope, task, ctx) = headless_scope(&runtime, &spec("plain")).unwrap();
         task.set_data_with(|data| {
             data.set("v", 4);
-            data.set("__private", 5);
+            data.set("#private", 5);
         });
         let outputs = task.outputs(&ctx);
         assert_eq!(outputs.get::<i32>("v"), Some(4));
-        assert!(outputs.get_value("__private").is_none());
+        assert!(outputs.get_value("#private").is_none());
 
         let (_scope, task, ctx) = headless_scope(&runtime, &spec("opt")).unwrap();
         let outputs = task.outputs(&ctx);

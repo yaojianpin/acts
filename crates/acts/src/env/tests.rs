@@ -273,7 +273,7 @@ async fn env_task_get_var_not_exists() {
     });
 }
 
-/// A run with no timeout carries no `__cost` datum, so `$cost_in` reads the
+/// A run with no timeout carries no `#cost` datum, so `$cost_in` reads the
 /// acting task's elapsed cost instead of a frozen timeout marker.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]

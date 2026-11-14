@@ -22,7 +22,7 @@
 //!
 //! A workflow declares the pool on `assign.candidates: { params, uses }` and
 //! the answer lands in the act's variables, where
-//! `acts.core.parallel.in: "${{ candidates }}"` (or `ids`) fans the
+//! `acts.core.parallel.in: "${{ @candidates }}"` (or `ids`) fans the
 //! participants out; each item's `assign.owner` reads `value`. The engine
 //! resolves the local half of the expression (literal users, `initiator`,
 //! `current_actor`, `previous_approver`, and the set operations) itself; the

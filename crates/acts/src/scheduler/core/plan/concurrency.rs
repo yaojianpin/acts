@@ -21,9 +21,9 @@ use crate::scheduler::core::plan::ActPlan;
 /// keeps no wall-clock stamp of its own, so the run carries the one fact that
 /// order needs. Like the cost start of a timed-out execution
 /// ([`STARTED_VAR`](super::timeout::STARTED_VAR)) it is a kernel fact: it stays
-/// `__`-private, so it never reaches a scope a model reads, and it is written
+/// `#`-private, so it never reaches a scope a model reads, and it is written
 /// by the seed, not by a plan.
-pub(crate) const CREATED_VAR: &str = "__created";
+pub(crate) const CREATED_VAR: &str = "#created";
 
 /// What the driver does with a run that does not hold a slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

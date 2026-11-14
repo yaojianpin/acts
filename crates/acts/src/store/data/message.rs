@@ -74,15 +74,13 @@ pub struct Message {
     pub create_time: i64,
     pub timestamp: i64,
 
-    /// Projected assignment of a human act (see `__assignment`).
+    /// Projected assignment of a human act (see `#assignment`).
     #[serde(default)]
     pub owner: Option<String>,
     #[serde(default)]
     pub assignee: Option<String>,
     #[serde(default)]
     pub delegator: Option<String>,
-    #[serde(default)]
-    pub delegatee: Option<String>,
     #[serde(default)]
     pub rev: u64,
     #[serde(default)]
@@ -163,9 +161,10 @@ impl Message {
     }
 
     /// v2 → v3: the assignment projection (`owner`, `assignee`, `delegator`,
-    /// `delegatee`, `rev`, `ref_msg_id`) was added. Old rows carry
-    /// none of them; every field is `#[serde(default)]`, so bumping the
-    /// version is the whole migration.
+    /// `rev`, `ref_msg_id`) was added. Old rows carry none of them; every
+    /// field is `#[serde(default)]`, so bumping the version is the whole
+    /// migration. A row a v3 kernel wrote may still carry a `delegatee` key;
+    /// serde ignores it — the identity is the assignee.
     fn migrate_v2(mut value: JsonValue) -> Result<Self> {
         if let JsonValue::Object(map) = &mut value {
             map.insert(

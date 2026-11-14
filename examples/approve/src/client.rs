@@ -279,9 +279,10 @@ impl HistoryEntry {
 
 /// The history path from one execution back to the run's root: the task
 /// predecessor chain when the row names one (the flow order), and the
-/// execution's parent when it does not (a pushed act). Virtual `block`
-/// containers are walked through but not listed — they are the kernel's own
-/// grouping, not a node a user acts on.
+/// execution's parent when it does not (a pushed act). The kernel's own
+/// groupings are walked through but not listed — the virtual `block` branch,
+/// the fan-out item's `acts.core.block` template and the `#cand` pool
+/// requests: none of them is a node a user acts on.
 fn history_path(
     graph: &acts::ProcessGraph,
     tasks: &[acts::TaskInfo],
@@ -301,7 +302,12 @@ fn history_path(
             break;
         };
         let node = by_tid.get(current.as_str()).copied();
-        if node.is_none_or(|node| node.kind != "block") {
+        let kernel_grouping = node.is_some_and(|node| {
+            node.kind == "block"
+                || node.uses.as_deref() == Some("acts.core.block")
+                || is_pool_request(&task.nid)
+        });
+        if !kernel_grouping {
             // An unnamed act (a pushed vote, a fan-out leaf) carries the
             // action key it runs in its params; that key is the name a user
             // knows it by, and a stable script key across runs.
@@ -343,6 +349,16 @@ fn history_path(
         }
     }
     path
+}
+
+/// Whether a node id names one of the kernel's `#cand<k>` pool requests: the
+/// container's own asking for its fan-out pool, never an act a user decides.
+fn is_pool_request(nid: &str) -> bool {
+    nid.rsplit('#')
+        .next()
+        .and_then(|tail| tail.strip_prefix("cand"))
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
+        && nid.contains('#')
 }
 
 /// The stable script keys for a history menu: the node name while it is
@@ -399,6 +415,11 @@ pub struct Client {
     /// One clerk processes the inbox: the demo answers one message at a
     /// time, so two answers never race in the same act's commit window.
     gate: tokio::sync::Mutex<()>,
+    /// The tids whose menu is open right now. A menu runs detached, so a
+    /// duplicate `Created` for one instance (a re-announce) must not open a
+    /// second menu on the same act — two menus would race for one script's
+    /// lines and one decider's answers.
+    menus: Mutex<HashSet<String>>,
     /// The menu's input source: the terminal, or a script.
     prompter: Prompter,
     /// tid → the terminal state its act announced. A queued act can settle
@@ -493,6 +514,33 @@ impl Client {
             .collect()
     }
 
+    /// The expense amount the run judges — the demo's one start input, the
+    /// first line a script must answer. An empty answer keeps the model's own
+    /// default (800). An interactive session asks again on a non-number; a
+    /// scripted one takes the default instead (a script cannot answer again,
+    /// and eating the choices that follow would drift the whole run).
+    pub async fn ask_amount(&self) -> i64 {
+        loop {
+            let line = self.prompter.input("amount:").await;
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                return 800;
+            }
+            match line.parse::<i64>() {
+                Ok(amount) => return amount,
+                Err(_) => {
+                    println!("   '{line}' is not an amount — enter a plain integer");
+                    if matches!(self.prompter, Prompter::Script { .. }) {
+                        println!(
+                            "   the script's first line is the amount; keeping the default 800"
+                        );
+                        return 800;
+                    }
+                }
+            }
+        }
+    }
+
     /// The executor whose decision the act currently waits on: the owner at
     /// creation, or whoever the latest assignment notice points at (a
     /// transfer's new owner, a delegation's delegatee). An act with no
@@ -542,10 +590,18 @@ impl Client {
         Ok(path)
     }
 
-    pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
-        // The act's terminal state is recorded before the clerk's gate: a
-        // queued menu keeps the gate, and the withdrawal that settles its
-        // act must still reach the set while the menu is open.
+    /// One engine message: the clerk's inbox. Assignment notifications and
+    /// notices (a remind, an `acts.core.msg` delivery) are *projections*, not
+    /// answers — they print the moment they land, on a detached task. A human
+    /// act's menu runs detached too: the engine's per-run event worker is
+    /// free while a menu is open, so a remind/transfer/delegate chosen on one
+    /// act shows its notification immediately instead of queueing behind the
+    /// menu. The choices themselves stay serialized on the clerk's gate, one
+    /// action at a time.
+    pub async fn process(self: &Arc<Self>, executor: &Executor, message: &Message) -> Result<()> {
+        // The act's terminal state is recorded before anything else: a queued
+        // menu keeps waiting, and the withdrawal that settles its act must
+        // still reach the set while the menu is open.
         if message.is_type("step") {
             let state = message.state();
             if matches!(
@@ -564,54 +620,43 @@ impl Client {
                     .insert(message.tid.clone(), state.to_string());
             }
         }
-        // The clerk takes the gate next: every action below runs one at a
-        // time.
-        let _clerk = self.gate.lock().await;
-
-        // A transfer/delegation notice is its own event: print the assignment
-        // it projects, refresh the act's current decider, and never answer it
-        // like the act's Created message.
-        if message.r#type == "assignment" {
-            println!(
-                "assignment: nid={} owner={:?} assignee={:?} delegator={:?} delegatee={:?} rev={}",
-                message.nid,
-                message.owner,
-                message.assignee,
-                message.delegator,
-                message.delegatee,
-                message.rev
-            );
-            if let Some(assignee) = &message.assignee {
-                self.deciders
-                    .lock()
-                    .unwrap()
-                    .insert(message.tid.clone(), assignee.clone());
-            }
-            return Ok(());
-        }
-
-        // A notice is a message a step sent (`acts.core.msg` — its one
-        // delivery, with the computed params in `outputs`) or the urge a
-        // user wrote on a pending act (a remind: it addresses the act's
-        // owner, carries the caller and the note in `inputs.params`, and
-        // decides nothing).
-        if message.r#type == "notice" {
-            if message.is_msg() {
-                println!(
-                    "notice: id={} inputs={} outputs={}",
-                    message.tid, message.inputs, message.outputs
-                );
-            } else {
-                let params = message.inputs.get::<Vars>("params").unwrap_or_default();
-                println!(
-                    "remind: nid={} owner={:?} from={:?} message={:?} outputs={}",
-                    message.nid,
-                    message.owner,
-                    params.get::<String>("from"),
-                    params.get::<String>("message"),
-                    message.outputs
-                );
-            }
+        if message.r#type == "assignment" || message.r#type == "notice" {
+            let client = self.clone();
+            let message = message.clone();
+            tokio::spawn(async move {
+                if message.r#type == "assignment" {
+                    println!(
+                        "assignment: nid={} owner={:?} assignee={:?} delegator={:?} rev={}",
+                        message.nid,
+                        message.owner,
+                        message.assignee,
+                        message.delegator,
+                        message.rev
+                    );
+                    if let Some(assignee) = &message.assignee {
+                        client
+                            .deciders
+                            .lock()
+                            .unwrap()
+                            .insert(message.tid.clone(), assignee.clone());
+                    }
+                } else if message.is_msg() {
+                    println!(
+                        "notice: id={} inputs={} outputs={}",
+                        message.tid, message.inputs, message.outputs
+                    );
+                } else {
+                    let params = message.inputs.get::<Vars>("params").unwrap_or_default();
+                    println!(
+                        "remind: nid={} owner={:?} from={:?} message={:?} outputs={}",
+                        message.nid,
+                        message.owner,
+                        params.get::<String>("from"),
+                        params.get::<String>("message"),
+                        message.outputs
+                    );
+                }
+            });
             return Ok(());
         }
 
@@ -642,9 +687,15 @@ impl Client {
                     message.tid.clone(),
                 ));
             }
-            // A human act announces itself: put it to the terminal.
+            // A human act announces itself: put it to the terminal, detached
+            // so the engine's event worker keeps draining the queue.
             if message.is_state(MessageState::Created) && message.is_irq() {
-                self.interact(executor, message).await;
+                let client = self.clone();
+                let executor = executor.clone();
+                let message = message.clone();
+                tokio::spawn(async move {
+                    client.interact(&executor, &message).await;
+                });
             }
         }
 
@@ -672,6 +723,20 @@ impl Client {
             .and_then(|params| params.get::<String>("key"))
             .unwrap_or_default();
         let owner = message.owner.clone();
+        // One menu per instance: a re-announced `Created` never opens a
+        // second one for the same act.
+        if !self.menus.lock().unwrap().insert(tid.clone()) {
+            return;
+        }
+        // Everything below returns through this guard: the instance's menu
+        // is closed however the session ends.
+        struct OpenMenu<'a>(&'a Mutex<HashSet<String>>, &'a str);
+        impl Drop for OpenMenu<'_> {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().remove(self.1);
+            }
+        }
+        let _open = OpenMenu(&self.menus, tid.as_str());
 
         loop {
             // A queued act may have been withdrawn while this handler waited
@@ -727,6 +792,10 @@ impl Client {
                 self.script_ran_out();
                 return;
             };
+            // The choice's action runs on the clerk's gate: menus for
+            // different acts may be open at once (the engine's event worker
+            // stays free), but only one answer reaches the kernel at a time.
+            let _clerk = self.gate.lock().await;
             match choices[picked].1 {
                 Menu::Leave => return,
                 Menu::Graph => match system.proc().graph(&pid).await {
@@ -788,7 +857,7 @@ impl Client {
                     Err(line) => println!("   {line} — choose again"),
                 },
                 Menu::AddApprover => {
-                    match self.decide_add_approver(&pid, &tid, &decider, system).await {
+                    match self.decide_add_approver(&pid, &tid, system).await {
                         Ok((line, settled)) => {
                             println!("   {line}");
                             // A sign chain absorbs the target's own answer, so
@@ -917,25 +986,43 @@ impl Client {
         &self,
         pid: &str,
         tid: &str,
-        decider: &Executor,
         system: &Executor,
     ) -> std::result::Result<(String, bool), String> {
-        // The sign chain hangs on this act; print where it sits on the path
-        // back to the root, task id and node name on every entry.
+        // The sign chain hangs on one act of this act's history path; print
+        // the path back to the root, task id and node name on every entry.
         let history = self.history(system, pid, tid).await;
         match &history {
             Ok(path) => print_history(
                 path,
-                "add approver: the sign chain hangs on this act; history to the root:",
+                "add approver: pick the act the new approver signs on; history to the root:",
                 "this act",
             ),
             Err(error) => println!("   history unavailable: {error}"),
         }
-        let here = history
-            .ok()
-            .and_then(|path| path.into_iter().next())
-            .map(|entry| format!("{} (task {})", entry.display_name(), entry.tid))
-            .unwrap_or_else(|| format!("task {tid}"));
+        // Where the new approver hangs: every act on the path back to the
+        // root, the act itself the default. Pushing on a step higher up (a
+        // container, a step the flow moved past) creates the approver's act
+        // under *that* node — beside what its fan-out generates — instead of
+        // beside the current act.
+        let path = history.map_err(|error| format!("history unavailable: {error}"))?;
+        let labels: Vec<String> = path.iter().map(HistoryEntry::label).collect();
+        let keys = history_keys(&path);
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let Some(picked) = self
+            .prompter
+            .select_keyed(
+                "push under which task (back to the root):",
+                &label_refs,
+                &key_refs,
+                0,
+            )
+            .await
+        else {
+            return Err("the script ran out — the rest is left to the engine".to_string());
+        };
+        let target = &path[picked];
+        let here = format!("{} (task {})", target.display_name(), target.tid);
         // The two sign positions, spelled out first: the added approver signs
         // before the current decider, or after her (the default).
         let Some(mode) = self
@@ -955,14 +1042,17 @@ impl Client {
             return Err("the script ran out — the rest is left to the engine".to_string());
         };
         let approver = users[approver].clone();
-        let assigned = self.deciders.lock().unwrap().contains_key(tid);
+        // The push answers to the act it hangs on: the target's own decider
+        // signs it (a chain target the demo never saw keeps the acting
+        // decider, the kernel covers the rest).
+        let assigned = self.deciders.lock().unwrap().get(&target.tid).cloned();
         let mut vars = Vars::new();
-        let executor = if assigned {
+        let executor = if let Some(id) = assigned.clone() {
             vars = vars.with("owners", json!([approver]).to_string());
             if mode == 0 {
                 vars = vars.with("mode", "before");
             }
-            decider.clone()
+            self.actor(&id)
         } else {
             vars = vars
                 .with("name", "added approver")
@@ -972,10 +1062,10 @@ impl Client {
         };
         executor
             .act()
-            .push(pid, tid, vars)
+            .push(pid, &target.tid, vars)
             .await
             .map_err(|error| error.to_string())?;
-        if assigned {
+        if assigned.is_some() {
             Ok((format!("added approver {approver} under {here}"), true))
         } else {
             Ok((
@@ -1122,9 +1212,9 @@ impl Client {
             )
             .await
             .map_err(|error| error.to_string())?;
-        // The assignment notice that confirms the new owner is queued behind
-        // this very menu (the clerk's gate); record the decider now so the
-        // next choice runs as the new owner.
+        // The detached assignment notice confirms the new owner and refreshes
+        // the decider map on its own; record it here as well so the very next
+        // choice already runs as the new owner, whatever order the tasks get.
         self.deciders
             .lock()
             .unwrap()
@@ -1156,8 +1246,8 @@ impl Client {
             )
             .await
             .map_err(|error| error.to_string())?;
-        // See `decide_transfer`: the notice is queued behind this menu, so
-        // the delegatee is recorded as the act's decider right away.
+        // See `decide_transfer`: record the delegatee here so the next
+        // choice already runs as them; the detached notice confirms it.
         self.deciders
             .lock()
             .unwrap()

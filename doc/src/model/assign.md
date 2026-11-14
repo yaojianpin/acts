@@ -8,7 +8,7 @@
 
 `assign.owner` 是模型层的责任人原语，**由内核本地解析**：一个字符串——用户 id，
 或 `${{ }}` 表达式（`$initiator` / `$actor` / `$previous_approver(n)`、工作流
-变量等，与 `params` 同一条表达式路径）。`__assignment`/`__delegation` 和
+变量等，与 `params` 同一条表达式路径）。`#assignment`/`#delegation` 和
 决策授权都在引擎内核；没有插件、没有 provider 配置。
 
 `assign.owner` 只允许写在人类决策叶子上（`ActRunAs::Irq` 的包，如
@@ -36,7 +36,7 @@
 - 解析结果为空（或不是字符串）时活动失败，不会退化成“无人审批”。
 - 容器（`acts.core.block` / `acts.core.parallel` / `acts.core.sequence`）可以声明
   `assign.owner`——它是**子步骤的模板**，不是容器自己的承办关系：容器本身不产生
-  `__assignment`；通过它生成的子活动（`block` 的 steps、`parallel`/`sequence`
+  `#assignment`；通过它生成的子活动（`block` 的 steps、`parallel`/`sequence`
   的 fan-out）里**没有单独声明 `assign.owner` 的**，在各自启动时继承最近的祖先
   容器的 owner 表达式，并在自己的作用域里解析（所以 `$item.value`、
   `$initiator`、工作流变量都能用）；自己声明了 `assign.owner` 的子活动用自己的。
@@ -227,7 +227,7 @@ a multi-approver step
 不走 `assign.candidates` 也可以直接把池计算做成一个普通步骤：
 `uses: acts.core.users` + `params`（CandidateExpr 文档）。这是一个普通
 IRQ 活动——参数在本地准备好（`${{ }}` 与上下文原子已解析）后发给业务系统，
-应答作为活动自己的输出落地，引擎不做本地折叠、也没有 `__candidates` 标记：
+应答作为活动自己的输出落地，引擎不做本地折叠、也没有 `#candidates` 标记：
 
 ```yml
 - id: pool
@@ -265,8 +265,7 @@ assign:
   祖先容器补齐（在自己作用域里按同样的“先本地、后 uses”计算）；自己声明了的
   key 用自己的。没有声明 assign 的子活动沿作用域链读到祖先已算出的池。
 - 池的名字必须是字母开头的 `[A-Za-z0-9_]*` 标识符，不得使用保留名（`assignee`、
-  `delegator`、`delegatee`、`ids`、`participants`、`count`、`at`）；非法名字在
-  活动启动时拒绝。
+  `delegator`、`ids`、`participants`、`count`、`at`）；非法名字在活动启动时拒绝。
 - 读池：`$assign.<key>.ids` 做 fan-out（或裸变量 `<key>`，与裸 `candidates`
   一样由引擎写入活动变量），`$assign.<key>.users` 取参与人对象。
 - `$assign.ids` / `$assign.participants` / `$assign.count` 仍指向
@@ -274,7 +273,7 @@ assign:
 
 ## 承办关系
 
-活动启动后，承办关系持久化在任务的私有变量 `__assignment` 中：
+活动启动后，承办关系持久化在任务的私有变量 `#assignment` 中：
 
 ```json
 {
@@ -294,10 +293,12 @@ assign:
 
 决策记录投影到活动消息：
 
-- `owner`、`assignee`、`delegator`、`delegatee`、`rev`、`ref_msg_id`。
-- 同时写入 `inputs.options.owner` / `inputs.options.assignee`，供 `ChannelOptions` 的 glob 过滤使用。
+- `owner`、`assignee`、`delegator`、`rev`、`ref_msg_id`。`assignee` 就是当前执行人：
+  转办后是新承办人，代办时是受托人；消息上**不再单独投影 `delegatee`**。
+- 同时写入 `inputs.assign`（`{ owner, assignee, delegator }`，`delegator` 仅代办生效时）与
+  `inputs.options.owner` / `inputs.options.assignee`，供打印与 `ChannelOptions` 的 glob 过滤使用。
 
-`inputs.options` 只用于路由，**不是授权依据**；授权以任务的 `__assignment` / `__delegation` 状态为准。
+`inputs.options` 只用于路由，**不是授权依据**；授权以任务的 `#assignment` / `#delegation` 状态为准。
 
 ## 转办
 
@@ -334,7 +335,7 @@ act:undelegate {pid,tid}
 - `expires_at` 可选，Unix 毫秒时间戳；到期后代理人立即失效，不依赖后台清理任务。
 - `reason` 可选，仅用于审计和通知。
 
-`act:delegate` 写入任务的 `__delegation`：
+`act:delegate` 写入任务的 `#delegation`：
 
 ```json
 {
@@ -352,7 +353,7 @@ act:undelegate {pid,tid}
 - `owner` 不变，`assignee` 变为 `delegatee`，`rev + 1`。
 - 一个活动同时只有一个有效代办；新的 `act:delegate` 替换旧记录。
 
-`act:undelegate` 清空 `__delegation`，`assignee` 恢复为 `owner`，`rev + 1`。
+`act:undelegate` 清空 `#delegation`，`assignee` 恢复为 `owner`，`rev + 1`。
 
 ## 读取承办关系（`$assign`）
 
@@ -360,9 +361,9 @@ act:undelegate {pid,tid}
 
 | 字段 | 来源 |
 | --- | --- |
-| `$assign.owner` / `$assign.assignee` | 最近一个持 `__assignment` 的执行 |
-| `$assign.delegator` / `$assign.delegatee` | 该执行自己的 `__delegation`；无有效代办为 `null` |
-| `$assign.candidates.users` / `.ids` / `.count` | 最近一个已算出候选池（`__candidates`）的执行的参与人、ids 列表与数量 |
+| `$assign.owner` / `$assign.assignee` | 最近一个持 `#assignment` 的执行 |
+| `$assign.delegator` | 该执行自己的 `#delegation`；无有效代办为 `null` |
+| `$assign.candidates.users` / `.ids` / `.count` | 最近一个已算出候选池（`#candidates`）的执行的参与人、ids 列表与数量 |
 | `$assign.ids` / `$assign.participants` / `$assign.count` | 同一 candidates 池的顶层别名（兼容） |
 | `$assign.<key>.users` / `.ids` / `.count` | 命名池（`assign` 下除 `owner`/`candidates` 外的 key）在自己的 key 下的同一形状 |
 | `$assign.at("<step-id>")` | 显式指定执行：node id 取该节点最新 generation，也接受 wire `tid`；只读该执行自身的事实 |
