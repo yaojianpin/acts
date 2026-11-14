@@ -1,11 +1,14 @@
 //! The interactive demo client: every human act the engine announces is put
 //! to the terminal as an arrow-key menu (complete / add approver / remove
-//! approver / back / submit / remind / transfer / delegate / cancel /
-//! graph); the client fills in `pid`, `tid` and the acting user, runs the
-//! choice and waits for the next act, until the workflow completes. The
-//! answers that need no user live in `sys.rs`. A `--script` replays one
-//! recorded choice per prompt; a `--record` session writes exactly that
-//! file, so a misbehaving run hands over its own repro.
+//! approver / back / submit / remind / transfer / delegate / cancel / graph /
+//! exit); the client fills in `pid`, `tid` and the acting user, runs the
+//! choice and waits for the next act, until the workflow completes. `back`
+//! and `cancel` ask for a predecessor of the current node (never the act's
+//! own node or a subtask), and `add approver` lists the tasks under the
+//! current node and lets the selected task's shape pick the kernel's push
+//! spelling. The answers that need no user live in `sys.rs`. A `--script`
+//! replays one recorded choice per prompt; a `--record` session writes exactly
+//! that file, so a misbehaving run hands over its own repro.
 
 use acts::{Engine, Executor, Message, MessageState, Principal, Result, UserPolicy, Vars};
 use dialoguer::{Input, Select, theme::ColorfulTheme};
@@ -249,13 +252,14 @@ fn refused_settled(error: &acts::ActError, nid: &str) -> bool {
     false
 }
 
-/// One execution on a run's history path: the task instance (`tid`) and the
-/// node it runs (`nid`, `name`).
+/// One execution a menu can offer: the task instance (`tid`) and the node it
+/// runs (`nid`, `name`, `state`).
 #[derive(Clone, Debug)]
 struct HistoryEntry {
     nid: String,
     tid: String,
     name: String,
+    state: String,
 }
 
 impl HistoryEntry {
@@ -275,61 +279,111 @@ impl HistoryEntry {
     fn label(&self) -> String {
         format!("{}  task={}", self.display_name(), self.tid)
     }
+
+    /// The label with the instance's state, so a menu that asks *which* task
+    /// to rewind or cancel tells a finished node from one the guard skipped.
+    fn label_with_state(&self) -> String {
+        format!(
+            "{}  task={}  state={}",
+            self.display_name(),
+            self.tid,
+            self.state
+        )
+    }
 }
 
-/// The history path from one execution back to the run's root: the task
-/// predecessor chain when the row names one (the flow order), and the
-/// execution's parent when it does not (a pushed act). The kernel's own
-/// groupings are walked through but not listed — the virtual `block` branch,
-/// the fan-out item's `acts.core.block` template and the `#cand` pool
-/// requests: none of them is a node a user acts on.
-fn history_path(
-    graph: &acts::ProcessGraph,
-    tasks: &[acts::TaskInfo],
-    start: &str,
-) -> Vec<HistoryEntry> {
-    let mut by_tid: HashMap<&str, &acts::GraphNode> = HashMap::new();
+/// The graph's executions by their wire `tid`.
+fn nodes_by_tid(graph: &acts::ProcessGraph) -> HashMap<&str, &acts::GraphNode> {
+    let mut by_tid = HashMap::new();
     for node in &graph.nodes {
         if let Some(tid) = node.tid.as_deref() {
             by_tid.insert(tid, node);
         }
     }
+    by_tid
+}
+
+/// One execution's entry: the node name (the action key for an unnamed act,
+/// the name a user knows it by and a stable script key across runs) and the
+/// state it announced. The graph is the source for an execution the read
+/// model does not project as a task row — a pushed act has a graph node but
+/// no `ProcInfo.tasks` entry.
+fn history_entry(node: Option<&acts::GraphNode>, task: Option<&acts::TaskInfo>) -> HistoryEntry {
+    let nid = task
+        .map(|task| task.nid.clone())
+        .or_else(|| node.map(|node| node.nid.clone()))
+        .unwrap_or_default();
+    let tid = task
+        .map(|task| task.id.clone())
+        .or_else(|| node.and_then(|node| node.tid.clone()))
+        .unwrap_or_default();
+    let name = task
+        .map(|task| task.name.as_str())
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            node.map(|node| node.name.as_str())
+                .filter(|name| !name.is_empty())
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            node.and_then(|node| node.params.get("key"))
+                .and_then(|key| key.as_str())
+                .unwrap_or_default()
+                .to_string()
+        });
+    let state = task
+        .map(|task| task.state.clone())
+        .or_else(|| node.and_then(|node| node.state.clone()))
+        .unwrap_or_default();
+    HistoryEntry {
+        nid,
+        tid,
+        name,
+        state,
+    }
+}
+
+/// The history path from one execution back to the run's root: the task
+/// predecessor chain when the row names one (the flow order), and the
+/// execution's parent when it does not (a pushed act). An execution the read
+/// model does not project as a task row — a pushed act — is read from its
+/// graph node instead. The kernel's own groupings are walked through but not
+/// listed — the virtual `block` branch, the fan-out item's `acts.core.block`
+/// template and the `#cand` pool requests: none of them is a node a user acts
+/// on.
+fn history_path(
+    graph: &acts::ProcessGraph,
+    tasks: &[acts::TaskInfo],
+    start: &str,
+) -> Vec<HistoryEntry> {
+    let by_tid = nodes_by_tid(graph);
     let mut path = Vec::new();
     let mut current = start.to_string();
     let mut seen = HashSet::new();
     while seen.insert(current.clone()) {
-        let Some(task) = tasks.iter().find(|task| task.id == current) else {
-            break;
-        };
+        let task = tasks.iter().find(|task| task.id == current);
         let node = by_tid.get(current.as_str()).copied();
+        if task.is_none() && node.is_none() {
+            break;
+        }
+        let nid = task
+            .map(|task| task.nid.as_str())
+            .or_else(|| node.map(|node| node.nid.as_str()))
+            .unwrap_or_default();
         let kernel_grouping = node.is_some_and(|node| {
             node.kind == "block"
                 || node.uses.as_deref() == Some("acts.core.block")
-                || is_pool_request(&task.nid)
+                || is_pool_request(nid)
         });
         if !kernel_grouping {
-            // An unnamed act (a pushed vote, a fan-out leaf) carries the
-            // action key it runs in its params; that key is the name a user
-            // knows it by, and a stable script key across runs.
-            let name = if task.name.is_empty() {
-                node.and_then(|node| node.params.get("key"))
-                    .and_then(|key| key.as_str())
-                    .unwrap_or_default()
-                    .to_string()
-            } else {
-                task.name.clone()
-            };
-            path.push(HistoryEntry {
-                nid: task.nid.clone(),
-                tid: task.id.clone(),
-                name,
-            });
+            path.push(history_entry(node, task));
         }
         // The row's `prev` is the node the flow came from; with several
         // generations of it, the latest one that started before this
         // execution is the one it inherited. A pushed act has no predecessor
         // row — its graph parent is the act it hangs under.
-        let previous = task.prev.as_ref().and_then(|prev| {
+        let previous = task.and_then(|task| {
+            let prev = task.prev.as_ref()?;
             tasks
                 .iter()
                 .enumerate()
@@ -361,10 +415,182 @@ fn is_pool_request(nid: &str) -> bool {
         && nid.contains('#')
 }
 
-/// The stable script keys for a history menu: the node name while it is
-/// unique on the path, and `name#<index>` for a name that appears several
-/// times (a fan-out's repeated act), so `--record` never writes a tid that
-/// the next run cannot match.
+/// Whether a node id names a kernel-materialized wrapper: the virtual
+/// `<step>#acts`/`<step>#in` branches, the fan-out item's `<step>#item`
+/// template and its `<step>#act<N>` children. A declared step's own id has no
+/// `#<wrapper>` tail, so a block step the model declares stays a real node.
+fn is_wrapper_nid(nid: &str) -> bool {
+    nid.rsplit_once('#').is_some_and(|(_, tail)| {
+        matches!(tail, "acts" | "in" | "item")
+            || tail
+                .strip_prefix("act")
+                .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// The execution ancestry of one task: the instance itself and every
+/// execution that admitted it, up to the workflow root.
+fn task_ancestry(graph: &acts::ProcessGraph, tid: &str) -> HashSet<String> {
+    let by_tid = nodes_by_tid(graph);
+    let mut ancestry = HashSet::new();
+    let mut current = Some(tid.to_string());
+    while let Some(tid) = current {
+        if !ancestry.insert(tid.clone()) {
+            break;
+        }
+        current = by_tid
+            .get(tid.as_str())
+            .and_then(|node| node.parent_tid.clone());
+    }
+    ancestry
+}
+
+/// Whether a graph node is one of the kernel's own groupings rather than a
+/// task a menu can offer: the workflow record, a virtual `block` branch, a
+/// `#cand` pool request, and the packages whose node is a request or a
+/// delivery rather than a decision (the candidate ask, the delegated join's
+/// request, a notification).
+fn is_kernel_grouping(node: &acts::GraphNode) -> bool {
+    node.kind == "workflow"
+        || node.kind == "block"
+        || is_wrapper_nid(&node.nid)
+        || is_pool_request(&node.nid)
+        || matches!(
+            node.uses.as_deref(),
+            Some("acts.core.users") | Some("acts.core.decide") | Some("acts.core.msg")
+        )
+}
+
+/// The flow predecessors of one act: the tasks the flow ran before the node
+/// this act belongs to. The act's own node is excluded — the act itself and
+/// every execution enclosing it (the fan-out vote's container) — as are the
+/// kernel groupings and the workflow record, so `back`/`cancel` never offer
+/// the current node, one of its subtasks, or a workflow message.
+fn predecessor_tasks(
+    graph: &acts::ProcessGraph,
+    tasks: &[acts::TaskInfo],
+    tid: &str,
+) -> std::result::Result<Vec<HistoryEntry>, String> {
+    let path = history_path(graph, tasks, tid);
+    let Some(here) = path.first() else {
+        return Err(format!("no task history for {tid}"));
+    };
+    let here = (here.display_name().to_string(), here.tid.clone());
+    let ancestry = task_ancestry(graph, tid);
+    let by_tid = nodes_by_tid(graph);
+    let predecessors: Vec<HistoryEntry> = path
+        .into_iter()
+        .filter(|entry| !ancestry.contains(&entry.tid))
+        .filter(|entry| {
+            !by_tid
+                .get(entry.tid.as_str())
+                .is_some_and(|node| node.kind == "workflow")
+        })
+        .filter(|entry| {
+            by_tid
+                .get(entry.tid.as_str())
+                .and_then(|node| node.uses.as_deref())
+                != Some("acts.core.msg")
+        })
+        .collect();
+    if predecessors.is_empty() {
+        return Err(format!(
+            "no predecessor task before {} (task {}) — this act starts the flow",
+            here.0, here.1
+        ));
+    }
+    Ok(predecessors)
+}
+
+/// The node one act belongs to: the nearest enclosing container step
+/// (`parallel`/`sequence`/`block`), or the top-level step when the act is not
+/// inside one. A fan-out vote and the container that admitted it are one
+/// node; so is an approver pushed under either.
+fn node_root(graph: &acts::ProcessGraph, tid: &str) -> Option<String> {
+    let by_tid = nodes_by_tid(graph);
+    let mut current = Some(tid.to_string());
+    let mut top = tid.to_string();
+    while let Some(tid) = current {
+        let Some(node) = by_tid.get(tid.as_str()).copied() else {
+            break;
+        };
+        if node.kind == "workflow" {
+            break;
+        }
+        if is_container(node) {
+            return Some(tid);
+        }
+        if node.kind == "step" {
+            top = tid;
+        }
+        current = node.parent_tid.clone();
+    }
+    Some(top)
+}
+
+/// Whether one execution is a container step: its package fans child acts out
+/// instead of waiting for one human decision.
+fn is_container(node: &acts::GraphNode) -> bool {
+    node.kind == "step"
+        && !is_wrapper_nid(&node.nid)
+        && matches!(
+            node.uses.as_deref(),
+            Some("acts.core.parallel") | Some("acts.core.sequence") | Some("acts.core.block")
+        )
+}
+
+/// Every execution's children, in graph order.
+fn children_by_graph(graph: &acts::ProcessGraph) -> HashMap<&str, Vec<&acts::GraphNode>> {
+    let mut children: HashMap<&str, Vec<&acts::GraphNode>> = HashMap::new();
+    for node in &graph.nodes {
+        if let Some(parent) = node.parent_tid.as_deref() {
+            children.entry(parent).or_default().push(node);
+        }
+    }
+    for list in children.values_mut() {
+        list.sort_by_key(|node| node.order);
+    }
+    children
+}
+
+/// The tasks of one node's execution subtree, in graph order: the node's own
+/// task, the acts its container admitted (a fan-out's votes), and every act
+/// pushed under it. The kernel's wrappers are walked through but not listed.
+fn node_subtree(
+    graph: &acts::ProcessGraph,
+    tasks: &[acts::TaskInfo],
+    root: &str,
+) -> Vec<HistoryEntry> {
+    let by_tid = nodes_by_tid(graph);
+    let children = children_by_graph(graph);
+    let mut entries = Vec::new();
+    let mut pending = vec![root.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(tid) = pending.pop() {
+        if !seen.insert(tid.clone()) {
+            continue;
+        }
+        if let Some(node) = by_tid.get(tid.as_str()).copied()
+            && !is_kernel_grouping(node)
+        {
+            let task = tasks.iter().find(|task| task.id == tid);
+            entries.push(history_entry(Some(node), task));
+        }
+        if let Some(children) = children.get(tid.as_str()) {
+            for child in children.iter().rev() {
+                if let Some(child) = child.tid.as_deref() {
+                    pending.push(child.to_string());
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// The stable script keys for a task menu: the node name while it is unique
+/// in the list, and `name#<index>` for a name that appears several times (a
+/// fan-out's repeated act), so `--record` never writes a tid that the next
+/// run cannot match.
 fn history_keys(path: &[HistoryEntry]) -> Vec<String> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for entry in path {
@@ -383,32 +609,20 @@ fn history_keys(path: &[HistoryEntry]) -> Vec<String> {
         .collect()
 }
 
-/// Print one history path, the first entry marked with `first` (the act the
-/// menu is about); auxiliary evidence for rewinds and sign-chain actions.
-fn print_history(path: &[HistoryEntry], note: &str, first: &str) {
+/// Print the menu's entries, one per line, with the state each announced.
+fn print_entries(note: &str, entries: &[HistoryEntry]) {
     println!("   {note}");
-    for (index, entry) in path.iter().enumerate() {
-        let here = if index == 0 {
-            format!("  <- {first}")
-        } else {
-            String::new()
-        };
-        println!("     {}  task={}{here}", entry.display_name(), entry.tid);
+    for entry in entries {
+        println!("     {}", entry.label_with_state());
     }
 }
 
 #[derive(Default)]
 pub struct Client {
-    /// node id → `(pid, tid)` of every step instance the demo has seen, so
-    /// a menu action can address a pushed act by the node id it printed.
-    seen: Mutex<HashMap<String, (String, String)>>,
     /// tid → the user whose decision the act currently waits on: the owner
     /// at creation, refreshed by every assignment notice (a transfer moves
     /// it, a delegation points it at the delegatee).
     deciders: Mutex<HashMap<String, String>>,
-    /// The last act that completed: `(nid, pid, tid)` — `cancel`'s default
-    /// target, the node the flow just moved past.
-    last_completed: Mutex<Option<(String, String, String)>>,
     /// authenticated executors per user id, built once at `bind` — the
     /// kernel attributes and authorizes every menu action by the subject.
     actors: Mutex<HashMap<String, Executor>>,
@@ -555,24 +769,12 @@ impl Client {
             .unwrap_or_else(|| system.clone())
     }
 
-    /// The action just decided this act: record it as the cancel target now,
-    /// not only when its `Completed` message reaches the clerk — the next
-    /// act's menu can open before that message, and `cancel` must point at the
-    /// work just done.
-    fn note_completed(&self, nid: &str, pid: &str, tid: &str) {
-        *self.last_completed.lock().unwrap() =
-            Some((nid.to_string(), pid.to_string(), tid.to_string()));
-    }
-
-    /// The history path from one act back to the run's root, as the task rows
-    /// and the graph agree on it: each entry carries the task id and the node
-    /// name the menus print.
-    async fn history(
+    /// The run's graph and task rows: the facts every task menu reads.
+    async fn view(
         &self,
         system: &Executor,
         pid: &str,
-        tid: &str,
-    ) -> std::result::Result<Vec<HistoryEntry>, String> {
+    ) -> std::result::Result<(acts::ProcessGraph, Vec<acts::TaskInfo>), String> {
         let graph = system
             .proc()
             .graph(pid)
@@ -583,11 +785,7 @@ impl Client {
             .get(pid)
             .await
             .map_err(|error| error.to_string())?;
-        let path = history_path(&graph, &info.tasks, tid);
-        if path.is_empty() {
-            return Err(format!("no task history for {tid}"));
-        }
-        Ok(path)
+        Ok((graph, info.tasks))
     }
 
     /// One engine message: the clerk's inbox. Assignment notifications and
@@ -661,31 +859,11 @@ impl Client {
         }
 
         if message.is_type("step") {
-            // Track the instance so menu actions can name a pushed act by
-            // the node id it printed, and know whose decision it waits on.
-            self.seen.lock().unwrap().insert(
-                message.nid.clone(),
-                (message.pid.clone(), message.tid.clone()),
-            );
             if let Some(owner) = &message.owner {
                 self.deciders
                     .lock()
                     .unwrap()
                     .insert(message.tid.clone(), owner.clone());
-            }
-            // The last act that completed — `cancel`'s default target —
-            // skips the system-answered requests and the virtual containers:
-            // only a human act (irq) is a node a user would re-run.
-            let sys_answered = matches!(
-                message.uses.as_deref(),
-                Some("acts.core.users") | Some("acts.core.decide") | Some("acts.core.block")
-            );
-            if message.is_state(MessageState::Completed) && !sys_answered && message.is_irq() {
-                *self.last_completed.lock().unwrap() = Some((
-                    message.nid.clone(),
-                    message.pid.clone(),
-                    message.tid.clone(),
-                ));
             }
             // A human act announces itself: put it to the terminal, detached
             // so the engine's event worker keeps draining the queue.
@@ -755,11 +933,10 @@ impl Client {
                 owner.as_deref().unwrap_or("-")
             );
             // One arrow-driven list, rendered at the bottom of the
-            // transcript; `complete` is the preselected default. Cancel
-            // rides last: it rewinds the step the flow just moved past
-            // (after the first step there is always one; at the very first
-            // act there is nothing to cancel yet).
-            let mut choices: Vec<(String, Menu)> = vec![
+            // transcript; `complete` is the preselected default. Cancel is
+            // always offered — it lists the current task's predecessors and
+            // rewinds the one picked (the first act simply has none yet).
+            let choices: Vec<(String, Menu)> = vec![
                 ("complete".into(), Menu::Complete),
                 ("add approver".into(), Menu::AddApprover),
                 ("remove approver".into(), Menu::RemoveApprover),
@@ -771,21 +948,13 @@ impl Client {
                 ("skip".into(), Menu::Skip),
                 ("error".into(), Menu::Error),
                 ("abort".into(), Menu::Abort),
-                ("leave it to the engine".into(), Menu::Leave),
-                ("show the run's graph".into(), Menu::Graph),
-            ];
-            if let Some(previous) = self
-                .last_completed
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|(nid, _, _)| nid.clone())
-            {
-                choices.push((
-                    format!("cancel {previous} (undo the work ahead and re-run it)"),
+                ("exit".into(), Menu::Leave),
+                ("graph".into(), Menu::Graph),
+                (
+                    "cancel a predecessor task (undo the work ahead and re-run it)".into(),
                     Menu::Cancel,
-                ));
-            }
+                ),
+            ];
             let items: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
             let Some(picked) = self.prompter.select("decide:", &items, 0).await else {
                 println!("   the script ran out — the rest is left to the engine");
@@ -847,7 +1016,6 @@ impl Client {
                 Menu::Complete => match self.decide_complete(&pid, &tid, &key, &decider).await {
                     Ok(line) => {
                         println!("   {line}");
-                        self.note_completed(&nid, &pid, &tid);
                         return;
                     }
                     Err(line) if line.contains("ActionNotAllowed") => {
@@ -875,7 +1043,7 @@ impl Client {
                     }
                 }
                 Menu::RemoveApprover => {
-                    match self.decide_remove_approver(&nid, &pid, &tid, system).await {
+                    match self.decide_remove_approver(&pid, &tid, system).await {
                         Ok(line) => println!("   {line}"),
                         Err(line) if line.contains("ActionNotAllowed") => {
                             println!("   the act already settled — left to the engine");
@@ -899,9 +1067,6 @@ impl Client {
                     // A submit settles the act like a completion — the flow
                     // moves on, only the label differs — so the menu ends.
                     let outcome = decider.act().submit(&pid, &tid, Vars::new()).await;
-                    if outcome.is_ok() {
-                        self.note_completed(&nid, &pid, &tid);
-                    }
                     if self.report(&outcome, &nid, "submitted") {
                         return;
                     }
@@ -973,58 +1138,96 @@ impl Client {
         Ok(format!("completed {tid}"))
     }
 
-    /// `add approver`: an owned act gains a sign chain the user places before
-    /// or after its current decider (`acts.core.push` modes `before`/`after`);
-    /// an unassigned act gains a plain member act the join counts. The sign
-    /// position is asked first, on every act: `1) before  2) after` — on an
-    /// act with no decider there is no one to sign relative to, so the choice
-    /// is reported as inert and the push hangs a plain co-signer instead.
-    /// Returns the report line and whether the push settled the act: a sign
-    /// chain absorbs the target's own answer (the menu ends), a plain push
-    /// leaves it due (the menu stays open).
+    /// `add approver`: the user picks a task of the current node's subtree —
+    /// the node's own task (a container's act) and every act the node
+    /// admitted or had pushed under it — and the approver attaches there.
+    /// The kernel creates the added approver differently by whether that task
+    /// has subtasks: a task with children (a container, or an act already
+    /// carrying pushed acts) takes the classic `push` (a new child act the
+    /// join counts, owned by the approver), while a leaf with none takes the
+    /// single-owner approver chain (`owners` + `mode`, before or after its
+    /// decider). Returns the report line and whether the push settled *this*
+    /// act: the chain absorbs its target's own answer, so the menu ends when
+    /// the target is this act; a child push leaves the decision due.
     async fn decide_add_approver(
         &self,
         pid: &str,
         tid: &str,
         system: &Executor,
     ) -> std::result::Result<(String, bool), String> {
-        // The sign chain hangs on one act of this act's history path; print
-        // the path back to the root, task id and node name on every entry.
-        let history = self.history(system, pid, tid).await;
-        match &history {
-            Ok(path) => print_history(
-                path,
-                "add approver: pick the act the new approver signs on; history to the root:",
-                "this act",
-            ),
-            Err(error) => println!("   history unavailable: {error}"),
+        let (graph, tasks) = self.view(system, pid).await?;
+        let root = node_root(&graph, tid)
+            .ok_or_else(|| format!("cannot locate the node of task {tid}"))?;
+        let mut path = node_subtree(&graph, &tasks, &root);
+        if path.is_empty() {
+            return Err(format!("no task under {root}"));
         }
-        // Where the new approver hangs: every act on the path back to the
-        // root, the act itself the default. Pushing on a step higher up (a
-        // container, a step the flow moved past) creates the approver's act
-        // under *that* node — beside what its fan-out generates — instead of
-        // beside the current act.
-        let path = history.map_err(|error| format!("history unavailable: {error}"))?;
+        // The act the menu is on is the natural target; keep it first and use
+        // it as the default even when the node's own task leads the tree.
+        path.sort_by_key(|entry| entry.tid != tid);
+        let root_name = path
+            .iter()
+            .find(|entry| entry.tid == root)
+            .map(|entry| entry.display_name().to_string())
+            .unwrap_or_else(|| root.clone());
+        print_entries(
+            &format!(
+                "add approver: the tasks under {root_name}; pick the one that gains the approver:"
+            ),
+            &path,
+        );
         let labels: Vec<String> = path.iter().map(HistoryEntry::label).collect();
         let keys = history_keys(&path);
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
         let Some(picked) = self
             .prompter
-            .select_keyed(
-                "push under which task (back to the root):",
-                &label_refs,
-                &key_refs,
-                0,
-            )
+            .select_keyed("which task:", &label_refs, &key_refs, 0)
             .await
         else {
             return Err("the script ran out — the rest is left to the engine".to_string());
         };
-        let target = &path[picked];
+        let target = path[picked].clone();
         let here = format!("{} (task {})", target.display_name(), target.tid);
-        // The two sign positions, spelled out first: the added approver signs
-        // before the current decider, or after her (the default).
+        // A task with subtasks is not a single owner: the added approver is a
+        // child act under it. A task without them (an owned leaf) takes the
+        // sign chain, which needs the owner to place the sign around.
+        let has_subtasks = node_subtree(&graph, &tasks, &target.tid).len() > 1;
+        let assigned = self.deciders.lock().unwrap().get(&target.tid).cloned();
+        let users = self.user_items(None);
+        let user_refs: Vec<&str> = users.iter().map(String::as_str).collect();
+        let Some(approver) = self.prompter.select("approver:", &user_refs, 0).await else {
+            return Err("the script ran out — the rest is left to the engine".to_string());
+        };
+        let approver = users[approver].clone();
+        if has_subtasks || assigned.is_none() {
+            // The classic push: a child act under the selected task, owned by
+            // the approver so her own menu asks for the decision.
+            let vars = Vars::new()
+                .with("name", "added approver")
+                .with("uses", "acts.core.irq")
+                .with("params", Vars::new().with("key", "added"))
+                .with("assign", json!({ "owner": approver }));
+            let executor = assigned
+                .as_deref()
+                .map(|id| self.actor(id))
+                .unwrap_or_else(|| system.clone());
+            executor
+                .act()
+                .push(pid, &target.tid, vars)
+                .await
+                .map_err(|error| error.to_string())?;
+            let why = if has_subtasks {
+                "as a child act (the task has subtasks)"
+            } else {
+                "as a child act (the task has no decider to sign relative to)"
+            };
+            return Ok((
+                format!("added approver {approver} under {here} {why}"),
+                false,
+            ));
+        }
+        // The single-owner approver chain: before or after the decider.
         let Some(mode) = self
             .prompter
             .select(
@@ -1036,120 +1239,96 @@ impl Client {
         else {
             return Err("the script ran out — the rest is left to the engine".to_string());
         };
-        let users = self.user_items(None);
-        let user_refs: Vec<&str> = users.iter().map(String::as_str).collect();
-        let Some(approver) = self.prompter.select("approver:", &user_refs, 0).await else {
-            return Err("the script ran out — the rest is left to the engine".to_string());
-        };
-        let approver = users[approver].clone();
-        // The push answers to the act it hangs on: the target's own decider
-        // signs it (a chain target the demo never saw keeps the acting
-        // decider, the kernel covers the rest).
-        let assigned = self.deciders.lock().unwrap().get(&target.tid).cloned();
-        let mut vars = Vars::new();
-        let executor = if let Some(id) = assigned.clone() {
-            vars = vars.with("owners", json!([approver]).to_string());
-            if mode == 0 {
-                vars = vars.with("mode", "before");
-            }
-            self.actor(&id)
-        } else {
-            vars = vars
-                .with("name", "added approver")
-                .with("uses", "acts.core.irq")
-                .with("params", Vars::new().with("key", "added"));
-            system.clone()
-        };
-        executor
+        let assigned = assigned.ok_or_else(|| "the target has no decider".to_string())?;
+        let mut vars = Vars::new().with("owners", json!([approver]).to_string());
+        if mode == 0 {
+            vars = vars.with("mode", "before");
+        }
+        self.actor(&assigned)
             .act()
             .push(pid, &target.tid, vars)
             .await
             .map_err(|error| error.to_string())?;
-        if assigned.is_some() {
-            Ok((format!("added approver {approver} under {here}"), true))
-        } else {
-            Ok((
-                format!(
-                    "added approver {approver} under {here} as a plain co-signer \
-                     (the act has no decider: before/after needs one, and the \
-                     act's own decision is still due)"
-                ),
-                false,
-            ))
-        }
+        let position = if mode == 0 { "before" } else { "after" };
+        Ok((
+            format!("added approver {approver} {position} {here}"),
+            target.tid == tid,
+        ))
     }
 
-    /// `remove approver`: pick one of the pushed acts under this act and
-    /// drop it; the join recomputes and the act keeps waiting.
+    /// `remove approver`: pick an added approver under the current node — the
+    /// chain leaves under a leaf and the child acts under a container alike —
+    /// and drop it; the join recomputes and the node keeps waiting.
     async fn decide_remove_approver(
         &self,
-        nid: &str,
         pid: &str,
         tid: &str,
         system: &Executor,
     ) -> std::result::Result<String, String> {
-        // The removed act hangs under this one; print the path back to the
-        // root so the report names the node the sign chain was added to and
-        // the task id it is being removed from.
-        let history = self.history(system, pid, tid).await;
-        match &history {
-            Ok(path) => print_history(
-                path,
-                "remove approver: the pushed acts hang on this act; history to the root:",
-                "this act",
-            ),
-            Err(error) => println!("   history unavailable: {error}"),
-        }
-        let here = history
-            .ok()
-            .and_then(|path| path.into_iter().next())
-            .map(|entry| format!("{} (task {})", entry.display_name(), entry.tid))
-            .unwrap_or_else(|| format!("task {tid}"));
-        let prefix = format!("{nid}#push");
-        let mut leaves: Vec<(String, String, String)> = self
-            .seen
-            .lock()
-            .unwrap()
+        let (graph, tasks) = self.view(system, pid).await?;
+        let root = node_root(&graph, tid)
+            .ok_or_else(|| format!("cannot locate the node of task {tid}"))?;
+        let root_name = graph
+            .nodes
             .iter()
-            .filter(|(seen, _)| seen.starts_with(&prefix))
-            .map(|(seen, (pid, tid))| (seen.clone(), pid.clone(), tid.clone()))
+            .find(|node| node.tid.as_deref() == Some(root.as_str()))
+            .map(|node| node.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| root.clone());
+        let leaves: Vec<HistoryEntry> = node_subtree(&graph, &tasks, &root)
+            .into_iter()
+            .filter(|entry| entry.nid.contains("#push"))
             .collect();
-        leaves.sort();
         if leaves.is_empty() {
-            return Err(format!("no pushed act under {nid}"));
+            return Err(format!("no added approver under {root_name}"));
         }
-        let items: Vec<String> = leaves
-            .iter()
-            .map(|(seen, _, leaf_tid)| format!("{seen}  task={leaf_tid}"))
-            .collect();
-        let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
-        let keys: Vec<&str> = leaves.iter().map(|(seen, _, _)| seen.as_str()).collect();
+        print_entries(
+            &format!("remove approver: the added approvers under {root_name}:"),
+            &leaves,
+        );
+        let labels: Vec<String> = leaves.iter().map(HistoryEntry::label).collect();
+        let keys = history_keys(&leaves);
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
         let Some(picked) = self
             .prompter
-            .select_keyed("remove which:", &item_refs, &keys, 0)
+            .select_keyed("remove which:", &label_refs, &key_refs, 0)
             .await
         else {
             return Err("the script ran out — the rest is left to the engine".to_string());
         };
-        let Some((seen, leaf_pid, leaf_tid)) = leaves
-            .get(picked)
-            .map(|(seen, pid, tid)| (seen.clone(), pid.clone(), tid.clone()))
-        else {
-            return Err("pick a listed act".to_string());
-        };
-        let remover = self
-            .deciders
-            .lock()
-            .unwrap()
-            .get(tid)
-            .map(|id| self.actor(id))
+        let leaf = leaves[picked].clone();
+        // Remove answers to the nearest assigned execution *above* a pushed
+        // act (the kernel's `approver_manager` starts at the parent), so the
+        // manager is the first ancestor with a known decider, never the
+        // pushed leaf's own owner.
+        let by_tid = nodes_by_tid(&graph);
+        let mut manager = None;
+        let mut current = by_tid
+            .get(leaf.tid.as_str())
+            .and_then(|node| node.parent_tid.clone());
+        while let Some(pid) = current {
+            if let Some(id) = self.deciders.lock().unwrap().get(&pid).cloned() {
+                manager = Some(id);
+                break;
+            }
+            current = by_tid
+                .get(pid.as_str())
+                .and_then(|node| node.parent_tid.clone());
+        }
+        let remover = manager
+            .map(|id| self.actor(&id))
             .unwrap_or_else(|| system.clone());
         remover
             .act()
-            .remove(&leaf_pid, &leaf_tid, Vars::new())
+            .remove(pid, &leaf.tid, Vars::new())
             .await
             .map_err(|error| error.to_string())?;
-        Ok(format!("removed {seen} (task {leaf_tid}) from {here}"))
+        Ok(format!(
+            "removed {} (task {}) from {root_name}",
+            leaf.display_name(),
+            leaf.tid
+        ))
     }
 
     /// `remind`: a non-decider urges the act; the pick leaves the decider
@@ -1255,13 +1434,13 @@ impl Client {
         Ok(format!("delegated {tid} to {delegatee}"))
     }
 
-    /// `back`: return the flow to an earlier task on this act's history path
-    /// to the root. The rewind closes this act's generation and re-enters the
-    /// named node, which re-runs as a *new* instance: its new `Created`
-    /// carries a different `tid`, and the menu asks again on it. The menu
-    /// names every entry by its task id and node name, so one instance among
-    /// several generations can be picked; the nearest predecessor is the
-    /// default.
+    /// `back`: return the flow to a task the flow ran before this act's node
+    /// — the predecessor list excludes this act's own node (the act and every
+    /// execution enclosing it), its subtasks, the kernel groupings and the
+    /// workflow record. The rewind closes this act's generation and re-enters
+    /// the named node, which re-runs as a *new* instance: its new `Created`
+    /// carries a different `tid`, and the menu asks again on it. The nearest
+    /// predecessor is the default.
     async fn decide_back(
         &self,
         system: &Executor,
@@ -1270,26 +1449,28 @@ impl Client {
         nid: &str,
         decider: &Executor,
     ) -> std::result::Result<String, String> {
-        let path = self.history(system, pid, tid).await?;
-        print_history(
+        let (graph, tasks) = self.view(system, pid).await?;
+        // A pushed act is not a flow step: the kernel's rewind starts at the
+        // node's own act, and a sign chain has already parked that act. The
+        // added approver is completed or removed, never rewound.
+        if !tasks.iter().any(|task| task.id == tid) {
+            return Err(format!(
+                "{nid} is an added approver — back applies to the flow task it hangs under; \
+                 complete it, or remove it with remove approver"
+            ));
+        }
+        let path = predecessor_tasks(&graph, &tasks, tid)?;
+        print_entries(
+            "back: pick the predecessor task the flow returns to (nearest first):",
             &path,
-            "back: this act's history to the root (nearest predecessor first):",
-            "this act",
         );
         let labels: Vec<String> = path.iter().map(HistoryEntry::label).collect();
         let keys = history_keys(&path);
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-        // The act itself is entry 0; its nearest predecessor is the default.
-        let default = usize::from(path.len() > 1);
         let Some(picked) = self
             .prompter
-            .select_keyed(
-                "return to which task (back to the root):",
-                &label_refs,
-                &key_refs,
-                default,
-            )
+            .select_keyed("return to which task:", &label_refs, &key_refs, 0)
             .await
         else {
             return Err("the script ran out — the rest is left to the engine".to_string());
@@ -1335,12 +1516,12 @@ impl Client {
         Ok(format!("failed {tid} with {code}"))
     }
 
-    /// `cancel`: issued on the previous node that has already completed —
-    /// the kernel allows `Cancel` on a `Completed`/`Submitted` act, undoes
-    /// the work ahead of it and re-enters that node as a *new* instance (a
-    /// different `tid`); the menu asks again on the redo. The default target
-    /// is the act the flow just moved past; the kernel requires live forward
-    /// work to rewind and refuses a settled chain.
+    /// `cancel`: cancel a completed predecessor — the kernel allows `Cancel`
+    /// on a `Completed`/`Submitted` act, undoes the work ahead of it and
+    /// re-enters that node as a *new* instance (a different `tid`); the menu
+    /// asks again on the redo. The current act's node and its subtasks are
+    /// excluded, and only a task the kernel can rewind is offered; the nearest
+    /// one is the default.
     async fn decide_cancel(
         &self,
         system: &Executor,
@@ -1348,25 +1529,19 @@ impl Client {
         tid: &str,
         nid: &str,
     ) -> std::result::Result<String, String> {
-        // The last act the flow moved past is the default target and the
-        // start of the history path; at the very first act there is none, so
-        // the current act's own path is the best available listing.
-        let last = self.last_completed.lock().unwrap().clone();
-        let start = last
-            .as_ref()
-            .filter(|(_, target_pid, target_tid)| target_pid == pid && target_tid != tid)
-            .map(|(_, _, target_tid)| target_tid.clone())
-            .unwrap_or_else(|| tid.to_string());
-        let path = self.history(system, pid, &start).await?;
-        let marker = if start == tid {
-            "this act"
-        } else {
-            "last completed"
-        };
-        print_history(
+        let (graph, tasks) = self.view(system, pid).await?;
+        let path: Vec<HistoryEntry> = predecessor_tasks(&graph, &tasks, tid)?
+            .into_iter()
+            .filter(|entry| matches!(entry.state.as_str(), "completed" | "submitted"))
+            .collect();
+        if path.is_empty() {
+            return Err(format!(
+                "no completed predecessor task before {nid} to cancel"
+            ));
+        }
+        print_entries(
+            "cancel: pick the completed predecessor to undo (the work ahead re-runs):",
             &path,
-            "cancel: the history to the root (the default target first):",
-            marker,
         );
         let labels: Vec<String> = path.iter().map(HistoryEntry::label).collect();
         let keys = history_keys(&path);
@@ -1374,12 +1549,7 @@ impl Client {
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
         let Some(picked) = self
             .prompter
-            .select_keyed(
-                "cancel which task (back to the root):",
-                &label_refs,
-                &key_refs,
-                0,
-            )
+            .select_keyed("cancel which task:", &label_refs, &key_refs, 0)
             .await
         else {
             return Err("the script ran out — the rest is left to the engine".to_string());
