@@ -12,8 +12,10 @@ pub(crate) const ACK: &str = "msg:ack";
 pub(crate) const RM: &str = "msg:rm";
 /// `msg:clear` — clear error deliveries, of one process or of all.
 pub(crate) const CLEAR: &str = "msg:clear";
-/// `msg:redo` — re-send error deliveries.
+/// `msg:redo` — re-send one error delivery to its channel.
 pub(crate) const REDO: &str = "msg:redo";
+/// `msg:redo_all` — re-send every error delivery.
+pub(crate) const REDO_ALL: &str = "msg:redo_all";
 /// `msg:unsub` — unsubscribe a channel.
 pub(crate) const UNSUB: &str = "msg:unsub";
 
@@ -100,8 +102,8 @@ impl MessageExecutor {
 
     /// Re-send every error delivery row (reset to `Created`; the retry timer
     /// sends them to their own channels).
-    pub async fn redo(&self) -> Result<()> {
-        self.principal.check(REDO)?;
+    pub async fn redo_all(&self) -> Result<()> {
+        self.principal.check(REDO_ALL)?;
         self.runtime.store().resend_error_deliveries().await?;
         Ok(())
     }
@@ -118,7 +120,7 @@ impl MessageExecutor {
 
     /// Reset one error delivery row and immediately re-send it to the channel
     /// it belongs to.
-    pub async fn redeliver(&self, delivery_id: &str) -> Result<()> {
+    pub async fn redo(&self, delivery_id: &str) -> Result<()> {
         self.principal.check(REDO)?;
         if let Some(delivery) = self
             .runtime
@@ -233,11 +235,11 @@ mod tests {
         assert_eq!(executor.list(&Query::new()).await.unwrap().rows.len(), 1);
     }
 
-    /// `redeliver` re-sends an error delivery, and silently does nothing when
+    /// `redo` re-sends an error delivery, and silently does nothing when
     /// the canonical message is gone (the row is still reset for a later
     /// retry).
     #[tokio::test]
-    async fn redeliver_resets_and_re_sends_an_error_delivery() {
+    async fn redo_resets_and_re_sends_an_error_delivery() {
         let engine = Engine::builder().start().await.unwrap();
         let store = engine.runtime().store();
         store.messages().create(&message("m1")).await.unwrap();
@@ -254,10 +256,10 @@ mod tests {
             .unwrap();
 
         let executor = executor(&engine).await;
-        executor.redeliver("d1").await.unwrap();
-        executor.redeliver("d2").await.unwrap();
+        executor.redo("d1").await.unwrap();
+        executor.redo("d2").await.unwrap();
         // neither row exists at all: nothing to reset, nothing to send
-        executor.redeliver("absent").await.unwrap();
+        executor.redo("absent").await.unwrap();
 
         for id in ["d1", "d2"] {
             assert_eq!(

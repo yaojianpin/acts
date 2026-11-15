@@ -336,7 +336,7 @@ impl ScopePolicy {
 ///   `@execute`: running a flow must not imply moving someone else's approval,
 ///   and a task's owner may manage its assignment without either grant.
 /// - `write` — changing or destroying stored state: every `*:rm`,
-///   `msg:redo`/`msg:clear`, the snapshot feeds, and the user management —
+///   `msg:redo`/`msg:redo_all`/`msg:clear`, the snapshot feeds, and the user management —
 ///   plus `sys:status`, a read that is kept here on purpose (it echoes the
 ///   server's own configuration, which may carry credentials; see below)
 /// - `all` — every action (`@all` in a list is the unrestricted grant, like
@@ -926,6 +926,8 @@ mod tests {
         assert_eq!(action_catalog("act:delegate"), "assign");
         assert_eq!(action_catalog("act:undelegate"), "assign");
         assert_eq!(action_catalog("msg:ack"), "execute");
+        assert_eq!(action_catalog("msg:redo"), "write");
+        assert_eq!(action_catalog("msg:redo_all"), "write");
         assert_eq!(action_catalog("model:rm"), "write");
         assert_eq!(action_catalog("snap:upsert"), "write");
         assert_eq!(action_catalog("acl:setuser"), "write");

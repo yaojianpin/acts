@@ -429,15 +429,12 @@ fn walk_branch(
     parent_tid: Option<&TaskId>,
     show_unreached: bool,
 ) -> Result<()> {
-    let kind = if branch.r#virtual {
-        crate::NodeKind::Block
-    } else {
-        crate::NodeKind::Branch
-    };
+    // A virtual container (`Branch::r#virtual`) speaks `branch` like every
+    // branch; its virtual flag is what keeps it apart on the wire.
     let spec = NodeSpec {
         nid: branch.id.clone(),
         name: branch.name.clone(),
-        kind: kind.to_string(),
+        kind: crate::NodeKind::Branch.to_string(),
         uses: None,
         parent: Some(model_parent.to_string()),
         next: None,

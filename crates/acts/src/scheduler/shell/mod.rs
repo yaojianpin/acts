@@ -2329,6 +2329,25 @@ impl Workers {
                 "cannot find 'to' value in options".to_string(),
             ));
         }
+        // A `Back` returns only along the source's flow predecessors: the
+        // named step's redo closure must carry the backed execution. The
+        // deciding call shares the rewind planner's walk, so a `to` beside or
+        // ahead of the source is refused here — the client gets the refusal
+        // and nothing durable is consumed — instead of a re-entry operation
+        // failing after the decision already recorded.
+        if let ActionKind::Back = command.action {
+            let to = command
+                .inputs
+                .iter()
+                .find(|(name, _)| name == crate::utils::consts::ACT_TO)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default();
+            let graph = task_graph(&snapshot)?;
+            crate::scheduler::core::plan::generation::Reenter::redo_closure(
+                &graph, &snapshot, &task_id, &to,
+            )
+            .map_err(runtime)?;
+        }
         // A cancel rewinds the work *forward* of the step the client names:
         // the legacy handler refuses when there is no package step ahead to
         // undo, and when that forward work already settled.

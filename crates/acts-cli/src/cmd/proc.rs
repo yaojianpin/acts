@@ -429,12 +429,12 @@ fn graph_children<'a>(graph: &'a ProcessGraph, node: &GraphNode) -> Vec<&'a Grap
     }
 }
 
-/// The children a tree line actually shows: every virtual `block` is replaced
-/// by its own visible children, recursively.
+/// The children a tree line actually shows: every virtual container branch
+/// is replaced by its own visible children, recursively.
 fn visible_children<'a>(graph: &'a ProcessGraph, node: &GraphNode) -> Vec<&'a GraphNode> {
     fn collect<'a>(graph: &'a ProcessGraph, node: &GraphNode, visible: &mut Vec<&'a GraphNode>) {
         for child in graph_children(graph, node) {
-            if child.kind == "block" {
+            if child.r#virtual && child.kind == "branch" {
                 collect(graph, child, visible);
             } else {
                 visible.push(child);

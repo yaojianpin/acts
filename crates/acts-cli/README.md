@@ -122,7 +122,7 @@ not parse prints clap's own usage diagnostic instead.
 | `package`  | publish / list / get / remove packages    |
 | `proc`     | start / list / get processes              |
 | `task`     | list / get tasks                          |
-| `message`  | list / get / ack / redeliver messages     |
+| `message`  | list / get / ack / redo messages           |
 | `act`      | send act actions (`submit`, `back`, …)    |
 | `event`    | get / list / start triggers (events)      |
 | `snapshot` | feed and query snapshot data (see below)  |

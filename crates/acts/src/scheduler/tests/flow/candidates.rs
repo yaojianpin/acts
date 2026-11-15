@@ -178,10 +178,10 @@ async fn sch_candidates_announce_container_speaks_only_the_declared_shape() {
         "only the declared nodes announce"
     );
     assert!(
-        fixture
-            .messages()
-            .iter()
-            .all(|message| message.r#type != "block"),
+        fixture.messages().iter().all(|message| !message
+            .nid
+            .starts_with("department_manager_approval#in")
+            && !message.nid.starts_with("department_manager_approval#item")),
         "a virtual wrapper must not announce: {:?}",
         fixture.messages()
     );

@@ -941,9 +941,9 @@ pub(super) fn node_facts(model: &crate::model::Workflow, node: &str) -> NodeFact
 }
 
 /// The kind and name of the branch with this id anywhere under one step, if
-/// any. The import's virtual container (`Branch::r#virtual`) is kind `block`
-/// — the declaration declares no such node — and every declared branch stays
-/// `branch`.
+/// any. Every branch — declared or the import's virtual container
+/// (`Branch::r#virtual`) — speaks `branch`; the virtual flag is what tells
+/// the kernel's own wrapper apart.
 pub(super) fn branch_facts(
     step: &crate::model::Step,
     target: &str,
@@ -951,12 +951,7 @@ pub(super) fn branch_facts(
     use crate::NodeKind;
     for branch in model::step_branches(step).unwrap_or_default() {
         if branch.id == target {
-            let kind = if branch.r#virtual {
-                NodeKind::Block
-            } else {
-                NodeKind::Branch
-            };
-            return Some((kind, branch.name.clone()));
+            return Some((NodeKind::Branch, branch.name.clone()));
         }
         for inner in &branch.steps {
             if let Some(facts) = branch_facts(inner, target) {
@@ -1047,8 +1042,8 @@ mod tests {
         );
         assert_eq!(
             facts("blocky#acts"),
-            (NodeKind::Block, NodeKind::Block, "Virtual".to_string()),
-            "the import's virtual container speaks `block` in both vocabularies"
+            (NodeKind::Branch, NodeKind::Branch, "Virtual".to_string()),
+            "the import's virtual container speaks `branch`, told apart by its virtual flag"
         );
         assert_eq!(
             facts("missing"),

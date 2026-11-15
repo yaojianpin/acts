@@ -194,7 +194,7 @@ pub async fn ack(parent: &mut Command<'_>, id: &str) -> anyhow::Result<String> {
 pub async fn redo(parent: &mut Command<'_>) -> anyhow::Result<String> {
     let mut ret = String::new();
     let options = Vars::new();
-    let resp = parent.send::<()>("msg:redo", options).await?;
+    let resp = parent.send::<()>("msg:redo_all", options).await?;
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;

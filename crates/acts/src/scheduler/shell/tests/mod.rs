@@ -4292,6 +4292,7 @@ async fn a_cancel_needs_a_finished_step_with_live_forward_work() {
     .unwrap();
     host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
     assert!(host.process_completed("p-cancel-guard").await.unwrap());
+    let settled_before = host.snapshot("p-cancel-guard").await.unwrap().unwrap();
     let settled = host
         .apply_action(
             "p-cancel-guard",
@@ -4304,6 +4305,11 @@ async fn a_cancel_needs_a_finished_step_with_live_forward_work() {
     assert!(
         format!("{settled}").contains("not allowed to cancel"),
         "a settled chain refuses the rewind: {settled}"
+    );
+    let settled_after = host.snapshot("p-cancel-guard").await.unwrap().unwrap();
+    assert_eq!(
+        settled_before.version, settled_after.version,
+        "a refused cancel consumes nothing"
     );
 
     // A lone step has no forward work to rewind at all: the legacy
@@ -6860,6 +6866,196 @@ async fn back_without_to_is_refused_without_consuming_state() {
         state_of(&after, "s1"),
         crate::scheduler::core::model::task_graph::TaskState::Waiting,
         "the step keeps waiting on its act"
+    );
+}
+
+/// Back names a predecessor: a `to` whose redo closure does not carry the
+/// backed execution is refused in the preflight — the client gets the
+/// refusal and nothing durable is consumed (the deciding call shares the
+/// rewind planner's walk).
+#[tokio::test]
+async fn back_to_a_non_predecessor_is_refused_without_consuming_state() {
+    let (host, mut wake_rx) = Workers::in_memory();
+    let mut spec = ProcessSpec::linear("p-back-ahead", "root", &["s1", "s2", "s3"]);
+    // Every step waits for its client action, so nothing past `s1` is live.
+    spec.auto.clear();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    let before = host.snapshot("p-back-ahead").await.unwrap().unwrap();
+    let error = host
+        .apply_action(
+            "p-back-ahead",
+            &tid_of("p-back-ahead", "s1", 0),
+            ActionKind::Back,
+            vec![("to".to_string(), "s3".to_string())],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error}").contains("SourceOutsideRedoClosure"),
+        "a `to` beside the source's path is refused: {error}"
+    );
+    let after = host.snapshot("p-back-ahead").await.unwrap().unwrap();
+    assert_eq!(
+        before.version, after.version,
+        "a refused back consumes nothing"
+    );
+    assert_eq!(
+        state_of(&after, "s1"),
+        crate::scheduler::core::model::task_graph::TaskState::Waiting
+    );
+
+    // The predecessor direction still works: back to the completed head
+    // re-runs it and recreates the chain behind it.
+    host.apply_action(
+        "p-back-ahead",
+        &tid_of("p-back-ahead", "s1", 0),
+        ActionKind::Complete,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    host.apply_action(
+        "p-back-ahead",
+        &tid_of("p-back-ahead", "s2", 0),
+        ActionKind::Back,
+        vec![("to".to_string(), "s1".to_string())],
+    )
+    .await
+    .unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    let snapshot = host.snapshot("p-back-ahead").await.unwrap().unwrap();
+    let state_at = |task: &str, generation: u64| {
+        snapshot
+            .tasks
+            .get(&crate::scheduler::core::model::task_graph::TaskId::new(task, generation).unwrap())
+            .map(|task| task.state)
+    };
+    assert_eq!(
+        state_at("s2", 0),
+        Some(crate::scheduler::core::model::task_graph::TaskState::Backed),
+        "the backed generation keeps its decision"
+    );
+    assert_eq!(
+        state_at("s1", 1),
+        Some(crate::scheduler::core::model::task_graph::TaskState::Waiting),
+        "the redo re-ran the named predecessor (waiting on its client action)"
+    );
+}
+
+/// A rewind restores the data: the re-entered generation starts from the
+/// scope the replaced generation held when it completed, so both a `Back`'s
+/// redo and a `Cancel`'s re-run see the previous pass's client data (and
+/// keep the node's own auto decision).
+#[tokio::test]
+async fn a_rewind_restores_the_completed_generations_data() {
+    let workflow = crate::model::Workflow::new()
+        .with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_IRQ,
+                crate::Vars::new().with("key", "restore-1"),
+            )
+        })
+        .with_step(|step| {
+            step.with_id("s2").with_uses(
+                crate::utils::test::USES_IRQ,
+                crate::Vars::new().with("key", "restore-2"),
+            )
+        });
+    let (host, mut wake_rx) = Workers::in_memory();
+    let spec = ProcessSpec::from_workflow("p-restore", &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    let var = |snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+               task: &str,
+               generation: u64,
+               name: &str| {
+        snapshot
+            .variables
+            .get(&(
+                crate::scheduler::core::model::task_graph::TaskId::new(task, generation).unwrap(),
+                name.to_string(),
+            ))
+            .cloned()
+    };
+
+    // The first pass writes client data on `s1`, which completes and seeds
+    // `s2`.
+    host.apply_action(
+        "p-restore",
+        &tid_of("p-restore", "s1", 0),
+        ActionKind::Complete,
+        vec![
+            ("amount".to_string(), "7".to_string()),
+            ("note".to_string(), "first".to_string()),
+        ],
+    )
+    .await
+    .unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+    // The `Back` re-enters `s1`: its fresh generation restores the data the
+    // completed generation held, instead of starting from the declaration.
+    host.apply_action(
+        "p-restore",
+        &tid_of("p-restore", "s2", 0),
+        ActionKind::Back,
+        vec![("to".to_string(), "s1".to_string())],
+    )
+    .await
+    .unwrap();
+    host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+    let snapshot = host.snapshot("p-restore").await.unwrap().unwrap();
+    assert_eq!(
+        var(&snapshot, "s1", 1, "amount").as_deref(),
+        Some("7"),
+        "the re-run sees the previous pass's data"
+    );
+    assert_eq!(var(&snapshot, "s1", 1, "note").as_deref(), Some("first"));
+    assert_eq!(
+        var(&snapshot, "s1", 1, "auto").as_deref(),
+        var(&snapshot, "s1", 0, "auto").as_deref(),
+        "the re-entered generation keeps the node's own auto decision"
+    );
+    assert_eq!(
+        var(&snapshot, "s2", 1, "amount"),
+        None,
+        "the downstream generation starts clean"
+    );
+
+    // The redo completes with new data; the cancelled re-run restores THAT
+    // pass.
+    host.apply_action(
+        "p-restore",
+        &tid_of("p-restore", "s1", 1),
+        ActionKind::Complete,
+        vec![("amount".to_string(), "8".to_string())],
+    )
+    .await
+    .unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    host.apply_action(
+        "p-restore",
+        &tid_of("p-restore", "s1", 1),
+        ActionKind::Cancel,
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+    let snapshot = host.snapshot("p-restore").await.unwrap().unwrap();
+    assert_eq!(
+        var(&snapshot, "s1", 2, "amount").as_deref(),
+        Some("8"),
+        "the cancelled re-run's re-entry restores that pass's data"
+    );
+    assert_eq!(
+        var(&snapshot, "s1", 2, "note").as_deref(),
+        Some("first"),
+        "data the second pass never wrote survives the restore"
     );
 }
 

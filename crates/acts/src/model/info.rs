@@ -71,12 +71,13 @@ pub struct GraphNode {
     /// The node's display name.
     pub name: String,
     /// The node's level: `workflow`, `branch` or `step` — the read model's
-    /// own word, the one `Workflow::tree_output` and the task rows use — plus
-    /// `block`, the kernel's own virtual container for a container package's
-    /// inline acts (`<step>#acts` and friends). A `block` is not a declared
-    /// level — the declaration declares no such node — so the tree display
-    /// folds it into its parent step, while the node itself stays here: the
-    /// messages and rows name it. A step carrying `uses` is still a `step`
+    /// own word, the one `Workflow::tree_output` and the task rows use. The
+    /// kernel's own virtual container for a container package's inline acts
+    /// (`<step>#acts` and friends) speaks `branch` too, flagged
+    /// [`GraphNode::r#virtual`]: it is not a declared level — the declaration
+    /// declares no such node — so the tree display folds it into its parent
+    /// step, while the node itself stays here: the messages and rows name it.
+    /// A step carrying `uses` is still a `step`
     /// here; its *message* is the act payload (type `step`, shape told by
     /// `uses`).
     pub kind: String,
@@ -195,8 +196,8 @@ impl GraphNode {
 /// the import seeds, so the container packages' inline acts already appear as
 /// their kernel children (`<step>#acts`, `<step>#item`, `<step>#act<N>`) and
 /// the ids match the messages the run announces; the kernel's own branch for
-/// them is kinded `block`, which the tree display folds into its parent step —
-/// the declaration declares no such branch.
+/// them is flagged virtual (`GraphNode::r#virtual`), which the tree display
+/// folds into its parent step — the declaration declares no such branch.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProcessGraph {
     pub pid: String,
@@ -210,7 +211,7 @@ impl ProcessGraph {
     /// order — `{kind} id:{nid} name={name}  uses={uses} state={state}
     /// next={next}`, with `nil` for an absent fact. A fan-out node appears
     /// once per item (the same `id` repeated), and a container's virtual
-    /// `block` renders no line of its own: its acts splice into its parent
+    /// `branch` renders no line of its own: its acts splice into its parent
     /// step's children.
     pub fn tree_output(&self) -> String {
         let mut output = String::new();
@@ -246,9 +247,10 @@ impl ProcessGraph {
             fact(&node.next),
             node.message_counts(),
         ));
-        // A virtual block renders no line, so its visible children take its
-        // place in the parent's list; the connector of every child is then
-        // decided by the flattened list, not by a hidden node's position.
+        // A virtual container renders no line, so its visible children take
+        // its place in the parent's list; the connector of every child is
+        // then decided by the flattened list, not by a hidden node's
+        // position.
         let children = self.visible_children(node);
         let len = children.len();
         for (index, child) in children.iter().enumerate() {
@@ -335,8 +337,10 @@ impl ProcessGraph {
         }
     }
 
-    /// The children a tree line actually shows: every virtual `block` is
-    /// replaced by its own visible children, recursively.
+    /// The children a tree line actually shows: every virtual container
+    /// branch (`GraphNode::r#virtual`) is replaced by its own visible
+    /// children, recursively. A declared branch keeps its row — the virtual
+    /// flag, not the kind word, is what separates the kernel's wrapper.
     fn visible_children(&self, node: &GraphNode) -> Vec<&GraphNode> {
         let mut visible = Vec::new();
         self.collect_visible_children(node, &mut visible);
@@ -345,7 +349,7 @@ impl ProcessGraph {
 
     fn collect_visible_children<'a>(&'a self, node: &GraphNode, visible: &mut Vec<&'a GraphNode>) {
         for child in self.children(node) {
-            if child.kind == "block" {
+            if child.r#virtual && child.kind == "branch" {
                 self.collect_visible_children(child, visible);
             } else {
                 visible.push(child);

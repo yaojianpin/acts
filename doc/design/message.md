@@ -8,8 +8,8 @@
 
 ## 1. 背景
 
-模型层级已经只有 `workflow|branch|step`（外加内核为容器包内联活动物化的
-虚拟分支 `block`），`act` 不再是模型类型。消息的 `Message.r#type`
+模型层级已经只有 `workflow|branch|step`（内核为容器包内联活动物化的虚拟
+分支也归入 `branch`，以 `r#virtual` 标志区分），`act` 不再是模型类型。消息的 `Message.r#type`
 （payload 的 `kind` 字段）却仍对带 `uses` 的 step 写 `act`（C6 时代
 "act payload 缺省"的遗留），与模型词汇脱节：
 
@@ -36,8 +36,8 @@
 
 内核物化的包装节点只存在于图/行投影，不产生消息：`<step>#item` 模板
 step，以及 `<step>#acts`/`<step>#in`/`<step>#act<N>` 虚拟分支。虚拟分支
-的图 kind 仍是 `block`（`NodeKind::Block`），但消息流只承载声明的节点与
-运行动态生成的活动。
+在图/行上也是 `branch`，由 `r#virtual` 标志与声明分支区分，但消息流只承
+载声明的节点与运行动态生成的活动。
 
 ### 2.1 声明节点一律发声（2026-11-12 修订）
 

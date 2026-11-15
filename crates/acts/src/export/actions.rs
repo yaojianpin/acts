@@ -396,12 +396,14 @@ pub async fn apply_as(
             let id = pop(&mut options, "id")?;
             value(executor.msg().ack(&id).await)
         }
-        "msg:redo" => match options.get::<String>("id") {
-            // re-send one error delivery to its channel
-            Some(id) => value(executor.msg().redeliver(&id).await),
-            // re-send every error delivery
-            None => value(executor.msg().redo().await),
-        },
+        // Re-sending is split by scope: `msg:redo` re-sends one error
+        // delivery to its channel, `msg:redo_all` re-sends every error
+        // delivery (the retry timer carries them out).
+        "msg:redo" => {
+            let id = pop(&mut options, "id")?;
+            value(executor.msg().redo(&id).await)
+        }
+        "msg:redo_all" => value(executor.msg().redo_all().await),
         "msg:clear" => {
             if let Some(id) = options.get::<String>("id") {
                 // clear one error delivery
@@ -1880,7 +1882,7 @@ mod tests {
         );
         let _ = apply(&engine, "msg:ack", Vars::new().with("id", "gone")).await;
         assert_eq!(
-            apply(&engine, "msg:redo", Vars::new()).await.unwrap(),
+            apply(&engine, "msg:redo_all", Vars::new()).await.unwrap(),
             JsonValue::Null
         );
         assert_eq!(

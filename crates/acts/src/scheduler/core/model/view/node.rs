@@ -10,18 +10,19 @@ pub enum NodeContent {
 }
 
 /// The word a node speaks where a kind is asked for. `workflow|branch|step`
-/// are the declaration's levels (the rows' and the tree renderings' words),
-/// and `block` is the kernel's own virtual container — the branch the import
-/// materializes for a container package's inline acts, which no declaration
-/// declares. There is no `act` kind: a `uses` step's message is a `step`
-/// whose payload shape the `uses` field tells (see `doc/design/message.md`).
+/// are the declaration's levels — the rows' and the tree renderings' words.
+/// The kernel's own virtual container (the branch the import materializes
+/// for a container package's inline acts) speaks `branch` too, flagged
+/// `Branch::r#virtual` / `GraphNode::virtual`: the declaration declares no
+/// such node, and the virtual flag is what tells it apart. There is no `act`
+/// kind: a `uses` step's message is a `step` whose payload shape the `uses`
+/// field tells (see `doc/design/message.md`).
 #[derive(PartialEq, Default, Debug, Clone, Serialize, Deserialize)]
 pub enum NodeKind {
     #[default]
     Workflow,
     Branch,
     Step,
-    Block,
 }
 
 /// The persisted shape of one model node — the `tasks.node_data` column.
@@ -127,7 +128,6 @@ impl std::fmt::Display for NodeKind {
             NodeKind::Workflow => "workflow",
             NodeKind::Branch => "branch",
             NodeKind::Step => "step",
-            NodeKind::Block => "block",
         };
         f.write_str(s)
     }
@@ -152,7 +152,6 @@ impl From<&str> for NodeKind {
             "workflow" => NodeKind::Workflow,
             "branch" => NodeKind::Branch,
             "step" => NodeKind::Step,
-            "block" => NodeKind::Block,
             _ => panic!("not found NodeKind: {str}"),
         }
     }
@@ -240,7 +239,6 @@ mod tests {
             (NodeKind::Workflow, "workflow"),
             (NodeKind::Branch, "branch"),
             (NodeKind::Step, "step"),
-            (NodeKind::Block, "block"),
         ] {
             assert_eq!(kind.to_string(), name);
             assert_eq!(String::from(kind.clone()), name);

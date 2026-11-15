@@ -176,7 +176,7 @@ silently granting — or denying — nothing.
 | `@read` | `model:ls` `model:get` `pack:ls` `pack:get` `proc:ls` `proc:get` `task:ls` `task:get` `msg:ls` `msg:get` `evt:ls` `evt:get` `snap:get` `snap:ls` `msg:sub` `acl:whoami` `acl:getuser` `acl:users` |
 | `@deploy` | `model:deploy` `pack:publish` |
 | `@execute` | `proc:start` `proc:start_from_model` `evt:start` `act:push` `act:remove` `act:submit` `act:complete` `act:abort` `act:cancel` `act:back` `act:skip` `act:error` `msg:ack` |
-| `@write` | `model:rm` `pack:rm` `msg:rm` `msg:redo` `msg:clear` `msg:unsub` `snap:upsert` `snap:remove` `acl:setuser` `acl:deluser` `ext:register_var`, plus `acl:login` `acl:refresh` `acl:logout` (which need no grant at all) |
+| `@write` | `model:rm` `pack:rm` `msg:rm` `msg:redo` `msg:redo_all` `msg:clear` `msg:unsub` `snap:upsert` `snap:remove` `acl:setuser` `acl:deluser` `ext:register_var`, plus `acl:login` `acl:refresh` `acl:logout` (which need no grant at all) |
 | `@all` | every action (`@*` and `*` are the same grant) |
 
 The groups separate the four ways a deployment is usually divided: `@read`

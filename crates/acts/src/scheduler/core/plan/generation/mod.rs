@@ -38,6 +38,62 @@ pub(crate) struct ReenterCommand {
 
 pub(crate) struct Reenter;
 
+impl Reenter {
+    /// The task a rewind re-enters and the forward closure it re-runs, in
+    /// breadth-first order (edges always point forward, so BFS is a
+    /// topological order). A `Cancel` re-enters the terminal source itself
+    /// (the target names it); a `Back` re-enters an EARLIER step the client
+    /// named (`to`), so the root is that node's latest generation and the
+    /// source must lie inside the closure it spawns — a `Back` returns only
+    /// along the source's flow predecessors, never to a step beside or ahead
+    /// of it.
+    pub(crate) fn redo_closure(
+        graph: &TaskGraph,
+        snapshot: &ProcessSnapshot,
+        source: &TaskId,
+        target_task_id: &str,
+    ) -> Result<(TaskId, Vec<TaskId>), GenerationError> {
+        if target_task_id.trim().is_empty() {
+            return Err(GenerationError::EmptyTargetTaskId);
+        }
+        let root = if target_task_id == source.node.as_str() {
+            source.clone()
+        } else {
+            snapshot
+                .tasks
+                .keys()
+                .filter(|id| id.node.as_str() == target_task_id)
+                .max_by_key(|id| id.generation)
+                .cloned()
+                .ok_or_else(|| {
+                    GenerationError::TargetNeverInstantiated(target_task_id.to_owned())
+                })?
+        };
+        let mut order: Vec<TaskId> = Vec::new();
+        let mut seen: HashMap<TaskId, ()> = HashMap::new();
+        let mut queue = VecDeque::new();
+        seen.insert(root.clone(), ());
+        order.push(root.clone());
+        queue.push_back(root.clone());
+        while let Some(current) = queue.pop_front() {
+            for successor in graph.successors(&current) {
+                if seen.insert(successor.clone(), ()).is_some() {
+                    continue;
+                }
+                order.push(successor.clone());
+                queue.push_back(successor.clone());
+            }
+        }
+        if !seen.contains_key(source) {
+            return Err(GenerationError::SourceOutsideRedoClosure {
+                source: source.clone(),
+                target: target_task_id.to_owned(),
+            });
+        }
+        Ok((root, order))
+    }
+}
+
 impl ActPlan for Reenter {
     type Reading<'a> = (&'a TaskGraph, &'a ProcessSnapshot);
     type Command<'a> = ReenterCommand;
@@ -86,52 +142,13 @@ impl ActPlan for Reenter {
         if operation.process_id != command.process_id || operation.task != command.source {
             return Err(GenerationError::SourceOperationTargetsDifferentTask);
         }
-        if command.target_task_id.trim().is_empty() {
-            return Err(GenerationError::EmptyTargetTaskId);
-        }
-        // The closure roots at the re-entered task: a Cancel re-enters the
-        // terminal source itself; a Back re-enters an EARLIER step named by
-        // the client (`to`), so the root is that task's latest generation
-        // and the source must lie inside the closure it spawns (the redo
-        // re-runs everything downstream of the target, the source included).
-        let root = if command.target_task_id == command.source.node.as_str() {
-            command.source.clone()
-        } else {
-            snapshot
-                .tasks
-                .keys()
-                .filter(|id| id.node.as_str() == command.target_task_id)
-                .max_by_key(|id| id.generation)
-                .cloned()
-                .ok_or_else(|| {
-                    GenerationError::TargetNeverInstantiated(command.target_task_id.clone())
-                })?
-        };
-        // Forward closure of the re-entered source in breadth-first order
-        // (edges always point forward, so BFS is a topological order): the
-        // source and every execution downstream of it are dead on this
-        // path and must be recreated as fresh generations.
-        let mut order: Vec<TaskId> = Vec::new();
-        let mut seen: HashMap<TaskId, ()> = HashMap::new();
-        let mut queue = VecDeque::new();
-        seen.insert(root.clone(), ());
-        order.push(root.clone());
-        queue.push_back(root.clone());
-        while let Some(current) = queue.pop_front() {
-            for successor in graph.successors(&current) {
-                if seen.insert(successor.clone(), ()).is_some() {
-                    continue;
-                }
-                order.push(successor.clone());
-                queue.push_back(successor.clone());
-            }
-        }
-        if !seen.contains_key(&command.source) {
-            return Err(GenerationError::SourceOutsideRedoClosure {
-                source: command.source.clone(),
-                target: command.target_task_id.clone(),
-            });
-        }
+        // The closure roots at the re-entered task and walks forward; a
+        // `Back` may only return along the source's flow predecessors, so
+        // the redo closure the target spawns must carry the source (the
+        // deciding call shares this walk to refuse a bogus `to` before
+        // anything durable).
+        let (root, order) =
+            Self::redo_closure(graph, snapshot, &command.source, &command.target_task_id)?;
 
         // One fresh generation per closed-over task, remapping every
         // predecessor edge onto the new generations (edges from outside the
@@ -277,13 +294,14 @@ impl ActPlan for Reenter {
         // The auto/waiting decision is durable per-execution state: recreated
         // generations inherit it from the generation they replace, or default
         // to self-completing when the replaced generation predates the
-        // variable. The declared model variables are seeded alongside it,
-        // exactly like the seed writes them for generation 0 and the fan-out
-        // writes them on a child: a re-entered generation is a NEW execution,
-        // so it starts from the declaration, never from the previous
-        // generation's mutations. State that must survive a rewind lives on a
-        // scope that outlives the generation (a workflow-level variable), not
-        // on the step.
+        // variable. The rewind also restores the DATA: a re-entered
+        // generation starts from the scope the replaced generation held when
+        // it completed — its inputs, outputs and client writes — so the
+        // re-run sees the node as its last pass left it. The engine's own
+        // facts stay out of the restore: private (`#`-prefixed) runtime
+        // markers and the reserved error inputs are re-derived by whatever
+        // re-runs. Whatever the replaced generation never wrote falls back
+        // to the declared model variables, exactly like generation 0.
         let mut variable_writes: Vec<VariableWrite> = Vec::with_capacity(closure.len());
         for (old_id, _, new_id) in &closure {
             variable_writes.push(VariableWrite {
@@ -296,6 +314,23 @@ impl ActPlan for Reenter {
                     .unwrap_or_else(|| "1".to_string()),
             });
             let mut written = HashSet::from(["auto".to_string()]);
+            for ((_, name), value) in snapshot
+                .variables
+                .range((old_id.clone(), String::new())..)
+                .take_while(|((scope, _), _)| *scope == *old_id)
+            {
+                if name.starts_with('#')
+                    || matches!(name.as_str(), "error.code" | "error.message")
+                    || !written.insert(name.clone())
+                {
+                    continue;
+                }
+                variable_writes.push(VariableWrite {
+                    scope: new_id.clone(),
+                    name: name.clone(),
+                    value: value.clone(),
+                });
+            }
             for (name, value) in command.vars.get(old_id.node.as_str()).into_iter().flatten() {
                 if !written.insert(name.clone()) {
                     continue;

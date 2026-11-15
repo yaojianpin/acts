@@ -2276,7 +2276,7 @@ async fn export_message_resend_error_messages() {
     engine
         .executor(&crate::Principal::unrestricted())
         .msg()
-        .redo()
+        .redo_all()
         .await
         .unwrap();
 

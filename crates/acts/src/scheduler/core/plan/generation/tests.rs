@@ -382,6 +382,80 @@ fn back_to_a_step_outside_the_redo_closure_is_refused() {
 }
 
 #[test]
+fn back_to_a_downstream_step_is_refused() {
+    // A `Back` may only return along the source's flow predecessors. Here
+    // the chain runs source -> target, so the redo closure from the named
+    // `target` re-runs work the source never passed through — and carries
+    // no path back to the backed source. The deciding call shares this
+    // walk, so the client's `to` is refused before anything durable.
+    let command = ReenterCommand {
+        target_task_id: "target".into(),
+        ..command()
+    };
+    assert!(matches!(
+        Reenter::plan((&graph(), &snapshot()), &command),
+        Err(GenerationError::SourceOutsideRedoClosure { .. })
+    ));
+}
+
+#[test]
+fn reentry_restores_the_data_the_replaced_generation_held() {
+    // The completed target held business data when it finished — inputs,
+    // outputs and client writes. The rewind restores it onto the fresh
+    // generation: the re-run sees the node as its last pass left it, the
+    // old value winning over the declaration. The engine's own facts (the
+    // `#`-prefixed runtime markers, the reserved error inputs) are not
+    // data and stay out of the restore.
+    let mut snapshot = snapshot();
+    for (name, value) in [
+        ("amount", "7"),
+        ("note", "first pass"),
+        ("#flow", "private"),
+        ("error.code", "E1"),
+    ] {
+        snapshot
+            .variables
+            .insert((id("target", 1), name.to_string()), value.to_string());
+    }
+    let mut command = command();
+    command.vars.insert(
+        "target".into(),
+        vec![
+            ("amount".into(), "42".into()),
+            ("extra".into(), "declared".into()),
+        ],
+    );
+    let plan = Reenter::plan((&graph(), &snapshot), &command).unwrap();
+    let write = |scope: TaskId, name: &str| {
+        plan.variable_writes
+            .iter()
+            .find(|write| write.scope == scope && write.name == name)
+            .map(|write| write.value.as_str())
+    };
+    assert_eq!(
+        write(id("target", 2), "amount"),
+        Some("7"),
+        "the held data wins over the declaration"
+    );
+    assert_eq!(write(id("target", 2), "note"), Some("first pass"));
+    assert_eq!(
+        write(id("target", 2), "extra"),
+        Some("declared"),
+        "a var the replaced generation never wrote falls back to the declaration"
+    );
+    assert!(
+        write(id("target", 2), "#flow").is_none(),
+        "a private runtime marker is not restored"
+    );
+    assert!(
+        write(id("target", 2), "error.code").is_none(),
+        "the reserved error inputs are not restored"
+    );
+    // The source's own scope held nothing: no data restore invents one.
+    assert!(write(id("source", 2), "amount").is_none());
+}
+
+#[test]
 fn the_command_envelope_must_match_the_snapshot() {
     let mut wrong_process = command();
     wrong_process.process_id = "other".into();

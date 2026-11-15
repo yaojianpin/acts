@@ -122,9 +122,10 @@ async fn sch_graph_answers_every_declared_node_with_its_state() {
 /// act's own id) with their own states, and every announced node folds onto
 /// the graph by `nid`. That is the join that makes the message stream a trace
 /// over the graph. The materialized container itself is the kernel's own
-/// virtual node (the declaration declares no branch): kind `block` on the
-/// graph, no line of its own in the tree, and silent — its acts fold into the
-/// parent step, which is where the declared flow puts them.
+/// virtual node (the declaration declares no branch): it speaks the declared
+/// `branch` level, flagged virtual — no line of its own in the tree, and
+/// silent — its acts fold into the parent step, which is where the declared
+/// flow puts them.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
@@ -173,9 +174,10 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
     assert_eq!(step.uses.as_deref(), Some(USES_BLOCK));
     assert_eq!(step.state.as_deref(), Some("running"));
     let branch = node("step1#acts");
-    // The kernel's own container: the declaration declares no branch, so it
-    // speaks `block` — not the declared `branch` level.
-    assert_eq!(branch.kind, "block");
+    // The kernel's own container: the declaration declares no branch, so the
+    // word is the `branch` level and the virtual flag tells it apart.
+    assert_eq!(branch.kind, "branch");
+    assert!(branch.r#virtual);
     assert_eq!(branch.parent.as_deref(), Some("step1"));
     assert_eq!(branch.state.as_deref(), Some("running"));
     assert_eq!(node("m1").kind, "step");
@@ -191,7 +193,7 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
     // The notices (`notice`, `assignment`) announce no level.
     for message in fixture.messages() {
         let level = message.r#type.as_str();
-        if !matches!(level, "workflow" | "branch" | "step" | "block") {
+        if !matches!(level, "workflow" | "branch" | "step") {
             continue;
         }
         let expected = node(&message.nid);
@@ -217,7 +219,7 @@ async fn sch_graph_names_the_materialized_nodes_the_messages_name() {
         fixture
             .messages()
             .iter()
-            .all(|message| message.nid != "step1#acts" && message.r#type != "block"),
+            .all(|message| message.nid != "step1#acts"),
         "a virtual wrapper must not announce: {:?}",
         fixture.messages()
     );
@@ -475,7 +477,8 @@ async fn sch_graph_keeps_the_hierarchy_across_a_rewind() {
         // `<step>#item` children are never walked.
         let bridge = node("approve#in", generation.tid.as_deref());
         assert_eq!(bridge.tid, None);
-        assert_eq!(bridge.kind, "block");
+        assert_eq!(bridge.kind, "branch");
+        assert!(bridge.r#virtual);
         let item = node("approve#item", generation.tid.as_deref());
         assert_eq!(item.parent.as_deref(), Some("approve#in"));
         let branch = node("approve#item#act0", item.tid.as_deref());
@@ -568,7 +571,8 @@ fn assert_action_hierarchy(graph: &crate::ProcessGraph) {
     );
     let (branch, act) = act_under(graph, approval);
     assert!(branch.tid.is_some(), "the container branch's execution");
-    assert_eq!(branch.kind, "block", "the kernel's virtual container");
+    assert_eq!(branch.kind, "branch", "the kernel's virtual container");
+    assert!(branch.r#virtual, "the kernel's virtual container");
     assert_eq!(branch.parent.as_deref(), Some("approval"));
     assert_eq!(act.parent.as_deref(), Some("approval#acts"));
 }
