@@ -82,6 +82,12 @@ pub struct GraphNode {
     pub order: usize,
     /// The step's declared `next`.
     pub next: Option<String>,
+    /// Whether the node is a kernel-materialized wrapper (`<step>#acts`,
+    /// `<step>#in`, `<step>#act<N>`, the `<step>#item` template) rather than a
+    /// declared node: the tree display flattens the wrapper's placeholder
+    /// chain into the declared levels, a declared node keeps its row.
+    #[serde(default)]
+    pub r#virtual: bool,
     /// The execution's state in the read model's vocabulary, or `None` while
     /// the flow has not reached the node.
     pub state: Option<String>,

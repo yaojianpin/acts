@@ -280,6 +280,9 @@ fn task_message_payload(
         "nid": node,
         "name": facts.name,
         "kind": facts.message_kind.to_string(),
+        // The model id every legacy message carried — the act payload's
+        // `mid` (the same `Message.mid` a subscriber reads).
+        "mid": model.id,
         // The commit's wall clock (see the act payload's `ts`).
         "ts": crate::utils::time::time_millis(),
         "inputs": serde_json::Value::Object(inputs),

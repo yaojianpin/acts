@@ -362,14 +362,16 @@ fn write_vars(node: &GraphNode, vars: &[String], output: &mut String) {
 
 /// One node's direct children by execution identity. An executed node's real
 /// children are the executions it admitted (or dynamic acts pushed under it),
-/// named by its own model id. A virtual level the kernel never admitted
+/// named by its own model id. A *virtual* level the kernel never admitted
 /// (`#in`, the fan-out's item container) hangs off the same enclosing
 /// execution as a *placeholder*, with the executions beneath it parented by
-/// the placeholder's id — so each direct placeholder's chain is walked and
-/// only the rows it terminates at are kept: a declaration with no execution
-/// owns the placeholders sharing its enclosing execution, and the rendered
-/// nesting stays the declared one (the placeholder chain flattened into
-/// direct children would re-render the whole subtree per folded level).
+/// the placeholder's id — so each direct virtual placeholder's chain is
+/// walked and only the rows it terminates at are kept: the kernel's wrappers
+/// fold away and the rendered nesting stays the declared one (the placeholder
+/// chain flattened into direct children would re-render the whole subtree per
+/// folded level). A *declared* placeholder — an unreached branch or step — is
+/// no wrapper: it keeps its row and nests its own unreached children under
+/// it, exactly the shape the model declares.
 fn graph_children<'a>(graph: &'a ProcessGraph, node: &GraphNode) -> Vec<&'a GraphNode> {
     match node.tid.as_deref() {
         Some(tid) => {
@@ -383,7 +385,10 @@ fn graph_children<'a>(graph: &'a ProcessGraph, node: &GraphNode) -> Vec<&'a Grap
                 .collect();
             loop {
                 let mut pulled: Vec<&GraphNode> = Vec::new();
-                for placeholder in closure.iter().filter(|row| row.tid.is_none()) {
+                for placeholder in closure
+                    .iter()
+                    .filter(|row| row.tid.is_none() && row.r#virtual)
+                {
                     let name = placeholder.nid.as_str();
                     for row in &graph.nodes {
                         if row.parent_tid.as_deref() == Some(tid)

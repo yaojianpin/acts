@@ -9,6 +9,7 @@
 
 use super::super::*;
 use super::Capability;
+use std::pin::Pin;
 
 /// Which engine event a run's lifecycle report is: the driver's mirror of the
 /// legacy `on_proc` emission.
@@ -58,6 +59,50 @@ where
 {
     fn sink(&self, message: &crate::Message, event: ProcessEvent) {
         (self.f)(message, event);
+    }
+}
+
+/// The event-drain seam: a bounded wait for a process's queued channel events
+/// to finish dispatching. The per-process emitter workers order one process's
+/// events; the subflow hand-back fences here so a *subscriber* also reads the
+/// child's stream and terminal event before the parent's continuation — the
+/// cross-process causal order the channel makes observable. A kernel
+/// facility, not an extension point: the serving assembly installs the
+/// engine's own emitter, and a host without one (a bare kernel test) reports
+/// nothing to wait for.
+pub(crate) trait EventDrain: Send + Sync {
+    fn drain(
+        &self,
+        pid: &str,
+        timeout: std::time::Duration,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send>>;
+}
+
+/// An [`EventDrain`] over a closure — the serving assembly's adapter, so the
+/// engine's emitter needs no trait impl of its own.
+pub(crate) struct FnEventDrain<F> {
+    f: F,
+}
+
+impl<F> FnEventDrain<F>
+where
+    F: Fn(&str, std::time::Duration) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
+{
+    pub(crate) fn new(f: F) -> Self {
+        Self { f }
+    }
+}
+
+impl<F> EventDrain for FnEventDrain<F>
+where
+    F: Fn(&str, std::time::Duration) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
+{
+    fn drain(
+        &self,
+        pid: &str,
+        timeout: std::time::Duration,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+        (self.f)(pid, timeout)
     }
 }
 

@@ -159,6 +159,7 @@ struct NodeSpec {
     next: Option<String>,
     params: serde_json::Value,
     vars: Vec<crate::Variant>,
+    r#virtual: bool,
 }
 
 fn push_execution(
@@ -192,6 +193,7 @@ fn push_execution(
         generation: live.map(|_| tid.generation),
         params: spec.params,
         vars: spec.vars,
+        r#virtual: spec.r#virtual,
         messages: Vec::new(),
     });
 }
@@ -216,6 +218,7 @@ fn push_placeholder(
         generation: None,
         params: spec.params,
         vars: spec.vars,
+        r#virtual: spec.r#virtual,
         messages: Vec::new(),
     });
 }
@@ -243,6 +246,7 @@ pub(crate) fn process_graph(
         next: None,
         params: serde_json::Value::Null,
         vars: Vec::new(),
+        r#virtual: false,
     };
     let roots = context.executions_under(root, None);
     if roots.is_empty() {
@@ -353,6 +357,7 @@ fn walk_step(
         next: step.next.clone(),
         params: step.params.clone(),
         vars: step.vars.clone(),
+        r#virtual: step.r#virtual,
     };
     let executions = context.executions_under(&step.id, parent_tid);
     if executions.is_empty() {
@@ -438,6 +443,7 @@ fn walk_branch(
         next: None,
         params: serde_json::Value::Null,
         vars: branch.vars.clone(),
+        r#virtual: branch.r#virtual,
     };
     let executions = context.executions_under(&branch.id, parent_tid);
     if executions.is_empty() {
@@ -502,6 +508,7 @@ fn walk_dynamic(
         next: None,
         params,
         vars,
+        r#virtual: false,
     };
     push_execution(nodes, context, spec, tid);
     for child in context.dynamic_children(tid) {

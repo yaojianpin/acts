@@ -89,6 +89,7 @@ skip = [
     { crate = "syn@2.0.119", reason = "derive crates (prost-derive, tracing-attributes, rquickjs-macro, sqlx-macros, validator_derive, ...) are still on syn 2" },
     { crate = "webpki-roots@0.26.11", reason = "sqlx-core 0.8 and tokio-websockets 0.10 still use webpki-roots 0.26" },
     { crate = "winnow@0.7.15", reason = "cron 0.17 is on winnow 0.7; the toml 1.1.6-spec parser (toml_edit 0.25) uses 1.0" },
+    { crate = "windows-sys@0.52.0", reason = "quinn-proto/quinn-udp 0.11.19 (the RUSTSEC-2026-0523/0524/0538 patch) pin windows-sys ^0.52 and drag ring, rustix, tempfile and errno down to it, while mio, socket2, console and the rest of the graph resolve 0.61" },
 ]
 
 # windows-sys bumps its major version faster than the ecosystem can agree on

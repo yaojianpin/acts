@@ -256,6 +256,12 @@ pub(crate) struct Workers {
     timer_guards: Arc<TimerGuards>,
     /// Which runs were already reported: a start once, a terminal once.
     reported: Arc<parking_lot::Mutex<ReportedRuns>>,
+    /// The event-drain seam (see [`caps::lifecycle::EventDrain`]): when
+    /// attached, a subflow hand-back fences on it so a subscriber reads the
+    /// child's channel events before the parent's continuation. Kernel
+    /// facility, not an extension point — the serving assembly installs the
+    /// engine's own emitter; a bare kernel host runs without one.
+    event_drain: Arc<parking_lot::RwLock<Option<Arc<dyn caps::lifecycle::EventDrain>>>>,
     /// How often one node may run in one run — the legacy
     /// `max_node_run_times` bound, which the kernel keeps as the generation
     /// count of the node (every re-entry mints one). A flow that loops without
@@ -449,6 +455,7 @@ impl Workers {
                 timer_guider: Arc::new(parking_lot::RwLock::new(None)),
                 timer_guards: Arc::new(TimerGuards::new()),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
+                event_drain: Arc::new(parking_lot::RwLock::new(None)),
                 max_node_run_times,
                 admissions: Arc::new(parking_lot::Mutex::new(Admissions::new(admissions))),
                 timer_poll_ms: timer_poll_ms.max(1),
@@ -626,6 +633,18 @@ impl Workers {
     /// settled — the driver's `on_proc`. Attach before driving operations.
     pub(crate) fn attach_lifecycle_sink(&self, sink: Arc<dyn LifecycleSink>) {
         self.caps.write().lifecycle = Some(sink);
+    }
+
+    /// Attach the event-drain seam: from then on a subflow hand-back fences
+    /// on the child's channel events before unlocking the parent (see
+    /// [`caps::lifecycle::EventDrain`]). Attach before driving operations.
+    pub(crate) fn attach_event_drain(&self, drain: Arc<dyn caps::lifecycle::EventDrain>) {
+        self.event_drain.write().replace(drain);
+    }
+
+    /// The installed event-drain seam, if any.
+    pub(crate) fn event_drain(&self) -> Option<Arc<dyn caps::lifecycle::EventDrain>> {
+        self.event_drain.read().clone()
     }
 
     /// Attach the predicate runner: from then on a branch `if` is decided on

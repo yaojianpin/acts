@@ -47,7 +47,18 @@ fn is_terminal(event: &KeyEvent) -> bool {
 /// How long an idle per-process worker stays alive before releasing itself.
 const WORKER_IDLE: Duration = Duration::from_secs(30);
 
-type Workers = Arc<RwLock<HashMap<String, UnboundedSender<KeyEvent>>>>;
+type Workers = Arc<RwLock<HashMap<String, PidWorker>>>;
+
+/// One live per-process consumer: its queue sender plus the queued/dispatched
+/// counters the drain barrier reads. `queued` counts the events the worker
+/// accepted (a re-homing successor seeds it with the pending count it takes
+/// over), `dispatched` counts the events whose handlers finished — the same
+/// counter the consumer task bumps.
+struct PidWorker {
+    tx: UnboundedSender<KeyEvent>,
+    queued: std::sync::atomic::AtomicU64,
+    dispatched: Arc<std::sync::atomic::AtomicU64>,
+}
 
 /// Serializes user event handlers against scheduler-lane work for the same
 /// process. Per-pid emitter workers already order handlers among themselves;
@@ -92,8 +103,8 @@ impl ProcessGate {
     }
 }
 
-/// Spawn the ordered consumer for `pid` and return its sender. Callers insert
-/// the sender into `workers` before handing it any event (see [`Emitter::route`]);
+/// Spawn the ordered consumer for `pid` and return its worker. Callers insert
+/// it into `workers` before handing it any event (see [`Emitter::route`]);
 /// the worker also uses the same choke point to re-home its queue on exit.
 #[allow(clippy::too_many_arguments)]
 fn spawn_pid_worker(
@@ -104,12 +115,25 @@ fn spawn_pid_worker(
     errors: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     gate: ProcessGate,
     pid: String,
-) -> UnboundedSender<KeyEvent> {
+) -> PidWorker {
     let (tx, rx) = unbounded_channel();
+    let dispatched = Arc::new(std::sync::atomic::AtomicU64::new(0));
     tokio::spawn(consume_pid_events(
-        workers, starts, completes, messages, errors, gate, pid, rx,
+        workers,
+        starts,
+        completes,
+        messages,
+        errors,
+        gate,
+        pid,
+        rx,
+        dispatched.clone(),
     ));
-    tx
+    PidWorker {
+        tx,
+        queued: std::sync::atomic::AtomicU64::new(0),
+        dispatched,
+    }
 }
 
 /// One ordered consumer per process id. Panics of a handler future are
@@ -125,7 +149,9 @@ async fn consume_pid_events(
     gate: ProcessGate,
     pid: String,
     mut rx: UnboundedReceiver<KeyEvent>,
+    dispatched: Arc<std::sync::atomic::AtomicU64>,
 ) {
+    use std::sync::atomic::Ordering;
     loop {
         let recv = tokio::time::timeout(WORKER_IDLE, rx.recv()).await;
         let Some(event) = recv.unwrap_or(None) else {
@@ -159,6 +185,7 @@ async fn consume_pid_events(
                 drop(gate);
             }
         }
+        dispatched.fetch_add(1, Ordering::Release);
         if terminal {
             break;
         }
@@ -179,7 +206,8 @@ async fn consume_pid_events(
             pending.push(event);
         }
         if !pending.is_empty() {
-            let tx = spawn_pid_worker(
+            let pending_len = pending.len();
+            let successor = spawn_pid_worker(
                 workers.clone(),
                 starts.clone(),
                 completes.clone(),
@@ -188,10 +216,16 @@ async fn consume_pid_events(
                 gate.clone(),
                 pid.clone(),
             );
+            // The pending events were already counted queued on this (dying)
+            // worker; the successor owns their dispatching now, so its own
+            // counters must cover them for the drain barrier to converge.
+            successor
+                .queued
+                .fetch_add(pending_len as u64, std::sync::atomic::Ordering::Relaxed);
             for event in pending {
-                let _ = tx.send(event);
+                let _ = successor.tx.send(event);
             }
-            map.insert(pid.clone(), tx);
+            map.insert(pid.clone(), successor);
         }
     }
 }
@@ -344,6 +378,7 @@ impl Emitter {
     /// into and left: it is replaced by a fresh worker that the event is then
     /// handed to.
     fn route(&self, mut event: KeyEvent) {
+        use std::sync::atomic::Ordering;
         let pid = match &event {
             KeyEvent::Start(m)
             | KeyEvent::Complete(m)
@@ -353,9 +388,12 @@ impl Emitter {
         };
         {
             let workers = self.workers.read();
-            if let Some(tx) = workers.get(&pid) {
-                match tx.send(event) {
-                    Ok(()) => return,
+            if let Some(worker) = workers.get(&pid) {
+                match worker.tx.send(event) {
+                    Ok(()) => {
+                        worker.queued.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
                     // the worker exited between the read and the send (idle
                     // timeout or terminal event) — re-create it below
                     Err(err) => event = err.0,
@@ -363,16 +401,19 @@ impl Emitter {
             }
         }
         let mut workers = self.workers.write();
-        if let Some(tx) = workers.get(&pid) {
-            match tx.send(event) {
-                Ok(()) => return,
+        if let Some(worker) = workers.get(&pid) {
+            match worker.tx.send(event) {
+                Ok(()) => {
+                    worker.queued.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
                 // a stale entry: this sender's worker is gone without having
                 // re-homed its queue, so the entry must be replaced instead of
                 // accepting an event nobody will ever read
                 Err(err) => event = err.0,
             }
         }
-        let tx = spawn_pid_worker(
+        let worker = spawn_pid_worker(
             self.workers.clone(),
             self.starts.clone(),
             self.completes.clone(),
@@ -381,16 +422,52 @@ impl Emitter {
             self.process_gate(),
             pid.clone(),
         );
-        workers.insert(pid, tx.clone());
-        drop(workers);
-        // the receiver was created one line above: it is gone only if the
-        // just-spawned task never got to run (no runtime left), and then there
-        // is no queue left to re-home the event to either
-        let _ = tx.send(event);
+        // The receiver was created one line above: its send cannot fail (it
+        // is gone only if the just-spawned task never got to run — no runtime
+        // left — and then there is no queue left to re-home the event to
+        // either). Holding the write lock across the send mirrors the read
+        // path: an event is counted queued by the same lock holder that
+        // accepted it.
+        let _ = worker.tx.send(event);
+        worker.queued.fetch_add(1, Ordering::Relaxed);
+        workers.insert(pid, worker);
     }
 
     pub(crate) fn process_gate(&self) -> ProcessGate {
         self.process_gate.clone()
+    }
+
+    /// Wait until every event queued for `pid` has had its handlers run,
+    /// bounded by `timeout`. The cross-process causal seam: a run whose
+    /// continuation another run's terminal event unlocks (the subflow
+    /// hand-back) fences here, so a subscriber reads the child's stream and
+    /// completion before the parent's next event — the per-process workers
+    /// alone order only one process's events. Best-effort: a subscriber that
+    /// never returns costs the fence its timeout, never the run's progress.
+    /// `true` when the queue was empty or drained in time.
+    pub(crate) async fn drain(&self, pid: &str, timeout: Duration) -> bool {
+        use std::sync::atomic::Ordering;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let snapshot = self.workers.read().get(pid).map(|worker| {
+                (
+                    worker.queued.load(Ordering::Acquire),
+                    worker.dispatched.load(Ordering::Acquire),
+                )
+            });
+            match snapshot {
+                // No live consumer: a worker only exits with everything it
+                // accepted dispatched (or re-homes the pending events to a
+                // fresh entry, which the next poll reads).
+                None => return true,
+                Some((queued, dispatched)) if dispatched >= queued => return true,
+                _ => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }
 
     #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]
@@ -538,7 +615,14 @@ mod tests {
         let emitter = Arc::new(Emitter::new());
         let (tx, rx) = unbounded_channel();
         drop(rx);
-        emitter.workers.write().insert("race".to_string(), tx);
+        emitter.workers.write().insert(
+            "race".to_string(),
+            PidWorker {
+                tx,
+                queued: std::sync::atomic::AtomicU64::new(0),
+                dispatched: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
 
         let handle = tokio::runtime::Handle::current();
         // Hold the read lock so neither sender can reach the write lock

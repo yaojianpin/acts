@@ -695,6 +695,18 @@ impl Runtime {
                 },
             ),
         ));
+        // The subflow hand-back fences on this: the child's channel events are
+        // dispatched before the waiting parent continues, so the cross-process
+        // causal order a subscriber reads matches the run's own (see
+        // `caps::lifecycle::EventDrain`).
+        let emitter = runtime.emitter.clone();
+        host.attach_event_drain(Arc::new(
+            crate::scheduler::shell::caps::lifecycle::FnEventDrain::new(move |pid, timeout| {
+                let emitter = emitter.clone();
+                let pid = pid.to_string();
+                Box::pin(async move { emitter.drain(&pid, timeout).await })
+            }),
+        ));
         // The read model: every commit re-materializes the legacy
         // proc/task/vars rows from the aggregate, so the row-reading APIs
         // (`proc:get`/`task:get`/`msg:ls`, `Runtime::read_proc`) and the sweeper

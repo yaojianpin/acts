@@ -98,6 +98,12 @@ pub struct GraphNode {
     /// The step's declared `next`, when it names one. The declaration chain
     /// itself is the order of a parent's `steps`.
     pub next: Option<String>,
+    /// Whether the node is a kernel-materialized wrapper (`<step>#acts`,
+    /// `<step>#in`, `<step>#act<N>`, the `<step>#item` template) rather than a
+    /// declared node: the tree display flattens the wrapper's placeholder
+    /// chain into the declared levels, a declared node keeps its row.
+    #[serde(default)]
+    pub r#virtual: bool,
     /// This execution's state, in the read model's vocabulary (`ready|running|
     /// interrupted|completed|submitted|backed|cancelled|error|aborted|skipped|
     /// removed`), or `None` when the flow has not reached the node — it has no
@@ -258,15 +264,17 @@ impl ProcessGraph {
 
     /// The node's direct children by execution identity. An executed node's
     /// real children are the executions it admitted (or dynamic acts pushed
-    /// under it), named by its own model id. A virtual level the kernel never
-    /// admitted (`#in`, the fan-out's item container) hangs off the same
+    /// under it), named by its own model id. A *virtual* level the kernel
+    /// never admitted (`#in`, the fan-out's item container) hangs off the same
     /// enclosing execution as a *placeholder*, with the executions beneath it
-    /// parented by the placeholder's id — so each direct placeholder's chain
-    /// is walked and only the rows it terminates at are kept: a declaration
-    /// with no execution owns the placeholders sharing its enclosing
-    /// execution, and the rendered nesting stays the declared one (the
-    /// placeholder chain flattened into direct children would re-render the
-    /// whole subtree per folded level).
+    /// parented by the placeholder's id — so each direct virtual
+    /// placeholder's chain is walked and only the rows it terminates at are
+    /// kept: the kernel's wrappers fold away and the rendered nesting stays
+    /// the declared one (the placeholder chain flattened into direct children
+    /// would re-render the whole subtree per folded level). A *declared*
+    /// placeholder — an unreached branch or step — is no wrapper: it keeps its
+    /// row and nests its own unreached children under it, exactly the shape
+    /// the model declares.
     fn children(&self, node: &GraphNode) -> Vec<&GraphNode> {
         match node.tid.as_deref() {
             Some(tid) => {
@@ -280,7 +288,10 @@ impl ProcessGraph {
                     .collect();
                 loop {
                     let mut pulled: Vec<&GraphNode> = Vec::new();
-                    for placeholder in closure.iter().filter(|row| row.tid.is_none()) {
+                    for placeholder in closure
+                        .iter()
+                        .filter(|row| row.tid.is_none() && row.r#virtual)
+                    {
                         let name = placeholder.nid.as_str();
                         for row in &self.nodes {
                             if row.parent_tid.as_deref() == Some(tid)

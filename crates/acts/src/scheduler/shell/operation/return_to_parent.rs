@@ -30,6 +30,15 @@ use crate::utils::consts;
 const PARENT_WAIT_ROUNDS: usize = 50;
 const PARENT_WAIT_MS: u64 = 10;
 
+/// How long the hand-back waits for the child's channel events to finish
+/// dispatching before it unlocks the parent: a subscriber reads the child's
+/// stream and terminal event before the parent's continuation (see
+/// [`caps::lifecycle::EventDrain`]). The per-process emitter workers alone
+/// order one process's events, so without this fence the parent's next event
+/// could reach the channel before the child's completion. Best-effort — a
+/// stalled subscriber costs the fence this bound, never the run's progress.
+const EVENT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The durable parent linkage a subflow child carries on its root scope.
 struct ParentLink {
     pid: String,
@@ -261,6 +270,13 @@ impl Workers {
         let Some(root) = root_task(snapshot) else {
             return Ok(());
         };
+        // The subscriber's causal order: the child's channel events are
+        // dispatched before the waiting parent continues. Fencing before the
+        // op is committed (the durable ready record is what lets any pass
+        // drive the parent) keeps the whole dispatch path behind the fence.
+        if let Some(drain) = self.event_drain() {
+            drain.drain(&snapshot.process_id, EVENT_DRAIN_TIMEOUT).await;
+        }
         let mut current = snapshot.clone();
         for _ in 0..3 {
             if current.operations.iter().any(|(id, operation)| {
