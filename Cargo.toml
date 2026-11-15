@@ -34,7 +34,7 @@ repository = "https://github.com/yaojianpin/acts.git"
 # machine, and the MSRV-aware resolver (resolver "3" below) stops `cargo update`
 # from resolving a version the floor cannot compile.
 rust-version = "1.91"
-version = "0.25.0"
+version = "0.26.0"
 
 # Every version below is the single source of truth for the workspace: a member
 # referencing one of these crates MUST use `workspace = true` and may only add
@@ -91,7 +91,7 @@ strum = { version = "0.28", features = ["derive"] }
 # changelog. A member that needs the value <-> `serde_json` bridge turns on the
 # `json` feature (see `crates/acts`), which is off by default so the crate
 # itself has no dependencies at all.
-acts-expr = { path = "./crates/acts-expr", version = "0.25.0" }
+acts-expr = { path = "./crates/acts-expr", version = "0.26.0" }
 # grpc / web
 # 0.14 is split: `tonic` is the transport and the generated code's skeleton, the
 # prost codec and its codegen are the separate `tonic-prost`/`tonic-prost-build`
@@ -137,19 +137,19 @@ redis = { version = "1.7", default-features = false, features = [
 sha2 = "0.11"
 # dev
 serial_test = { version = "3", features = ["async"] }
-acts = { path = "./crates/acts", version = "0.25.0" }
-acts-channel = { path = "./crates/acts-channel", version = "0.25.0" }
-acts-proto = { path = "./crates/acts-proto", version = "0.25.0" }
-acts-acl = { path = "./crates/acts-acl", version = "0.25.0" }
-acts-store = { path = "./crates/acts-store", version = "0.25.0" }
-acts-package-http = { path = "./packages/acts-package-http", version = "0.25.0" }
-acts-package-shell = { path = "./packages/acts-package-shell", version = "0.25.0" }
-acts-package-state = { path = "./packages/acts-package-state", version = "0.25.0" }
-acts-package-nats = { path = "./packages/acts-package-nats", version = "0.25.0" }
-acts-package-javascript = { path = "./packages/acts-package-javascript", version = "0.25.0" }
-acts-plugin-grpc = { path = "./plugins/acts-plugin-grpc", version = "0.25.0" }
-acts-plugin-web = { path = "./plugins/acts-plugin-web", version = "0.25.0" }
-acts-plugin-nats = { path = "./plugins/acts-plugin-nats", version = "0.25.0" }
+acts = { path = "./crates/acts", version = "0.26.0" }
+acts-channel = { path = "./crates/acts-channel", version = "0.26.0" }
+acts-proto = { path = "./crates/acts-proto", version = "0.26.0" }
+acts-acl = { path = "./crates/acts-acl", version = "0.26.0" }
+acts-store = { path = "./crates/acts-store", version = "0.26.0" }
+acts-package-http = { path = "./packages/acts-package-http", version = "0.26.0" }
+acts-package-shell = { path = "./packages/acts-package-shell", version = "0.26.0" }
+acts-package-state = { path = "./packages/acts-package-state", version = "0.26.0" }
+acts-package-nats = { path = "./packages/acts-package-nats", version = "0.26.0" }
+acts-package-javascript = { path = "./packages/acts-package-javascript", version = "0.26.0" }
+acts-plugin-grpc = { path = "./plugins/acts-plugin-grpc", version = "0.26.0" }
+acts-plugin-web = { path = "./plugins/acts-plugin-web", version = "0.26.0" }
+acts-plugin-nats = { path = "./plugins/acts-plugin-nats", version = "0.26.0" }
 
 # The kernel persists through the aggregate document family on every
 # operation, so an unoptimized build pays its codec, hashing and formatting

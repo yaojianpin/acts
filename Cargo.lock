@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acts"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts-expr",
  "async-trait",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "acts-acl"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "async-trait",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "acts-channel"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "acts-acl",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "acts-cli"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "acts-acl",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "acts-expr"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "regex",
  "serde_json",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-http"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "async-trait",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-javascript"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "async-trait",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-nats"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "async-nats",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-shell"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "acts-acl",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-state"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "async-trait",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "acts-plugin-grpc"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "acts-acl",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "acts-plugin-nats"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "acts-acl",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "acts-plugin-web"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "acts-acl",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "acts-proto"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "nanoid",
  "parking_lot 0.12.5",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "acts-server"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "acts-acl",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "acts-store"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "acts",
  "async-trait",
