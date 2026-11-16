@@ -2,8 +2,8 @@ use crate::Config;
 use crate::event::EventAction;
 use crate::{
     ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, Engine, KvStore,
-    MemoryStore, MessageState, ScanOperation, ScanOptions, Vars, Workflow, utils,
-    utils::test::USES_IRQ, utils::test::USES_SET,
+    MemoryStore, MessageState, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard, Vars,
+    Workflow, utils, utils::test::USES_IRQ, utils::test::USES_SET,
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -698,6 +698,22 @@ impl KvStore for CustomStore {
     async fn delete(&self, key: &str) -> crate::Result<()> {
         self.data.lock().remove(key);
         Ok(())
+    }
+
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
+        for guard in guards {
+            let stored = self.one(&guard.key).await?;
+            if !guard.matches(stored.as_deref()) {
+                return Ok(false);
+            }
+        }
+        for op in ops {
+            match op {
+                StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await?,
+                StoreBatchOp::Delete { key } => self.delete(key).await?,
+            }
+        }
+        Ok(true)
     }
 
     async fn scan_prefix(

@@ -132,6 +132,10 @@ redis = { version = "1.7", default-features = false, features = [
     "tokio-comp",
 ] }
 sha2 = "0.11"
+# password hashing: the ACL's login credentials are Argon2id PHC strings
+# (see `crates/acts-acl`); parameters travel inside the PHC string, so a
+# verifier always uses what the hash itself declares.
+argon2 = "0.5"
 # dev
 serial_test = { version = "3", features = ["async"] }
 acts = { path = "./crates/acts", version = "0.26.0" }

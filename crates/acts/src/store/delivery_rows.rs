@@ -106,7 +106,7 @@ impl Store {
             delivery.status = DeliveryStatus::Created;
             delivery.retry_times = 0;
             delivery.update_time = utils::time::time_millis();
-            collection.update(&delivery).await?;
+            collection.upsert(&delivery).await?;
         }
 
         Ok(())
@@ -141,7 +141,7 @@ impl Store {
         delivery.status = DeliveryStatus::Created;
         delivery.retry_times = 0;
         delivery.update_time = utils::time::time_millis();
-        if collection.update(&delivery).await? {
+        if collection.upsert(&delivery).await? {
             Ok(Some(delivery))
         } else {
             Ok(None)

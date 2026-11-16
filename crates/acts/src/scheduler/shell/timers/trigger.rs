@@ -39,7 +39,7 @@ pub(crate) async fn fire_schedule(runtime: &Arc<Runtime>, event: &data::Event) -
         Some(schedule) => crate::scheduler::core::plan::cron::Cron::next_fire_millis(schedule),
         None => 0,
     };
-    runtime.store().events().update(&event).await?;
+    runtime.store().events().upsert(&event).await?;
     started.map(|_| ())
 }
 

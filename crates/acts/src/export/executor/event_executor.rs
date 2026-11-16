@@ -323,7 +323,7 @@ mod tests {
         let store = engine.runtime().store();
         let mut event = store.events().find("evt-probe:event1").await.unwrap();
         event.params = "not json".to_string();
-        store.events().update(&event).await.unwrap();
+        store.events().upsert(&event).await.unwrap();
 
         let err = executor
             .evt()

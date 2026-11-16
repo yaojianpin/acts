@@ -224,7 +224,7 @@ fn store_update_qps(c: &mut Criterion) {
                         let mut proc = procs.find(&ids[idx]).await.unwrap();
                         proc.state = "completed".to_string();
                         proc.mid = update_mid.clone();
-                        procs.update(&proc).await.unwrap();
+                        procs.upsert(&proc).await.unwrap();
                     }
                     // Cleanup
                     for id in &ids {
@@ -294,7 +294,7 @@ fn store_mixed_qps(c: &mut Criterion) {
                         // Update
                         let mut p = procs.find(&id).await.unwrap();
                         p.state = "completed".to_string();
-                        procs.update(&p).await.unwrap();
+                        procs.upsert(&p).await.unwrap();
                         // Find again
                         let _ = procs.find(&id).await.unwrap();
                         // Delete

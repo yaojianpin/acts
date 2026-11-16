@@ -176,7 +176,7 @@ impl Store {
                     update_time: utils::time::time_millis(),
                     ..pack.clone()
                 };
-                packages.update(&data).await
+                packages.upsert(&data).await
             }
             None => {
                 let data = Package {
@@ -496,7 +496,7 @@ impl Store {
         }
         let mut proc = proc;
         proc.removable = true;
-        procs.update(&proc).await?;
+        procs.upsert(&proc).await?;
         Ok(true)
     }
 
@@ -961,6 +961,24 @@ mod tests {
             options: ScanOptions,
         ) -> crate::Result<Vec<(String, Vec<u8>)>> {
             self.inner.scan_prefix(key, options).await
+        }
+
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
+            // Guards first, as one committed read would see them; a guarded
+            // read parks like any other when the get gate is armed.
+            for guard in guards {
+                let stored = self.one(&guard.key).await?;
+                if !guard.matches(stored.as_deref()) {
+                    return Ok(false);
+                }
+            }
+            for op in ops {
+                match op {
+                    StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await?,
+                    StoreBatchOp::Delete { key } => self.delete(key).await?,
+                }
+            }
+            Ok(true)
         }
     }
 

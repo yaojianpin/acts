@@ -169,7 +169,7 @@ impl ScheduleFixture {
     pub(crate) async fn make_due(&self) {
         let mut evt = self.store().events().find(&self.trigger_id).await.unwrap();
         evt.next_run = utils::time::time_millis() - 1000;
-        self.store().events().update(&evt).await.unwrap();
+        self.store().events().upsert(&evt).await.unwrap();
     }
 
     /// How many `schedule` rows this model has (a restart must not duplicate

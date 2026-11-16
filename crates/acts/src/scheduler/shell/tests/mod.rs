@@ -9305,7 +9305,7 @@ async fn a_restart_catches_up_only_the_rows_that_lag() {
     // and reads a state the aggregate left behind.
     row.state = "running".into();
     row.source_revision = "1.0.0".into();
-    store.tasks().update(&row).await.unwrap();
+    store.tasks().upsert(&row).await.unwrap();
 
     // A fresh host over the same store: no in-process projection claims.
     let (restarted, _wake) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
@@ -9495,7 +9495,7 @@ async fn a_proc_read_reprojects_a_lagging_row() {
         .unwrap();
     row.state = "running".into();
     row.source_revision = "1.0.0".into();
-    runtime.store().procs().update(&row).await.unwrap();
+    runtime.store().procs().upsert(&row).await.unwrap();
 
     let live = runtime
         .read_proc(&pid)

@@ -124,6 +124,7 @@ impl From<acts::actions::Error> for AppError {
         let status = match value {
             acts::actions::Error::Unauthenticated(_) => StatusCode::UNAUTHORIZED,
             acts::actions::Error::Denied(_) => StatusCode::FORBIDDEN,
+            acts::actions::Error::Conflict(_) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self {

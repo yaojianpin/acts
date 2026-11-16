@@ -696,7 +696,7 @@ macro_rules! gen_store_tests {
             store.procs().create(&proc).await.expect("create process");
 
             proc.state = "running".to_string();
-            store.procs().update(&proc).await.expect("update process");
+            store.procs().upsert(&proc).await.expect("update process");
 
             let p = store.procs().find(&proc.id).await.unwrap();
             assert_eq!(p.id, proc.id);
@@ -1019,7 +1019,7 @@ macro_rules! gen_store_tests {
             let id = comp_id(&pid, &tid);
             let mut task = store.tasks().find(&id.id()).await.unwrap();
             task.state = "running".to_string();
-            store.tasks().update(&task).await.unwrap();
+            store.tasks().upsert(&task).await.unwrap();
 
             let task2 = store.tasks().find(&id.id()).await.unwrap();
             assert_eq!(task.state, task2.state);
@@ -1374,7 +1374,7 @@ macro_rules! gen_store_tests {
             let mut msg = store.messages().find(&id.id()).await.unwrap();
             msg.state = MessageState::Completed;
             msg.name = "updated".to_string();
-            store.messages().update(&msg).await.unwrap();
+            store.messages().upsert(&msg).await.unwrap();
 
             let msg2 = store.messages().find(&id.id()).await.unwrap();
             assert_eq!(msg2.state, MessageState::Completed);
@@ -1720,7 +1720,7 @@ macro_rules! gen_store_tests {
             let mut p = store.packages().find(&package.id).await.unwrap();
             p.desc = "my desc".to_string();
             p.version = "0.2.0".to_string();
-            store.packages().update(&p).await.unwrap();
+            store.packages().upsert(&p).await.unwrap();
 
             let p2 = store.packages().find(&package.id).await.unwrap();
             assert_eq!(p2.desc, "my desc");
@@ -1883,7 +1883,7 @@ macro_rules! gen_store_tests {
             let mut updated = vars.clone();
             updated.data = json!({"a": 2, "b": 3}).to_string();
             updated.sealed = json!({"s": 1}).to_string();
-            store.vars().update(&updated).await.expect("update task vars");
+            store.vars().upsert(&updated).await.expect("update task vars");
 
             let found = store.vars().find(&vars.id).await.unwrap();
             assert_eq!(found.data, updated.data);

@@ -309,16 +309,19 @@ async fn serve_actions(
                     return;
                 }
             };
-            let principal = match engine.acl().authenticate(cmd.token.as_deref()) {
-                Ok(principal) => principal,
-                Err(err) => {
-                    tracing::warn!(name = %cmd.name, error = %err, "nats action unauthenticated");
+            let principal = match engine.acl().resolve(cmd.token.as_deref()).await {
+                acts::AuthenticationResult::Authenticated(principal) => principal,
+                acts::AuthenticationResult::MissingCredentials => engine.acl().anonymous(),
+                acts::AuthenticationResult::InvalidCredentials => {
+                    tracing::warn!(name = %cmd.name, "nats action unauthenticated");
                     if let Some(subject) = msg.reply {
                         let out = WireReply {
                             name: cmd.name,
                             ack: cmd.seq,
                             data: JsonValue::Null,
-                            err: Some(err.to_string()),
+                            err: Some(
+                                "unauthenticated: the credential is invalid or expired".to_string(),
+                            ),
                         };
                         let _ = client.publish(subject, reply_bytes(&out).into()).await;
                     }

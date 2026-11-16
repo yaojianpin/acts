@@ -144,7 +144,7 @@ mod tests {
             schema: "{}".to_string(),
             ..Default::default()
         };
-        assert!(store.packages().update(&updated).await.unwrap());
+        assert!(store.packages().upsert(&updated).await.unwrap());
         cache.invalidate_package("p1");
         let updated = cache.package(&store, "p1").await.unwrap();
         assert!(updated.validate(&json!({})).is_ok());

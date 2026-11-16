@@ -45,6 +45,7 @@ fn action_status(err: acts::actions::Error) -> Status {
         acts::actions::Error::Invalid(msg) => Status::invalid_argument(msg),
         acts::actions::Error::Unauthenticated(msg) => Status::unauthenticated(msg),
         acts::actions::Error::Denied(msg) => Status::permission_denied(msg),
+        acts::actions::Error::Conflict(msg) => Status::aborted(msg),
         acts::actions::Error::Internal(msg) => {
             tracing::error!("do-action err={msg}");
             Status::new(Code::Internal, msg)
@@ -184,9 +185,14 @@ impl GrpcServer {
             token.is_some()
         );
 
-        let principal = match self.engine.acl().authenticate(token.as_deref()) {
-            Ok(principal) => principal,
-            Err(err) => return Err(Status::unauthenticated(err.to_string())),
+        let principal = match self.engine.acl().resolve(token.as_deref()).await {
+            acts::AuthenticationResult::Authenticated(principal) => principal,
+            acts::AuthenticationResult::MissingCredentials => self.engine.acl().anonymous(),
+            acts::AuthenticationResult::InvalidCredentials => {
+                return Err(Status::unauthenticated(
+                    "the credential is invalid or expired",
+                ));
+            }
         };
 
         let name = message.name.clone();
@@ -221,11 +227,15 @@ impl ActsService for GrpcServer {
         // on its own, so a checked subscription and the key it occupies
         // cannot drift apart.
         let token = Self::bearer_token(&req);
-        let principal = self
-            .engine
-            .acl()
-            .authenticate(token.as_deref())
-            .map_err(|err| Status::unauthenticated(err.to_string()))?;
+        let principal = match self.engine.acl().resolve(token.as_deref()).await {
+            acts::AuthenticationResult::Authenticated(principal) => principal,
+            acts::AuthenticationResult::MissingCredentials => self.engine.acl().anonymous(),
+            acts::AuthenticationResult::InvalidCredentials => {
+                return Err(Status::unauthenticated(
+                    "the credential is invalid or expired",
+                ));
+            }
+        };
         let addr = req
             .remote_addr()
             .map(|addr| addr.to_string())
@@ -311,7 +321,8 @@ impl ActsService for GrpcServer {
         request: tonic::Request<Message>,
     ) -> Result<tonic::Response<Message>, tonic::Status> {
         let token = Self::bearer_token(&request);
-        self.do_action(request.into_inner(), token).await
+        let message = request.into_inner();
+        self.do_action(message, token).await
     }
 }
 

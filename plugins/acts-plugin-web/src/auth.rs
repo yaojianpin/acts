@@ -7,7 +7,7 @@
 //! handlers can hand it to `acts::actions::apply_as`. A request that cannot
 //! be authenticated is answered before any handler runs.
 
-use acts::{AclError, Engine};
+use acts::{AuthenticationResult, Engine};
 use axum::{
     extract::{Request, State},
     http::StatusCode,
@@ -16,6 +16,12 @@ use axum::{
 };
 use std::sync::Arc;
 /// Resolve the bearer token into a principal, or answer 401.
+///
+/// The three states are kept apart on purpose: no credential proceeds as the
+/// anonymous catalogue-only caller (the route's authorization decides), a
+/// credential that does not check out is refused with 401 before any handler
+/// runs — never folded into the anonymous caller — and a live session
+/// proceeds as its principal.
 pub async fn require_auth(
     State(engine): State<Arc<Engine>>,
     mut request: Request,
@@ -33,14 +39,16 @@ pub async fn require_auth(
         .map(str::trim)
         .filter(|token| !token.is_empty());
 
-    let principal = match engine.acl().authenticate(token) {
-        Ok(principal) => principal,
-        Err(err) => {
-            let status = match err {
-                AclError::Unauthenticated(_) => StatusCode::UNAUTHORIZED,
-                AclError::Denied(_) => StatusCode::FORBIDDEN,
-            };
-            return (status, err.to_string()).into_response();
+    let principal = match engine.acl().resolve(token).await {
+        AuthenticationResult::Authenticated(principal) => principal,
+        AuthenticationResult::MissingCredentials => engine.acl().anonymous(),
+        AuthenticationResult::InvalidCredentials => {
+            let status = StatusCode::UNAUTHORIZED;
+            return (
+                status,
+                "unauthenticated: the credential is invalid or expired".to_string(),
+            )
+                .into_response();
         }
     };
 

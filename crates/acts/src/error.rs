@@ -58,6 +58,12 @@ pub enum ActError {
     #[error("{0}")]
     Denied(String),
 
+    /// The row the caller read moved before its conditional write landed
+    /// (an ACL user patched concurrently, say). The caller re-reads and
+    /// retries; the server never merges two security patches on its own.
+    #[error("{0}")]
+    Conflict(String),
+
     /// Another live instance holds the database's exclusive lease. Startup
     /// refuses to run an engine on that database — a second engine over one
     /// database duplicates recovery and scheduling, which is what the lease

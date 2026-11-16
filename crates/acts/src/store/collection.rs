@@ -1072,18 +1072,25 @@ where
     }
 
     async fn create(&self, data: &Self::Item) -> crate::Result<bool> {
-        // `create` and `update` are the same write. Both may land on an id
-        // that already holds a document — the engine's find-then-create
-        // upserts (`publish`, `upsert_proc`, the task/vars rows) and two
-        // racing callers of either — and the invariant they maintain is one:
-        // after the write, the index rows of this id are exactly the keys
-        // derived from the stored document. A create that merely overwrote the
-        // data row would leave the previous document's index rows behind,
-        // answering queries for a value the row no longer holds.
-        self.write_document(data).await
+        // An insert, never an overwrite: the guard requires the id to hold no
+        // row, so a second create of the same id writes nothing and answers
+        // `false`. Callers that mean "write this state, whatever the current
+        // one" call `upsert`.
+        let json = serde_json::to_value(data).map_err(map_db_err)?;
+        let id = extract_id(&json)?;
+        let _lock = lock_docs([self.data_key(&id)]).await;
+        let ops = self.update_ops_json(&json).await?;
+        self.kv
+            .batch(&ops, &[StoreGuard::absent(self.data_key(&id))])
+            .await
     }
 
-    async fn update(&self, data: &Self::Item) -> crate::Result<bool> {
+    async fn upsert(&self, data: &Self::Item) -> crate::Result<bool> {
+        // The write that maintains one invariant: after it lands, the index
+        // rows of this id are exactly the keys derived from the stored
+        // document. A write that merely overwrote the data row would leave
+        // the previous document's index rows behind, answering queries for a
+        // value the row no longer holds.
         self.write_document(data).await
     }
 
@@ -1095,6 +1102,32 @@ where
         let ops = self.delete_ops(id).await?;
         self.kv.batch(&ops, &[]).await?;
         Ok(true)
+    }
+
+    async fn update_guarded(
+        &self,
+        data: &Self::Item,
+        expected: &Self::Item,
+    ) -> crate::Result<bool> {
+        // The guard is the expected row's serialized bytes — exactly what the
+        // stored row holds while it is still the one the caller read; the
+        // index diff is taken against the same expected row, so the stale
+        // index rows this write drops are the ones the guarded state carries.
+        let json = serde_json::to_value(data).map_err(map_db_err)?;
+        let id = extract_id(&json)?;
+        let old = serde_json::to_value(expected).map_err(map_db_err)?;
+        let _lock = lock_docs([self.data_key(&id)]).await;
+        let previous = self.index_keys(&old, &id);
+        let ops = self.update_ops_json_against(&json, Some(previous))?;
+        self.kv
+            .batch(
+                &ops,
+                &[StoreGuard::holds(
+                    self.data_key(&id),
+                    serde_json::to_vec(&old).map_err(map_db_err)?,
+                )],
+            )
+            .await
     }
 
     async fn query_all(&self, q: &Query) -> crate::Result<Vec<Self::Item>> {
@@ -2152,6 +2185,10 @@ mod tests {
             entries.reverse();
             Ok(entries)
         }
+
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
+            self.inner.batch(ops, guards).await
+        }
     }
 
     /// A query whose filter selects nothing must not pay for the ordering
@@ -2431,7 +2468,7 @@ mod tests {
         col.create(&doc("d1", "idle", 5)).await.unwrap();
         kv.batches.store(0, Ordering::SeqCst);
 
-        col.update(&doc("d1", "running", 9)).await.unwrap();
+        col.upsert(&doc("d1", "running", 9)).await.unwrap();
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
             1,
@@ -2712,13 +2749,13 @@ mod tests {
         kv.arm();
         let first = {
             let col = col.clone();
-            tokio::spawn(async move { col.update(&doc("d1", "b", 1)).await })
+            tokio::spawn(async move { col.upsert(&doc("d1", "b", 1)).await })
         };
         kv.wait_entered(1).await;
 
         let second = {
             let col = col.clone();
-            tokio::spawn(async move { col.update(&doc("d1", "a", 2)).await })
+            tokio::spawn(async move { col.upsert(&doc("d1", "a", 2)).await })
         };
         // Give the second update every chance to run: it must wait for the
         // document lock instead of reading the version the first one mutates.
@@ -2774,7 +2811,7 @@ mod tests {
 
         let updater = {
             let col = col.clone();
-            tokio::spawn(async move { col.update(&doc("d1", "b", 2)).await })
+            tokio::spawn(async move { col.upsert(&doc("d1", "b", 2)).await })
         };
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert_eq!(
@@ -2911,7 +2948,7 @@ mod tests {
         let parked = {
             let col = col.clone();
             let id = ids[0].clone();
-            tokio::spawn(async move { col.update(&doc(&id, "running", 2)).await })
+            tokio::spawn(async move { col.upsert(&doc(&id, "running", 2)).await })
         };
         kv.wait_entered(1).await;
         assert!(
@@ -2935,7 +2972,7 @@ mod tests {
             let ids = ids.clone();
             tasks.push(tokio::spawn(async move {
                 for id in ids {
-                    col.update(&doc(&id, "running", 3 + i)).await.unwrap();
+                    col.upsert(&doc(&id, "running", 3 + i)).await.unwrap();
                 }
             }));
         }
