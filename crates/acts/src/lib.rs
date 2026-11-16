@@ -72,8 +72,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use crate::scheduler::{Context, HealthState, SchedulerHealth};
 pub use acl::{
     ACTION_LOGIN, ACTION_LOGOUT, ACTION_REFRESH, ACTION_SETUSER, ACTION_SUBSCRIBE, ACTION_WHOAMI,
-    ANONYMOUS_ALLOW, ANONYMOUS_ROLE, AccessControl, AclError, AnonymousAcl, CATALOG_GROUPS,
-    DisabledAcl, LoginTokens, Principal, ScopePolicy, UserPolicy, UserSpec, action_catalog,
+    ANONYMOUS_ALLOW, ANONYMOUS_ROLE, AccessControl, AclError, AnonymousAcl, AuthenticationResult,
+    CATALOG_GROUPS, DisabledAcl, LoginTokens, Principal, ScopePolicy, UserPolicy, UserSpec,
+    action_catalog,
 };
 pub use builder::EngineBuilder;
 pub use caps::Capability;

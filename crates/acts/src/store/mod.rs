@@ -561,13 +561,20 @@ pub trait DbCollection: Send + Sync {
         query: &Query,
         pred: &(dyn for<'a> Fn(&'a Self::Item) -> bool + Sync),
     ) -> Result<Option<Self::Item>>;
+    /// Write `data` under its id **only while the id holds no stored row** —
+    /// an insert, never an overwrite. `Ok(false)` says the row already exists
+    /// and nothing was written; callers that mean "write this state, whatever
+    /// the current one" use [`DbCollection::upsert`].
+    async fn create(&self, data: &Self::Item) -> Result<bool>;
     /// Write `data` as the document of its id, replacing any stored document
     /// together with the index rows it no longer matches.
-    async fn create(&self, data: &Self::Item) -> Result<bool>;
-    /// Same write as [`DbCollection::create`].
-    async fn update(&self, data: &Self::Item) -> Result<bool>;
+    async fn upsert(&self, data: &Self::Item) -> Result<bool>;
     /// Remove the document and every index row of it.
     async fn delete(&self, id: &str) -> Result<bool>;
+    /// Replace the stored row of `data`'s id — only while it still holds
+    /// `expected` exactly (the row the caller read). `false` says the stored
+    /// row moved: nothing was applied.
+    async fn update_guarded(&self, data: &Self::Item, expected: &Self::Item) -> Result<bool>;
 }
 
 #[cfg(test)]
@@ -575,7 +582,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[derive(Debug, Deserialize, Serialize, PartialEq)]
+    #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
     struct Row {
         id: String,
         #[serde(default)]
@@ -596,6 +603,74 @@ mod tests {
             ActError::Store(message) => assert!(message.contains("expected")),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    fn row_store() -> Store {
+        Store::new(std::sync::Arc::new(MemoryStore::new()))
+    }
+
+    fn row(id: &str, v: i32) -> Row {
+        Row {
+            id: id.to_string(),
+            v,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_never_overwrites() {
+        let store = row_store();
+        let rows = store.collection::<Row>();
+
+        assert!(rows.create(&row("a", 1)).await.unwrap());
+        // the second insert is refused and the stored row is untouched
+        assert!(!rows.create(&row("a", 2)).await.unwrap());
+        assert_eq!(rows.find("a").await.unwrap(), row("a", 1));
+        // upsert is the write that does replace
+        assert!(rows.upsert(&row("a", 2)).await.unwrap());
+        assert_eq!(rows.find("a").await.unwrap(), row("a", 2));
+    }
+
+    #[tokio::test]
+    async fn update_guarded_refuses_a_stale_row() {
+        let store = row_store();
+        let rows = store.collection::<Row>();
+        rows.create(&row("a", 1)).await.unwrap();
+
+        // a write decided against the stored row lands
+        assert!(
+            rows.update_guarded(&row("a", 2), &row("a", 1))
+                .await
+                .unwrap()
+        );
+        assert_eq!(rows.find("a").await.unwrap(), row("a", 2));
+        // a write decided against the pre-update row is refused wholesale
+        assert!(
+            !rows
+                .update_guarded(&row("a", 3), &row("a", 1))
+                .await
+                .unwrap()
+        );
+        assert_eq!(rows.find("a").await.unwrap(), row("a", 2));
+    }
+
+    #[tokio::test]
+    async fn upsert_rebuilds_the_index_rows() {
+        let store = row_store();
+        let rows = store.collection::<Row>();
+        rows.create(&row("a", 1)).await.unwrap();
+        rows.upsert(&row("a", 2)).await.unwrap();
+        // the replaced document's index row is gone and the new one answers
+        let q = Query {
+            offset: 0,
+            limit: 10,
+            filter: Some(Filter {
+                r#type: FilterType::And,
+                exprs: vec![FilterExpr::Expr(Expr::eq("v", 2))],
+            }),
+            order_by: Vec::new(),
+        };
+        let page = rows.query(&q).await.unwrap();
+        assert_eq!(page.rows, vec![row("a", 2)]);
     }
 
     #[test]

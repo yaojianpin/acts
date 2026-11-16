@@ -513,7 +513,7 @@ fn remove_workdir(pid: &str, dir: Option<std::path::PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{KvStore, MemoryStore, ScanOptions};
+    use crate::store::{KvStore, MemoryStore, ScanOptions, StoreBatchOp, StoreGuard};
     use crate::utils::shared;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -683,6 +683,22 @@ mod tests {
 
         fn saturated(&self) -> bool {
             self.stressed.load(Ordering::SeqCst)
+        }
+
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+            for guard in guards {
+                let stored = self.inner.one(&guard.key).await?;
+                if !guard.matches(stored.as_deref()) {
+                    return Ok(false);
+                }
+            }
+            for op in ops {
+                match op {
+                    StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await?,
+                    StoreBatchOp::Delete { key } => self.delete(key).await?,
+                }
+            }
+            Ok(true)
         }
     }
 

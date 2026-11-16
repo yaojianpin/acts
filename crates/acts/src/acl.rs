@@ -165,6 +165,12 @@ pub struct UserSpec {
     /// Passwords to remove, by their plaintext value.
     #[serde(default)]
     pub rm_passwords: Vec<String>,
+    /// Force every live session of the user out by bumping its security
+    /// version — the O(1) "log this user out everywhere" switch.
+    pub force_logout: Option<bool>,
+    /// Active sessions this user may hold at once (`None` keeps the current
+    /// setting; new users default to the registry cap).
+    pub max_sessions: Option<u32>,
     /// Command/catalog patterns the user may run (`model:*`, `@read`,
     /// `@deploy`, `@execute`); replaces the current list.
     pub allow: Option<Vec<String>>,
@@ -179,7 +185,7 @@ pub struct UserSpec {
 }
 
 /// What `acl:login` and `acl:refresh` answer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LoginTokens {
     /// The access token: present it as the `authorization: Bearer …`
     /// credential on every request.
@@ -191,6 +197,24 @@ pub struct LoginTokens {
     pub expires_in: i64,
     /// Refresh-token lifetime, seconds.
     pub refresh_expires_in: i64,
+}
+
+/// A token is a secret: `Debug` shows its shape (the `at_`/`rt_` prefix and
+/// its length) so log lines stay useful without carrying a usable credential.
+impl std::fmt::Debug for LoginTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginTokens")
+            .field("token", &mask_token(&self.token))
+            .field("refresh_token", &mask_token(&self.refresh_token))
+            .field("expires_in", &self.expires_in)
+            .field("refresh_expires_in", &self.refresh_expires_in)
+            .finish()
+    }
+}
+
+fn mask_token(token: &str) -> String {
+    let head: String = token.chars().take(6).collect();
+    format!("{head}…(len={})", token.chars().count())
 }
 
 /// The authority carried by a process: which snapshot targets the process
@@ -690,6 +714,30 @@ impl Principal {
     }
 }
 
+/// What [`AccessControl::resolve`] decided about a request's credential.
+///
+/// Three states, kept apart on purpose: "no credential" is routed by route
+/// policy, "a credential that checks out" proceeds, and "a credential that
+/// does not" is refused with 401/UNAUTHENTICATED — never folded into the
+/// anonymous catalogue-only caller, which is what turned a forged token into
+/// a 403 before (audit ACL-AUTH-01).
+//
+// The authenticated variant carries the whole compiled principal (≈280 bytes)
+// and is passed by value exactly once per request, never stored; boxing it
+// would turn every authenticated request into one heap allocation purely to
+// shrink a stack temporary that dies at the end of the match.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum AuthenticationResult {
+    /// The request carried no token.
+    MissingCredentials,
+    /// The token resolved to a live session.
+    Authenticated(Principal),
+    /// The request carried a token that resolves to nothing: unknown,
+    /// expired, consumed, revoked, or its subject no longer matches.
+    InvalidCredentials,
+}
+
 /// The engine's access control, as the engine uses it: authenticate a request,
 /// log in and out, and manage the users behind it.
 ///
@@ -708,9 +756,35 @@ pub trait AccessControl: Send + Sync + fmt::Debug {
     /// through as [`Principal::unrestricted`].
     fn enabled(&self) -> bool;
 
+    /// Whether `subject` must change its password before anything else: the
+    /// engine then refuses every action except the password change itself
+    /// (`acl:setuser` naming the subject with a new password); the change
+    /// bumps the security version, so the next request must log in again.
+    /// `false` — the default — means no initial-state account exists.
+    fn password_change_required(&self, subject: &str) -> bool {
+        let _ = subject;
+        false
+    }
+
     /// Resolve a request's token into a principal. An absent, unknown or
     /// expired token resolves to the anonymous catalogue-only principal.
     fn authenticate(&self, token: Option<&str>) -> std::result::Result<Principal, AclError>;
+
+    /// Resolve a request's token into one of three states (see
+    /// [`AuthenticationResult`]). The default maps a legacy
+    /// [`AccessControl::authenticate`] implementation onto the states; an
+    /// implementation that tracks session state precisely overrides it.
+    async fn resolve(&self, token: Option<&str>) -> AuthenticationResult {
+        match token.map(str::trim).filter(|token| !token.is_empty()) {
+            None => AuthenticationResult::MissingCredentials,
+            Some(token) => match self.authenticate(Some(token)) {
+                Ok(principal) if principal.is_authenticated() => {
+                    AuthenticationResult::Authenticated(principal)
+                }
+                _ => AuthenticationResult::InvalidCredentials,
+            },
+        }
+    }
 
     /// The principal a request without a valid token resolves to.
     fn anonymous(&self) -> Principal {

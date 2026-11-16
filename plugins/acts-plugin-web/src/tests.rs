@@ -1208,13 +1208,14 @@ async fn http_auth_accepts_both_bearer_spellings() {
 }
 
 /// A header that is not UTF-8 (or not a bearer credential) is no credential:
-/// the middleware answers 401/403 from the ACL, never a 500 from a header it
-/// could not parse.
+/// the middleware answers 401 from the three-state resolution, never a 500
+/// from a header it could not parse. Authorization denials belong to the
+/// action layer — a credential that does not check out is always 401.
 #[tokio::test(flavor = "multi_thread")]
 async fn http_auth_maps_acl_failures_to_401_and_403() {
     for (mode, expected) in [
         (FailingAclMode::Unauthenticated, 401),
-        (FailingAclMode::Denied, 403),
+        (FailingAclMode::Denied, 401),
     ] {
         let port = free_port();
         let table: toml::Table = toml::from_str(&format!("[web]\nport = {port}\n")).unwrap();

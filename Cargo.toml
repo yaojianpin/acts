@@ -13,8 +13,6 @@ resolver = "3"
 
 [workspace.package]
 authors = ["Yao <yaojianpin@sohu.com>"]
-description = "a fast, lightweight, extensiable workflow engine"
-keywords = ["workflow"]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/yaojianpin/acts.git"
@@ -104,7 +102,6 @@ tonic = { version = "0.14", default-features = false, features = [
 ] }
 tonic-prost = "0.14"
 prost = "0.14"
-prost-types = "0.14"
 axum = "0.8"
 validator = { version = "0.21.0", features = ["derive"] }
 # shell
@@ -135,6 +132,10 @@ redis = { version = "1.7", default-features = false, features = [
     "tokio-comp",
 ] }
 sha2 = "0.11"
+# password hashing: the ACL's login credentials are Argon2id PHC strings
+# (see `crates/acts-acl`); parameters travel inside the PHC string, so a
+# verifier always uses what the hash itself declares.
+argon2 = "0.5"
 # dev
 serial_test = { version = "3", features = ["async"] }
 acts = { path = "./crates/acts", version = "0.26.0" }

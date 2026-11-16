@@ -33,6 +33,9 @@ pub enum Error {
     /// Authenticated caller without the right to run the action (or to name
     /// the snapshot scope it targets).
     Denied(String),
+    /// The row the caller read moved before its conditional write landed —
+    /// re-read and retry. Transports answer 409 / `aborted`.
+    Conflict(String),
 }
 
 impl fmt::Display for Error {
@@ -43,6 +46,7 @@ impl fmt::Display for Error {
             Error::Internal(msg) => f.write_str(msg),
             Error::Unauthenticated(msg) => write!(f, "unauthenticated: {msg}"),
             Error::Denied(msg) => write!(f, "permission denied: {msg}"),
+            Error::Conflict(msg) => write!(f, "conflict: {msg}"),
         }
     }
 }
@@ -96,6 +100,7 @@ fn acl_error(err: crate::ActError) -> Error {
         | crate::ActError::Action(msg) => Error::Invalid(msg),
         crate::ActError::Unauthenticated(msg) => Error::Unauthenticated(msg),
         crate::ActError::Denied(msg) => Error::Denied(msg),
+        crate::ActError::Conflict(msg) => Error::Conflict(msg),
         other => Error::Internal(other.to_string()),
     }
 }
@@ -154,14 +159,33 @@ pub async fn apply_as(
     }
     // `acl:setuser`, `acl:deluser`, `acl:getuser`, `acl:users` are admin
     // operations like any other: the action check below decides.
-    // The action check for the operations the executor does not own: the
-    // snapshot data plane (checked here and by `check_scope` below) and
-    // `msg:sub` (which answers a channel key rather than touching the
-    // engine). Every operation that does go through the executor is checked
-    // again there, against the same principal — one policy, enforced at each
-    // entry point, so a caller that reaches the executor directly is held to
-    // exactly what this table would grant it.
-    crate::acl::check_action(principal, name).map_err(deny)?;
+    // The initial-state exception: an account that still answers the default
+    // password may change that password and nothing else — every other
+    // action is refused until it does, and the change forces a fresh login.
+    let must_change =
+        principal.is_authenticated() && engine.acl().password_change_required(principal.subject());
+    if must_change {
+        let changes_own_password = name == crate::acl::ACTION_SETUSER
+            && options.get::<crate::UserSpec>("user").is_some_and(|spec| {
+                spec.name.trim() == principal.subject() && !spec.add_passwords.is_empty()
+            });
+        if !changes_own_password {
+            return Err(deny(crate::AclError::Denied(
+                "the account still uses its initial password: change it first \
+                 (acl:setuser naming yourself with a new password), then log in again"
+                    .to_string(),
+            )));
+        }
+    } else {
+        // The action check for the operations the executor does not own: the
+        // snapshot data plane (checked here and by `check_scope` below) and
+        // `msg:sub` (which answers a channel key rather than touching the
+        // engine). Every operation that does go through the executor is
+        // checked again there, against the same principal — one policy,
+        // enforced at each entry point, so a caller that reaches the executor
+        // directly is held to exactly what this table would grant it.
+        crate::acl::check_action(principal, name).map_err(deny)?;
+    }
 
     let executor = engine.executor(principal);
     match name {
@@ -535,6 +559,130 @@ mod tests {
     use super::*;
     use crate::TaskState;
     use crate::utils::consts;
+
+    /// An ACL whose one user is stuck in the initial state: the token
+    /// authenticates, but the password still has to change.
+    #[derive(Debug)]
+    struct MustChangeAcl;
+
+    #[async_trait::async_trait]
+    impl crate::AccessControl for MustChangeAcl {
+        async fn load(&self, _store: std::sync::Arc<crate::Store>) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn enabled(&self) -> bool {
+            true
+        }
+
+        fn password_change_required(&self, subject: &str) -> bool {
+            subject == "u1"
+        }
+
+        fn authenticate(
+            &self,
+            token: Option<&str>,
+        ) -> std::result::Result<crate::Principal, crate::AclError> {
+            if token == Some("u1-token") {
+                return Ok(principal(&user("u1", &["model:ls", "acl:setuser"])));
+            }
+            Ok(crate::Principal::anonymous())
+        }
+
+        async fn login(
+            &self,
+            _user: &str,
+            _password: &str,
+        ) -> std::result::Result<crate::LoginTokens, crate::AclError> {
+            Err(crate::AclError::Denied("test acl".to_string()))
+        }
+
+        async fn refresh(
+            &self,
+            _refresh_token: &str,
+        ) -> std::result::Result<crate::LoginTokens, crate::AclError> {
+            Err(crate::AclError::Denied("test acl".to_string()))
+        }
+
+        async fn logout(&self, _token: &str) -> crate::Result<bool> {
+            Ok(false)
+        }
+
+        async fn set_user(&self, _spec: &crate::UserSpec) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn del_user(&self, _name: &str) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn user_names(&self) -> Vec<String> {
+            vec!["u1".to_string()]
+        }
+
+        async fn get_user(&self, _name: &str) -> Option<serde_json::Value> {
+            None
+        }
+    }
+
+    /// The initial-state gate: a logged-in account that still answers the
+    /// default password may change that password and do nothing else.
+    #[tokio::test]
+    async fn an_initial_state_account_can_only_change_its_own_password() {
+        let engine = crate::Engine::builder()
+            .set_acl(std::sync::Arc::new(MustChangeAcl))
+            .start()
+            .await
+            .unwrap();
+        let principal = engine.acl().authenticate(Some("u1-token")).unwrap();
+        assert!(principal.is_authenticated());
+
+        // an ordinary action the policy allows is still refused by the gate
+        let err = apply_as(&engine, &principal, "model:ls", Vars::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+
+        // a setuser naming someone else is refused too
+        let err = apply_as(
+            &engine,
+            &principal,
+            "acl:setuser",
+            Vars::new().with("user", json!({ "name": "u2", "add_passwords": ["p"] })),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+
+        // the password change naming itself passes the gate
+        let ok = apply_as(
+            &engine,
+            &principal,
+            "acl:setuser",
+            Vars::new().with("user", json!({ "name": "u1", "add_passwords": ["new"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok, json!(true));
+
+        // the anonymous caller is not gated by an initial state at all: its
+        // own policy still decides — catalogue reads pass, the rest needs a
+        // credential
+        let anonymous = engine.anonymous();
+        assert!(
+            apply_as(&engine, &anonymous, "model:ls", Vars::new())
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            apply_as(&engine, &anonymous, "model:deploy", Vars::new())
+                .await
+                .unwrap_err(),
+            Error::Unauthenticated(_)
+        ));
+
+        engine.close().await;
+    }
 
     /// An engine with access control explicitly off. These cases exercise the
     /// dispatch table itself, so their caller must be unrestricted: the
