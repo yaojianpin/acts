@@ -82,6 +82,18 @@ pub const ACCESS_TOKEN_TTL_SECS: i64 = 3600;
 /// How long a refresh token may rotate a session, in seconds.
 pub const REFRESH_TOKEN_TTL_SECS: i64 = 7 * 24 * 3600;
 
+/// The `[acl]` server settings, read by `acts-server` from its config and
+/// applied with [`UserAcl::with_options`]. Every field is optional: an
+/// omitted one keeps the environment default.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct AclOptions {
+    /// The total number of live sessions the registry keeps, counted across
+    /// every user — one user may hold several. A login past the cap is
+    /// refused with the total it would exceed; no other session is evicted.
+    /// Omitted: `ACTS_ACL_MAX_SESSIONS`, else no cap. Zero reads as no cap.
+    pub max_sessions: Option<u32>,
+}
+
 const USERS_PREFIX: &str = "acl_users";
 const SESSIONS_PREFIX: &str = "acl_sessions";
 
@@ -105,8 +117,8 @@ struct AclConfig {
     login_backoff_max_secs: i64,
     /// Stored credentials a user may hold at once.
     max_passwords: usize,
-    /// Active sessions a user holds by default (`max_sessions` overrides).
-    default_max_sessions: usize,
+    /// The total live sessions the registry keeps; `None` is no cap.
+    max_sessions: Option<usize>,
     /// How long a cached session row trusts itself, millis. Past it the store
     /// re-reads — the multi-instance convergence bound.
     session_ttl_ms: i64,
@@ -123,21 +135,25 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-static ACL_CONFIG: LazyLock<AclConfig> = LazyLock::new(|| AclConfig {
-    // the OWASP starting point; a budgeted deployment raises these (see the
-    // crate README) and the parameters travel inside every PHC string, so
-    // existing hashes keep verifying
-    argon2_m: env_num("ACTS_ARGON2_M_KIB", 19_456),
-    argon2_t: env_num("ACTS_ARGON2_T", 2),
-    argon2_p: env_num("ACTS_ARGON2_P", 1),
-    kdf_permits: env_num("ACTS_ACL_KDF_CONCURRENCY", 8).max(1),
-    login_max_failures: env_num("ACTS_ACL_LOGIN_MAX_FAILURES", 5).max(1),
-    login_backoff_max_secs: env_num("ACTS_ACL_LOGIN_BACKOFF_MAX_SECS", 900),
-    max_passwords: env_num("ACTS_ACL_MAX_PASSWORDS", 3).max(1),
-    default_max_sessions: env_num("ACTS_ACL_MAX_SESSIONS", 10).max(1),
-    session_ttl_ms: env_num("ACTS_ACL_SESSION_TTL_MS", 5_000i64).max(0),
-    user_ttl_ms: env_num("ACTS_ACL_HEADER_TTL_MS", 2_000i64).max(0),
-    gc_interval_secs: env_num("ACTS_ACL_GC_INTERVAL_SECS", 60u64).max(5),
+static ACL_CONFIG: LazyLock<AclConfig> = LazyLock::new(|| {
+    // zero is "no cap", the convention the other unbounded knobs use
+    let max_sessions = env_num::<usize>("ACTS_ACL_MAX_SESSIONS", 0);
+    AclConfig {
+        // the OWASP starting point; a budgeted deployment raises these (see
+        // the crate README) and the parameters travel inside every PHC
+        // string, so existing hashes keep verifying
+        argon2_m: env_num("ACTS_ARGON2_M_KIB", 19_456),
+        argon2_t: env_num("ACTS_ARGON2_T", 2),
+        argon2_p: env_num("ACTS_ARGON2_P", 1),
+        kdf_permits: env_num("ACTS_ACL_KDF_CONCURRENCY", 8).max(1),
+        login_max_failures: env_num("ACTS_ACL_LOGIN_MAX_FAILURES", 5).max(1),
+        login_backoff_max_secs: env_num("ACTS_ACL_LOGIN_BACKOFF_MAX_SECS", 900),
+        max_passwords: env_num("ACTS_ACL_MAX_PASSWORDS", 3).max(1),
+        max_sessions: (max_sessions > 0).then_some(max_sessions),
+        session_ttl_ms: env_num("ACTS_ACL_SESSION_TTL_MS", 5_000i64).max(0),
+        user_ttl_ms: env_num("ACTS_ACL_HEADER_TTL_MS", 2_000i64).max(0),
+        gc_interval_secs: env_num("ACTS_ACL_GC_INTERVAL_SECS", 60u64).max(5),
+    }
 });
 
 /// The bootstrap password from the environment; test builds ignore the host's
@@ -309,8 +325,6 @@ pub struct AclUser {
     /// Argon2id PHC password strings (`$argon2id$…`); an empty list means
     /// the user has no usable credential
     pub passwords: Vec<String>,
-    /// active sessions this user may hold at once (`None` = the default cap)
-    pub max_sessions: Option<u32>,
     /// the initial-state flag: while set, the account answered the builtin
     /// default password and every action but the password change is refused
     /// (and logout); the change clears it and the security bump forces a
@@ -406,7 +420,7 @@ pub enum SessionState {
     },
     Revoked {
         at: i64,
-        /// logout / replay / expired / quota_evicted
+        /// logout / replay / expired
         reason: String,
     },
 }
@@ -440,6 +454,14 @@ pub struct AclSession {
     /// refresh-token expiry, millis since epoch
     pub refresh_expiry: i64,
     pub state: SessionState,
+    /// whether this row is a live connection: set on mint, cleared with every
+    /// terminal transition (consumed, revoked). The index lets the global
+    /// `max_sessions` count read the live total without scanning the backlog
+    /// of dead rows a rotation leaves for the rest of its refresh TTL. Rows
+    /// written before the field existed read as inactive, so they can only
+    /// under-count a cap, never exhaust it.
+    #[serde(default)]
+    pub active: bool,
     /// bumped on every guarded state write (diagnostics)
     pub revision: u64,
 
@@ -457,7 +479,9 @@ impl DbCollectionIden for AclSession {
     fn indexed_fields() -> &'static [&'static str] {
         // `state` is deliberately not indexed: the internally tagged enum
         // serializes as a nested object, which no scalar filter can match —
-        // callers that care filter in memory after a `user`/`family_id` scan
+        // callers that care use the scalar `active` mirror (minted and
+        // cleared with the state) or filter in memory after a `user`/
+        // `family_id` scan
         &[
             "timestamp",
             "create_time",
@@ -465,6 +489,7 @@ impl DbCollectionIden for AclSession {
             "refresh",
             "user",
             "family_id",
+            "active",
         ]
     }
     fn ordered_index_fields() -> &'static [&'static str] {
@@ -554,6 +579,9 @@ pub struct UserAcl {
     kdf_permits: Arc<Semaphore>,
     /// Per-name login budget (failure backoff + attempt bucket).
     budget: Mutex<LoginBudget>,
+    /// The total live-session cap from [`AclOptions`]; `None` keeps
+    /// `ACTS_ACL_MAX_SESSIONS`. It counts every user's sessions together.
+    max_sessions: Option<usize>,
 }
 
 /// One GC loop per process, whatever the embedder constructs.
@@ -593,7 +621,19 @@ impl UserAcl {
             refresh: RwLock::new(HashMap::new()),
             kdf_permits: Arc::new(Semaphore::new(acl_config().kdf_permits)),
             budget: Mutex::new(LoginBudget::default()),
+            max_sessions: None,
         }
+    }
+
+    /// Apply the [`AclOptions`] (`acts-server` reads its `[acl]` section into
+    /// them). Call it before the registry is bound to a store — the engine's
+    /// builder does that when it starts.
+    pub fn with_options(mut self, options: AclOptions) -> Self {
+        self.max_sessions = options
+            .max_sessions
+            .filter(|cap| *cap > 0)
+            .map(|cap| cap as usize);
+        self
     }
 
     /// The users currently loaded, by name.
@@ -634,6 +674,7 @@ impl UserAcl {
             access_expiry: now + ACCESS_TOKEN_TTL_SECS * 1000,
             refresh_expiry: now + REFRESH_TOKEN_TTL_SECS * 1000,
             state: SessionState::Active,
+            active: true,
             revision: 1,
             create_time: now,
             update_time: now,
@@ -840,6 +881,7 @@ impl UserAcl {
                     at: now,
                     reason: "replay".to_string(),
                 };
+                dead.active = false;
                 dead.revision += 1;
                 dead.update_time = now;
                 dead.timestamp = now;
@@ -865,69 +907,98 @@ impl UserAcl {
         AclError::Unauthenticated("the refresh token is unknown or was already used".to_string())
     }
 
-    /// Evict the oldest active sessions past the user's cap, best effort: a
-    /// lost eviction or a failed scan still lets the login through (the cap
-    /// is a budget, not a security boundary), and concurrent logins may
-    /// overshoot by the design-accepted epsilon.
-    async fn enforce_quota(&self, user: &CompiledUser) {
-        let cap = user
-            .row
+    /// Refuse a login that would take the registry past its total session
+    /// cap (`[acl] max_sessions` / `ACTS_ACL_MAX_SESSIONS`). The count is the
+    /// live total across every user — one user may hold several — and it is
+    /// read from the `active` index, so the dead rows a rotation leaves for
+    /// the rest of its refresh TTL do not count. Nothing is evicted: a cap is
+    /// a capacity decision, and evicting another caller's session to admit
+    /// one would turn a login into a kick. Concurrent logins may overshoot by
+    /// the design-accepted epsilon (the count and the mint are two steps).
+    async fn check_session_capacity(&self) -> std::result::Result<(), AclError> {
+        let cap = self
             .max_sessions
-            .map(|value| value as usize)
-            .unwrap_or(acl_config().default_max_sessions);
+            .or(acl_config().max_sessions)
+            .unwrap_or(usize::MAX);
+        if cap == usize::MAX {
+            return Ok(());
+        }
         let Some(store) = self.store() else {
-            return;
+            return Ok(());
         };
         let query = Query {
             offset: 0,
-            limit: (cap + 1).clamp(1, 100),
+            limit: 1,
             filter: Some(Filter {
                 r#type: FilterType::And,
-                exprs: vec![FilterExpr::Expr(Expr::eq("user", user.row.id.clone()))],
+                exprs: vec![FilterExpr::Expr(Expr::eq("active", true))],
             }),
             order_by: Vec::new(),
         };
-        let rows = match store.collection::<AclSession>().query(&query).await {
-            Ok(page) => page.rows,
+        let live = match store.collection::<AclSession>().query(&query).await {
+            Ok(page) => page.count,
             Err(err) => {
-                tracing::warn!(error = %err, "session quota scan failed");
-                return;
+                // fail closed: the cap exists to bound the registry, and a
+                // count that cannot be read is not evidence that room exists
+                return Err(AclError::Denied(format!(
+                    "the session total could not be checked: {err}"
+                )));
             }
         };
-        let mut live: Vec<AclSession> = rows
-            .into_iter()
-            .filter(|row| matches!(row.state, SessionState::Active))
-            .collect();
-        if live.len() < cap {
-            return;
+        if live >= cap {
+            return Err(AclError::Denied(format!(
+                "the server already holds {live} of its {cap} sessions; \
+                 log one out or raise max_sessions"
+            )));
         }
-        live.sort_by_key(|row| row.create_time);
-        let evict = live.len().saturating_sub(cap - 1);
+        Ok(())
+    }
+
+    /// Load one user row, let `change` edit it, and write it back with the
+    /// compare-and-swap, bumping the security version so every token issued
+    /// before the write stops resolving. Answers `false` (and writes
+    /// nothing) when the user does not exist — a patch must never create a
+    /// user. `change` answers `false` when it left the row untouched, in
+    /// which case nothing is written at all.
+    async fn patch_user(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut AclUser) -> bool,
+    ) -> Result<bool> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ActError::Config(
+                "acl user name cannot be empty".to_string(),
+            ));
+        }
+        let store = self
+            .store()
+            .ok_or_else(|| ActError::Store("the acl is not bound to a store".to_string()))?;
+        let col = store.collection::<AclUser>();
+        let Some(expected) = col.find_opt(name).await? else {
+            return Ok(false);
+        };
+        let mut row = expected.clone();
+        if !change(&mut row) {
+            return Ok(true);
+        }
+        row.security_version = row.security_version.saturating_add(1);
+        row.document_revision = row.document_revision.saturating_add(1);
+        let policy = row.policy()?;
+        let principal = Principal::from_policy(&policy)?;
         let now = now_millis();
-        for victim in live.into_iter().take(evict) {
-            let mut dead = victim.clone();
-            dead.state = SessionState::Revoked {
-                at: now,
-                reason: "quota_evicted".to_string(),
-            };
-            dead.revision += 1;
-            dead.update_time = now;
-            dead.timestamp = now;
-            if store
-                .collection::<AclSession>()
-                .update_guarded(&dead, &victim)
-                .await
-                .unwrap_or(false)
-            {
-                self.sessions.write().remove(&victim.id);
-                self.refresh.write().remove(&victim.refresh);
-                tracing::info!(
-                    user = %user.row.id,
-                    session = %victim.session_id,
-                    "session evicted by the quota"
-                );
-            }
+        row.update_time = now;
+        row.timestamp = now;
+        if !col.update_guarded(&row, &expected).await? {
+            return Err(ActError::Conflict(format!(
+                "acl user '{name}' changed concurrently; re-read and retry"
+            )));
         }
+        self.users.write().insert(
+            name.to_string(),
+            (Arc::new(CompiledUser { row, principal }), now_millis()),
+        );
+        Ok(true)
     }
 
     /// One GC pass: page over the sessions whose refresh token expired,
@@ -1170,7 +1241,7 @@ impl AccessControl for UserAcl {
         drop(permit);
         let compiled = compiled?;
         self.budget.lock().clear_failures(name);
-        self.enforce_quota(&compiled).await;
+        self.check_session_capacity().await?;
         self.mint(&compiled, None, None).await
     }
 
@@ -1198,6 +1269,7 @@ impl AccessControl for UserAcl {
                     at: now,
                     reason: "expired".to_string(),
                 };
+                expired.active = false;
                 expired.revision += 1;
                 expired.update_time = now;
                 expired.timestamp = now;
@@ -1253,6 +1325,7 @@ impl AccessControl for UserAcl {
             access_expiry: now + ACCESS_TOKEN_TTL_SECS * 1000,
             refresh_expiry: now + REFRESH_TOKEN_TTL_SECS * 1000,
             state: SessionState::Active,
+            active: true,
             revision: 1,
             create_time: now,
             update_time: now,
@@ -1264,6 +1337,7 @@ impl AccessControl for UserAcl {
             at: now,
             successor: session_id,
         };
+        consumed.active = false;
         consumed.revision += 1;
         consumed.update_time = now;
         consumed.timestamp = now;
@@ -1328,6 +1402,7 @@ impl AccessControl for UserAcl {
             at: now,
             reason: "logout".to_string(),
         };
+        revoked.active = false;
         revoked.revision += 1;
         revoked.update_time = now;
         revoked.timestamp = now;
@@ -1347,6 +1422,32 @@ impl AccessControl for UserAcl {
         self.sessions.write().remove(&row.id);
         self.refresh.write().remove(&row.refresh);
         Ok(true)
+    }
+
+    async fn logout_user(&self, name: &str) -> Result<bool> {
+        // The security version is the O(1) revocation: every token issued
+        // before this write stops resolving, and the session rows are left
+        // for the GC instead of being walked here. The user keeps its
+        // passwords and grants, so it can log in again immediately.
+        self.patch_user(name, |_| true).await
+    }
+
+    async fn set_user_enabled(&self, name: &str, enabled: bool) -> Result<bool> {
+        if !enabled && name.trim() == ADMIN_USER {
+            return Err(ActError::Config(format!(
+                "the builtin user '{ADMIN_USER}' cannot be disabled"
+            )));
+        }
+        self.patch_user(name, move |row| {
+            if row.enabled == enabled {
+                // already in the asked state: no write, and no reason to
+                // log the user's live sessions out
+                return false;
+            }
+            row.enabled = enabled;
+            true
+        })
+        .await
     }
 
     async fn set_user(&self, spec: &UserSpec) -> Result<()> {
@@ -1402,9 +1503,6 @@ impl AccessControl for UserAcl {
         if let Some(snapshot) = &spec.snapshot {
             row.snapshot = serde_json::to_string(snapshot)
                 .map_err(|err| ActError::Config(format!("invalid snapshot rule: {err}")))?;
-        }
-        if let Some(cap) = spec.max_sessions {
-            row.max_sessions = Some(cap.max(1));
         }
         for password in spec
             .rm_passwords
@@ -1583,7 +1681,6 @@ fn admin_row_with(password: &str, must_change_password: bool) -> Result<AclUser>
         security_version: 1,
         document_revision: 1,
         passwords: vec![phc_encode(password)?],
-        max_sessions: None,
         must_change_password,
         allow: vec!["*".to_string()],
         deny: Vec::new(),
@@ -2362,53 +2459,205 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_over_the_cap_evict_the_oldest() {
-        let (acl, store) = acl().await;
+    async fn sessions_from_separate_logins_are_independent() {
+        let (acl, _store) = acl().await;
         set_user(
             &acl,
             UserSpec {
                 name: "op".to_string(),
                 add_passwords: vec!["p".to_string()],
-                max_sessions: Some(2),
                 ..Default::default()
             },
         )
         .await;
 
+        // two logins are two sessions of the same subject
+        let laptop = acl.login("op", "p").await.unwrap();
+        let phone = acl.login("op", "p").await.unwrap();
+        assert_ne!(laptop.token, phone.token);
+        for tokens in [&laptop, &phone] {
+            let principal = acl.authenticate(Some(&tokens.token)).unwrap();
+            assert!(principal.is_authenticated());
+            assert_eq!(principal.subject(), "op");
+        }
+
+        // logging the laptop out touches only its own session
+        assert!(acl.logout(&laptop.token).await.unwrap());
+        assert!(
+            !acl.authenticate(Some(&laptop.token))
+                .unwrap()
+                .is_authenticated()
+        );
+        assert!(
+            acl.authenticate(Some(&phone.token))
+                .unwrap()
+                .is_authenticated()
+        );
+
+        // the laptop's refresh is dead with it, and replaying it revokes only
+        // that family; the phone keeps working and still rotates
+        assert!(acl.refresh(&laptop.refresh_token).await.is_err());
+        assert!(
+            acl.authenticate(Some(&phone.token))
+                .unwrap()
+                .is_authenticated()
+        );
+        let next = acl.refresh(&phone.refresh_token).await.unwrap();
+        assert!(
+            acl.authenticate(Some(&next.token))
+                .unwrap()
+                .is_authenticated()
+        );
+        assert!(
+            !acl.authenticate(Some(&phone.token))
+                .unwrap()
+                .is_authenticated()
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_user_revokes_every_session_of_that_user_only() {
+        let (acl, _store) = acl().await;
+        for (name, password) in [("op", "p"), ("other", "o")] {
+            set_user(
+                &acl,
+                UserSpec {
+                    name: name.to_string(),
+                    add_passwords: vec![password.to_string()],
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        let laptop = acl.login("op", "p").await.unwrap();
+        let phone = acl.login("op", "p").await.unwrap();
+        let other = acl.login("other", "o").await.unwrap();
+
+        assert!(acl.logout_user("op").await.unwrap());
+        // both sessions of the user are out, refresh included
+        for tokens in [&laptop, &phone] {
+            assert!(
+                !acl.authenticate(Some(&tokens.token))
+                    .unwrap()
+                    .is_authenticated()
+            );
+            assert!(acl.refresh(&tokens.refresh_token).await.is_err());
+        }
+        // another user's session is untouched
+        assert!(
+            acl.authenticate(Some(&other.token))
+                .unwrap()
+                .is_authenticated()
+        );
+
+        // an unknown name answers false and creates nothing
+        assert!(!acl.logout_user("ghost").await.unwrap());
+        assert!(acl.get_user("ghost").await.is_none());
+
+        // the credentials were not touched: the user logs in again right away
+        let again = acl.login("op", "p").await.unwrap();
+        assert!(
+            acl.authenticate(Some(&again.token))
+                .unwrap()
+                .is_authenticated()
+        );
+    }
+
+    #[tokio::test]
+    async fn disable_user_kills_its_sessions_and_enable_reopens_the_login() {
+        let (acl, _store) = acl().await;
+        set_user(
+            &acl,
+            UserSpec {
+                name: "op".to_string(),
+                add_passwords: vec!["p".to_string()],
+                ..Default::default()
+            },
+        )
+        .await;
         let first = acl.login("op", "p").await.unwrap();
         let second = acl.login("op", "p").await.unwrap();
-        // the third login evicts the oldest (the first) in the same breath
-        let third = acl.login("op", "p").await.unwrap();
 
-        let active = store
-            .collection::<AclSession>()
-            .query(&Query {
-                offset: 0,
-                limit: 10,
-                filter: Some(Filter {
-                    r#type: FilterType::And,
-                    exprs: vec![FilterExpr::Expr(Expr::eq("user", "op"))],
-                }),
-                order_by: Vec::new(),
-            })
-            .await
-            .unwrap();
-        let active = active
-            .rows
-            .into_iter()
-            .filter(|row| matches!(row.state, SessionState::Active))
-            .count();
-        assert_eq!(active, 2);
+        // disabling revokes every live session and refuses a new login
+        assert!(acl.set_user_enabled("op", false).await.unwrap());
+        for tokens in [&first, &second] {
+            assert!(
+                !acl.authenticate(Some(&tokens.token))
+                    .unwrap()
+                    .is_authenticated()
+            );
+            assert!(acl.refresh(&tokens.refresh_token).await.is_err());
+        }
+        assert!(acl.login("op", "p").await.is_err());
+        assert_eq!(acl.get_user("op").await.unwrap()["enabled"], json!(false));
+
+        // enabling reopens the login, and a redundant enable is a no-op that
+        // does not log the live session out
+        assert!(acl.set_user_enabled("op", true).await.unwrap());
+        let again = acl.login("op", "p").await.unwrap();
         assert!(
-            !acl.authenticate(Some(&first.token))
+            acl.authenticate(Some(&again.token))
                 .unwrap()
                 .is_authenticated()
         );
+        assert!(acl.set_user_enabled("op", true).await.unwrap());
         assert!(
-            acl.authenticate(Some(&second.token))
+            acl.authenticate(Some(&again.token))
                 .unwrap()
-                .is_authenticated()
+                .is_authenticated(),
+            "a redundant enable must not revoke a live session"
         );
+
+        // the builtin admin cannot be disabled; an unknown name answers false
+        let err = acl.set_user_enabled(ADMIN_USER, false).await.unwrap_err();
+        assert!(err.to_string().contains("cannot be disabled"), "{err}");
+        assert!(!acl.set_user_enabled("ghost", false).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_session_cap_counts_every_user_and_nothing_is_evicted() {
+        let store = Arc::new(Store::new(Arc::new(MemoryStore::new())));
+        let acl = UserAcl::new().with_options(AclOptions {
+            max_sessions: Some(2),
+        });
+        acl.load(store).await.unwrap();
+        for (name, password) in [("op", "p"), ("reader", "r")] {
+            set_user(
+                &acl,
+                UserSpec {
+                    name: name.to_string(),
+                    add_passwords: vec![password.to_string()],
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+
+        // one user may hold several sessions, and together they fill the cap
+        let first = acl.login("op", "p").await.unwrap();
+        let second = acl.login("op", "p").await.unwrap();
+
+        // the check is the live total across every user: another login of
+        // either name is refused, and no live session is evicted to make room
+        let refused = acl.login("op", "p").await.unwrap_err();
+        assert!(matches!(refused, AclError::Denied(_)), "{refused:?}");
+        assert!(
+            refused.to_string().contains("2 of its 2 sessions"),
+            "got: {refused}"
+        );
+        assert!(acl.login("reader", "r").await.is_err());
+        for tokens in [&first, &second] {
+            assert!(
+                acl.authenticate(Some(&tokens.token))
+                    .unwrap()
+                    .is_authenticated(),
+                "a refused login must not evict a live session"
+            );
+        }
+
+        // a logout returns its slot to the total
+        assert!(acl.logout(&first.token).await.unwrap());
+        let third = acl.login("reader", "r").await.unwrap();
         assert!(
             acl.authenticate(Some(&third.token))
                 .unwrap()
@@ -2444,6 +2693,7 @@ mod tests {
             access_expiry: now - 1_000,
             refresh_expiry: now - 1_000,
             state: SessionState::Active,
+            active: true,
             revision: 1,
             create_time: now,
             update_time: now,

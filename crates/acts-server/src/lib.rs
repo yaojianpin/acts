@@ -4,7 +4,7 @@
 use acts::{
     ConfigLog, Engine, EngineBuilder, KvStore, MissingParamAction, SnapshotOptions, SnapshotPolicy,
 };
-use acts_acl::AclUsers;
+use acts_acl::{AclOptions, UserAcl};
 
 /// The engine configuration [`engine_builder`] reads. Re-exported because a
 /// caller of this crate builds the config before it can build the engine — the
@@ -446,17 +446,28 @@ port = 10082
 # subscribes again.
 # queue_size = 100
 
-# access control — always on. There is no `[acl]` section: users live in the
-# store and are managed at runtime, and every engine starts with the builtin
-# `admin` user.
+# access control — always on. Users live in the store and are managed at
+# runtime, and every engine starts with the builtin `admin` user.
 #
 # Log in to become someone: `acl:login` (user + password) answers a session
 # token, presented on every request the same way the old static tokens were —
 # gRPC and HTTP as `authorization: Bearer <token>`, NATS as the `token` field
-# of the action JSON body. A request with no usable token is anonymous: it may
-# read the model/package catalogue and nothing else. The access token expires
-# (one hour); a longer-lived refresh token rotates it (`acl:refresh`), and the
-# shipped clients do that on their own.
+# of the action JSON body. A request with no usable token is refused: nothing
+# is readable without a login. The access token expires (one hour); a
+# longer-lived refresh token rotates it (`acl:refresh`), and the shipped
+# clients do that on their own.
+#
+# One user may hold several sessions at once — one per client that logged in —
+# and they are independent: logging in again opens another, and a logout (or a
+# refresh rotation) touches only the session it names.
+#
+# [acl]
+# the live sessions the whole server keeps, counted across every user (default:
+# ACTS_ACL_MAX_SESSIONS, else no cap; 0 is no cap too). A login past the cap is
+# refused with the total it would exceed — no caller's session is evicted to
+# admit another — and a logout returns its slot. Raise it, or log a client out,
+# when the refusal appears.
+# max_sessions = 1000
 #
 # The admin password: on the first start of a fresh store the builtin `admin`
 # is created with the password in ACTS_ADMIN_PASSWORD, or with a generated one
@@ -480,8 +491,8 @@ port = 10082
 # The CLI drives it: `auth login <user>`, `auth user set <user> --allow '@read'
 # --pattern 'orders:*' --snapshot 'secrets=$subject' --password <pw>`,
 # `auth user ls`. Over the wire the actions are `acl:login`, `acl:refresh`,
-# `acl:logout`, `acl:whoami`, `acl:setuser`, `acl:deluser`, `acl:getuser` and
-# `acl:users`.
+# `acl:logout`, `acl:whoami`, `acl:setuser`, `acl:deluser`, `acl:logout_user`,
+# `acl:disable_user`, `acl:enable_user`, `acl:getuser` and `acl:users`.
 #
 # The process directory root is a global engine setting (see `workdir` above):
 # `<workdir>/<pid>` is the run's own directory, what `Context::workdir()` and
@@ -974,8 +985,12 @@ pub fn engine_builder(
     plugins: &ServerPlugins,
 ) -> acts::Result<EngineBuilder> {
     // the store-backed user registry: users, sessions and the builtin admin
+    let mut acl = UserAcl::new();
+    if config.has("acl") {
+        acl = acl.with_options(config.get::<AclOptions>("acl")?);
+    }
     let mut builder = Engine::builder()
-        .with_user_acl()
+        .set_acl(Arc::new(acl))
         .set_config(config)
         .set_store(store);
     if config.has("snapshot") {
@@ -1116,6 +1131,98 @@ ttl = "5m"
             std::fs::remove_file(&path).ok();
             std::fs::remove_dir(&dir).ok();
         }
+    }
+
+    /// `[acl] max_sessions` reaches the registry and counts the live total
+    /// across every user: one user may hold several, a login past the total is
+    /// refused (nothing is evicted), and a logout frees a slot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_acl_section_caps_the_total_sessions() {
+        use acts::UserSpec;
+
+        let (dir, path) = write_config("[acl]\nmax_sessions = 2\n");
+        let config = Config::create(&path).unwrap();
+        let engine = engine_builder(
+            &config,
+            Arc::new(MemoryStore::new()),
+            &ServerPlugins::default(),
+        )
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+
+        for (name, password) in [("op", "p"), ("reader", "r")] {
+            engine
+                .acl()
+                .set_user(&UserSpec {
+                    name: name.to_string(),
+                    add_passwords: vec![password.to_string()],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        // one user's two logins fill the cap
+        let first = engine.acl().login("op", "p").await.unwrap();
+        let second = engine.acl().login("op", "p").await.unwrap();
+        let refused = engine.acl().login("op", "p").await.unwrap_err();
+        assert!(
+            refused.to_string().contains("2 of its 2 sessions"),
+            "the refusal must name the total: {refused}"
+        );
+        // the total is system-wide, so another user is refused too
+        assert!(engine.acl().login("reader", "r").await.is_err());
+        // and no live session was evicted to make room
+        for tokens in [&first, &second] {
+            assert!(
+                engine
+                    .acl()
+                    .authenticate(Some(&tokens.token))
+                    .unwrap()
+                    .is_authenticated(),
+                "a refused login must not evict a live session"
+            );
+        }
+
+        // a logout returns its slot to the total
+        assert!(engine.acl().logout(&first.token).await.unwrap());
+        let third = engine.acl().login("reader", "r").await.unwrap();
+        assert!(
+            engine
+                .acl()
+                .authenticate(Some(&third.token))
+                .unwrap()
+                .is_authenticated()
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    /// A typo in `[acl]` fails engine construction with the section named,
+    /// instead of being silently ignored.
+    #[test]
+    fn a_malformed_acl_section_fails_engine_build() {
+        let (dir, path) = write_config("[acl]\nmax_sessions = \"two\"\n");
+        let config = Config::create(&path).unwrap();
+
+        let err = engine_builder(
+            &config,
+            Arc::new(MemoryStore::new()),
+            &ServerPlugins::default(),
+        )
+        .err()
+        .expect("a malformed [acl] section must fail engine construction");
+        assert!(matches!(err, acts::ActError::Config(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("acl"),
+            "the error should name the section: {err}"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 
     /// The server's builder supports `assign.owner` out of the box: the

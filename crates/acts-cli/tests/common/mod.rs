@@ -38,9 +38,11 @@ where
         let dir = scratch(name)?;
         let port = free_port()?;
         let config_path = dir.join("acts.toml");
-        // The ACL is selected on the builder, not in the config: an `[acl]`
-        // section is no longer read (users live in the store), so the cases
-        // that need no credentials say so by disabling the ACL.
+        // The ACL is selected on the builder, not in the config: users live
+        // in the store and an `[acl]` section only carries session policy
+        // (`max_sessions`, read by acts-server's own builder, which this
+        // harness does not use), so the cases that need no credentials say so
+        // by disabling the ACL.
         std::fs::write(&config_path, format!("[grpc]\nport = {port}\n"))
             .with_context(|| format!("failed to write {}", config_path.display()))?;
 

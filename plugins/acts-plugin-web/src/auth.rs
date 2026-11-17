@@ -18,10 +18,10 @@ use std::sync::Arc;
 /// Resolve the bearer token into a principal, or answer 401.
 ///
 /// The three states are kept apart on purpose: no credential proceeds as the
-/// anonymous catalogue-only caller (the route's authorization decides), a
-/// credential that does not check out is refused with 401 before any handler
-/// runs — never folded into the anonymous caller — and a live session
-/// proceeds as its principal.
+/// anonymous caller, which holds no grant — the route's action check refuses
+/// it (401) — a credential that does not check out is refused with 401 before
+/// any handler runs, never folded into the anonymous caller, and a live
+/// session proceeds as its principal.
 pub async fn require_auth(
     State(engine): State<Arc<Engine>>,
     mut request: Request,

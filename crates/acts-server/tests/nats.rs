@@ -59,8 +59,8 @@ async fn acts_server_handles_nats_snapshot_actions() {
             .as_nanos()
     ));
     // This case exercises the server's NATS action path, so the caller must be
-    // unrestricted (the default acl would answer it as anonymous, read-only):
-    // the plugin is still wired through the server's own builder.
+    // unrestricted (the default acl would refuse an anonymous caller): the
+    // plugin is still wired through the server's own builder.
     std::fs::write(
         &path,
         "[log]\ndir = \"acts-server-test-log\"\nlevel = \"INFO\"\n\n\

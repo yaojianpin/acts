@@ -34,7 +34,7 @@ session was established at all, the greeting says so and names the way in
 instead of reading like a name:
 
 ```text
-connected anonymously to http://127.0.0.1:10080: the catalogue reads are available, nothing else. Log in with 'auth login <user>' or --user.
+connected anonymously to http://127.0.0.1:10080: nothing is readable without a session. Log in with 'auth login <user>' or --user.
 ```
 
 Type `help` inside the session to list the available subcommands.

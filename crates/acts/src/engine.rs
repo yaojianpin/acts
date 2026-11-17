@@ -67,9 +67,9 @@ impl Engine {
     }
 
     /// The engine's access control. A bare engine runs [`AnonymousAcl`]: no
-    /// users, no sessions, the anonymous catalogue-only policy for every
-    /// caller — install `acts-acl`'s `UserAcl` (see
-    /// [`EngineBuilder::set_acl`]) for users, login and sessions.
+    /// users, no sessions, and no grant for any caller — install
+    /// `acts-acl`'s `UserAcl` (see [`EngineBuilder::set_acl`]) for users,
+    /// login and sessions.
     pub fn acl(&self) -> Arc<dyn AccessControl> {
         self.acl.clone()
     }
@@ -77,8 +77,9 @@ impl Engine {
     /// The principal a caller that presents no token resolves to — the
     /// identity to hand [`Engine::executor`] on behalf of such a request.
     ///
-    /// It is the anonymous principal: the catalogue reads, and nothing else
-    /// (a disabled ACL resolves it to [`Principal::unrestricted`] instead).
+    /// It is the anonymous principal: no grant at all, so a login is the way
+    /// in (a disabled ACL resolves it to [`Principal::unrestricted`]
+    /// instead).
     pub fn anonymous(&self) -> Principal {
         self.acl.anonymous()
     }

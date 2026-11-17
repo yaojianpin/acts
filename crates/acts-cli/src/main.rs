@@ -27,14 +27,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Resolve an identity before entering the REPL: an explicit token, a
     // stored session (refreshed when its access token expired), or a login as
-    // `--user`. A caller with none is anonymous, and the server answers it
-    // the catalogue reads only — said out loud rather than discovered on the
+    // `--user`. A caller with none is anonymous, and the server refuses it
+    // everything but a login — said out loud rather than discovered on the
     // first command.
     let (mut client, who) =
         client::connect_and_authenticate(&uri, cli.token, cli.user, cli.password).await?;
     if who.is_null() {
         println!(
-            "connected anonymously to {uri}: the catalogue reads are available, nothing else. \
+            "connected anonymously to {uri}: nothing is readable without a session. \
              Log in with 'auth login <user>' or --user."
         );
     } else {

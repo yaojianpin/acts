@@ -240,13 +240,13 @@ A caller logs in with `acl:login` (user + password) and receives a session: an
 access token (one hour, the `authorization: Bearer …` credential) plus a refresh
 token (seven days) that rotates the pair (`acl:refresh`; the old one dies with
 the rotation). `acl:logout` revokes it, and the store keeps only the tokens'
-sha256 digests. A request the engine cannot attribute to a user — no token, or
-an unknown/expired one — is the built-in `anonymous` subject: it may list and
-get **models and packages** and nothing else — no other read (a run, a delivery
-or a trigger is someone's work), no write, no control actions (`proc:start`,
-`act:*`, `evt:start`, `msg:ack`), no admin actions, no snapshot scope, no
-subscriptions. `Engine::builder().disable_acl()` is the explicit opt-out: every
-caller is unrestricted.
+sha256 digests. A caller the engine cannot attribute to a user — no token, or
+an unknown/expired one — gets nothing: every action is refused as
+`unauthenticated`, the model/package catalogue included. Only `acl:login`,
+`acl:refresh` and `acl:logout` (their own payload is the credential) and the
+identity probe `acl:whoami` answer without a session.
+`Engine::builder().disable_acl()` is the explicit opt-out: every caller is
+unrestricted.
 
 | Transport | Credential |
 |-----------|------------|

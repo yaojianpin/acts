@@ -188,6 +188,14 @@ impl GrpcServer {
         let principal = match self.engine.acl().resolve(token.as_deref()).await {
             acts::AuthenticationResult::Authenticated(principal) => principal,
             acts::AuthenticationResult::MissingCredentials => self.engine.acl().anonymous(),
+            // the actions whose own payload is the credential carry on as the
+            // anonymous caller: refusing them would make the very request
+            // that repairs a dead session (login, refresh, logout) impossible
+            acts::AuthenticationResult::InvalidCredentials
+                if acts::carries_own_credential(&message.name) =>
+            {
+                self.engine.acl().anonymous()
+            }
             acts::AuthenticationResult::InvalidCredentials => {
                 return Err(Status::unauthenticated(
                     "the credential is invalid or expired",
