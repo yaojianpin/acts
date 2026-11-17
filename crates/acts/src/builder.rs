@@ -78,7 +78,7 @@ impl EngineBuilder {
     /// forming a publish ring, so that example is not a doctest here.)
     ///
     /// A bare engine runs [`AnonymousAcl`](crate::AnonymousAcl): no users, no
-    /// login, the anonymous catalogue-only policy for every caller.
+    /// login, and no grant for any caller.
     pub fn set_acl(mut self, acl: Arc<dyn AccessControl>) -> Self {
         self.acl = Some(acl);
         self
@@ -88,11 +88,11 @@ impl EngineBuilder {
     /// [`Principal::unrestricted`](crate::Principal::unrestricted) and nothing
     /// is checked.
     ///
-    /// This is the explicit opt-out, and the setting a test or a local demo
+    /// It is the explicit opt-out, and the setting a test or a local demo
     /// uses — it is spelled out at the call site, never inferred. There is no
     /// implicit version of it: an engine without this call runs whatever
     /// access control was installed ([`AnonymousAcl`](crate::AnonymousAcl)
-    /// when none was — the anonymous catalogue-only policy).
+    /// when none was — no grant for any caller).
     pub fn disable_acl(mut self) -> Self {
         self.acl = Some(Arc::new(crate::DisabledAcl));
         self

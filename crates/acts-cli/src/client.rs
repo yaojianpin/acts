@@ -54,7 +54,7 @@ pub async fn connect_and_authenticate(
         Ok(_) if explicit => Ok((client, Value::Null)),
         Ok(_) | Err(_) => {
             // no usable session: log in when we can, otherwise stay anonymous
-            // (the server answers the catalogue reads and refuses the rest)
+            // (the server refuses everything but a login, and says so)
             let Some(user) = user else {
                 let who = if explicit {
                     Value::Null

@@ -42,8 +42,8 @@ let engine = Engine::builder().set_acl(acl).start().await?;
 ```
 
 An engine without this crate installed runs `acts::AnonymousAcl`: no users, no
-login (it answers "no user registry is installed in this engine"), the
-anonymous catalogue-only policy for every caller.
+login (it answers "no user registry is installed in this engine"), and no grant
+for any caller.
 
 ## What it stores
 
@@ -148,3 +148,11 @@ days); `acl:refresh` rotates the pair and kills the old one, and `acl:logout`
 revokes it. Tokens are opaque random strings — the store keeps only their
 sha256 digests, so the clear text exists in transit and in the client's own
 session file, nowhere on the server.
+
+A user may hold several sessions at once — one per client that logged in — and
+they are independent: a logout or a rotation touches only the session it names.
+`max_sessions` bounds the live sessions of the whole registry, every user
+together: `[acl] max_sessions` in `acts-server`, or `ACTS_ACL_MAX_SESSIONS` for
+an embedder. A login past the cap is refused with the total it would exceed,
+and no other caller's session is evicted to admit it; omitted or zero is no
+cap.

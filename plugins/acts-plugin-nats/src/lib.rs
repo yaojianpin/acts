@@ -312,6 +312,14 @@ async fn serve_actions(
             let principal = match engine.acl().resolve(cmd.token.as_deref()).await {
                 acts::AuthenticationResult::Authenticated(principal) => principal,
                 acts::AuthenticationResult::MissingCredentials => engine.acl().anonymous(),
+                // the actions whose own payload is the credential carry on as
+                // the anonymous caller (the request that repairs a dead
+                // session must stay reachable)
+                acts::AuthenticationResult::InvalidCredentials
+                    if acts::carries_own_credential(&cmd.name) =>
+                {
+                    engine.acl().anonymous()
+                }
                 acts::AuthenticationResult::InvalidCredentials => {
                     tracing::warn!(name = %cmd.name, "nats action unauthenticated");
                     if let Some(subject) = msg.reply {

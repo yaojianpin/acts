@@ -134,8 +134,9 @@ impl tonic::service::Interceptor for Auth {
 }
 
 impl ActsChannel {
-    /// Connect without a credential: the anonymous catalogue-only caller.
-    /// Log in ([`ActsChannel::login`]) to do more.
+    /// Connect without a credential: the anonymous caller, which may run
+    /// nothing but the auth actions. Log in ([`ActsChannel::login`]) to do
+    /// more.
     pub async fn connect(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
         Self::connect_with_token(url, None).await
     }

@@ -567,8 +567,27 @@ async fn an_admin_writes_users_over_the_wire() {
     .await
     .expect("the new grants apply to a fresh session");
 
-    // deleting a user revokes its sessions
+    // an administrator logs a user out everywhere: the session dies at its
+    // next use, and the untouched password logs the user back in
     let token = login(&engine, "deployer", "dp").await;
+    apply_as(
+        &engine,
+        &admin,
+        "acl:logout_user",
+        acts::Vars::new().with("user", "deployer"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !engine
+            .acl()
+            .authenticate(Some(&token))
+            .unwrap()
+            .is_authenticated()
+    );
+    let token = login(&engine, "deployer", "dp").await;
+
+    // deleting a user revokes its sessions
     apply_as(
         &engine,
         &admin,

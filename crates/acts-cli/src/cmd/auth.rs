@@ -3,8 +3,9 @@
 //! The CLI holds one connection: `auth login` swaps the credential it carries
 //! (and stores the session so the next run reuses it), `auth logout` drops
 //! it. `auth user …` administers the engine's user registry (`acl:setuser`,
-//! `acl:getuser`, `acl:users`, `acl:deluser`) and therefore needs an
-//! administrator: an ordinary user is refused by the server, not here.
+//! `acl:getuser`, `acl:users`, `acl:logout_user`, `acl:disable_user`,
+//! `acl:enable_user`, `acl:deluser`) and therefore needs an administrator: an
+//! ordinary user is refused by the server, not here.
 
 use super::CommandRunner as Command;
 use crate::{client, session, util};
@@ -106,6 +107,21 @@ pub enum UserCommands {
         #[arg(long, help = "(re)enable the user")]
         enable: bool,
     },
+    #[command(about = "log a user out everywhere (revokes every session it holds)")]
+    Logout {
+        #[arg(help = "user name")]
+        user: String,
+    },
+    #[command(about = "disable a user (login is refused, live sessions die)")]
+    Disable {
+        #[arg(help = "user name")]
+        user: String,
+    },
+    #[command(about = "(re)enable a user")]
+    Enable {
+        #[arg(help = "user name")]
+        user: String,
+    },
     #[command(about = "delete a user (the builtin admin cannot be deleted)")]
     Rm {
         #[arg(help = "user name")]
@@ -146,6 +162,9 @@ pub async fn process(parent: &mut Command<'_>, command: &AuthCommands) -> anyhow
                 )
                 .await
             }
+            UserCommands::Logout { user } => logout_user(parent, user).await,
+            UserCommands::Disable { user } => change_enabled(parent, user, false).await,
+            UserCommands::Enable { user } => change_enabled(parent, user, true).await,
             UserCommands::Rm { user } => rm(parent, user).await,
         },
     }?;
@@ -193,6 +212,47 @@ pub async fn logout(parent: &mut Command<'_>) -> anyhow::Result<()> {
     } else {
         "no session to log out of"
     });
+    Ok(())
+}
+
+/// Revoke every session of one user (an administrator's logout): the user's
+/// next request is refused, while its passwords and grants stay untouched.
+pub async fn logout_user(parent: &mut Command<'_>, user: &str) -> anyhow::Result<()> {
+    let ret = parent
+        .send::<bool>("acl:logout_user", Vars::new().with("user", user))
+        .await?;
+    let done = client::payload("acl:logout_user", ret.data)?;
+    let line = if done {
+        format!("logged out '{user}' on every session")
+    } else {
+        "no session to log out of".to_string()
+    };
+    parent.output(&line);
+    Ok(())
+}
+
+/// Turn login on or off for one user (an administrator's action): disabling
+/// revokes the sessions it holds, enabling reopens the login.
+pub async fn change_enabled(
+    parent: &mut Command<'_>,
+    user: &str,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    let action = if enabled {
+        "acl:enable_user"
+    } else {
+        "acl:disable_user"
+    };
+    let ret = parent
+        .send::<bool>(action, Vars::new().with("user", user))
+        .await?;
+    let _ = client::payload(action, ret.data)?;
+    let line = if enabled {
+        format!("enabled '{user}'")
+    } else {
+        format!("disabled '{user}' (its live sessions are revoked)")
+    };
+    parent.output(&line);
     Ok(())
 }
 

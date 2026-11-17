@@ -1,15 +1,16 @@
 # 访问控制
 
 引擎的每一个操作，都要拿执行它的那个调用者身份做一次校验。访问控制**始终开启**，
-而且不再由配置文件定义：`acts.toml` 里残留的 `[acl]` 段会被忽略并记一条警告，
-配置里没有 token、没有角色、也没有兜底角色。**用户存放在引擎的存储里、在运行期管理**
+而且用户不由配置文件定义：配置里没有 token、没有角色、也没有兜底角色；服务端从
+`[acl]` 段读取的只有 `max_sessions`（它保留的实时会话总数，按所有用户合并计算）。
+**用户存放在引擎的存储里、在运行期管理**
 ——用 `acl:*` 动作创建、授权、删除（其上就是 `acts-cli auth user …`），并且装了用户表的
 引擎自带内置的 `admin`（裸引擎则没有任何用户；见[用户存放在哪](#用户存放在哪)）。
 
-引擎认不出身份的请求——完全没带 token，或带了一个未知/过期的——就是**匿名**调用者：
-它只能 list/get **模型与包**，没有别的读取、没有写入、没有控制类动作、没有管理类动作、
-没有 snapshot scope、也不能订阅。未配置的部署是用来"看"已经部署了什么的，不是用来改它、
-也不是用来读某个流程、某条消息或某个触发器里的内容。其余一切都要求先登录。
+引擎认不出身份的请求——完全没带 token，或带了一个未知/过期的——一律拒绝：
+没有会话就**什么都不给**，模型/包的目录也一样。唯一不需要凭证就能到达的动作是
+`acl:login`、`acl:refresh`、`acl:logout`（凭据就在它们自己的载荷里）以及身份探测
+`acl:whoami`；其余一切都要求先登录。
 
 唯一的、写在代码里而非配置里的主动退出姿势是 `Engine::builder().disable_acl()`：
 它让所有调用者不受限——开启 ACL 之前的行为，也是测试、演示或单租户嵌入式部署用的设置。
@@ -67,7 +68,9 @@ let engine = Engine::builder().with_user_acl().start().await?;
 ## 用户、密码与内置 admin
 
 用户就是存储里的一行（`acl:setuser` 创建或更新，`acl:deluser` 删除，
-`acl:getuser`/`acl:users` 读回）。`acl:setuser` 收的是 `acts::UserSpec`——字段就是下面这些，
+`acl:logout_user` 吊销它持有的全部会话，`acl:disable_user`/`acl:enable_user`
+分别关闭与重开它的登录，`acl:getuser`/`acl:users` 读回）。`acl:setuser` 收的是
+`acts::UserSpec`——字段就是下面这些，
 其中 `None` 表示"该项保持不变"，清单字段则整体替换——写入的是一行 `acts_acl::AclUser`。
 `acl:getuser` 返回策略本身，但不含密码哈希：name、`enabled`、`allow`、`deny`、`patterns`、
 `snapshot`、密码条数，以及该用户是否不受限。一个用户带着：
@@ -89,16 +92,22 @@ let engine = Engine::builder().with_user_acl().start().await?;
   `acl:deluser admin`、`enabled = false` 的 spec、以及
   `acts-cli auth user set admin --disable` 都会被拒绝。
 
-只有拿到相应授权的用户能改动用户表：`acl:setuser` 与 `acl:deluser` 属于 `@write`
-分组，`acl:getuser`/`acl:users` 则是读取（`@read`）——它们都是普通动作，照常校验。读写密码
-不是传输层能做的事——密码只会作为 `acl:login` 的载荷出现。
+只有拿到相应授权的用户能改动用户表：`acl:setuser`、`acl:deluser`、`acl:logout_user`、
+`acl:disable_user`、`acl:enable_user` 属于 `@write` 分组，`acl:getuser`/`acl:users`
+则是读取（`@read`）——它们都是普通动作，照常校验。读写密码不是传输层能做的事——密码只会
+作为 `acl:login` 的载荷出现。
 
 用户名同时是引擎归属工作的**主体**，也是该用户所开每条订阅的通道键前缀，因此含有路径
 分隔符（`/`）的名字在写入用户时就被拒绝。
 
 请求是按用户**当前**那一行解析的，而不是登录时取的副本，因此增删授权会在存活会话的
-下一个请求上生效；被禁用的用户立即不再认证（其 token 解析为 `anonymous`），
-`acl:deluser` 会吊销被删用户的全部会话。
+下一个请求上生效。管理员可以用 `acl:logout_user`（`{user}`，
+`acts-cli auth user logout <user>`）当场切断一个已登录的用户：安全版本前移，此前签发的
+每个 token 在下一个请求上都不再解析，而用户的密码与授权分毫未动，因此它可以马上重新登录。
+`acl:disable_user`（`auth user disable <user>`）做同样的事，并且连登录也一并拒绝，直到
+`acl:enable_user`（`auth user enable <user>`）重新打开——重复的 enable 不会打扰任何存活
+会话。`acl:deluser` 同样吊销被删用户的全部会话并删掉那一行，因此同名重建是一个新主体，
+旧 token 不会绑定到它。
 
 ## 登录与会话
 
@@ -147,13 +156,14 @@ let engine = Engine::builder().with_user_acl().start().await?;
 | `@read` | `model:ls` `model:get` `pack:ls` `pack:get` `proc:ls` `proc:get` `task:ls` `task:get` `msg:ls` `msg:get` `evt:ls` `evt:get` `snap:get` `snap:ls` `msg:sub` `acl:whoami` `acl:getuser` `acl:users` |
 | `@deploy` | `model:deploy` `pack:publish` |
 | `@execute` | `proc:start` `proc:start_from_model` `evt:start` `act:push` `act:remove` `act:submit` `act:complete` `act:abort` `act:cancel` `act:back` `act:skip` `act:error` `msg:ack` |
-| `@write` | `model:rm` `pack:rm` `msg:rm` `msg:redo` `msg:redo_all` `msg:clear` `msg:unsub` `snap:upsert` `snap:remove` `acl:setuser` `acl:deluser` `ext:register_var` `ext:register_function`，另有 `acl:login` `acl:refresh` `acl:logout`（这三个本就不需要授权） |
+| `@write` | `model:rm` `pack:rm` `msg:rm` `msg:redo` `msg:redo_all` `msg:clear` `msg:unsub` `snap:upsert` `snap:remove` `acl:setuser` `acl:deluser` `acl:logout_user` `acl:disable_user` `acl:enable_user` `ext:register_var` `ext:register_function`，另有 `acl:login` `acl:refresh` `acl:logout`（这三个本就不需要授权） |
 | `@all` | 全部动作（`@*` 与 `*` 是同一份授权） |
 
 这四个分组对应一次部署通常要划开的四种权限：`@read` 只看，`@deploy` 把工作放进目录，
 `@execute` 运行它、并通过 act 推进它，`@write` 改动或销毁已存状态——删除、snapshot 写入，
-以及**用户表本身**（`acl:setuser`/`acl:deluser`），因此授予 `@write` 就等于授予管理权。
-没有任何分组点名的动作按 `write` 处理——未知操作永远不会被当成读取。
+以及**用户表本身**（`acl:setuser`/`acl:deluser`/`acl:logout_user`/`acl:disable_user`/
+`acl:enable_user`），因此授予 `@write` 就等于授予管理权。没有任何分组点名的动作按
+`write` 处理——未知操作永远不会被当成读取。
 
 授予其中一个分组绝不隐含另一个：`@execute` 能启动、能推进流程，但既不能部署、也不能删除；
 而 `@write` 不能让用户跑任何流程。`allow` 里的 `@all` 使该用户不受限——所有动作放行、
@@ -166,13 +176,12 @@ let engine = Engine::builder().with_user_acl().start().await?;
 [executor](#executor)）。发布包定义（`ext().register_package`）走的是 `pack:publish`，
 因此随 `@deploy` 走。
 
-`anonymous` 主体拿到的正是 `model:ls` `model:get` `pack:ls` `pack:get`——目录。
-这是引擎无法指名道姓的调用者可以被授予的最小集合，而且这份清单由测试钉死，不留给解读。
-其余全部不在其中，包括命名调用者看来理所当然的读取：一条流程行指名了谁跑了什么，
-一条投递指名了它本是发给谁的，一个触发器指名了它将启动哪个模型——引擎认不出的调用者，
-不是这些行所描述的那个人。`msg:sub` 同理，还多一条理由：一条订阅流既承载实时载荷，
-又会为它持有的通道逐条写入投递行；`snap:get`/`snap:ls` 也不在其中，因为 snapshot scope
-只有在用户点名时才有归属。
+`anonymous` 主体**没有任何授权**：`model:ls` `model:get` `pack:ls` `pack:get`
+也和其他动作一样被拒绝，因为引擎指不出名字的调用者什么都拿不到。理由就在数据本身：
+一条流程行指名了谁跑了什么，一条投递指名了它本是发给谁的，一个触发器指名了它将启动哪个
+模型——引擎认不出的调用者，不是这些行所描述的那个人，这个理由同样覆盖目录。要读任何东西
+都得先登录；`acl:whoami` 仍然可达，作为身份探测（回答 `"authenticated": false`），
+客户端因此可以在登录前先问候，而不是等到第一条命令才发现自己是谁。
 
 ### 资源模式
 
@@ -424,7 +433,7 @@ CLI 先用 `acl:whoami` 解析出身份并打印，因此凭证缺失或过期�
 `authenticated as alice`；完全没有建立会话时打印
 
 ```text
-connected anonymously to http://127.0.0.1:10080: the catalogue reads are available, nothing else. Log in with 'auth login <user>' or --user.
+connected anonymously to http://127.0.0.1:10080: nothing is readable without a session. Log in with 'auth login <user>' or --user.
 ```
 
 ```rust,no_run
@@ -437,6 +446,6 @@ let mut client = ActsChannel::connect_with_session("http://127.0.0.1:10080", ses
 let mut client = ActsChannel::connect_with_password("http://127.0.0.1:10080", "alice", "s3cret").await?;
 ```
 
-`connect` 是不带 token 的形式，即匿名调用者：它只能读目录，别的什么都不行。未认证的
+`connect` 是不带 token 的形式，即匿名调用者：除了认证类动作，它什么都跑不了。未认证的
 调用者会被按 `unauthenticated` 拒绝，而不是 `permission denied`——这正是客户端据此
 判断"该去登录"而不是"该求更多授权"的依据。

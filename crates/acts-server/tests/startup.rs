@@ -110,7 +110,8 @@ fn a_malformed_db_section_is_reported_not_panicked() -> anyhow::Result<()> {
 }
 
 /// Access control is always on — there is no `[acl]` section to enable it —
-/// and the anonymous caller is refused everything outside the catalogue.
+/// and the anonymous caller is refused everything, the catalogue reads
+/// included.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_acl_is_on_by_default_and_refuses_anonymous() -> anyhow::Result<()> {
     let dir = scratch("acl-default")?;
@@ -125,18 +126,15 @@ async fn the_acl_is_on_by_default_and_refuses_anonymous() -> anyhow::Result<()> 
     .await?;
 
     assert!(engine.acl().enabled());
-    let err = acts::actions::apply(&engine, "model:rm", acts::Vars::new().with("id", "x"))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, acts::actions::Error::Unauthenticated(_)),
-        "got: {err}"
-    );
-
-    // the catalogue is the anonymous grant: which models exist stays readable
-    acts::actions::apply(&engine, "model:ls", acts::Vars::new())
-        .await
-        .context("the catalogue must stay readable to the anonymous caller")?;
+    for action in ["model:rm", "model:ls", "pack:ls"] {
+        let err = acts::actions::apply(&engine, action, acts::Vars::new())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, acts::actions::Error::Unauthenticated(_)),
+            "{action} got: {err}"
+        );
+    }
 
     engine.close().await;
     let _ = std::fs::remove_dir_all(&dir);
