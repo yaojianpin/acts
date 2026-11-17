@@ -1,20 +1,21 @@
 # Access Control
 
 Every operation of the engine is checked against the identity of the caller
-performing it. Access control is **always on**, and it is no longer configured
-in the config file: an `[acl]` section left in `acts.toml` is ignored with a
-warning, and there is no config token, no role and no default role. **Users live
+performing it. Access control is **always on**, and users are not configured
+in the config file: there is no config token, no role and no default role, and
+the only `[acl]` setting the server reads is `max_sessions` (the total live
+sessions it keeps, counted across every user). **Users live
 in the engine's store and are managed at runtime** — created, granted and
 removed with the `acl:*` actions (`acts-cli auth user …` on top of them) — and
 an engine that installs the user registry starts with the builtin `admin` (a
 bare engine has no users at all; see [Where the users live](#where-the-users-live)).
 
 A request the engine cannot attribute to a user — no token at all, or an
-unknown/expired one — is the **anonymous** caller, and it may only list and get
-**models and packages**: no other read, no write, no control action, no admin
-action, no snapshot scope, no subscription. An unconfigured deployment is for
-looking at what is deployed, not for changing it or for reading what a run, a
-message or a trigger holds. Everything else requires a login.
+unknown/expired one — is refused: **nothing** is answered without a session,
+the model/package catalogue included. The only actions reachable without a
+credential are `acl:login`, `acl:refresh` and `acl:logout` (their own payload is
+the credential) plus the identity probe `acl:whoami`; everything else requires a
+login.
 
 The one deliberate opt-out is written in code, not config:
 `Engine::builder().disable_acl()` makes every caller unrestricted — the
@@ -52,12 +53,13 @@ A registry built by hand goes in through `EngineBuilder::set_acl`, e.g.
 public, so an embedder may install its own implementation instead.
 
 A **bare engine** — `Engine::builder().start()` with nothing installed — runs
-`acts::AnonymousAcl`: it knows no users, every caller is the anonymous
-catalogue-only principal, and `acl:login` is refused with "no user registry is
+`acts::AnonymousAcl`: it knows no users, every caller is the grant-free
+anonymous principal, and `acl:login` is refused with "no user registry is
 installed in this engine". That is a deliberate default rather than a hole: an
 embedder that never installs a registry cannot be logged into, so nobody can
-become anyone. `acts-server` installs `acts_acl::UserAcl` in its engine
-builder, so the shipped server is the behaviour this chapter describes.
+become anyone, and nothing is served. `acts-server` installs
+`acts_acl::UserAcl` in its engine builder, so the shipped server is the
+behaviour this chapter describes.
 
 `UserAcl` keeps two collections in the engine's own store, under prefixes of
 their own:
@@ -80,7 +82,9 @@ constants: `acts_acl::ADMIN_USER` (`admin`), `acts_acl::ADMIN_PASSWORD_ENV`
 ## Users, passwords and the builtin admin
 
 A user is a row in the store (`acl:setuser` creates or updates it,
-`acl:deluser` removes it, `acl:getuser`/`acl:users` read it back). `acl:setuser`
+`acl:deluser` removes it, `acl:logout_user` revokes every session it holds,
+`acl:disable_user`/`acl:enable_user` turn its login off and on,
+`acl:getuser`/`acl:users` read it back). `acl:setuser`
 takes an `acts::UserSpec` — the same fields as below, where `None` means "leave
 this setting alone" and a list replaces the current one — and writes an
 `acts_acl::AclUser` row. `acl:getuser` answers the policy without the password
@@ -105,9 +109,10 @@ The engine always starts with the builtin administrator `admin`:
   its own user registry. `acl:deluser admin` and a spec with `enabled = false`
   are refused, and so is `acts-cli auth user set admin --disable`.
 
-Only a user granted the right can change the registry: `acl:setuser` and
-`acl:deluser` belong to the `@write` group, while `acl:getuser`/`acl:users` are
-reads (`@read`) — all of them are ordinary actions, checked like any other. Reading
+Only a user granted the right can change the registry: `acl:setuser`,
+`acl:deluser`, `acl:logout_user`, `acl:disable_user` and `acl:enable_user`
+belong to the `@write` group, while `acl:getuser`/`acl:users` are reads
+(`@read`) — all of them are ordinary actions, checked like any other. Reading
 and writing a password is not a thing a transport can do — a password only ever
 travels as the payload of `acl:login`.
 
@@ -117,8 +122,15 @@ containing a path separator (`/`) is refused when the user is written.
 
 A request is resolved against the user's **current** row, not a copy taken at
 login, so a grant added or removed applies to a live session on its next
-request; a disabled user stops authenticating at once (its token resolves to
-`anonymous`), and `acl:deluser` revokes the deleted user's sessions.
+request. An administrator can cut a logged-in user off on the spot with
+`acl:logout_user` (`{user}`, `acts-cli auth user logout <user>`): the security
+version moves, every token issued before it stops resolving at the next
+request, and the user's passwords and grants stay untouched, so it can log in
+again. `acl:disable_user` (`auth user disable <user>`) does the same and also
+refuses the login, until `acl:enable_user` (`auth user enable <user>`) reopens
+it — a redundant enable never disturbs a live session. `acl:deluser` revokes
+the deleted user's sessions the same way and deletes the row, so a re-created
+name is a new subject no old token binds to.
 
 ## Login and sessions
 
@@ -176,15 +188,16 @@ silently granting — or denying — nothing.
 | `@read` | `model:ls` `model:get` `pack:ls` `pack:get` `proc:ls` `proc:get` `task:ls` `task:get` `msg:ls` `msg:get` `evt:ls` `evt:get` `snap:get` `snap:ls` `msg:sub` `acl:whoami` `acl:getuser` `acl:users` |
 | `@deploy` | `model:deploy` `pack:publish` |
 | `@execute` | `proc:start` `proc:start_from_model` `evt:start` `act:push` `act:remove` `act:submit` `act:complete` `act:abort` `act:cancel` `act:back` `act:skip` `act:error` `msg:ack` |
-| `@write` | `model:rm` `pack:rm` `msg:rm` `msg:redo` `msg:redo_all` `msg:clear` `msg:unsub` `snap:upsert` `snap:remove` `acl:setuser` `acl:deluser` `ext:register_var`, plus `acl:login` `acl:refresh` `acl:logout` (which need no grant at all) |
+| `@write` | `model:rm` `pack:rm` `msg:rm` `msg:redo` `msg:redo_all` `msg:clear` `msg:unsub` `snap:upsert` `snap:remove` `acl:setuser` `acl:deluser` `acl:logout_user` `acl:disable_user` `acl:enable_user` `ext:register_var`, plus `acl:login` `acl:refresh` `acl:logout` (which need no grant at all) |
 | `@all` | every action (`@*` and `*` are the same grant) |
 
 The groups separate the four ways a deployment is usually divided: `@read`
 looks, `@deploy` puts work into the catalogue, `@execute` runs it and drives it
 through its acts, and `@write` changes or destroys stored state — the removals,
-the snapshot feeds and the **user registry itself** (`acl:setuser`/`acl:deluser`),
-so granting `@write` is an administrative act. An action that no group names is
-`write`, because an unknown operation is never a read.
+the snapshot feeds and the **user registry itself** (`acl:setuser`/`acl:deluser`,
+`acl:logout_user`/`acl:disable_user`/`acl:enable_user`), so granting `@write` is
+an administrative act. An action that no group names is `write`, because an
+unknown operation is never a read.
 
 Granting one group never implies another: `@execute` starts and drives runs but
 deploys and removes nothing, and `@write` does not let a user run anything.
@@ -199,16 +212,15 @@ passes its own principal (see [The executor](#the-executor)). Publishing a
 package definition (`ext().register_package`) is the `pack:publish` action, so
 it follows `@deploy`.
 
-The `anonymous` subject gets exactly `model:ls` `model:get` `pack:ls`
-`pack:get` — the catalogue. That is the least a caller the engine cannot name
-may be trusted with, and the list is pinned by a test rather than left to
-interpretation. Everything else is out, including reads a named caller would
-take for granted: a process row names who ran what, a delivery names who was
-meant to receive it, a trigger names the model it will start — a caller the
-engine cannot identify is not the one those rows are about. `msg:sub` is out for
-the same reason and one more (a stream both carries live payloads and stores a
-delivery row per message for a channel it holds), and `snap:get`/`snap:ls` are
-out because a snapshot scope has an owner only when a user names one.
+The `anonymous` subject holds **no** grant: `model:ls` `model:get` `pack:ls`
+`pack:get` are refused like everything else, because a caller the engine cannot
+name gets nothing. The reason is the data itself: a process row names who ran
+what, a delivery names who was meant to receive it, a trigger names the model it
+will start — a caller the engine cannot identify is not the one those rows are
+about, and that argument covers the catalogue too. Log in to read anything;
+`acl:whoami` stays reachable as the identity probe (it answers
+`"authenticated": false`), which is what lets a client greet before it logs in
+instead of discovering its identity on the first command.
 
 ### Resource patterns
 
@@ -367,8 +379,8 @@ operation. The two callers that do not *have* an identity are the two the table
 has an answer for anyway:
 
 - a request with no usable token is anonymous — it is still a caller, and it is
-  checked like any other: an action outside the catalogue is refused as
-  `unauthenticated` (log in), not as `permission denied`;
+  checked like any other: every action is refused as `unauthenticated` (log in),
+  not as `permission denied`;
 - a run nothing claims (a `schedule` trigger) and a subflow (which inherits its
   parent's authority) are the engine's own starts, with no caller to check:
   what they may read is the authority they ended up carrying, and neither can
@@ -511,7 +523,7 @@ stale credential is visible at startup instead of on the first command:
 established,
 
 ```text
-connected anonymously to http://127.0.0.1:10080: the catalogue reads are available, nothing else. Log in with 'auth login <user>' or --user.
+connected anonymously to http://127.0.0.1:10080: nothing is readable without a session. Log in with 'auth login <user>' or --user.
 ```
 
 ```rust,no_run
@@ -524,7 +536,7 @@ let mut client = ActsChannel::connect_with_session("http://127.0.0.1:10080", ses
 let mut client = ActsChannel::connect_with_password("http://127.0.0.1:10080", "alice", "s3cret").await?;
 ```
 
-`connect` is the tokenless form: it is the anonymous caller, so it can read the
-catalogue and nothing else. An unauthenticated caller is refused as
+`connect` is the tokenless form: it is the anonymous caller, so it may run
+nothing but the auth actions. An unauthenticated caller is refused as
 `unauthenticated` rather than as "not allowed", which is what tells a client to
 log in instead of asking for more grants.

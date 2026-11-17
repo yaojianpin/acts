@@ -193,7 +193,7 @@ let engine = Engine::builder().with_user_acl().start().await?;
 
 (`acts` does not depend on `acts-acl` — not even for tests — so that snippet is
 not a doctest here.) A bare `Engine::builder().start()` runs `AnonymousAcl`: no
-users, no login, and the anonymous catalogue-only policy for every caller.
+users, no login, and no grant for any caller.
 `EngineBuilder::disable_acl()` is the explicit opt-out, where every caller is
 unrestricted. See the access-control chapter of the book for the actions, the
 grant groups, the sessions and the CLI that drives the registry.

@@ -107,10 +107,11 @@ fn acl_error(err: crate::ActError) -> Error {
 
 /// Apply a channel message action as an anonymous in-process caller.
 ///
-/// The caller resolves to the `anonymous` principal, which may read the model
-/// and package catalogues and nothing else — an embedder that never carries a
-/// session token cannot sidestep the transport checks; it is held to exactly
-/// what an unauthenticated transport caller is.
+/// The caller resolves to the `anonymous` principal, which holds no grant —
+/// an embedder that never carries a session token cannot sidestep the
+/// transport checks; it is held to exactly what an unauthenticated transport
+/// caller is (the three credential-carrying auth actions and `acl:whoami`
+/// aside).
 pub async fn apply(engine: &Engine, name: &str, options: Vars) -> Ret {
     let principal = engine.anonymous();
     apply_as(engine, &principal, name, options).await
@@ -132,13 +133,14 @@ pub async fn apply_as(
     name: &str,
     mut options: Vars,
 ) -> Ret {
-    // `acl:whoami` is implicitly allowed — but only once a token resolved, so
-    // it doubles as a startup check without being reachable anonymously.
+    // `acl:whoami` is answered for the anonymous caller too (with
+    // `"authenticated": false`): the identity probe reveals nothing and is
+    // what lets a client greet before it logs in.
     if name == crate::acl::ACTION_WHOAMI {
         return Ok(principal.to_value());
     }
-    // `acl:login` and `acl:refresh` carry their own credential and are the
-    // only operations reachable without one.
+    // `acl:login`, `acl:refresh` and `acl:logout` carry their own credential
+    // and are the only other operations reachable without one.
     if name == crate::acl::ACTION_LOGIN {
         let user = options.get::<String>("user").unwrap_or_default();
         let password = options.get::<String>("password").unwrap_or_default();
@@ -541,6 +543,37 @@ pub async fn apply_as(
             engine.acl().del_user(&user).await.map_err(acl_error)?;
             Ok(json!(true))
         }
+        name if name == crate::acl::ACTION_LOGOUT_USER => {
+            let user = pop(&mut options, "user")?;
+            if !engine.acl().logout_user(&user).await.map_err(acl_error)? {
+                return Err(Error::NotFound(format!("user '{user}' not found")));
+            }
+            Ok(json!(true))
+        }
+        name if name == crate::acl::ACTION_DISABLE_USER => {
+            let user = pop(&mut options, "user")?;
+            if !engine
+                .acl()
+                .set_user_enabled(&user, false)
+                .await
+                .map_err(acl_error)?
+            {
+                return Err(Error::NotFound(format!("user '{user}' not found")));
+            }
+            Ok(json!(true))
+        }
+        name if name == crate::acl::ACTION_ENABLE_USER => {
+            let user = pop(&mut options, "user")?;
+            if !engine
+                .acl()
+                .set_user_enabled(&user, true)
+                .await
+                .map_err(acl_error)?
+            {
+                return Err(Error::NotFound(format!("user '{user}' not found")));
+            }
+            Ok(json!(true))
+        }
         name if name == crate::acl::ACTION_GETUSER => {
             let user = pop(&mut options, "user")?;
             engine
@@ -666,14 +699,14 @@ mod tests {
         assert_eq!(ok, json!(true));
 
         // the anonymous caller is not gated by an initial state at all: its
-        // own policy still decides — catalogue reads pass, the rest needs a
-        // credential
+        // own policy still decides — no grant, so a login is the only way in
         let anonymous = engine.anonymous();
-        assert!(
+        assert!(matches!(
             apply_as(&engine, &anonymous, "model:ls", Vars::new())
                 .await
-                .is_ok()
-        );
+                .unwrap_err(),
+            Error::Unauthenticated(_)
+        ));
         assert!(matches!(
             apply_as(&engine, &anonymous, "model:deploy", Vars::new())
                 .await
@@ -686,8 +719,8 @@ mod tests {
 
     /// An engine with access control explicitly off. These cases exercise the
     /// dispatch table itself, so their caller must be unrestricted: the
-    /// catalogue-only principal a normal engine resolves a tokenless caller
-    /// to is covered by `the_anonymous_caller_reads_only_the_catalogue` below.
+    /// grant-free principal a normal engine resolves a tokenless caller to is
+    /// covered by `the_anonymous_caller_holds_no_grant` above.
     async fn open_engine() -> crate::Engine {
         crate::Engine::builder()
             .disable_acl()
@@ -766,8 +799,8 @@ mod tests {
     }
 
     /// A tokenless caller is refused: `sys:status` is deliberately not in
-    /// `@read` (its config section echoes the server's configuration), so it
-    /// is beyond the anonymous policy's catalogue reads — the refusal is the
+    /// `@read` (its config section echoes the server's configuration), and
+    /// the anonymous caller holds no grant at all — the refusal is the
     /// anonymous one, "needs a credential", not a deny of a named user.
     #[tokio::test]
     async fn sys_status_is_beyond_the_anonymous_caller() {
@@ -921,30 +954,30 @@ mod tests {
         crate::Engine::builder().start().await.unwrap()
     }
 
-    /// Without a credential the caller is the `anonymous` subject: the
-    /// catalogue reads and nothing else. A token that resolves to no session
-    /// is that same caller, not an error.
+    /// Without a credential the caller is the `anonymous` subject, which
+    /// holds no grant: even the catalogue reads need a login, and the refusal
+    /// says so rather than "denied".
     #[tokio::test]
-    async fn the_anonymous_caller_reads_only_the_catalogue() {
+    async fn the_anonymous_caller_holds_no_grant() {
         let engine = acl_engine().await;
 
-        // `apply` is the anonymous in-process entry.
-        assert!(apply(&engine, "model:ls", Vars::new()).await.is_ok());
-        let err = apply(&engine, "model:deploy", Vars::new())
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::Unauthenticated(_)), "got: {err}");
-
-        // Exactly the catalogue reads are within the anonymous policy: the
-        // rest needs a login, and says so rather than "denied".
-        let anonymous = engine.anonymous();
-        for action in crate::acl::ANONYMOUS_ALLOW {
+        // `apply` is the anonymous in-process entry: nothing is served.
+        for action in ["model:ls", "pack:ls", "model:deploy", "proc:ls"] {
+            let err = apply(&engine, action, Vars::new()).await.unwrap_err();
             assert!(
-                anonymous.check(action).is_ok(),
-                "the anonymous caller must read '{action}'"
+                matches!(err, Error::Unauthenticated(_)),
+                "'{action}' got: {err}"
             );
         }
+
+        // every action but the ones that carry their own credential (and the
+        // identity probe) needs a login
+        let anonymous = engine.anonymous();
         for action in [
+            "model:ls",
+            "model:get",
+            "pack:ls",
+            "pack:get",
             "model:deploy",
             "proc:start",
             "snap:ls",
@@ -960,12 +993,12 @@ mod tests {
             );
         }
 
-        // A token that selects no session resolves to the same principal: no
-        // registry is installed, so nothing authenticates above the catalogue.
+        // a token that selects no session resolves to the same principal: no
+        // registry is installed, so nothing authenticates at all
         let bogus = engine.acl().authenticate(Some("bogus")).unwrap();
         assert!(!bogus.is_authenticated());
         assert_eq!(bogus.subject(), crate::acl::ANONYMOUS_ROLE);
-        assert!(bogus.check("model:deploy").is_err());
+        assert!(bogus.check("model:ls").is_err());
     }
 
     #[tokio::test]
@@ -1729,6 +1762,14 @@ mod tests {
             Ok(())
         }
 
+        async fn logout_user(&self, name: &str) -> crate::Result<bool> {
+            Ok(name == "u1")
+        }
+
+        async fn set_user_enabled(&self, name: &str, _enabled: bool) -> crate::Result<bool> {
+            Ok(name == "u1")
+        }
+
         async fn user_names(&self) -> Vec<String> {
             vec!["u1".to_string()]
         }
@@ -1819,6 +1860,32 @@ mod tests {
                 .unwrap(),
             json!(true)
         );
+        assert_eq!(
+            apply(&engine, "acl:logout_user", Vars::new().with("user", "u1"))
+                .await
+                .unwrap(),
+            json!(true)
+        );
+        let err = apply(
+            &engine,
+            "acl:logout_user",
+            Vars::new().with("user", "ghost"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "got: {err}");
+        for action in ["acl:disable_user", "acl:enable_user"] {
+            assert_eq!(
+                apply(&engine, action, Vars::new().with("user", "u1"))
+                    .await
+                    .unwrap(),
+                json!(true)
+            );
+            let err = apply(&engine, action, Vars::new().with("user", "ghost"))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::NotFound(_)), "{action}: got {err}");
+        }
     }
 
     /// One pass over the action table, so every arm's argument handling and

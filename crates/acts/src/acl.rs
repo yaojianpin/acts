@@ -10,8 +10,8 @@
 //!   (`@read`, `@write`, `@deploy`, `@execute`, `@all`) naming the group an
 //!   action belongs to — the Redis ACL shape of `+command` and `+@category`.
 //!   A `deny` always wins, and the default is *deny*: a request without a
-//!   token (or with an unknown or expired one) resolves to the read-only
-//!   [`ANONYMOUS_ROLE`] principal.
+//!   token (or with an unknown or expired one) is refused — the
+//!   [`ANONYMOUS_ROLE`] principal holds no grant; logging in is the way in.
 //! - **Whose data a process may touch** — a user owns the snapshot scopes it
 //!   may read (per target, `$subject` allowed) and the *resources*
 //!   (`patterns`) it may deploy and run: a workflow declares its resource
@@ -62,6 +62,27 @@ pub const ACTION_REFRESH: &str = "acl:refresh";
 /// Implicitly allowed for an authenticated caller (it revokes the caller's
 /// own credential, nobody else's).
 pub const ACTION_LOGOUT: &str = "acl:logout";
+/// `acl:logout_user` — an administrator revokes **every** live session of one
+/// user (`{user}`): the user's next request is refused, while its passwords
+/// and grants stay untouched, so it can log in again. Needs an ordinary write
+/// grant (it is user administration, like `acl:setuser`).
+pub const ACTION_LOGOUT_USER: &str = "acl:logout_user";
+/// `acl:disable_user` — an administrator turns login off for one user
+/// (`{user}`): its live sessions are revoked and `acl:login` refuses it until
+/// it is enabled again. The builtin `admin` cannot be disabled.
+pub const ACTION_DISABLE_USER: &str = "acl:disable_user";
+/// `acl:enable_user` — an administrator turns login back on for one user
+/// (`{user}`).
+pub const ACTION_ENABLE_USER: &str = "acl:enable_user";
+/// Whether `action` carries its own credential in its payload, so a request
+/// whose bearer no longer resolves must still reach it: `acl:login` (user +
+/// password), `acl:refresh` (the refresh token) and `acl:logout` (the session
+/// token). Refusing these at the transport would make the very request that
+/// repairs a dead session impossible; for every other action the bearer is
+/// the credential, and an invalid one is refused as such.
+pub fn carries_own_credential(action: &str) -> bool {
+    matches!(action, ACTION_LOGIN | ACTION_REFRESH | ACTION_LOGOUT)
+}
 /// `acl:setuser` — create or update one user (passwords, command/catalog
 /// patterns, resource patterns, snapshot scopes).
 pub const ACTION_SETUSER: &str = "acl:setuser";
@@ -75,14 +96,6 @@ pub const ACTION_USERS: &str = "acl:users";
 /// The role an unauthenticated caller runs under, and the subject it is
 /// attributed to.
 pub const ANONYMOUS_ROLE: &str = "anonymous";
-
-/// What [`ANONYMOUS_ROLE`] may do: the catalogue reads, and nothing else.
-///
-/// An engine answers to anyone, so it must answer to the least anyone could
-/// be trusted with. That least is the *catalogue*: which models are deployed
-/// and which packages exist. Everything else is out — writes, control
-/// actions, admin actions, snapshot data, subscriptions. Log in to get more.
-pub const ANONYMOUS_ALLOW: &[&str] = &["model:ls", "model:get", "pack:get", "pack:ls"];
 
 /// Every catalog group a user's `allow`/`deny` list may name, plus the
 /// catch-all. A token that matches none of them is a config error rather
@@ -168,9 +181,6 @@ pub struct UserSpec {
     /// Force every live session of the user out by bumping its security
     /// version — the O(1) "log this user out everywhere" switch.
     pub force_logout: Option<bool>,
-    /// Active sessions this user may hold at once (`None` keeps the current
-    /// setting; new users default to the registry cap).
-    pub max_sessions: Option<u32>,
     /// Command/catalog patterns the user may run (`model:*`, `@read`,
     /// `@deploy`, `@execute`); replaces the current list.
     pub allow: Option<Vec<String>>,
@@ -514,27 +524,21 @@ impl Principal {
         }
     }
 
-    /// The anonymous caller under an enabled ACL: no token matched — the
-    /// catalogue reads, and nothing else.
+    /// The anonymous caller under an enabled ACL: no token matched. It holds
+    /// **no** grant — not even the catalogue reads — so every action but the
+    /// three that carry their own credential (`acl:login`, `acl:refresh`,
+    /// `acl:logout`, and the identity probe `acl:whoami`) refuses it; logging
+    /// in is the way in.
     pub fn anonymous() -> Self {
-        let allow = compile_patterns(
-            &ANONYMOUS_ALLOW
-                .iter()
-                .map(|a| a.to_string())
-                .collect::<Vec<_>>(),
-            ANONYMOUS_ROLE,
-            "allow",
-        )
-        .expect("the built-in anonymous allow list is valid");
         Self {
             subject: ANONYMOUS_ROLE.to_string(),
             authenticated: false,
             all: false,
-            allow,
+            allow: Vec::new(),
             deny: Vec::new(),
             allow_cats: Vec::new(),
             deny_cats: Vec::new(),
-            allow_pat: ANONYMOUS_ALLOW.iter().map(|a| a.to_string()).collect(),
+            allow_pat: Vec::new(),
             deny_pat: Vec::new(),
             scopes: HashMap::new(),
             rn: Vec::new(),
@@ -640,9 +644,8 @@ impl Principal {
             return Ok(());
         }
         if !self.authenticated {
-            // the anonymous caller is held to its catalogue read list above;
-            // anything else needs a login, and the transport should say so
-            // with "no credential" rather than "not allowed"
+            // the anonymous principal holds no grant at all; every refusal is
+            // "log in", never "not allowed"
             return Err(AclError::Unauthenticated(
                 "a session token is required; login first (acl:login)".to_string(),
             ));
@@ -719,8 +722,8 @@ impl Principal {
 /// Three states, kept apart on purpose: "no credential" is routed by route
 /// policy, "a credential that checks out" proceeds, and "a credential that
 /// does not" is refused with 401/UNAUTHENTICATED — never folded into the
-/// anonymous catalogue-only caller, which is what turned a forged token into
-/// a 403 before (audit ACL-AUTH-01).
+/// anonymous caller, which is what turned a forged token into a 403 before
+/// (audit ACL-AUTH-01).
 //
 // The authenticated variant carries the whole compiled principal (≈280 bytes)
 // and is passed by value exactly once per request, never stored; boxing it
@@ -729,12 +732,18 @@ impl Principal {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum AuthenticationResult {
-    /// The request carried no token.
+    /// The request carried no token: the grant-free anonymous principal, so
+    /// only the actions that carry their own credential and `acl:whoami`
+    /// answer it.
     MissingCredentials,
     /// The token resolved to a live session.
     Authenticated(Principal),
     /// The request carried a token that resolves to nothing: unknown,
-    /// expired, consumed, revoked, or its subject no longer matches.
+    /// expired, consumed, revoked, or its subject no longer matches. The
+    /// transports refuse it with 401/UNAUTHENTICATED, except for the actions
+    /// that carry their own credential in the payload
+    /// ([`carries_own_credential`]) — those stay reachable, or a caller could
+    /// never log in or rotate a session again.
     InvalidCredentials,
 }
 
@@ -767,7 +776,7 @@ pub trait AccessControl: Send + Sync + fmt::Debug {
     }
 
     /// Resolve a request's token into a principal. An absent, unknown or
-    /// expired token resolves to the anonymous catalogue-only principal.
+    /// expired token resolves to the grant-free anonymous principal.
     fn authenticate(&self, token: Option<&str>) -> std::result::Result<Principal, AclError>;
 
     /// Resolve a request's token into one of three states (see
@@ -802,6 +811,28 @@ pub trait AccessControl: Send + Sync + fmt::Debug {
     /// `acl:logout`: drop the session `token` belongs to.
     async fn logout(&self, token: &str) -> Result<bool>;
 
+    /// `acl:logout_user`: revoke every live session of `name` — the
+    /// administrator's "log this user out everywhere" — without touching its
+    /// passwords or grants, so it can log in again. Answers whether the user
+    /// existed. The default refuses: a registry that cannot revoke by user
+    /// must not report a logout that did not happen.
+    async fn logout_user(&self, name: &str) -> Result<bool> {
+        Err(ActError::Action(format!(
+            "this access control cannot log out user '{name}'"
+        )))
+    }
+
+    /// `acl:disable_user` / `acl:enable_user`: decide whether `name` may log
+    /// in. Disabling revokes the sessions the user holds (the security
+    /// version moves); enabling only reopens the login. Answers whether the
+    /// user existed; an implementation that cannot change the state refuses.
+    async fn set_user_enabled(&self, name: &str, enabled: bool) -> Result<bool> {
+        let _ = enabled;
+        Err(ActError::Action(format!(
+            "this access control cannot enable or disable user '{name}'"
+        )))
+    }
+
     /// `acl:setuser`: create or update one user.
     async fn set_user(&self, spec: &UserSpec) -> Result<()>;
 
@@ -816,9 +847,11 @@ pub trait AccessControl: Send + Sync + fmt::Debug {
 }
 
 /// The access control of an engine without an implementation installed: no
-/// users, no sessions, no login — every caller is the anonymous
-/// catalogue-only principal. It is what a bare `Engine::builder().start()`
-/// runs, so an embedder that never configures users cannot be reached.
+/// users, no sessions, no login — every caller is the grant-free anonymous
+/// principal, so nothing but `acl:whoami` answers (and `acl:login` refuses
+/// because there is no registry). It is what a bare
+/// `Engine::builder().start()` runs, so an embedder that never configures
+/// users cannot be reached.
 #[derive(Debug, Default)]
 pub struct AnonymousAcl;
 
@@ -854,6 +887,18 @@ impl AccessControl for AnonymousAcl {
 
     async fn logout(&self, _token: &str) -> Result<bool> {
         Ok(false)
+    }
+
+    async fn logout_user(&self, _name: &str) -> Result<bool> {
+        Err(ActError::Config(
+            "no user registry is installed in this engine".to_string(),
+        ))
+    }
+
+    async fn set_user_enabled(&self, _name: &str, _enabled: bool) -> Result<bool> {
+        Err(ActError::Config(
+            "no user registry is installed in this engine".to_string(),
+        ))
     }
 
     async fn set_user(&self, _spec: &UserSpec) -> Result<()> {
@@ -915,6 +960,18 @@ impl AccessControl for DisabledAcl {
 
     async fn logout(&self, _token: &str) -> Result<bool> {
         Ok(false)
+    }
+
+    async fn logout_user(&self, _name: &str) -> Result<bool> {
+        Err(ActError::Config(
+            "the acl is disabled: there is no user registry".to_string(),
+        ))
+    }
+
+    async fn set_user_enabled(&self, _name: &str, _enabled: bool) -> Result<bool> {
+        Err(ActError::Config(
+            "the acl is disabled: there is no user registry".to_string(),
+        ))
     }
 
     async fn set_user(&self, _spec: &UserSpec) -> Result<()> {
@@ -1186,20 +1243,25 @@ mod tests {
     }
 
     #[test]
-    fn the_anonymous_principal_reads_the_catalogue_only() {
+    fn the_anonymous_principal_holds_no_grant() {
         let principal = Principal::anonymous();
         assert!(!principal.is_authenticated());
-        principal.check("model:ls").unwrap();
-        principal.check("pack:get").unwrap();
-        assert!(principal.check("model:deploy").is_err());
-        assert!(principal.check("proc:start").is_err());
-        assert!(principal.check("acl:setuser").is_err());
-        assert!(principal.check_rn("orders:eu").is_err());
-        // every refusal beyond the catalogue is "log in", not "not allowed"
+        // not even the catalogue reads: everything is "log in", never a grant
+        for action in ["model:ls", "model:get", "pack:get", "pack:ls"] {
+            assert!(
+                matches!(principal.check(action), Err(AclError::Unauthenticated(_))),
+                "'{action}' must need a credential"
+            );
+        }
         assert!(matches!(
             principal.check("model:deploy"),
             Err(AclError::Unauthenticated(_))
         ));
+        assert!(matches!(
+            principal.check("acl:setuser"),
+            Err(AclError::Unauthenticated(_))
+        ));
+        assert!(principal.check_rn("orders:eu").is_err());
     }
 
     #[test]

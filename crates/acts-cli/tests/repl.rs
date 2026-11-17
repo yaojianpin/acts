@@ -499,8 +499,7 @@ async fn a_refusal_names_the_action_and_the_message() {
 /// An ACL refusal is the transport's, not the engine's: the identity the
 /// startup greeting prints comes from the session a login answered with, what
 /// the user's grants allow is served, and what they do not is an error naming
-/// the action. A caller that never logged in reads the catalogue and nothing
-/// else.
+/// the action. A caller that never logged in may run nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_acl_refusal_names_the_action() {
     common::with_server("acl", false, |engine, url| async move {
@@ -537,8 +536,8 @@ async fn an_acl_refusal_names_the_action() {
             "a denied action must say so: {text}"
         );
 
-        // without a session the server answers the catalogue reads, and a
-        // missing credential is reported as such — not as a grant
+        // without a session the server refuses even the catalogue reads, and
+        // a missing credential is reported as such — not as a grant
         let mut anonymous = client::connect(&url, None).await?;
         let who = client::whoami(&mut anonymous).await?;
         assert_eq!(who["user"], json!("anonymous"));
@@ -548,12 +547,14 @@ async fn an_acl_refusal_names_the_action() {
             "anonymous",
             "an unauthenticated session greets as anonymous"
         );
+        let err = anonymous
+            .send::<serde_json::Value>("model:ls", Vars::new())
+            .await
+            .unwrap_err();
+        let text = format!("{err}");
         assert!(
-            anonymous
-                .send::<serde_json::Value>("model:ls", Vars::new())
-                .await
-                .is_ok(),
-            "an anonymous caller reads the catalogue"
+            text.contains("a session token is required"),
+            "a missing credential must be reported as one: {text}"
         );
         // over the CLI surface the action is named, and what is missing is the
         // credential — not a grant
@@ -672,6 +673,50 @@ async fn the_auth_commands_manage_the_engines_users() {
                 "`{line}` must be refused: {text}"
             );
         }
+
+        // `auth user logout` cuts every session of the user off (an
+        // administrator's logout); its credentials are untouched, so it logs
+        // in again right away
+        cli.run("auth user logout reader").await?;
+        let err = reader
+            .send::<serde_json::Value>("acl:whoami", Vars::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid user or password"),
+            "the revoked session must be refused: {err}"
+        );
+        let mut reader = acts_channel::ActsChannel::connect_with_password(&url, "reader", "s3cret")
+            .await
+            .map_err(|err| client::action_failed("acl:login", err))?;
+
+        // `auth user disable` refuses the login and revokes live sessions;
+        // `auth user enable` reopens it, and the builtin admin cannot be
+        // disabled
+        cli.run("auth user disable reader").await?;
+        let err = reader
+            .send::<serde_json::Value>("acl:whoami", Vars::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid user or password"),
+            "the disabled user must be refused: {err}"
+        );
+        assert!(
+            acts_channel::ActsChannel::connect_with_password(&url, "reader", "s3cret")
+                .await
+                .is_err(),
+            "a disabled user must not log in"
+        );
+        cli.run("auth user enable reader").await?;
+        let _reader = acts_channel::ActsChannel::connect_with_password(&url, "reader", "s3cret")
+            .await
+            .map_err(|err| client::action_failed("acl:login", err))?;
+        let err = cli.run("auth user disable admin").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot be disabled"),
+            "the builtin admin cannot be disabled: {err:#}"
+        );
 
         // `auth user rm` deletes the user, and its login is refused from then on
         cli.run("auth user rm reader").await?;
@@ -1205,11 +1250,20 @@ fn the_binary_answers_help_and_reports_bad_input_and_unreachable_servers() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The REPL loop in the shipped binary against a live server: it authenticates
-/// at startup, answers help, runs a command, reports a bad line, and exits.
+/// The REPL loop in the shipped binary against a live server: it logs in at
+/// startup, answers help, runs a command, reports a bad line, and exits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_binary_runs_the_repl_against_a_live_server() {
-    common::with_server("binary-repl", false, |_engine, url| async move {
+    common::with_server("binary-repl", false, |engine, url| async move {
+        engine
+            .acl()
+            .set_user(&UserSpec {
+                name: "reader".to_string(),
+                add_passwords: vec!["s3cret".to_string()],
+                allow: Some(vec!["model:ls".to_string()]),
+                ..Default::default()
+            })
+            .await?;
         let port = url
             .rsplit(':')
             .next()
@@ -1217,7 +1271,11 @@ async fn the_binary_runs_the_repl_against_a_live_server() {
             .to_string();
 
         let dir = scratch_dir("binary-repl");
-        let out = run_binary(&["--port", &port], Some("\nmodel ls\nbogus\nexit\n"), &dir);
+        let out = run_binary(
+            &["--port", &port, "--user", "reader", "--password", "s3cret"],
+            Some("\nmodel ls\nbogus\nexit\n"),
+            &dir,
+        );
         assert!(
             out.status.success(),
             "the REPL must exit successfully: {}",
@@ -1225,7 +1283,7 @@ async fn the_binary_runs_the_repl_against_a_live_server() {
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            stdout.contains("authenticated as anonymous"),
+            stdout.contains("authenticated as reader"),
             "the startup greeting must name the identity: {stdout}"
         );
         assert!(

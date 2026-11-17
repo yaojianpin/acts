@@ -1161,7 +1161,7 @@ async fn http_auth_accepts_both_bearer_spellings() {
     // /health is open, and no route below it is
     let (status, _) = http_call(port, "GET", "/health", &[], None).await;
     assert_eq!(status, 200);
-    // anonymous callers are catalogue-only: a write is refused, not served
+    // an anonymous caller is refused: a write is a 401, not a denial
     let (status, _) = http_call(
         port,
         "POST",

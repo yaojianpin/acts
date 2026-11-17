@@ -661,6 +661,50 @@ async fn test_send_enforces_acl() {
         .expect("an authenticated subscription must open");
 }
 
+/// A bearer that no longer resolves still reaches the actions whose payload is
+/// the credential: refusing them would make the very request that repairs a
+/// dead session impossible. Every other action stays UNAUTHENTICATED.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_stale_bearer_reaches_the_credential_actions() {
+    let engine = engine_with_users(&[("operator", "op-pass", &[])]).await;
+    let server = GrpcServer::new(&engine);
+
+    // the login is answered even though the bearer in hand is invalid
+    let mut login_request = action(
+        "acl:login",
+        json!({"user": "operator", "password": "op-pass"}),
+    );
+    login_request
+        .metadata_mut()
+        .insert("authorization", "Bearer bogus".parse().unwrap());
+    let answer = server
+        .send(login_request)
+        .await
+        .expect("acl:login carries its own credential")
+        .into_inner();
+    let refresh_token = payload(&answer)["refresh_token"]
+        .as_str()
+        .expect("acl:login must answer a refresh token")
+        .to_string();
+
+    // and so is the rotation that replaces the dead session
+    let mut refresh_request = action("acl:refresh", json!({"refresh_token": refresh_token}));
+    refresh_request
+        .metadata_mut()
+        .insert("authorization", "Bearer bogus".parse().unwrap());
+    server
+        .send(refresh_request)
+        .await
+        .expect("acl:refresh carries its own credential");
+
+    // the identity answer is about the bearer, so an invalid one is refused
+    let status = server
+        .send(send_request("acl:whoami", Some("bogus")))
+        .await
+        .expect_err("whoami needs a credential that resolves");
+    assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status}");
+}
+
 /// Two tenants, both allowed to start runs, subscribe and ack.
 const SUB_ALLOW: &[&str] = &["model:deploy", "proc:start", "msg:ack", "msg:sub"];
 

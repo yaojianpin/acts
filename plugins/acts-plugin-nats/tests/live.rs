@@ -59,7 +59,7 @@ fn temp_config(nats_section: &str) -> (PathBuf, Config) {
 /// The engine with access control on — the default — and the store-backed
 /// registry installed: it is a separate crate, so without it a bare engine
 /// refuses every `acl:*` action, `acl:login` and `set_user` included. The
-/// anonymous caller behaves the same either way: catalogue-only.
+/// anonymous caller is refused everything either way.
 async fn engine_with_nats(config: &Config) -> Engine {
     Engine::builder()
         .set_config(config)
@@ -147,7 +147,7 @@ async fn snapshot_actions_over_nats() {
     };
 
     // This case exercises the NATS action surface, so the caller must be
-    // unrestricted (the default acl would answer it as anonymous, read-only).
+    // unrestricted (the default acl would refuse an anonymous caller).
     let (path, config) =
         temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-snapshot-test\"\n");
     let engine = engine_with_nats_unrestricted(&config).await;

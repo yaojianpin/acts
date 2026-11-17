@@ -287,25 +287,29 @@ mod tests {
         assert!(executor.model().list(&Query::new()).await.is_ok());
     }
 
-    /// The tokenless caller is the catalogue-only `anonymous` subject: the
-    /// reads pass, everything else is refused as "no credential" through the
-    /// same executor.
+    /// The tokenless caller is the grant-free `anonymous` subject: every
+    /// operation, the reads included, is refused as "no credential" through
+    /// the same executor.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_anonymous_callers_executor_reads_only_the_catalogue() {
+    async fn the_anonymous_callers_executor_holds_no_grant() {
         let engine = Engine::builder().start().await.unwrap();
         let executor = engine.executor(&engine.anonymous());
 
-        assert!(executor.model().list(&Query::new()).await.is_ok());
-        assert!(executor.pack().list(&Query::new()).await.is_ok());
+        for result in [
+            executor.model().list(&Query::new()).await.err(),
+            executor.pack().list(&Query::new()).await.err(),
+            executor.proc().list(&Query::new()).await.err(),
+        ] {
+            assert!(
+                matches!(result, Some(ActError::Unauthenticated(_))),
+                "the anonymous executor must refuse the read: {result:?}"
+            );
+        }
         assert!(matches!(
             executor
                 .model()
                 .deploy(&Workflow::new().with_id("m1"), None)
                 .await,
-            Err(ActError::Unauthenticated(_))
-        ));
-        assert!(matches!(
-            executor.proc().list(&Query::new()).await,
             Err(ActError::Unauthenticated(_))
         ));
     }
