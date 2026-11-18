@@ -1,20 +1,20 @@
 # Acts million-run stress report
 
-- Generated at (Unix seconds): 1794962324
+- Generated at (Unix seconds): 1795043563
 - Result: **PASS**
 - Measured attempts: 100000
 - Measured completed: 100000
 - Measured errored: 0
 - Measured terminated: 0
 - Measured error rate: 0.0000%
-- Measured elapsed: 728.50s
-- Measured throughput: 137.27 workflows/s
-- Peak RSS: 0.29 GiB
-- Min system available memory: 14.39 GiB
-- Process CPU: peak 385.0% / sample mean 308.9%
-- System CPU: peak 96.6% / sample mean 78.9%
-- Max storage used: 0.18 GiB
-- Peak process rows: 2659 (active 17)
+- Measured elapsed: 689.17s
+- Measured throughput: 145.10 workflows/s
+- Peak RSS: 0.30 GiB
+- Min system available memory: 14.34 GiB
+- Process CPU: peak 380.0% / sample mean 308.8%
+- System CPU: peak 96.3% / sample mean 78.9%
+- Max storage used: 0.19 GiB
+- Peak process rows: 2782 (active 18)
 - Process rows at the end (after the cleanup wait, when configured): 0
 - Residual aggregate documents: 0
 - Residual index documents: 0
@@ -48,20 +48,20 @@ Backend selected by --store; connection URLs are not copied into this report; cl
 
 | Phase | Concurrency | Attempted | Completed | Errored | Terminated | Throughput/s | Error rate | Elapsed/s |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| warmup | 16 | 100 | 100 | 0 | 0 | 224.42 | 0.0000% | 0.45 |
+| warmup | 16 | 100 | 100 | 0 | 0 | 237.95 | 0.0000% | 0.42 |
 
-**warmup start API latency (ms)**: p50 0.563 / p90 0.919 / p95 1.269 / p99 2.512 / p99.9 4.413 / max 4.413 / mean 0.706 / stddev 0.507
-**warmup end-to-end latency (ms)**: p50 45.483 / p90 137.386 / p95 160.945 / p99 192.415 / p99.9 197.127 / max 197.127 / mean 63.919 / stddev 48.528
+**warmup start API latency (ms)**: p50 0.556 / p90 0.842 / p95 1.281 / p99 2.695 / p99.9 4.438 / max 4.438 / mean 0.681 / stddev 0.479
+**warmup end-to-end latency (ms)**: p50 58.811 / p90 106.203 / p95 113.881 / p99 138.840 / p99.9 148.197 / max 148.197 / mean 60.490 / stddev 32.243
 
-| load-1/1-c16 | 16 | 100000 | 100000 | 0 | 0 | 137.27 | 0.0000% | 728.50 |
+| load-1/1-c16 | 16 | 100000 | 100000 | 0 | 0 | 145.10 | 0.0000% | 689.17 |
 
-**load-1/1-c16 start API latency (ms)**: p50 0.774 / p90 1.827 / p95 2.597 / p99 4.159 / p99.9 39.888 / max 809.463 / mean 1.165 / stddev 4.959
-**load-1/1-c16 end-to-end latency (ms)**: p50 88.794 / p90 239.765 / p95 310.206 / p99 511.807 / p99.9 773.338 / max 1250.478 / mean 116.554 / stddev 103.492
+**load-1/1-c16 start API latency (ms)**: p50 0.729 / p90 1.710 / p95 2.343 / p99 3.565 / p99.9 33.889 / max 136.893 / mean 1.061 / stddev 2.080
+**load-1/1-c16 end-to-end latency (ms)**: p50 85.489 / p90 227.583 / p95 288.786 / p99 455.981 / p99.9 651.317 / max 925.594 / mean 110.261 / stddev 93.365
 
-| post-stress-smoke | 16 | 100 | 100 | 0 | 0 | 175.99 | 0.0000% | 0.57 |
+| post-stress-smoke | 16 | 100 | 100 | 0 | 0 | 137.41 | 0.0000% | 0.73 |
 
-**post-stress-smoke start API latency (ms)**: p50 0.758 / p90 1.123 / p95 1.319 / p99 4.092 / p99.9 22.242 / max 22.242 / mean 1.098 / stddev 2.181
-**post-stress-smoke end-to-end latency (ms)**: p50 74.280 / p90 154.284 / p95 180.676 / p99 188.478 / p99.9 203.412 / max 203.412 / mean 82.310 / stddev 46.953
+**post-stress-smoke start API latency (ms)**: p50 0.729 / p90 1.064 / p95 1.199 / p99 1.412 / p99.9 3.579 / max 3.579 / mean 0.811 / stddev 0.331
+**post-stress-smoke end-to-end latency (ms)**: p50 89.888 / p90 195.827 / p95 222.643 / p99 248.155 / p99.9 278.946 / max 278.946 / mean 103.140 / stddev 61.329
 
 ## Metric definitions and limitations
 
