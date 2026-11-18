@@ -61,7 +61,7 @@ serde_json = "1.0.140"
 # sites are untouched.
 serde_yaml = { version = "0.9.42", package = "serde_norway" }
 toml = "1.1.6"
-jsonschema = { version = "0.60.2", default-features = false }
+jsonschema = { version = "0.61.2", default-features = false }
 # logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
