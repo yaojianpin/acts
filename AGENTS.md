@@ -18,12 +18,14 @@ MSRV 1.91, license/advisory gates).
 
 ## Commit requirements (mandatory)
 
-Every commit MUST pass both gates **before** you commit. Run them from the
+Every commit MUST pass all gates **before** you commit. Run them from the
 repository root:
 
 ```sh
 cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
 cargo fmt
+cargo deny --locked check
+cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384
 ```
 
 - Clippy runs exactly what CI runs (`.github/workflows/rust.yml`); any warning
@@ -32,11 +34,21 @@ cargo fmt
 - `cargo fmt` formats all code; CI verifies with `cargo fmt --check`. If you
   want to verify without rewriting files, run `cargo fmt --check`.
 - `--locked` means: if you changed any `Cargo.toml`, run `cargo update -p <crate>`
-  (or `cargo check`) first so `Cargo.lock` is in sync, or clippy will fail on
-  the lockfile check.
-- Changes touching dependency manifests also require `cargo deny check bans`
-  to stay warning-free; refresh `deny.toml`'s `skip` baseline when the graph
-  moves (cargo-deny names every stale entry in its output).
+  (or `cargo check`) first so `Cargo.lock` is in sync, or the `--locked`
+  commands above will fail on the lockfile check.
+- `cargo deny --locked check` runs the `deny` job
+  (`.github/workflows/supply-chain.yml`) with `deny.toml`: advisories, duplicate
+  versions, licenses and sources over the all-features graph of the shipped
+  platforms. It also warns about a `skip`/`skip-tree` entry the graph no longer
+  matches, so refresh the baseline when dependencies move.
+- `cargo audit` parses `Cargo.lock` directly, including crates no feature set
+  enables. Its `--ignore` list MUST match the `audit` job in
+  `.github/workflows/supply-chain.yml`, whose comments carry the review for
+  each entry.
+- The RustSec advisory database must be current. If the fetch fails, use the
+  cached-database forms instead of skipping the gate:
+  `cargo deny --offline --locked check` and
+  `cargo audit -n --stale …` with the same ignores.
 
 ## Tests
 
