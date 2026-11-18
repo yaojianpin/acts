@@ -13,7 +13,7 @@ rust-version.workspace = true
 [dependencies]
 acts-channel = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 clap = { workspace = true }
 clap-cargo = { workspace = true }
 comfy-table = "8.0.0"

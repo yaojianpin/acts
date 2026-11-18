@@ -53,7 +53,6 @@ use acts::{
 };
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
-use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
@@ -98,7 +97,7 @@ const USERS_PREFIX: &str = "acl_users";
 const SESSIONS_PREFIX: &str = "acl_sessions";
 
 fn now_millis() -> i64 {
-    Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// Runtime knobs, read once from the environment.

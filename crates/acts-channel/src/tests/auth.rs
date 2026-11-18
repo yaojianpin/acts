@@ -55,7 +55,7 @@ async fn login_carries_a_session_and_logout_revokes_it() {
     let session = client.session().expect("a login answers a session");
     assert_eq!(client.token().as_deref(), Some(session.token.as_str()));
     // the expiries are the server's TTLs stamped on the local clock
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = crate::utils::time_millis();
     assert!(
         session.expires_at > now && session.expires_at <= now + ACCESS_TOKEN_TTL_SECS * 1000,
         "the access token's expiry is not within its TTL: {session:?}"
@@ -173,7 +173,7 @@ async fn a_stale_access_token_is_refreshed_transparently() {
     let stale = SessionTokens {
         token: "at_expired".to_string(),
         refresh_token: live.refresh_token.clone(),
-        expires_at: chrono::Utc::now().timestamp_millis() - 1,
+        expires_at: crate::utils::time_millis() - 1,
         refresh_expires_at: live.refresh_expires_at,
     };
     assert!(stale.is_expired() && !stale.is_refresh_expired());
@@ -209,7 +209,7 @@ async fn a_stale_access_token_is_refreshed_transparently() {
 async fn a_spent_refresh_token_is_reported_by_the_refresh() {
     let (_engine, port, tx) = auth_server().await;
     let url = url(port);
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = crate::utils::time_millis();
 
     let stale = SessionTokens {
         token: "at_expired".to_string(),
@@ -238,7 +238,7 @@ async fn a_spent_refresh_token_is_reported_by_the_refresh() {
 async fn a_login_replaces_a_session_the_server_no_longer_resolves() {
     let (_engine, port, tx) = auth_server().await;
     let url = url(port);
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = crate::utils::time_millis();
 
     let stale = SessionTokens {
         token: "at_expired".to_string(),
@@ -497,8 +497,8 @@ async fn an_admin_can_disable_and_enable_a_user() {
 /// access token needs rotating, and whether the session is dead outright.
 #[test]
 fn session_expiry_flags_follow_the_wall_clock() {
-    let far = chrono::Utc::now().timestamp_millis() + 60_000;
-    let past = chrono::Utc::now().timestamp_millis() - 1;
+    let far = crate::utils::time_millis() + 60_000;
+    let past = crate::utils::time_millis() - 1;
     let live = SessionTokens {
         token: "at".to_string(),
         refresh_token: "rt".to_string(),

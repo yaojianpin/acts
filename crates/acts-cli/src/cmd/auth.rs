@@ -191,10 +191,7 @@ pub async fn login(
     session::save(&url, user, &tokens)?;
     parent.output(&format!(
         "logged in as '{user}' (access token valid for {}s; session stored for {url})",
-        tokens
-            .expires_at
-            .saturating_sub(chrono::Utc::now().timestamp_millis())
-            / 1000
+        tokens.expires_at.saturating_sub(util::now_millis()) / 1000
     ));
     Ok(())
 }

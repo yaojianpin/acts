@@ -89,13 +89,14 @@ skip = [
     { crate = "sha2@0.10.9", reason = "acts' token hashing, sqlx 0.8 and ed25519-dalek 2 are on sha2 0.10; bashkit's checksum builtins use 0.11" },
     { crate = "syn@2.0.119", reason = "derive crates (prost-derive, tracing-attributes, rquickjs-macro, sqlx-macros, validator_derive, ...) are still on syn 2" },
     { crate = "webpki-roots@0.26.11", reason = "sqlx-core 0.8 and tokio-websockets 0.10 still use webpki-roots 0.26" },
-    { crate = "winnow@0.7.15", reason = "cron 0.17 is on winnow 0.7; the toml 1.1.6-spec parser (toml_edit 0.25) uses 1.0" },
 ]
 
 # windows-sys bumps its major version faster than the ecosystem can agree on
 # one, so the subtree below each tolerated major is exempt instead of listing
 # every leaf crate.
 skip-tree = [
+    { crate = "darling@0.20.11", reason = "derive_builder 0.20.2, croner 4.0.3's pattern builder, pins darling 0.20; prost/validator derives are on darling 0.23" },
+    { crate = "strum@0.27.2", reason = "croner 4.0.3 pins strum 0.27; acts and jsonschema use strum 0.28" },
     { crate = "windows-sys@0.48.0", reason = "etcetera 0.8.0 has not moved past windows-sys 0.48" },
 ]
 

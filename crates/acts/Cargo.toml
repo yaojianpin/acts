@@ -22,8 +22,8 @@ rust-version.workspace = true
 [dependencies]
 tokio = { features = ["full", "macros"], workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
-cron = { workspace = true }
+jiff = { workspace = true }
+croner = { workspace = true }
 globset = { default-features = false, workspace = true }
 inventory = "0.3.20"
 jsonschema = { workspace = true }

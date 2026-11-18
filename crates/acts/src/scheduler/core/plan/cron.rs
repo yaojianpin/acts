@@ -1,33 +1,34 @@
 //! cron expression helpers for `schedule` triggers.
 //!
-//! The cron syntax follows the `cron` crate: 6 fields
-//! (`sec min hour day month dow`). Times are interpreted in the engine's
-//! local timezone.
+//! Expressions follow `croner`: the engine documents the 6-field
+//! (`sec min hour day month dow`) form, and a 5-field expression means
+//! minute granularity. Times are interpreted in the engine's local timezone.
 
 use crate::Result;
-use chrono::{DateTime, Local};
+use croner::Cron as Croner;
+use jiff::Zoned;
 use std::str::FromStr;
 
 /// A parsed cron schedule.
 #[derive(Debug, Clone)]
-pub struct Cron(cron::Schedule);
+pub struct Cron(Croner);
 
 impl Cron {
-    /// parse a 6-field cron expression (`sec min hour day month dow`)
+    /// parse a cron expression (`sec min hour day month dow`)
     pub fn parse(expr: &str) -> Result<Self> {
-        let schedule = cron::Schedule::from_str(expr)
+        let schedule = Croner::from_str(expr)
             .map_err(|err| crate::ActError::Model(format!("invalid cron '{expr}': {err}")))?;
         Ok(Self(schedule))
     }
 
-    /// the next fire time strictly after `after`, in the same timezone
-    pub fn next_after(&self, after: DateTime<Local>) -> Option<DateTime<Local>> {
-        self.0.after(&after).next()
+    /// the next fire time strictly after `after`, in `after`'s timezone
+    fn next_after(&self, after: &Zoned) -> Option<Zoned> {
+        self.0.find_next_occurrence(after, false).ok()
     }
 
     /// the next fire time after now
-    pub fn next(&self) -> Option<DateTime<Local>> {
-        self.next_after(Local::now())
+    fn next(&self) -> Option<Zoned> {
+        self.next_after(&Zoned::now())
     }
 
     /// the next fire time of `expr` after now, in epoch millis — 0 when the
@@ -38,7 +39,7 @@ impl Cron {
         Self::parse(expr)
             .ok()
             .and_then(|cron| cron.next())
-            .map(|next| next.timestamp_millis())
+            .map(|next| next.timestamp().as_millisecond())
             .unwrap_or(0)
     }
 }
@@ -62,6 +63,6 @@ mod tests {
     fn cron_next_is_after_now() {
         let c = Cron::parse("* * * * * *").unwrap();
         let next = c.next().unwrap();
-        assert!(next > Local::now());
+        assert!(next > Zoned::now());
     }
 }

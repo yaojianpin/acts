@@ -14,7 +14,7 @@ rust-version.workspace = true
 acts = { workspace = true }
 argon2 = { workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 nanoid = { workspace = true }
 parking_lot = { workspace = true }
 serde = { features = ["derive"], workspace = true }

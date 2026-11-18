@@ -2,7 +2,7 @@ use acts_channel::{
     ActionResult,
     model::{Expr, Filter, OrderBy, PageData, Query},
 };
-use chrono::prelude::*;
+use jiff::tz::TimeZone;
 use serde_json::json;
 
 pub const CLAP_STYLING: clap::builder::styling::Styles = clap::builder::styling::Styles::styled()
@@ -14,13 +14,21 @@ pub const CLAP_STYLING: clap::builder::styling::Styles = clap::builder::styling:
     .valid(clap_cargo::style::VALID)
     .invalid(clap_cargo::style::INVALID);
 
+/// Milliseconds since the Unix epoch, on the wall clock.
+pub fn now_millis() -> i64 {
+    jiff::Timestamp::now().as_millisecond()
+}
+
 pub fn local_time(millis: i64) -> String {
     if millis == 0 {
         return "(nil)".to_string();
     }
-    match Local.timestamp_millis_opt(millis) {
-        chrono::LocalResult::Single(dt) => format!("{}", dt.format("%Y-%m-%d %H:%M:%S")),
-        _ => "".to_string(),
+    match jiff::Timestamp::from_millisecond(millis) {
+        Ok(timestamp) => timestamp
+            .to_zoned(TimeZone::system())
+            .strftime("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => "".to_string(),
     }
 }
 

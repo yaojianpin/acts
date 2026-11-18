@@ -75,12 +75,17 @@ clap-cargo = "0.19.0"
 # default features pull an editor and password hashing this repo never uses
 dialoguer = { version = "0.12", default-features = false }
 # utilities
-chrono = "0.4"
+# `chrono` is unmaintained (RUSTSEC-2026-0543); `jiff` is the replacement the
+# advisory names, and it is also the clock behind `croner`'s schedule search.
+# 0.2, not 1.0: croner 4's jiff backend has not moved to 1.0 yet, and two
+# majors in one graph would defeat the single-version policy below.
+jiff = "0.2"
 regex = "1.11"
 globset = { version = "0.4", default-features = false }
 nanoid = "0.5"
 parking_lot = "0.12"
-cron = "0.17"
+# cron expressions; the jiff backend keeps the engine's scheduling off chrono.
+croner = { version = "4.0", default-features = false, features = ["jiff"] }
 strum = { version = "0.28", features = ["derive"] }
 # expression language (the engine's `${{ }}` / `if` evaluator).
 #

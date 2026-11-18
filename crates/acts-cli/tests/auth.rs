@@ -10,7 +10,7 @@
 mod common;
 
 use acts::UserSpec;
-use acts_cli::{client, cmd::CommandRunner, session};
+use acts_cli::{client, cmd::CommandRunner, session, util};
 use anyhow::Context;
 use std::path::PathBuf;
 
@@ -127,7 +127,7 @@ fn the_auth_commands_login_store_the_session_and_log_out() {
                 // a session is scoped to its server, and a spent one is
                 // discarded on the way out
                 let other = scratch("other").expect("a second scratch directory");
-                let now = chrono::Utc::now().timestamp_millis();
+                let now = util::now_millis();
                 let tokens = acts_channel::SessionTokens {
                     token: "at_x".to_string(),
                     refresh_token: "rt_x".to_string(),

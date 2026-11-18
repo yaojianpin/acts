@@ -69,7 +69,7 @@ impl SessionTokens {
     /// persisted session can tell an expired token from a live one. The
     /// payload it reads is this module's own decoding, not part of the API.
     fn from_login(tokens: &LoginTokens) -> Self {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::utils::time_millis();
         Self {
             token: tokens.token.clone(),
             refresh_token: tokens.refresh_token.clone(),
@@ -82,13 +82,13 @@ impl SessionTokens {
     /// is authoritative, and a false negative just costs one refused request
     /// that `refresh` then repairs).
     pub fn is_expired(&self) -> bool {
-        self.expires_at <= chrono::Utc::now().timestamp_millis()
+        self.expires_at <= crate::utils::time_millis()
     }
 
     /// Whether the refresh token is past its expiry: such a session cannot be
     /// revived and needs a fresh login.
     pub fn is_refresh_expired(&self) -> bool {
-        self.refresh_expires_at <= chrono::Utc::now().timestamp_millis()
+        self.refresh_expires_at <= crate::utils::time_millis()
     }
 }
 
@@ -891,7 +891,7 @@ mod tests {
 
     #[test]
     fn session_tokens_serde_and_clock() {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = crate::utils::time_millis();
         let session = SessionTokens {
             token: "at".to_string(),
             refresh_token: "rt".to_string(),

@@ -141,7 +141,7 @@ mod tests {
     fn round_trips_a_session_and_scopes_it_to_its_server() {
         let dir = std::env::temp_dir().join(format!("acts_cli_session_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let far = chrono::Utc::now().timestamp_millis() + 60_000;
+        let far = crate::util::now_millis() + 60_000;
 
         save_to(&dir, "127.0.0.1:10080", "admin", &tokens(far)).unwrap();
         let loaded = load_from(&dir, "127.0.0.1:10080").expect("stored session loads");
@@ -160,7 +160,7 @@ mod tests {
     fn an_expired_session_is_discarded() {
         let dir = std::env::temp_dir().join(format!("acts_cli_session_exp_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let past = chrono::Utc::now().timestamp_millis() - 1;
+        let past = crate::util::now_millis() - 1;
 
         save_to(&dir, "srv", "admin", &tokens(past)).unwrap();
         assert!(load_from(&dir, "srv").is_none());
@@ -173,7 +173,7 @@ mod tests {
     fn clear_only_removes_another_servers_file_never() {
         let dir = std::env::temp_dir().join(format!("acts_cli_session_clr_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let far = chrono::Utc::now().timestamp_millis() + 60_000;
+        let far = crate::util::now_millis() + 60_000;
 
         save_to(&dir, "srv", "admin", &tokens(far)).unwrap();
         clear_from(&dir, "other").unwrap();
