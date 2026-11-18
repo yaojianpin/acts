@@ -722,7 +722,8 @@ pub async fn open_store(config_dir: &Path, db: &DbConfig) -> acts::Result<Opened
     }
 
     let raw: Arc<dyn KvStore> = if db.shards.is_empty() {
-        let url = database_url(config_dir, db)?;
+        let env_url = std::env::var(ACTS_DATABASE_URL_ENV).ok();
+        let url = database_url(config_dir, db, env_url.as_deref())?;
         open_backend(db.kind, &url, db.max_in_flight_writes).await?
     } else {
         let mut shards = Vec::with_capacity(shard_count);
@@ -834,12 +835,17 @@ async fn lease_holder_text(store: &Arc<dyn KvStore>) -> String {
     }
 }
 
-fn database_url(config_dir: &Path, db: &DbConfig) -> acts::Result<String> {
-    if let Some(url) = std::env::var(ACTS_DATABASE_URL_ENV)
-        .ok()
-        .filter(|url| !url.is_empty())
-    {
-        return Ok(url);
+/// Resolve the URL of the single database: `env_url` (the
+/// `ACTS_DATABASE_URL` value [`open_store`] reads once), then
+/// `[db].database_url`, then the default `<config_dir>/data` for sled. Any
+/// other type without a url is an error. An empty override counts as unset.
+///
+/// The override is a parameter, not a lookup here, so a caller can resolve a
+/// store without touching the process environment (tests open several stores
+/// in parallel).
+fn database_url(config_dir: &Path, db: &DbConfig, env_url: Option<&str>) -> acts::Result<String> {
+    if let Some(url) = env_url.filter(|url| !url.is_empty()) {
+        return Ok(url.to_string());
     }
     if let Some(url) = db.database_url.as_deref().filter(|url| !url.is_empty()) {
         return Ok(url.to_string());
@@ -1023,10 +1029,6 @@ pub fn engine_builder(
 mod tests {
     use super::*;
     use acts::MemoryStore;
-
-    /// `ACTS_DATABASE_URL` is process-global: the tests that set or read it
-    /// must not interleave.
-    static DATABASE_URL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn write_config(body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let thread = std::thread::current()
@@ -1585,9 +1587,6 @@ ttl = "5m"
 
     #[test]
     fn database_url_prefers_config_then_sled_default() {
-        let _guard = DATABASE_URL_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config_dir = Path::new("/tmp/acts");
         let sled = DbConfig::default();
         let pg = DbConfig {
@@ -1601,19 +1600,17 @@ ttl = "5m"
             ..DbConfig::default()
         };
 
-        // no env set (guarded): config url wins, sled falls back under the
-        // config dir, any other type without a url is an error
-        if std::env::var_os(ACTS_DATABASE_URL_ENV).is_none() {
-            assert_eq!(
-                database_url(config_dir, &sled).unwrap(),
-                config_dir.join("data").to_string_lossy()
-            );
-            assert_eq!(
-                database_url(config_dir, &pg).unwrap(),
-                "postgres://h/db".to_string()
-            );
-            assert!(database_url(config_dir, &pg_no_url).is_err());
-        }
+        // Config url wins, sled falls back under the config dir, any other
+        // type without a url is an error.
+        assert_eq!(
+            database_url(config_dir, &sled, None).unwrap(),
+            config_dir.join("data").to_string_lossy()
+        );
+        assert_eq!(
+            database_url(config_dir, &pg, None).unwrap(),
+            "postgres://h/db".to_string()
+        );
+        assert!(database_url(config_dir, &pg_no_url, None).is_err());
     }
 
     #[tokio::test]
@@ -1915,33 +1912,34 @@ ttl = "5m"
     }
 
     /// `ACTS_DATABASE_URL` overrides `[db].database_url`, even for a backend
-    /// that would otherwise have to error for a missing url.
+    /// that would otherwise have to error for a missing url. The override is
+    /// a parameter, not a write to the process environment: a store opened by
+    /// another test must never observe it.
     #[test]
     fn database_url_env_overrides_config() {
-        let _guard = DATABASE_URL_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config_dir = Path::new("/tmp/acts");
         let pg_no_url = DbConfig {
             kind: DbType::Postgres,
             database_url: None,
             ..DbConfig::default()
         };
-        let old = std::env::var_os(ACTS_DATABASE_URL_ENV);
-        unsafe { std::env::set_var(ACTS_DATABASE_URL_ENV, "postgres://env/db") };
-        assert_eq!(
-            database_url(Path::new("/tmp/acts"), &DbConfig::default()).unwrap(),
-            "postgres://env/db"
-        );
-        assert_eq!(
-            database_url(Path::new("/tmp/acts"), &pg_no_url).unwrap(),
-            "postgres://env/db"
-        );
-        unsafe {
-            match old {
-                Some(value) => std::env::set_var(ACTS_DATABASE_URL_ENV, value),
-                None => std::env::remove_var(ACTS_DATABASE_URL_ENV),
-            }
+        let pg_with_url = DbConfig {
+            database_url: Some("postgres://config/db".to_string()),
+            ..pg_no_url.clone()
+        };
+
+        for db in [&DbConfig::default(), &pg_with_url, &pg_no_url] {
+            assert_eq!(
+                database_url(config_dir, db, Some("postgres://env/db")).unwrap(),
+                "postgres://env/db"
+            );
         }
+        // An empty value counts as unset, leaving the usual resolution.
+        assert_eq!(
+            database_url(config_dir, &pg_with_url, Some("")).unwrap(),
+            "postgres://config/db"
+        );
+        assert!(database_url(config_dir, &pg_no_url, Some("")).is_err());
     }
 
     /// Connection URLs and `:memory:` are left alone; a file path gets its
