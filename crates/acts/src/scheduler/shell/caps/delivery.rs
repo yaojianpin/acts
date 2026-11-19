@@ -10,7 +10,8 @@
 //! The transport reports facts only; retry timing and quarantine policy
 //! remain the kernel's decisions. The serving implementation is the
 //! message forwarder (`caps::message::MessageForwarder`); the shadow
-//! transport below is the kernel's default.
+//! transport below exists only in a test build, and a host with no
+//! transport attached leaves records `Pending`.
 
 use super::Capability;
 use crate::ActError;
@@ -111,18 +112,23 @@ fn delivery_events(claim: &DeliveryClaim, outcome: DeliveryOutcome, now: i64) ->
     }
 }
 
-/// The default outbox transport: it logs each record and confirms it — what a
-/// host with nothing attached (the kernel's own tests, and any embedder that
-/// only wants the durable aggregate) does. The serving host replaces it with
-/// [`message::MessageForwarder`] so records reach the engine channel.
+/// The kernel's **test-only** outbox transport: it logs each record and
+/// confirms it without sending anything. The kernel's own tests and the P2
+/// parity harness install it explicitly (see `Workers::new`); the serving
+/// runtime attaches [`message::MessageForwarder`] instead, and `#[cfg(test)]`
+/// keeps this type out of a serving build entirely — a production runtime
+/// cannot construct it, let alone default to it.
+#[cfg(test)]
 pub(crate) struct ShadowTransport;
 
+#[cfg(test)]
 impl Capability for ShadowTransport {
     fn key(&self) -> &str {
         "shadow.delivery"
     }
 }
 
+#[cfg(test)]
 impl OutboxTransport for ShadowTransport {
     fn deliver(
         &self,
@@ -159,12 +165,17 @@ impl Workers {
         if ids.is_empty() {
             return;
         }
+        // No transport attached is not "nothing to send": the records stay
+        // `Pending` for the transport the serving assembly installs before the
+        // driver starts. Confirming them here would be the shadow bug.
+        let Some(transport) = self.caps.read().delivery.clone() else {
+            return;
+        };
         let process_id = loaded.snapshot.process_id.clone();
         let snapshot = &loaded.snapshot;
         let now = SystemClock.now_ms();
         let mut confirmations = Vec::with_capacity(ids.len());
         {
-            let transport = self.caps.read().delivery.clone();
             for id in ids {
                 let Some(record) = snapshot.outbox.get(id) else {
                     continue;
@@ -233,6 +244,12 @@ impl Workers {
     /// `Ok(true)` means the transport confirmed delivery; `Ok(false)` means the
     /// claim was lost or the record was no longer dispatchable.
     async fn dispatch_outbox_record(&self, record: OutboxRecord, now: i64) -> Result<bool> {
+        // Nothing to hand the record to: leave it `Pending`, unclaimed. A
+        // claim here would be retry accounting without a transport — the
+        // shadow bug in slow motion.
+        let Some(transport) = self.caps.read().delivery.clone() else {
+            return Ok(false);
+        };
         let claim = delivery_claim(&record, now);
         // A4: the claim and the outcome are two guarded aggregate writes of
         // this record's pid, so each takes the command lane — never across the
@@ -261,7 +278,6 @@ impl Workers {
         };
         drop(lane);
         let event = {
-            let transport = self.caps.read().delivery.clone();
             let outcome = transport.deliver(&claimed);
             outcome_event(&claim, outcome, now)
         };

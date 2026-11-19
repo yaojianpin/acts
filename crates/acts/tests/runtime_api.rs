@@ -52,11 +52,12 @@ impl acts::caps::Capability for DummyEffect {
 
 #[async_trait::async_trait]
 impl EffectRunner for DummyEffect {
-    async fn resolve(&self, _request: &EffectRequest) -> acts::Result<ResolvedEffect> {
-        Ok(ResolvedEffect {
+    async fn resolve(&self, _request: &EffectRequest) -> acts::Result<Option<ResolvedEffect>> {
+        Ok(Some(ResolvedEffect {
             params: serde_json::json!({}),
             options: serde_json::json!({}),
-        })
+            definition: None,
+        }))
     }
 
     async fn run(&self, _request: EffectRequest, _key: EffectKey) -> acts::Result<EffectOutcome> {

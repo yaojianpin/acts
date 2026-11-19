@@ -42,14 +42,18 @@ impl Workers {
             return Ok(None);
         };
         let model_node = task.model_node.clone();
-        let Some((runner, request)) = self.step_effect(
+        let (runner, request) = match self.step_effect(
             &loaded.snapshot,
             Some(&loaded.snapshot),
             &observed.operation_id.task,
             &model_node,
-        )?
-        else {
-            return Ok(None);
+        )? {
+            crate::scheduler::shell::StepEffect::Ready { runner, request } => (runner, request),
+            // No declared package, or no runner to ask: nothing can be
+            // observed. The operation stays `EffectUnknown` — recovery never
+            // invents an observation, and never re-runs it on a guess.
+            crate::scheduler::shell::StepEffect::NoEffect
+            | crate::scheduler::shell::StepEffect::NotReady { .. } => return Ok(None),
         };
         let key = EffectKey::of(&observed.operation_id);
         let observation = match runner.observe(&key).await {

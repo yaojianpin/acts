@@ -162,18 +162,96 @@ impl Store {
         Ok(total)
     }
 
+    /// The content identity of one package definition: the fields a run can
+    /// depend on, in a fixed order. Timestamps and the id-keyed row metadata
+    /// are not content. SHA-256 hex, so two builds of the same definition
+    /// agree, and a changed schema/`run_as`/options contract changes the hash.
+    pub(crate) fn content_hash<T: Serialize>(value: &T) -> String {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+
+        let text = serde_json::to_string(value).unwrap_or_default();
+        let digest = Sha256::digest(text.as_bytes());
+        let mut out = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+
+    /// The canonical content of a package definition (see [`Self::content_hash`]).
+    fn package_content(pack: &Package) -> JsonValue {
+        serde_json::json!({
+            "id": &pack.id,
+            "name": &pack.name,
+            "desc": &pack.desc,
+            "icon": &pack.icon,
+            "doc": &pack.doc,
+            "version": &pack.version,
+            "schema": &pack.schema,
+            "options": &pack.options,
+            "run_as": &pack.run_as,
+            "resources": &pack.resources,
+            "catalog": &pack.catalog,
+        })
+    }
+
+    /// The definition hash a start binds an operation to.
+    pub(crate) fn package_hash(pack: &Package) -> String {
+        Self::content_hash(&Self::package_content(pack))
+    }
+
+    /// Publish one package definition.
+    ///
+    /// The write is content-addressed: republishing byte-identical content is
+    /// an idempotent no-op (the start pass republishes every built-in and
+    /// plugin package on every boot), while a same-version definition whose
+    /// content changed is refused — two implementations cannot silently
+    /// answer one package id at the same version. A new version replaces the
+    /// row (the store keys definitions by id) and a running operation that
+    /// bound the old hash refuses to execute the new one (see
+    /// `caps::effect::DefinitionBinding`).
     pub async fn publish(&self, pack: &Package) -> Result<bool> {
         trace!(id = %pack.id, "store publish");
         if pack.id.is_empty() {
             return Err(ActError::Action("missing id in package".into()));
         }
 
+        let hash = Self::package_hash(pack);
         let packages = self.packages();
         match packages.find_opt(&pack.id).await? {
-            Some(m) => {
+            Some(existing) => {
+                // A row written before the hash existed: recompute it from
+                // the stored content, which is what a republish compares
+                // against.
+                let existing_hash = if existing.content_hash.is_empty() {
+                    Self::package_hash(&existing)
+                } else {
+                    existing.content_hash.clone()
+                };
+                if existing_hash == hash {
+                    // Backfill the field once, without touching the row's
+                    // clock: an idempotent republish must not look like a
+                    // change to anything watching update_time.
+                    if existing.content_hash.is_empty() {
+                        let data = Package {
+                            content_hash: hash,
+                            ..existing
+                        };
+                        packages.upsert(&data).await?;
+                    }
+                    return Ok(false);
+                }
+                if existing.version == pack.version {
+                    return Err(ActError::Conflict(format!(
+                        "package '{}' version '{}' is already published with different content",
+                        pack.id, pack.version
+                    )));
+                }
                 let data = Package {
-                    create_time: m.create_time,
+                    create_time: existing.create_time,
                     update_time: utils::time::time_millis(),
+                    content_hash: hash,
                     ..pack.clone()
                 };
                 packages.upsert(&data).await
@@ -181,6 +259,7 @@ impl Store {
             None => {
                 let data = Package {
                     create_time: utils::time::time_millis(),
+                    content_hash: hash,
                     ..pack.clone()
                 };
                 packages.create(&data).await
@@ -2096,6 +2175,58 @@ mod tests {
         let no_ver = Workflow::new().with_id("m1").with_ver("");
         let err = store.deploy(&no_ver, None).await.unwrap_err();
         assert!(err.to_string().contains("missing ver in model"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn publish_is_content_addressed_and_refuses_same_version_changes() {
+        let store = empty_store();
+        let base = Package {
+            id: "pack-hash".into(),
+            name: "pack".into(),
+            version: "1.0".into(),
+            schema: "{}".into(),
+            ..Package::default()
+        };
+
+        assert!(
+            store.publish(&base).await.unwrap(),
+            "the first publish writes"
+        );
+        let stored = store.packages().find("pack-hash").await.unwrap();
+        assert!(!stored.content_hash.is_empty(), "the row carries its hash");
+
+        // The start pass republishes every built-in on every boot: identical
+        // content is an idempotent no-op, not an update.
+        assert!(
+            !store.publish(&base).await.unwrap(),
+            "an identical republish changes nothing"
+        );
+
+        // Same version, different content: two implementations cannot answer
+        // one id at one version.
+        let changed = Package {
+            schema: r#"{"type":"object"}"#.into(),
+            ..base.clone()
+        };
+        let error = store.publish(&changed).await.unwrap_err();
+        assert!(
+            error.to_string().contains("different content"),
+            "the conflict names the version: {error}"
+        );
+
+        // A new version replaces the row (definitions are id-keyed) and takes
+        // the new hash.
+        let next = Package {
+            version: "2.0".into(),
+            ..changed
+        };
+        assert!(
+            store.publish(&next).await.unwrap(),
+            "a new version publishes"
+        );
+        let stored = store.packages().find("pack-hash").await.unwrap();
+        assert_eq!(stored.version, "2.0");
+        assert_eq!(stored.content_hash, Store::package_hash(&next));
     }
 
     #[tokio::test]

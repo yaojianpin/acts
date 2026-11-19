@@ -132,6 +132,7 @@ mod pool;
 pub(crate) mod recovery;
 pub(crate) mod scope;
 pub(crate) mod snapshot;
+mod startup;
 pub(crate) mod timers;
 pub(crate) mod validation;
 
@@ -144,7 +145,6 @@ pub(crate) use caps::assign::{
     ASSIGNMENT_VAR, Assign, Assignment, CANONICAL_POOL, DELEGATION_VAR, Delegation,
     RuntimeAssignmentResolver, names_business_data,
 };
-pub(crate) use caps::delivery::ShadowTransport;
 pub(crate) use caps::effect::PackageEffectRunner;
 pub(crate) use caps::lifecycle::ReportedRuns;
 pub(crate) use caps::message::MessageForwarder;
@@ -227,6 +227,16 @@ pub(crate) struct Workers {
     /// move to the lane tasks when [`Workers::serve`] starts; a host driven
     /// inline by the test harness keeps them unclaimed.
     pool: Arc<LanePool>,
+    /// The driver's start barrier (see [`startup`]): a host built for a staged
+    /// start holds its driver here until the engine's registrations are
+    /// committed, so the driver never plans a recovered operation against a
+    /// half-built package registry. A host built ready (every test, and an
+    /// embedder's own `Runtime::new`) holds it open.
+    startup: startup::StartupGate,
+    /// The lane tasks' handles, pushed in [`Workers::start_scheduler_workers`].
+    /// `Runtime::close` joins them after cancelling the token, so an in-flight
+    /// operation finishes before the writer drains.
+    lanes: Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     /// The extensible capabilities the scheduler calls: package effects,
     /// branch predicates, outbox delivery and process lifecycle. The scheduler
     /// holds the capability traits, never the shell's default implementations;
@@ -373,6 +383,26 @@ pub(crate) struct PoisonedOutbox {
     pub(crate) attempts: u64,
 }
 
+/// How one step's package resolves against the host's effect seam.
+pub(in crate::scheduler::shell) enum StepEffect {
+    /// The step declares no package (or the acting node is not a step): the
+    /// act completes with nothing to run.
+    NoEffect,
+    /// The package is declared and the host can run it.
+    Ready {
+        runner: Arc<dyn EffectRunner>,
+        /// Boxed: `EffectRequest` carries the whole `ScopeSpec`, and the
+        /// resolution is built once per effect and immediately destructured —
+        /// the indirection costs one allocation on the effect path and keeps
+        /// the enum (and every `Result` carrying it) small on the scheduler's
+        /// stack.
+        request: Box<EffectRequest>,
+    },
+    /// The package is declared but no runner is attached. The act must not
+    /// complete as if its package had run: the caller defers it.
+    NotReady { package: String },
+}
+
 impl Workers {
     /// A host over the engine's key-value store, plus the wake receiver its
     /// driver task must own. `cache_cap` bounds the runs that may be in flight
@@ -385,14 +415,17 @@ impl Workers {
         max_node_run_times: u64,
         timer_poll_ms: i64,
     ) -> (Arc<Self>, Receiver<OperationId>) {
-        Self::new_with_admissions(
+        let (host, wake_rx) = Self::new_with_admissions(
             kv,
             AdmissionCaps::new(cache_cap),
             max_node_run_times,
             timer_poll_ms,
             1,
             PAGE_SIZE * 8,
-        )
+            false,
+        );
+        host.install_test_caps();
+        (host, wake_rx)
     }
 
     /// A test host with an explicit scheduler lane count — the pool tests
@@ -405,20 +438,38 @@ impl Workers {
         timer_poll_ms: i64,
         workers: usize,
     ) -> (Arc<Self>, Receiver<OperationId>) {
-        Self::new_with_admissions(
+        let (host, wake_rx) = Self::new_with_admissions(
             kv,
             AdmissionCaps::new(cache_cap),
             max_node_run_times,
             timer_poll_ms,
             workers,
             PAGE_SIZE * 8,
-        )
+            false,
+        );
+        host.install_test_caps();
+        (host, wake_rx)
+    }
+
+    /// The kernel's own test host: the outbox transport and the effect runner
+    /// are **test doubles**, installed explicitly here so the serving
+    /// assembly's "nothing attached" state never doubles as one. A test that
+    /// wants different behaviour attaches its own (the last attach wins).
+    #[cfg(test)]
+    fn install_test_caps(&self) {
+        self.attach_outbox_transport(Arc::new(caps::delivery::ShadowTransport));
+        self.attach_effect_runner(Arc::new(caps::effect::TestEffectRunner));
     }
 
     /// The host with explicit caps for every admission category (A8) and the
     /// scheduler's worker-lane count and queue capacity. The serving runtime
     /// builds these from [`Config`](crate::Config); tests that only exercise
     /// the execution bound keep [`Self::new`].
+    ///
+    /// `start_gated` holds the driver at the start barrier (see [`startup`]):
+    /// the builder's start transaction passes `true` so no recovered operation
+    /// is planned against a half-registered package registry; every other
+    /// constructor passes `false` and the driver starts immediately.
     pub(crate) fn new_with_admissions(
         kv: Arc<dyn KvStore>,
         admissions: AdmissionCaps,
@@ -426,19 +477,22 @@ impl Workers {
         timer_poll_ms: i64,
         scheduler_workers: usize,
         scheduler_queue_cap: usize,
+        start_gated: bool,
     ) -> (Arc<Self>, Receiver<OperationId>) {
         let store = Arc::new(KvDocumentStore::new(kv));
         let processes = Arc::new(AsyncProcessRepository::new(store));
         let recovery = Arc::new(AsyncRecoveryRepository::new(processes.clone()));
         let (wake_tx, wake_rx) = channel(PAGE_SIZE * 8);
         let pool = Arc::new(LanePool::new(scheduler_workers, scheduler_queue_cap));
-        // The assembly defaults: no effects/predicates/lifecycle until the
-        // serving runtime attaches them, and the shadow transport (records
-        // logged, nothing sent) answering delivery.
+        // The assembly defaults: no capability is attached yet. The serving
+        // runtime installs every seam before it spawns the driver, and the
+        // kernel's test host installs its doubles in `install_test_caps` — so
+        // an unattached seam is always a start-assembly state, never a
+        // silently-successful implementation.
         let ports = CapServices {
             effects: None,
             predicates: None,
-            delivery: Arc::new(ShadowTransport),
+            delivery: None,
             lifecycle: None,
             join: crate::scheduler::shell::caps::join::Join,
             assignment: None,
@@ -450,6 +504,12 @@ impl Workers {
                 recovery,
                 wake_tx,
                 pool,
+                startup: if start_gated {
+                    startup::StartupGate::held()
+                } else {
+                    startup::StartupGate::open()
+                },
+                lanes: Arc::new(parking_lot::Mutex::new(Vec::new())),
                 caps: Arc::new(parking_lot::RwLock::new(ports)),
                 deliver: Arc::new(tokio::sync::Notify::new()),
                 timer_guider: Arc::new(parking_lot::RwLock::new(None)),
@@ -625,7 +685,7 @@ impl Workers {
     /// transport maps them onto engine messages (see [`message`]). Attach
     /// before driving operations.
     pub(crate) fn attach_outbox_transport(&self, transport: Arc<dyn OutboxTransport>) {
-        self.caps.write().delivery = transport;
+        self.caps.write().delivery = Some(transport);
     }
 
     /// Attach the process-lifecycle sink: from then on a run reports one
@@ -653,6 +713,42 @@ impl Workers {
     /// driving operations.
     pub(crate) fn attach_predicate_runner(&self, runner: Arc<dyn PredicateRunner>) {
         self.caps.write().predicates = Some(runner);
+    }
+
+    /// Open the start barrier: the driver may now claim, recover, deliver and
+    /// clean up. Idempotent and one-way — the engine calls it once its
+    /// registrations are committed, and nothing closes it again.
+    pub(crate) fn open_startup(&self) {
+        self.startup.open_now();
+    }
+
+    /// The host's start barrier, for a background task that must not reach
+    /// the store before the engine is ready (the terminal-cleanup task).
+    pub(crate) fn startup_gate(&self) -> startup::StartupGate {
+        self.startup.clone()
+    }
+
+    /// Whether the effect seam is installed: the start assembly checks it
+    /// before it opens the start barrier.
+    pub(crate) fn effect_runner_attached(&self) -> bool {
+        self.caps.read().effects.is_some()
+    }
+
+    /// The package's run-bound kind for a pushed act. A host with no runner
+    /// cannot answer, and guessing `Irq` would silently change what the act
+    /// does — the push fails closed instead. A serving host attaches its
+    /// runner before the driver starts; a package the runner does not know
+    /// still answers `None` (the import's `Irq` default).
+    pub(in crate::scheduler::shell) fn effect_run_as(
+        &self,
+        package: &str,
+    ) -> Result<Option<crate::ActRunAs>> {
+        match &self.caps.read().effects {
+            Some(runner) => Ok(runner.run_as(package)),
+            None => Err(ActError::Runtime(format!(
+                "no effect runner is attached; the pushed package '{package}' cannot be planned"
+            ))),
+        }
     }
 
     /// The installed capabilities' keys (see [`crate::scheduler::shell::caps::Capability`]):
@@ -1116,12 +1212,27 @@ impl Workers {
     /// plane, one store-touching background service. Notifications still
     /// accelerate the ready and outbox passes; a lost wake is only latency,
     /// never lost work. Exits when `shutdown` fires.
+    ///
+    /// The start barrier comes first (see [`startup`]): a host built for a
+    /// staged start runs nothing — no lane, no boot repair, no store read —
+    /// until the engine opens it, and a close before that exits here.
     pub(crate) async fn serve(
         self: Arc<Self>,
         mut wake_rx: Receiver<OperationId>,
         shutdown: tokio_util::sync::CancellationToken,
         schedule: KernelSchedule,
     ) {
+        // The start barrier: a runtime built for a staged start holds its
+        // driver here until the engine's registrations are committed, so no
+        // recovered operation is planned against a half-built registry (a
+        // missing runtime instance fails the task; an unregistered package
+        // reads as not idempotent and strands recovery). A runtime built ready
+        // passes at once. A close before the gate opens exits here, without
+        // starting a lane or reading the store.
+        tokio::select! {
+            _ = self.startup.wait() => {}
+            _ = shutdown.cancelled() => return,
+        }
         // The lane tasks own every operation from here on. A host driven
         // inline by the test harness never reaches this point, keeps its
         // receivers unclaimed, and does not route wakes into the pool.
@@ -1416,10 +1527,22 @@ impl Workers {
         for (lane, receivers) in receivers.into_iter().enumerate() {
             let host = self.clone();
             let shutdown = shutdown.clone();
-            tokio::spawn(async move { host.serve_lane(lane, receivers, shutdown).await });
+            let handle =
+                tokio::spawn(async move { host.serve_lane(lane, receivers, shutdown).await });
+            self.lanes.lock().push(handle);
         }
         self.pool.activate();
         true
+    }
+
+    /// Join every lane task after the shutdown token fired. An in-flight
+    /// operation runs to completion: the lane loop only observes the token
+    /// between jobs.
+    pub(crate) async fn join_lanes(&self) {
+        let handles: Vec<tokio::task::JoinHandle<()>> = std::mem::take(&mut *self.lanes.lock());
+        for handle in handles {
+            let _ = handle.await;
+        }
     }
 
     /// One lane's consumer: execute its operations in FIFO order, one at a
@@ -2560,46 +2683,50 @@ impl Workers {
         })
     }
 
-    /// The effect request for a `uses` step, when a runner is attached:
-    /// `None` for a leaf without a package or a host running without the seam.
+    /// Resolve the effect request for a `uses` step against the effect seam.
+    ///
+    /// The declaration is read **before** the slot: a step without a package
+    /// is [`StepEffect::NoEffect`] whether or not a runner is attached, so an
+    /// unattached seam can never be mistaken for "this act has no work". A
+    /// declared package with no runner is [`StepEffect::NotReady`], and every
+    /// caller fails closed on it.
     fn step_effect(
         &self,
         snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
         shared: Option<&Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>>,
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
-    ) -> Result<Option<(Arc<dyn EffectRunner>, EffectRequest)>> {
-        let Some(runner) = self.caps.read().effects.clone() else {
-            return Ok(None);
-        };
+    ) -> Result<StepEffect> {
         let Some(model) = model_of(snapshot)? else {
-            return Ok(None);
+            return Ok(StepEffect::NoEffect);
         };
-        let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
+        let package = match find_step_in_model(&model, model_node.as_str()) {
+            Some(step) => match step.uses.clone().filter(|uses| !uses.trim().is_empty()) {
+                Some(package) => package,
+                None => return Ok(StepEffect::NoEffect),
+            },
             // A pushed act is not in the model: its facts ride the
             // execution's scope (see `push_plan`).
-            let Some(act) = crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)?
-            else {
-                return Ok(None);
-            };
-            return Ok(Some((
-                runner,
-                caps::effect::EffectRequest {
-                    scope: self.scope_spec(snapshot, shared, task_id, model)?,
-                    package: act.uses,
-                },
-            )));
+            None => match crate::scheduler::shell::action::pushed_act_of(snapshot, task_id)? {
+                Some(act) => act.uses,
+                None => return Ok(StepEffect::NoEffect),
+            },
         };
-        let Some(package) = step.uses.clone().filter(|uses| !uses.trim().is_empty()) else {
-            return Ok(None);
+        let Some(runner) = self.caps.read().effects.clone() else {
+            return Ok(StepEffect::NotReady { package });
         };
-        Ok(Some((
+        // The binding the start pinned on this execution (absent for a run
+        // started before the binding existed, and for the start operation's
+        // own resolution, which runs before the pin is written).
+        let binding = act_facts(snapshot, task_id).and_then(|facts| facts.definition);
+        Ok(StepEffect::Ready {
             runner,
-            caps::effect::EffectRequest {
+            request: Box::new(caps::effect::EffectRequest {
                 scope: self.scope_spec(snapshot, shared, task_id, model)?,
                 package,
-            },
-        )))
+                binding,
+            }),
+        })
     }
 
     /// Whether a waiting act (`auto == "0"`) still has a package effect to
@@ -2613,11 +2740,15 @@ impl Workers {
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<bool> {
-        let Some((runner, request)) = self.step_effect(snapshot, shared, task_id, model_node)?
-        else {
-            return Ok(false);
-        };
-        Ok(runner.executes_while_waiting(&request.package))
+        match self.step_effect(snapshot, shared, task_id, model_node)? {
+            StepEffect::Ready { runner, request } => {
+                Ok(runner.executes_while_waiting(&request.package))
+            }
+            // No package, or no runner to ask: the act waits for its client.
+            // A declared package with no runner is deferred by the effect
+            // operation, never completed here.
+            StepEffect::NoEffect | StepEffect::NotReady { .. } => Ok(false),
+        }
     }
 
     /// Resolve one `uses` step's package at start (the legacy act's `run()`
@@ -2630,14 +2761,20 @@ impl Workers {
         task_id: &crate::scheduler::core::model::task_graph::TaskId,
         model_node: &crate::scheduler::core::model::model_graph::NodeId,
     ) -> Result<Option<ActFacts>> {
-        let Some((runner, request)) = self.step_effect(snapshot, shared, task_id, model_node)?
-        else {
+        let (runner, request) = match self.step_effect(snapshot, shared, task_id, model_node)? {
+            StepEffect::Ready { runner, request } => (runner, request),
+            // No package: no facts. A declared package with no runner keeps
+            // the declared params (nothing can prepare them); its effect is
+            // deferred when it would run, never reported as done.
+            StepEffect::NoEffect | StepEffect::NotReady { .. } => return Ok(None),
+        };
+        let Some(resolved) = runner.resolve(&request).await? else {
             return Ok(None);
         };
-        let resolved = runner.resolve(&request).await?;
         Ok(Some(ActFacts {
             params: resolved.params,
             options: resolved.options,
+            definition: resolved.definition,
         }))
     }
 

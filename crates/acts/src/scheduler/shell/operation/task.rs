@@ -560,6 +560,15 @@ impl ActOperation for ExecuteTask {
                         name: OPTIONS_VAR.to_string(),
                         value: facts.options.to_string(),
                     });
+                    // The definition the facts came from: the effect
+                    // re-checks it before executing (see `DefinitionBinding`).
+                    if let Some(definition) = &facts.definition {
+                        plan.variable_writes.push(VariableWrite {
+                            scope: task_id.clone(),
+                            name: DEF_VAR.to_string(),
+                            value: serde_json::to_string(definition).map_err(runtime)?,
+                        });
+                    }
                 }
                 if fresh && let Some(owner) = &assignment {
                     plan.variable_writes.push(VariableWrite {

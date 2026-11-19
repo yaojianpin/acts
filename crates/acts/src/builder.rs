@@ -188,7 +188,7 @@ impl EngineBuilder {
     /// }
     /// #[async_trait::async_trait]
     /// impl ActPlugin for TestPlugin {
-    ///     fn on_init(&self, engine: &Engine) -> Result<()> {
+    ///     async fn prepare(&self, engine: &Engine) -> Result<()> {
     ///         println!("TestPlugin");
     ///         engine.channel().on_start(|_| async {});
     ///         engine.channel().on_complete(|_| async {});
@@ -319,7 +319,12 @@ impl EngineBuilder {
         } = self;
         let config = Arc::new(config);
 
-        let runtime = Runtime::new(&config, store)?;
+        // The start transaction: the driver exists but is held at the start
+        // barrier until `Engine::initialize` committed every registration, so
+        // a recovered operation can never be planned against a half-built
+        // package registry. A failed start closes the runtime and the driver
+        // exits without reading the store.
+        let runtime = Runtime::new_gated(&config, store)?;
         let acl: Arc<dyn AccessControl> = acl.unwrap_or_else(|| Arc::new(crate::AnonymousAcl));
         let engine = Engine::with_runtime(config, runtime.clone(), acl)?;
 
@@ -329,7 +334,10 @@ impl EngineBuilder {
                 Ok(engine)
             }
             Err(err) => {
-                runtime.close().await;
+                // Stop the plugins that started (reverse order) and the
+                // runtime, then report the rollback counts the error path
+                // cannot carry.
+                engine.close().await;
                 Err(err)
             }
         }

@@ -289,7 +289,7 @@ impl Package {
     }
 
     /// Every registration the runtime holds. The start pass uses it to
-    /// publish the packages plugins registered from `on_init` (the registry
+    /// publish the packages plugins registered from `prepare` (the registry
     /// itself is the record; no second queue exists).
     pub(crate) fn registers(&self) -> Vec<ActPackageRegister> {
         self.packages
@@ -337,6 +337,7 @@ impl ActPackageDefinition {
             resources: serde_json::to_string(&pack.resources)
                 .expect("cannot convert ActPackageMeta.resources to json"),
             catalog: pack.catalog,
+            content_hash: String::new(),
             create_time: 0,
             update_time: 0,
             timestamp: 0,

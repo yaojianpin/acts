@@ -8,6 +8,11 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub(crate) struct CachedPackage {
     id: String,
+    version: String,
+    /// The stored definition's content hash (see `Store::publish`). Empty for
+    /// a row written before the hash existed; the effect binding treats an
+    /// empty hash as "unbound" and only logs.
+    content_hash: String,
     run_as: ActRunAs,
     /// The compiled-validator cache's key for this package's schema (the
     /// schema's serialized text), kept so that invalidating the package can
@@ -23,6 +28,14 @@ impl CachedPackage {
 
     pub(crate) fn run_as(&self) -> ActRunAs {
         self.run_as
+    }
+
+    pub(crate) fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub(crate) fn content_hash(&self) -> &str {
+        &self.content_hash
     }
 
     pub(crate) fn validate(&self, instance: &JsonValue) -> Result<()> {
@@ -71,6 +84,8 @@ impl SchemaCache {
             .map_err(|err| ActError::Package(format!("schema validation error: {err}")))?;
         let cached = Arc::new(CachedPackage {
             id: package.id,
+            version: package.version,
+            content_hash: package.content_hash,
             run_as: package.run_as,
             schema_key: key,
             validator,

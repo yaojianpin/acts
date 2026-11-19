@@ -70,6 +70,14 @@ pub struct CapServices {
   `attach_effect_runner` / `attach_outbox_transport` / `attach_lifecycle_sink`
   / `attach_predicate_runner` / `attach_assignment_resolver` 在装配期安装
   实现（last wins，serve 前完成）。
+- **装配先于驱动（2026-11-18）**：`Runtime::create` 现在先构造 `Arc<Runtime>`、
+  attach 全部端口与 timers，之后才 spawn driver 与 cleanup，`attach_*` 的
+  “attach before driving operations” 因此是字面事实而不是时间窗口假设。
+- `Workers` 持有启动屏障（`shell/startup.rs` 的 `StartupGate`）：builder 的
+  启动事务用 `Runtime::new_gated` 构造，屏障在 `Engine::initialize` 的注册
+  全部提交后才打开；`serve` 与 cleanup 在屏障前不触达 store。直接
+  `Runtime::new` 的嵌入方/测试得到已打开的屏障，行为不变。设计见
+  [`startup.md`](startup.md)。
 - 没有 registry、没有 default key 选择、没有封口：一个槽位一个实现。
 
 ### 2.3 状态输出

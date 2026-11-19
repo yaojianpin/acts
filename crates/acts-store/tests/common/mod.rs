@@ -1437,6 +1437,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                content_hash: String::new(),
                 v: 0,
             };
 
@@ -1467,6 +1468,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                content_hash: String::new(),
                 v: 0,
             };
             store.packages().create(&package).await.unwrap();
@@ -1497,6 +1499,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     built_in: false,
+                    content_hash: String::new(),
                     v: 0,
                 };
                 store.packages().create(&package).await.unwrap();
@@ -1549,6 +1552,7 @@ macro_rules! gen_store_tests {
                     update_time: 100,
                     timestamp: 0,
                     built_in: false,
+                    content_hash: String::new(),
                     v: 0,
                 };
                 store.packages().create(&package).await.unwrap();
@@ -1597,6 +1601,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     built_in: false,
+                    content_hash: String::new(),
                     v: 0,
                 };
                 store.packages().create(&package).await.unwrap();
@@ -1619,6 +1624,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     built_in: false,
+                    content_hash: String::new(),
                     v: 0,
                 };
                 store.packages().create(&package).await.unwrap();
@@ -1660,6 +1666,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: timestamp(),
                     built_in: false,
+                    content_hash: String::new(),
                     v: 0,
                 };
                 store.packages().create(&package).await.unwrap();
@@ -1714,6 +1721,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                content_hash: String::new(),
                 v: 0,
             };
             store.packages().create(&package).await.unwrap();
@@ -1749,6 +1757,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                content_hash: String::new(),
                 v: 0,
             };
             store.packages().create(&package).await.unwrap();
@@ -2087,6 +2096,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                content_hash: String::new(),
                 v: 0,
             };
             store

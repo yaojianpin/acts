@@ -47,6 +47,14 @@ pub struct Runtime {
     /// over the aggregate documents, including the store-facing timers
     /// (`timer_guider`/`timer_guards`).
     workers: Arc<Workers>,
+    /// The driver task's handle: `close` cancels the token and joins it before
+    /// the writer drains, so a pass already in flight finishes first.
+    driver: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// The terminal-cleanup task's handle (spawned only outside tests).
+    #[cfg(not(test))]
+    cleanup: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// `Runtime::close` is idempotent.
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Tick the periodic timers run on under test — short enough that a test can
@@ -92,8 +100,32 @@ impl Runtime {
     }
 
     pub fn new(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Self>> {
-        let runtime = Self::create(config, store)?;
+        let runtime = Self::create(config, store, false)?;
         Ok(runtime)
+    }
+
+    /// A runtime whose driver is held at the start barrier until
+    /// [`Self::open_startup`] (see the shell's `startup` module).
+    ///
+    /// The builder's start transaction builds one: `Engine::initialize`
+    /// registers snapshots, plugins and packages, and a driver that ran before
+    /// those commits would plan recovered operations against a half-built
+    /// registry. A runtime built through [`Self::new`] is open from the start,
+    /// so an embedder that drives the runtime directly keeps the old
+    /// behaviour.
+    pub(crate) fn new_gated(
+        config: &Config,
+        store: Option<Arc<dyn KvStore>>,
+    ) -> crate::Result<Arc<Self>> {
+        Self::create(config, store, true)
+    }
+
+    /// Open the start barrier: the driver may claim, recover, deliver and
+    /// clean up. Called once, by `Engine::initialize`, after every
+    /// registration committed; a failed start closes the runtime instead, and
+    /// the driver exits through the shutdown token without reading the store.
+    pub(crate) fn open_startup(&self) {
+        self.workers.open_startup();
     }
 
     pub fn env(&self) -> &Arc<Environment> {
@@ -230,7 +262,27 @@ impl Runtime {
     }
 
     pub async fn close(&self) {
+        if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         self.shutdown.cancel();
+        // Cancel stops new work; joining proves the old work stopped. The
+        // order is the durability order: the driver (which claims and
+        // delivers), then the lanes (an in-flight operation finishes its
+        // commit), then the cleanup task, and only then the writer drain, the
+        // store flush and the emitter close. No store write can land after the
+        // flush because no task that writes is still running.
+        let driver = self.driver.lock().take();
+        if let Some(handle) = driver {
+            let _ = handle.await;
+        }
+        self.workers.join_lanes().await;
+        #[cfg(not(test))]
+        let cleanup = self.cleanup.lock().take();
+        #[cfg(not(test))]
+        if let Some(handle) = cleanup {
+            let _ = handle.await;
+        }
         // Let every queued write reach the backend before the durability
         // barrier: a store that flushes in the background (sled) would
         // otherwise leave the tail of the run only in its log buffer.
@@ -357,6 +409,32 @@ impl Runtime {
     /// the same aggregate view.
     pub(crate) fn workers(&self) -> &Arc<crate::scheduler::shell::Workers> {
         &self.workers
+    }
+
+    /// Operator audit for a database written by a build whose default outbox
+    /// transport confirmed records without sending them (`receipt="shadow"`).
+    /// Returns `(pid, record keys)` for the live runs whose read model still
+    /// lists them; read-only, and bounded by the reconstructed proc rows (a
+    /// reclaimed run has no aggregate left to inspect). The engine exposes the
+    /// same answer as [`crate::Engine::shadow_deliveries`].
+    pub(crate) async fn shadow_deliveries(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let page = self
+            .store
+            .procs()
+            .query(&crate::query::Query::new())
+            .await?;
+        let mut found = Vec::new();
+        for row in page.rows {
+            let Some(snapshot) = self.workers.snapshot(&row.id).await? else {
+                continue;
+            };
+            let keys = shadow_receipts(&snapshot);
+            if !keys.is_empty() {
+                found.push((row.id, keys));
+            }
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(found)
     }
 
     /// The read model for one process. There is no resident object — a
@@ -596,7 +674,11 @@ impl Runtime {
             .await
     }
 
-    fn create(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Runtime>> {
+    fn create(
+        config: &Config,
+        store: Option<Arc<dyn KvStore>>,
+        start_gated: bool,
+    ) -> crate::Result<Arc<Runtime>> {
         // refuse a config that switches the runaway protections off
         config.validate()?;
         let env = Arc::new(Environment::new());
@@ -642,17 +724,8 @@ impl Runtime {
             schedule.ready.as_millis() as i64,
             config.scheduler_workers(),
             config.scheduler_queue_cap(),
+            start_gated,
         );
-        {
-            let driver = workers.clone();
-            let driver_shutdown = shutdown.clone();
-            // Each control-plane loop runs on its own interval (A10); under
-            // test every unset interval follows the short test tick, so a test
-            // that waits for a message does not have to wait the production 15 s.
-            tokio::spawn(async move {
-                driver.serve(wake_rx, driver_shutdown, schedule).await;
-            });
-        }
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
             emitter,
@@ -664,6 +737,10 @@ impl Runtime {
             schema_cache,
             snapshots,
             workers,
+            driver: Arc::new(parking_lot::Mutex::new(None)),
+            #[cfg(not(test))]
+            cleanup: Arc::new(parking_lot::Mutex::new(None)),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
         // The driver seams: the host serves, so the effect runner (Func
@@ -733,6 +810,24 @@ impl Runtime {
         // one background task that reaches the store.
         let guider = Arc::new(TimerGuider::new(&runtime));
         host.attach_timers(guider.clone());
+        // Every port the driver reaches is attached: only now does its task
+        // exist. A spawn before the attaches would leave a window in which a
+        // ready operation meets `effects: None` (completed without its
+        // package) or the default shadow transport (recorded as delivered,
+        // never sent) — and, more widely, the package registry is still being
+        // filled by `Engine::initialize` (the start barrier holds the driver
+        // there for a staged start).
+        {
+            let driver = runtime.workers.clone();
+            let driver_shutdown = runtime.shutdown.clone();
+            // Each control-plane loop runs on its own interval (A10); under
+            // test every unset interval follows the short test tick, so a test
+            // that waits for a message does not have to wait the production 15 s.
+            let handle = tokio::spawn(async move {
+                driver.serve(wake_rx, driver_shutdown, schedule).await;
+            });
+            runtime.driver.lock().replace(handle);
+        }
         // Terminal cleanup is the exception: one page of finished runs is a
         // bulk operation whose cost grows with the backlog (and with a store
         // that is still draining the run's own projections), so it must not
@@ -745,7 +840,15 @@ impl Runtime {
         #[cfg(not(test))]
         {
             let shutdown = runtime.shutdown.clone();
-            tokio::spawn(async move {
+            let startup = runtime.workers.startup_gate();
+            let handle = tokio::spawn(async move {
+                // The cleanup reaches the store like the driver, so it waits
+                // on the same barrier — and a close before the barrier opens
+                // leaves it here, having read nothing.
+                tokio::select! {
+                    _ = startup.wait() => {}
+                    _ = shutdown.cancelled() => return,
+                }
                 let mut ticker = tokio::time::interval(cleanup_interval);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 // `interval` fires immediately; the boot pass already ran.
@@ -762,6 +865,7 @@ impl Runtime {
                     }
                 }
             });
+            runtime.cleanup.lock().replace(handle);
         }
         Ok(runtime)
     }
@@ -816,6 +920,24 @@ pub(crate) fn prepare_workdir(root: &std::path::Path, pid: &str) -> Result<std::
         ))
     })?;
     Ok(dir)
+}
+
+/// The outbox records a removed shadow transport confirmed without sending
+/// (`receipt == "shadow"`), as one aggregate's record keys — the migration
+/// audit's filter (see [`Runtime::shadow_deliveries`]).
+pub(crate) fn shadow_receipts(
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+) -> Vec<String> {
+    use crate::scheduler::core::outbox::records::OutboxState;
+
+    snapshot
+        .outbox
+        .values()
+        .filter(|record| {
+            matches!(&record.state, OutboxState::Delivered { receipt } if receipt == "shadow")
+        })
+        .map(|record| record.id.key.clone())
+        .collect()
 }
 
 /// Whether `pid` is usable as a single directory name: non-empty, not `.` or
@@ -924,6 +1046,92 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("cannot find 'uses' in act"));
+        runtime.close().await;
+    }
+
+    /// Wait until the run's aggregate says every execution settled.
+    async fn wait_settled(runtime: &Arc<Runtime>, pid: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !runtime
+            .workers()
+            .process_completed(pid)
+            .await
+            .unwrap_or(false)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "run {pid} never settled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The start barrier: a runtime built for a staged start keeps its driver
+    /// off the store until the engine opens the gate. A run started while the
+    /// gate is held is durable but untouched — no claim, no recovery, no
+    /// delivery — and settles only after `open_startup`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_held_startup_gate_keeps_the_driver_off_the_store() {
+        let runtime = Runtime::new_gated(&Config::default(), None).unwrap();
+        assert!(
+            !runtime.workers().startup_gate().is_open(),
+            "a staged start must hold the barrier"
+        );
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-gated")
+            .with_step(|step| step.with_id("s1"));
+        let pid = runtime.start(&workflow, Vars::new()).await.unwrap();
+
+        // The driver task exists; give it every chance to claim the run.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !runtime
+                .workers()
+                .process_completed(&pid)
+                .await
+                .unwrap_or(false),
+            "the driver must not drive a run before the barrier opens"
+        );
+
+        runtime.open_startup();
+        wait_settled(&runtime, &pid).await;
+        runtime.close().await;
+    }
+
+    /// A failed start closes a runtime whose barrier never opened: the driver
+    /// leaves through the shutdown token without a single pass, so the run
+    /// stays untouched and `close` does not wait for the gate.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn closing_a_held_runtime_stops_before_the_gate_opens() {
+        let runtime = Runtime::new_gated(&Config::default(), None).unwrap();
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-aborted")
+            .with_step(|step| step.with_id("s1"));
+        let pid = runtime.start(&workflow, Vars::new()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), runtime.close())
+            .await
+            .expect("close must not wait for a barrier that never opens");
+        assert!(
+            !runtime
+                .workers()
+                .process_completed(&pid)
+                .await
+                .unwrap_or(false),
+            "an aborted start must not have driven the run"
+        );
+    }
+
+    /// The plain constructor keeps its old semantics: the barrier is open, so
+    /// an embedder driving the runtime directly still starts immediately.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_plain_runtime_starts_with_an_open_barrier() {
+        let runtime = Runtime::new(&Config::default(), None).unwrap();
+        assert!(runtime.workers().startup_gate().is_open());
         runtime.close().await;
     }
 }

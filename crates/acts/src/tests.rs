@@ -109,8 +109,8 @@ async fn engine_start() {
     assert!(engine.is_ok());
 }
 
-/// Plugin that spawns a task from `on_init` and stops it on the engine
-/// shutdown token — the pattern the transport plugins (gRPC, web, NATS) use.
+/// Plugin that spawns a task from `start` and stops it on the engine shutdown
+/// token — the pattern the transport plugins use.
 #[derive(Clone)]
 struct ShutdownTaskPlugin {
     stopped: crate::Signal<bool>,
@@ -118,7 +118,7 @@ struct ShutdownTaskPlugin {
 
 #[async_trait::async_trait]
 impl crate::ActPlugin for ShutdownTaskPlugin {
-    fn on_init(&self, engine: &Engine) -> crate::Result<()> {
+    async fn start(&self, engine: &Engine) -> crate::Result<()> {
         let shutdown = engine.shutdown_token();
         let stopped = self.stopped.clone();
         tokio::spawn(async move {
@@ -154,7 +154,7 @@ async fn engine_close_fires_shutdown_token() {
         .expect("engine close must fire the shutdown token");
 }
 
-/// Plugin whose `on_init` can fail on demand — used to exercise the
+/// Plugin whose `prepare` can fail on demand — used to exercise the
 /// engine-start failure path.
 #[derive(Clone)]
 struct FailPlugin {
@@ -163,7 +163,7 @@ struct FailPlugin {
 
 #[async_trait::async_trait]
 impl crate::ActPlugin for FailPlugin {
-    fn on_init(&self, _engine: &Engine) -> crate::Result<()> {
+    async fn prepare(&self, _engine: &Engine) -> crate::Result<()> {
         if self.fail {
             return Err(crate::ActError::Action(
                 "injected plugin init failure".to_string(),

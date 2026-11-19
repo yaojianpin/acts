@@ -243,7 +243,7 @@ fn test_web_plugin_new() {
 
 #[test]
 fn test_web_plugin_default() {
-    let plugin = WebPlugin;
+    let plugin = WebPlugin::default();
     let _ = plugin;
 }
 
@@ -330,13 +330,34 @@ async fn bind_conflict_fails_the_engine_start() {
     );
 }
 
-/// The default bind is loopback, not the wildcard: after the server is up, a
-/// sibling loopback alias of the same port is still free, so a caller on
-/// another interface cannot reach the management surface out of the box. The
-/// wildcard itself is the wrong probe: Linux refuses a wildcard bind that
-/// overlaps a listening specific-address socket regardless of `SO_REUSEADDR`,
-/// so it fails with "address already in use" even when the server binds
-/// loopback only.
+/// A start that fails at a later plugin must join the listeners already
+/// started before it returns: the first web plugin binds the port, the second
+/// cannot, and the rollback releases the socket.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_second_listener_releases_the_first_started_plugin() {
+    let port = free_port();
+    let table: toml::Table = toml::from_str(&format!("[web]\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    // Both plugins read the same `[web]` port: the first binds, the second
+    // fails, and the start's rollback must join the first (releasing the
+    // socket) before returning the error.
+    let started = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await;
+    assert!(started.is_err(), "the second listener cannot bind the port");
+    assert!(
+        wait_for_port("127.0.0.1", port, false).await,
+        "the rollback must stop the plugin that did bind"
+    );
+}
+
+/// The default bind is loopback, not the wildcard (see the comment above).
 #[tokio::test(flavor = "multi_thread")]
 async fn web_server_defaults_to_loopback() {
     let port = free_port();

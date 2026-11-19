@@ -594,6 +594,10 @@ pub(super) fn lifecycle_state(
 /// (and must fail the act at start, never a later operation).
 pub(super) const PARAMS_VAR: &str = "#params";
 pub(super) const OPTIONS_VAR: &str = "#options";
+/// The definition the act was started against (`{id, version, hash}`): the
+/// durable binding an effect re-checks before it executes, so replacing a
+/// package definition cannot change what an in-flight run runs.
+pub(super) const DEF_VAR: &str = "#def";
 
 /// The private execution variable a fan-out pins on a branch whose predicate
 /// could not be evaluated (`{"code":..,"message":..}`): the branch is admitted
@@ -655,6 +659,8 @@ pub(super) fn task_variable<'a>(
 pub(crate) struct ActFacts {
     pub(super) params: serde_json::Value,
     pub(super) options: serde_json::Value,
+    /// The definition the facts were resolved from (see [`DEF_VAR`]).
+    pub(super) definition: Option<crate::scheduler::shell::caps::effect::DefinitionBinding>,
 }
 
 /// The act facts the start operation pinned on `execution`, when a runner resolved
@@ -674,6 +680,7 @@ pub(crate) fn act_facts(
     Some(ActFacts {
         params: read(PARAMS_VAR)?,
         options: read(OPTIONS_VAR).unwrap_or(serde_json::Value::Null),
+        definition: read(DEF_VAR).and_then(|value| serde_json::from_value(value).ok()),
     })
 }
 

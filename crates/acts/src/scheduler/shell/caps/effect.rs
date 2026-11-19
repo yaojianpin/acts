@@ -2,9 +2,11 @@
 //! `ApplyAction` operation.
 //!
 //! The capability is the trait (contract + request/response vocabulary) and
-//! the kernel's own implementation in one module: a host driving without an
-//! attached runner auto-completes (the bare contract the kernel's own tests
-//! use); the serving host has [`PackageEffectRunner`] attached, which
+//! the kernel's own implementation in one module: a host with no runner
+//! attached **defers** a step that declares a package (the act stays open, its
+//! effect never reported as done); the kernel's own tests install
+//! [`TestEffectRunner`] explicitly. The serving host has
+//! [`PackageEffectRunner`] attached, which
 //! executes the step's package for real and folds its outputs into the same
 //! atomic commit that completes the execution. The effect runs before the
 //! state commits, exactly like the legacy `exec` → persist ordering, but it
@@ -34,6 +36,21 @@ use std::sync::Arc;
 
 pub use crate::scheduler::EffectKey;
 
+/// The definition an operation's act was started against.
+///
+/// The start operation pins it in the aggregate (`#def`); the effect runner
+/// re-reads the stored definition and refuses to execute a different content.
+/// Without that, replacing a package definition would silently change what an
+/// in-flight run executes, and a `Func` act planned under one schema could run
+/// another. An older run (started before the binding existed) carries none and
+/// is allowed through.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DefinitionBinding {
+    pub id: String,
+    pub version: String,
+    pub hash: String,
+}
+
 /// One package effect request: everything the runner needs besides the
 /// engine handles it was built with.
 pub struct EffectRequest {
@@ -42,6 +59,8 @@ pub struct EffectRequest {
     pub scope: ScopeSpec,
     /// The step's `uses` package id.
     pub package: String,
+    /// The definition this act was started against, when the start pinned one.
+    pub binding: Option<DefinitionBinding>,
 }
 
 /// The act facts one `uses` step resolves to before it runs — the legacy
@@ -49,12 +68,16 @@ pub struct EffectRequest {
 /// message operation needs them for every `run_as` (the legacy act's Created
 /// message carries the resolved params and its options); the effect operation needs
 /// them for the package it executes (Func).
+#[derive(Debug)]
 pub struct ResolvedEffect {
     /// The step's resolved params (`task.params(ctx)`), the message's
     /// `params` input.
     pub params: serde_json::Value,
     /// The step's declared options, the message's `options` input.
     pub options: serde_json::Value,
+    /// The definition the facts were resolved from; the start pins it and the
+    /// effect re-checks it before executing.
+    pub definition: Option<DefinitionBinding>,
 }
 
 /// What one package effect left behind: the values the host folds into the
@@ -119,11 +142,13 @@ pub enum EffectObservation {
 /// implementation; without one the host auto-completes (the shadow contract).
 #[async_trait::async_trait]
 pub trait EffectRunner: Capability {
-    /// Resolve the step's package and validate its params — the legacy act's
-    /// `run()` before the `run_as` match. Every `run_as` goes through here at
-    /// task start, exactly like the legacy engine: a schema violation fails
-    /// the act whether it runs a package or waits for a client.
-    async fn resolve(&self, request: &EffectRequest) -> Result<ResolvedEffect>;
+    /// Resolve the step's package facts — the legacy act's `run()` before the
+    /// `run_as` match. Every `run_as` goes through here at task start, exactly
+    /// like the legacy engine: a schema violation fails the act whether it
+    /// runs a package or waits for a client. A runner that has no package
+    /// registry answers `None` (no facts to pin); the start then keeps the
+    /// declared params, as it does for a step with no runner attached.
+    async fn resolve(&self, request: &EffectRequest) -> Result<Option<ResolvedEffect>>;
 
     /// The package's work: a Func package executes (an Irq/Msg package has
     /// none). The outcome carries the values to fold into the operation's commit.
@@ -177,6 +202,44 @@ impl PackageEffectRunner {
         Self { runtime }
     }
 
+    /// The binding an operation records for this definition.
+    fn binding_of(
+        definition: &crate::scheduler::shell::validation::CachedPackage,
+    ) -> DefinitionBinding {
+        DefinitionBinding {
+            id: definition.id().to_string(),
+            version: definition.version().to_string(),
+            hash: definition.content_hash().to_string(),
+        }
+    }
+
+    /// Refuse to execute a definition whose content moved since the act
+    /// started. An act with no binding predates the binding (an upgraded
+    /// database) and is allowed; a stored row with no hash cannot prove
+    /// either way and is allowed with the same reasoning.
+    fn check_binding(
+        request: &EffectRequest,
+        definition: &crate::scheduler::shell::validation::CachedPackage,
+    ) -> Result<()> {
+        let Some(bound) = &request.binding else {
+            return Ok(());
+        };
+        if definition.content_hash().is_empty() {
+            return Ok(());
+        }
+        if bound.hash != definition.content_hash() {
+            return Err(crate::ActError::Package(format!(
+                "package '{}' changed since the act started (bound version '{}' hash {}, stored version '{}' hash {}); redeploy the run",
+                request.package,
+                bound.version,
+                bound.hash,
+                definition.version(),
+                definition.content_hash()
+            )));
+        }
+        Ok(())
+    }
+
     /// The headless scope the legacy run evaluated in: a bare in-memory
     /// process over the declaring model with one task on the acting node (see
     /// [`super::scope`]). The run's caller authority travels with it, so the
@@ -196,8 +259,9 @@ impl Capability for PackageEffectRunner {
 
 #[async_trait::async_trait]
 impl EffectRunner for PackageEffectRunner {
-    async fn resolve(&self, request: &EffectRequest) -> Result<ResolvedEffect> {
+    async fn resolve(&self, request: &EffectRequest) -> Result<Option<ResolvedEffect>> {
         let definition = self.runtime.package_definition(&request.package).await?;
+        Self::check_binding(request, &definition)?;
         // The legacy task init path: seed the task's own vars and seal the
         // snapshot data its target declares, under the owner's authority. A
         // seal error — a denied scope, a missing required param under
@@ -215,18 +279,30 @@ impl EffectRunner for PackageEffectRunner {
                     .create(definition.id(), self.runtime.config())?;
                 package.prepare_params(&ctx, params).await?
             }
-            // Published metadata without a runtime instance: nothing can
-            // normalize the params, so the request carries the declared ones.
-            None => params,
+            // A published-only `Irq`/`Msg` package is executed by the client:
+            // there is no local instance, so the request carries the declared
+            // params (the legacy contract for a definition published without
+            // an implementation). A `Func` package executes **here**, so a
+            // missing runtime instance is a deployment error — the act fails
+            // at start instead of running later with unprepared params.
+            None if definition.run_as() != ActRunAs::Func => params,
+            None => {
+                return Err(crate::ActError::Package(format!(
+                    "func package '{}' is published but has no runtime instance",
+                    definition.id()
+                )));
+            }
         };
-        Ok(ResolvedEffect {
+        Ok(Some(ResolvedEffect {
             params,
             options: serde_json::to_value(task.options()).unwrap_or(serde_json::Value::Null),
-        })
+            definition: Some(Self::binding_of(&definition)),
+        }))
     }
 
     async fn run(&self, request: EffectRequest, key: EffectKey) -> Result<EffectOutcome> {
         let definition = self.runtime.package_definition(&request.package).await?;
+        Self::check_binding(&request, &definition)?;
         // Every `run_as` prepares the act's scope first — the legacy act's own
         // `run()`: seed its vars and seal the snapshot data its target
         // declares, under the run's authority. A resolution failure (a denied
@@ -315,6 +391,34 @@ impl EffectRunner for PackageEffectRunner {
     }
 }
 
+/// The kernel test host's effect runner: it resolves no package facts and
+/// executes no package work. A test that drives a package step gets the old
+/// "nothing to run" completion **explicitly installed** (`Workers::new`), so
+/// the serving path can never acquire that behaviour by leaving the slot
+/// empty.
+#[cfg(test)]
+pub(crate) struct TestEffectRunner;
+
+#[cfg(test)]
+impl Capability for TestEffectRunner {
+    fn key(&self) -> &str {
+        "test.effect"
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl EffectRunner for TestEffectRunner {
+    async fn resolve(&self, _request: &EffectRequest) -> Result<Option<ResolvedEffect>> {
+        // No registry, no facts: the start keeps the declared params.
+        Ok(None)
+    }
+
+    async fn run(&self, _request: EffectRequest, _key: EffectKey) -> Result<EffectOutcome> {
+        Ok(EffectOutcome::empty())
+    }
+}
+
 /// Turns package outputs into aggregate variable writes (the aggregate's
 /// string-valued representation). The caller scopes them to the acting
 /// execution.
@@ -367,6 +471,7 @@ mod coverage_tests {
                 owner: crate::ScopePolicy::deny_all(),
             },
             package: package.into(),
+            binding: None,
         }
     }
 
@@ -396,6 +501,49 @@ mod coverage_tests {
         assert!(!runner.idempotent(&request("missing")));
     }
 
+    /// The run pins the definition it started against: an effect refuses a
+    /// definition whose content changed under it, and pins the stored hash
+    /// when the binding matches.
+    #[tokio::test]
+    async fn an_effect_refuses_a_definition_changed_since_the_start() {
+        let runtime = runtime();
+        let row = crate::data::Package {
+            id: "bound".into(),
+            name: "bound".into(),
+            version: "1.0".into(),
+            schema: "{}".into(),
+            ..Default::default()
+        };
+        runtime.store().publish(&row).await.unwrap();
+        let hash = crate::store::Store::package_hash(&row);
+        let runner = PackageEffectRunner::new(runtime);
+
+        let mut stale = request("bound");
+        stale.binding = Some(DefinitionBinding {
+            id: "bound".into(),
+            version: "1.0".into(),
+            hash: "stale".into(),
+        });
+        let error = runner.resolve(&stale).await.unwrap_err();
+        assert!(
+            error.to_string().contains("changed since the act started"),
+            "the refusal names the change: {error}"
+        );
+
+        let mut bound = request("bound");
+        bound.binding = Some(DefinitionBinding {
+            id: "bound".into(),
+            version: "1.0".into(),
+            hash: hash.clone(),
+        });
+        let resolved = runner.resolve(&bound).await.unwrap().expect("facts");
+        assert_eq!(
+            resolved.definition.expect("the resolved binding").hash,
+            hash,
+            "the facts carry the definition the run is bound to"
+        );
+    }
+
     /// A runner that declares nothing is not idempotent and cannot observe
     /// anything: both defaults keep the operation safe.
     #[tokio::test]
@@ -410,11 +558,12 @@ mod coverage_tests {
 
         #[async_trait::async_trait]
         impl EffectRunner for Bare {
-            async fn resolve(&self, _request: &EffectRequest) -> Result<ResolvedEffect> {
-                Ok(ResolvedEffect {
+            async fn resolve(&self, _request: &EffectRequest) -> Result<Option<ResolvedEffect>> {
+                Ok(Some(ResolvedEffect {
                     params: serde_json::Value::Null,
                     options: serde_json::Value::Null,
-                })
+                    definition: None,
+                }))
             }
 
             async fn run(&self, _request: EffectRequest, _key: EffectKey) -> Result<EffectOutcome> {

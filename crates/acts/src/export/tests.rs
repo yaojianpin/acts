@@ -842,6 +842,7 @@ async fn export_manager_packages_count() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            content_hash: String::new(),
             v: 0,
         };
         manager.pack().publish(&package).await.unwrap();
@@ -886,6 +887,7 @@ async fn export_manager_packages_order() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            content_hash: String::new(),
             v: 0,
         };
         manager.pack().publish(&package).await.unwrap();
@@ -928,6 +930,7 @@ async fn export_manager_packages_query() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            content_hash: String::new(),
             v: 0,
         };
         manager.pack().publish(&package).await.unwrap();
@@ -966,6 +969,7 @@ async fn export_manager_packages_offset_in_range() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            content_hash: String::new(),
             v: 0,
         };
         manager.pack().publish(&package).await.unwrap();
@@ -1011,6 +1015,7 @@ async fn export_manager_packages_offset_out_range() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            content_hash: String::new(),
             v: 0,
         };
         manager.pack().publish(&package).await.unwrap();
@@ -1049,6 +1054,7 @@ async fn export_manager_package_rm() {
         update_time: 0,
         timestamp: utils::time::timestamp(),
         built_in: false,
+        content_hash: String::new(),
         v: 0,
     };
     manager.pack().publish(&package).await.unwrap();

@@ -21,6 +21,13 @@ pub struct Package {
     pub resources: String,
     pub catalog: ActPackageCatalog,
     pub built_in: bool,
+    /// The content identity of this definition (see
+    /// [`crate::store::Store::publish`]): the fields a run depends on, in a
+    /// fixed order. Empty in rows published by a build older than the hash;
+    /// the publish path fills it and compares against a computed hash for
+    /// those rows.
+    #[serde(default)]
+    pub content_hash: String,
 
     pub create_time: i64,
     pub update_time: i64,

@@ -25,7 +25,8 @@ mod builder;
 pub mod caps {
     pub use crate::scheduler::shell::caps::Capability;
     pub use crate::scheduler::shell::caps::effect::{
-        EffectKey, EffectObservation, EffectOutcome, EffectRequest, EffectRunner, ResolvedEffect,
+        DefinitionBinding, EffectKey, EffectObservation, EffectOutcome, EffectRequest,
+        EffectRunner, ResolvedEffect,
     };
     pub use crate::scheduler::shell::caps::services::CapServices;
 }
@@ -79,7 +80,7 @@ pub use acl::{
 pub use builder::EngineBuilder;
 pub use caps::Capability;
 pub use config::{Config, ConfigLog, DEFAULT_LOG_MAX_FILES, MissingParamAction};
-pub use engine::{EffectResolution, EffectUnknown, Engine};
+pub use engine::{EffectResolution, EffectUnknown, Engine, ShadowDeliveryAudit};
 pub use env::{ActFunction, ActUserVar};
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};

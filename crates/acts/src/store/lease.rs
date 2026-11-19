@@ -37,7 +37,7 @@
 //! commit — not even in the window between "my lease expired" and "I noticed".
 //! Wrapping the engine's store in it puts that fence on every durable mutation
 //! the engine makes: PID-lane flushes, scheduler gates, recovery claims,
-//! task/vars/proc rows, deployments and deliveries.
+//! task/vars/proc rows and deliveries.
 //!
 //! [`LeaseKeeper`] runs the renewal loop the expiry needs, and stops the
 //! engine when the lease is lost — whether a renewal noticed it or a write did:

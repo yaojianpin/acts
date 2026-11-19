@@ -24,6 +24,7 @@ fn model_info_package() {
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         built_in: false,
+        content_hash: String::new(),
         v: 0,
     };
     let info: PackageInfo = package.into();
@@ -155,6 +156,7 @@ fn model_info_package_arr_to_value() {
         update_time: 0,
         timestamp: 0,
         built_in: false,
+        content_hash: String::new(),
         v: 0,
     };
     let info: PackageInfo = package.into();

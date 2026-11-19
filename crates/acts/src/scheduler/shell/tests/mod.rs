@@ -915,11 +915,12 @@ impl caps::effect::EffectRunner for ObservedRunner {
     async fn resolve(
         &self,
         _request: &caps::effect::EffectRequest,
-    ) -> crate::Result<caps::effect::ResolvedEffect> {
-        Ok(caps::effect::ResolvedEffect {
+    ) -> crate::Result<Option<caps::effect::ResolvedEffect>> {
+        Ok(Some(caps::effect::ResolvedEffect {
             params: serde_json::json!({ "n": 2 }),
             options: serde_json::Value::Null,
-        })
+            definition: None,
+        }))
     }
 
     async fn run(
@@ -970,11 +971,12 @@ impl caps::effect::EffectRunner for DedupingRunner {
     async fn resolve(
         &self,
         _request: &caps::effect::EffectRequest,
-    ) -> crate::Result<caps::effect::ResolvedEffect> {
-        Ok(caps::effect::ResolvedEffect {
+    ) -> crate::Result<Option<caps::effect::ResolvedEffect>> {
+        Ok(Some(caps::effect::ResolvedEffect {
             params: serde_json::json!({ "n": 2 }),
             options: serde_json::Value::Null,
-        })
+            definition: None,
+        }))
     }
 
     async fn run(
@@ -1702,11 +1704,12 @@ async fn effects_of_different_runs_overlap_outside_the_lanes() {
         async fn resolve(
             &self,
             _request: &caps::effect::EffectRequest,
-        ) -> crate::Result<caps::effect::ResolvedEffect> {
-            Ok(caps::effect::ResolvedEffect {
+        ) -> crate::Result<Option<caps::effect::ResolvedEffect>> {
+            Ok(Some(caps::effect::ResolvedEffect {
                 params: serde_json::json!({ "n": 2 }),
                 options: serde_json::Value::Null,
-            })
+                definition: None,
+            }))
         }
 
         async fn run(
@@ -1799,11 +1802,12 @@ async fn scheduler_worker_lanes_run_independent_pids_in_parallel() {
         async fn resolve(
             &self,
             _request: &caps::effect::EffectRequest,
-        ) -> crate::Result<caps::effect::ResolvedEffect> {
-            Ok(caps::effect::ResolvedEffect {
+        ) -> crate::Result<Option<caps::effect::ResolvedEffect>> {
+            Ok(Some(caps::effect::ResolvedEffect {
                 params: serde_json::json!({ "n": 2 }),
                 options: serde_json::Value::Null,
-            })
+                definition: None,
+            }))
         }
 
         async fn run(
@@ -1917,11 +1921,12 @@ async fn an_effect_releases_the_lane_for_a_concurrent_decision() {
         async fn resolve(
             &self,
             _request: &caps::effect::EffectRequest,
-        ) -> crate::Result<caps::effect::ResolvedEffect> {
-            Ok(caps::effect::ResolvedEffect {
+        ) -> crate::Result<Option<caps::effect::ResolvedEffect>> {
+            Ok(Some(caps::effect::ResolvedEffect {
                 params: serde_json::json!({ "n": 2 }),
                 options: serde_json::Value::Null,
-            })
+                definition: None,
+            }))
         }
 
         async fn run(
@@ -11367,4 +11372,34 @@ async fn a_lost_outbox_claim_skips_the_record_without_failing_the_pass() {
             .any(|record| matches!(record.state, OutboxState::Pending { .. })),
         "the record stays pending for a later pass"
     );
+}
+
+/// The shadow-receipt audit lists exactly the outbox records the test
+/// transport confirmed without sending (`ShadowTransport`'s receipt) — the
+/// data a database written by the pre-fix default carries, and the operator's
+/// migration list.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_shadow_audit_lists_the_test_transports_confirmations() {
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-shadow")
+        .with_step(|step| step.with_id("s1"));
+    let (host, mut wake) = Workers::in_memory();
+    let spec = ProcessSpec::from_workflow("p-shadow", &workflow, &|_| None).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake, 200).await.unwrap();
+
+    let snapshot = host.snapshot("p-shadow").await.unwrap().unwrap();
+    let expected = snapshot
+        .outbox
+        .values()
+        .filter(|record| {
+            matches!(&record.state, OutboxState::Delivered { receipt } if receipt == "shadow")
+        })
+        .count();
+    let keys = crate::scheduler::runtime::shadow_receipts(&snapshot);
+    assert!(
+        !keys.is_empty(),
+        "the shadow confirmations are durable records"
+    );
+    assert_eq!(keys.len(), expected, "every shadow receipt is listed once");
 }

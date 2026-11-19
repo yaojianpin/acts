@@ -78,21 +78,6 @@ struct WireReply {
     err: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct NatsPlugin;
-
-impl NatsPlugin {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for NatsPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 async fn connect(config: &NatsConfig) -> std::result::Result<Client, String> {
     let opts = if let Some(token) = &config.token {
         async_nats::ConnectOptions::with_token(token.clone())
@@ -378,48 +363,95 @@ fn action_options(data: Option<JsonValue>) -> std::result::Result<Vars, String> 
     }
 }
 
+#[derive(Clone)]
+pub struct NatsPlugin {
+    /// The connection established in `prepare`: a broker that refuses it fails
+    /// the engine start instead of leaving a "running" engine with no
+    /// transport (the old spawn-and-log behaviour).
+    client: Arc<tokio::sync::Mutex<Option<Client>>>,
+    /// The plugin's tasks, joined by `shutdown`.
+    tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl NatsPlugin {
+    pub fn new() -> Self {
+        Self {
+            client: Arc::new(tokio::sync::Mutex::new(None)),
+            tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl Default for NatsPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl ActPlugin for NatsPlugin {
-    fn on_init(&self, engine: &Engine) -> acts::Result<()> {
-        let engine = engine.clone();
+    /// Connect to the broker. Registering the channels and serving only start
+    /// after every plugin prepared, so a refused connection is a start
+    /// failure with a reason.
+    async fn prepare(&self, engine: &Engine) -> acts::Result<()> {
+        let config: NatsConfig = engine.config().get("nats").unwrap_or_default();
+        let client = connect(&config).await.map_err(acts::ActError::Config)?;
+        let mut slot = self.client.lock().await;
+        *slot = Some(client);
+        Ok(())
+    }
+
+    async fn start(&self, engine: &Engine) -> acts::Result<()> {
         let config: NatsConfig = engine.config().get("nats").unwrap_or_default();
         let shutdown = engine.shutdown_token();
+        let client = self.client.lock().await.clone().ok_or_else(|| {
+            acts::ActError::Config("nats plugin started without a prepared connection".to_string())
+        })?;
 
-        tokio::spawn(async move {
-            let client = match connect(&config).await {
-                Ok(client) => client,
-                Err(err) => {
-                    tracing::error!(error = %err, "nats plugin disabled");
-                    return;
-                }
-            };
-
-            let base = config.subject.clone();
-            let cmd_subject = format!("{base}.cmd");
-            let max_in_flight = config.max_in_flight();
-            let actions_client = client.clone();
-            let actions_engine = engine.clone();
-            let actions_shutdown = shutdown.clone();
-            tokio::spawn(async move {
-                serve_actions(
-                    actions_client,
-                    cmd_subject,
-                    actions_engine,
-                    actions_shutdown,
-                    max_in_flight,
-                )
-                .await;
+        let base = config.subject.clone();
+        let cmd_subject = format!("{base}.cmd");
+        let max_in_flight = config.max_in_flight();
+        {
+            let client = client.clone();
+            let engine = engine.clone();
+            let shutdown = shutdown.clone();
+            let handle = tokio::spawn(async move {
+                serve_actions(client, cmd_subject, engine, shutdown, max_in_flight).await;
             });
+            self.tasks.lock().await.push(handle);
+        }
 
-            let channels = config.channels.clone();
-            for channel in &channels {
-                register_channel(&engine, client.clone(), channel, &base);
-            }
+        for channel in &config.channels {
+            register_channel(engine, client.clone(), channel, &base);
+        }
 
-            shutdown.cancelled().await;
-            tracing::info!("nats plugin stopped");
-        });
+        // One task owns the connection's lifetime: it drops the client after
+        // the shutdown token fires, which closes the subscriptions.
+        let watcher = {
+            let client = client.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                shutdown.cancelled().await;
+                drop(client);
+                tracing::info!("nats plugin stopped");
+            })
+        };
+        self.tasks.lock().await.push(watcher);
 
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> acts::Result<()> {
+        let handles: Vec<tokio::task::JoinHandle<()>> = {
+            let mut tasks = self.tasks.lock().await;
+            std::mem::take(&mut *tasks)
+        };
+        for handle in handles {
+            // The engine cancels the token before shutting plugins down; the
+            // bound keeps a wedged broker client from blocking close forever.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        }
+        self.client.lock().await.take();
         Ok(())
     }
 }
@@ -503,5 +535,33 @@ mod tests {
                 "unexpected error for data={data}: {err}"
             );
         }
+    }
+
+    /// A broker that refuses the connection fails the engine start: the
+    /// connection moved from the old spawned task (which logged "disabled" and
+    /// returned Ok) to `prepare`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_broker_fails_the_engine_start() {
+        // Bind and drop: the port stays closed for the plugin's connect.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let table: toml::Table =
+            toml::from_str(&format!("[nats]\nurl = \"nats://127.0.0.1:{port}\"\n")).unwrap();
+        let config = acts::Config {
+            data: Default::default(),
+            table,
+        };
+        let started = acts::Engine::builder()
+            .set_config(&config)
+            .disable_acl()
+            .add_plugin(&NatsPlugin::new())
+            .start()
+            .await;
+        assert!(
+            started.is_err(),
+            "a refused broker must fail the start, not disable the plugin silently"
+        );
     }
 }

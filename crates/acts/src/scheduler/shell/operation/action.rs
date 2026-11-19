@@ -860,14 +860,10 @@ impl ApplyAction {
         let node = crate::scheduler::shell::action::next_push_node(snapshot, task_id);
 
         // The run-bound decisions the import built for declared nodes: the
-        // pushed package's own `run_as`. An unregistered package is the `Irq`
-        // default — the pushed act waits for its client.
-        let run_as = host
-            .caps
-            .read()
-            .effects
-            .as_ref()
-            .and_then(|runner| runner.run_as(&act.uses));
+        // pushed package's own `run_as`. A host with no runner fails closed —
+        // guessing `Irq` would plan an act that never runs its package; a
+        // package the runner does not know is still the `Irq` default.
+        let run_as = host.effect_run_as(&act.uses)?;
         let auto = matches!(run_as, Some(crate::ActRunAs::Func | crate::ActRunAs::Msg));
         let msg = run_as == Some(crate::ActRunAs::Msg);
 
@@ -2223,7 +2219,23 @@ impl ActOperation for ApplyAction {
                     task_id,
                     &task.model_node,
                 )? {
-                    Some((runner, request)) => {
+                    crate::scheduler::shell::StepEffect::Ready { runner, request } => {
+                        // A waiting act runs an effect only when its package
+                        // does so while waiting (a Func subflow starts its
+                        // child and then waits). An `Irq` act waits for its
+                        // client: nothing runs here, so the bare hop completes
+                        // it. Planning asks the same question (see
+                        // `step_runs_while_waiting`); asking it again here
+                        // keeps a fact-less `ApplyAction` (the inert carrier a
+                        // rewind leaves) from being mistaken for an effect
+                        // that arranged the wait.
+                        if matches!(
+                            task.state,
+                            crate::scheduler::core::model::task_graph::TaskState::Waiting
+                        ) && !runner.executes_while_waiting(&request.package)
+                        {
+                            return Ok(Outcome::Effect(Effect::Completed(None)));
+                        }
                         // The effect's identity is the operation's durable
                         // identity (A1c): every retry, replan and recovery of
                         // this operation reuses this exact key.
@@ -2245,7 +2257,7 @@ impl ActOperation for ApplyAction {
                                 crate::scheduler::core::decision::AdmissionCategory::Effect,
                             )
                             .await;
-                        let ran = runner.run(request, key).await;
+                        let ran = runner.run(*request, key).await;
                         drop(effect_lease);
                         operation.lane.resume().await;
                         match ran {
@@ -2305,7 +2317,22 @@ impl ActOperation for ApplyAction {
                             Err(error) => Effect::Failed(error),
                         }
                     }
-                    None => Effect::Completed(None),
+                    crate::scheduler::shell::StepEffect::NoEffect => Effect::Completed(None),
+                    // The step declares a package but the host has no runner:
+                    // completing would report the package done; failing would
+                    // take the business failure path (`catches`). The
+                    // operation is released and re-driven — a serving host
+                    // attaches its runner before the driver starts, so this is
+                    // a start-assembly fault, never a normal state.
+                    crate::scheduler::shell::StepEffect::NotReady { package } => {
+                        tracing::warn!(
+                            pid = %snapshot.process_id,
+                            node = task.model_node.as_str(),
+                            package = %package,
+                            "the act declares a package but no effect runner is attached; deferring it"
+                        );
+                        return Ok(Outcome::Nothing);
+                    }
                 }
             }
         };

@@ -15,11 +15,31 @@ mod sse;
 pub use config::{DEFAULT_HOST, DEFAULT_QUEUE_SIZE, HttpConfig};
 
 #[derive(Clone)]
-pub struct WebPlugin;
+pub struct WebPlugin {
+    /// The serving task, so `shutdown` can join it. Clones share the handle
+    /// (the builder boxes a clone of the plugin the caller passed).
+    task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
 
 impl WebPlugin {
     pub fn new() -> Self {
-        Self
+        Self {
+            task: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// The configured bind address, parsed and validated.
+    fn address(engine: &Engine) -> acts::Result<SocketAddr> {
+        let config = engine.config();
+        let web_config = config.get::<HttpConfig>("web").unwrap_or_default();
+        let host = web_config
+            .host
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HOST.to_string());
+        let port = web_config.port.unwrap_or(10082);
+        format!("{host}:{port}").parse().map_err(|e| {
+            acts::ActError::Config(format!("invalid web bind address {host}:{port}: {e}"))
+        })
     }
 }
 
@@ -31,18 +51,15 @@ impl Default for WebPlugin {
 
 #[async_trait::async_trait]
 impl ActPlugin for WebPlugin {
-    fn on_init(&self, engine: &Engine) -> acts::Result<()> {
+    /// Validate the bind address and the route table; nothing listens yet.
+    async fn prepare(&self, engine: &Engine) -> acts::Result<()> {
+        Self::address(engine)?;
+        Ok(())
+    }
+
+    async fn start(&self, engine: &Engine) -> acts::Result<()> {
         let engine = Arc::new(engine.clone());
-        let config = engine.config();
-        let web_config = config.get::<HttpConfig>("web").unwrap_or_default();
-        let host = web_config
-            .host
-            .clone()
-            .unwrap_or_else(|| DEFAULT_HOST.to_string());
-        let port = web_config.port.unwrap_or(10082);
-        let addr: SocketAddr = format!("{host}:{port}").parse().map_err(|e| {
-            acts::ActError::Config(format!("invalid web bind address {host}:{port}: {e}"))
-        })?;
+        let addr = Self::address(&engine)?;
         let shutdown = engine.shutdown_token();
 
         // Every route below resolves an `authorization: Bearer <token>`
@@ -101,7 +118,7 @@ impl ActPlugin for WebPlugin {
         })?;
 
         info!(addr = %addr, "The Web server is now ready to accept connections");
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let serve = axum::serve(listener, app)
                 .with_graceful_shutdown(async move { shutdown.cancelled().await });
             if let Err(err) = serve.await {
@@ -110,7 +127,19 @@ impl ActPlugin for WebPlugin {
                 info!(addr = %addr, "web server stopped");
             }
         });
+        let mut slot = self.task.lock().await;
+        *slot = Some(handle);
 
+        Ok(())
+    }
+
+    /// The engine cancels the shutdown token before it calls this; joining the
+    /// serving task is what proves the port is released.
+    async fn shutdown(&self) -> acts::Result<()> {
+        let handle = self.task.lock().await.take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
         Ok(())
     }
 }

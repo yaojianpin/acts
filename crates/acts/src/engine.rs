@@ -32,6 +32,16 @@ pub struct EffectUnknown {
     pub attempt: u32,
 }
 
+/// One run's outbox records a removed shadow transport confirmed without
+/// sending them (see [`Engine::shadow_deliveries`]).
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ShadowDeliveryAudit {
+    /// The run that owns the records.
+    pub pid: String,
+    /// The outbox record keys (the durable message identities).
+    pub keys: Vec<String>,
+}
+
 /// An operator's durable decision about an unknown effect (A1c).
 #[derive(Debug, Clone)]
 pub enum EffectResolution {
@@ -55,6 +65,17 @@ pub struct Engine {
     config: Arc<Config>,
     runtime: Arc<Runtime>,
     acl: Arc<dyn AccessControl>,
+    /// The plugins this engine started, in prepare order. `close` shuts them
+    /// down in reverse, and a failed start's rollback reports how many had
+    /// started.
+    plugins: Arc<parking_lot::Mutex<Vec<Arc<dyn ActPlugin>>>>,
+    started_plugins: Arc<std::sync::atomic::AtomicUsize>,
+    /// Whether the engine reached Ready (every registration and plugin start
+    /// succeeded, and the start barrier opened). A close before that is a
+    /// rollback.
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    /// `Engine::close` is idempotent: a second call is a no-op.
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Engine {
@@ -93,15 +114,15 @@ impl Engine {
         Ok(())
     }
 
-    /// Register a package from [`ActPlugin::on_init`].
+    /// Register a package instance from [`ActPlugin::prepare`].
     ///
     /// This writes the package into the runtime registry directly. The start
     /// pass publishes every definition registered this way before
-    /// [`EngineBuilder::start`] returns, because `on_init` is synchronous while
-    /// publishing is not. Call it from `on_init` only: a call after the start
-    /// pass installs the runtime instance but nothing publishes its definition.
-    /// An embedding application with no plugin registers packages with
-    /// [`EngineBuilder::add_package`] instead.
+    /// [`EngineBuilder::start`] returns; call it from `prepare` (which runs
+    /// before that pass). A call after the start pass installs the runtime
+    /// instance but nothing publishes its definition. An embedding application
+    /// with no plugin registers packages with [`EngineBuilder::add_package`]
+    /// instead.
     pub fn add_package<T>(&self)
     where
         T: ActPackage + 'static,
@@ -114,7 +135,7 @@ impl Engine {
 
     /// Register a user var module into the engine's expression environment.
     ///
-    /// Call it from [`ActPlugin::on_init`] (or an embedder that owns the
+    /// Call it from [`ActPlugin::prepare`] (or an embedder that owns the
     /// engine). A transport caller registers through the ACL-checked
     /// `executor.ext().register_var` instead.
     pub fn register_env_var<T: ActUserVar + Clone + 'static>(&self, var: &T) {
@@ -125,7 +146,7 @@ impl Engine {
     ///
     /// The method is callable by name from a workflow expression
     /// (`owner_of(...)`, or `$owner_of(...)` by the built-in convention). Call
-    /// it from [`ActPlugin::on_init`] or an embedder; the ACL-checked runtime
+    /// it from [`ActPlugin::prepare`] or an embedder; the ACL-checked runtime
     /// entry is `executor.ext().register_function`.
     pub fn register_env_function<T: ActFunction + Clone + 'static>(&self, function: &T) {
         self.runtime.env().register_function(function);
@@ -199,9 +220,70 @@ impl Engine {
         self.runtime.clone()
     }
 
-    /// Close the engine and stop its runtime.
+    /// Operator audit for outbox records a pre-fix build confirmed without
+    /// sending (`receipt="shadow"`): the runs whose read model still lists
+    /// them, with the record keys. Read-only; a run already reclaimed has no
+    /// aggregate to inspect and is not listed.
+    ///
+    /// The records are not re-sent automatically: the external side may or may
+    /// not have received the message, and the engine cannot prove either way.
+    pub async fn shadow_deliveries(&self) -> crate::Result<Vec<ShadowDeliveryAudit>> {
+        Ok(self
+            .runtime
+            .shadow_deliveries()
+            .await?
+            .into_iter()
+            .map(|(pid, keys)| ShadowDeliveryAudit { pid, keys })
+            .collect())
+    }
+
+    /// Close the engine: stop its plugins in reverse start order, then stop
+    /// the runtime.
+    ///
+    /// The shutdown token is cancelled first, so a plugin's tasks see the same
+    /// signal the runtime's do; the plugins are then joined, and only after
+    /// that does the runtime drain its writer, flush the store and close the
+    /// emitter. Closing before Ready is a start rollback: the plugins that
+    /// started are still stopped, and the remaining ones answer their default
+    /// no-op shutdown.
     pub async fn close(&self) {
+        if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        tracing::info!(phase = "quiescing");
+        self.runtime.shutdown_token().cancel();
+
+        let plugins = self.plugins.lock().clone();
+        let started = self
+            .started_plugins
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let mut errors = Vec::new();
+        for (index, plugin) in plugins.iter().enumerate().rev() {
+            if let Err(error) = plugin.shutdown().await {
+                tracing::warn!(
+                    plugin = index,
+                    error = %error,
+                    "plugin shutdown failed"
+                );
+                errors.push(error.to_string());
+            }
+        }
+
         self.runtime.close().await;
+
+        if !self.ready.load(std::sync::atomic::Ordering::SeqCst) {
+            // The start never reached Ready: this close is the rollback. The
+            // report is a structured log because the builder's Err is the
+            // caller's only handle on the failed start.
+            tracing::warn!(
+                prepared = plugins.len(),
+                started,
+                stopped = plugins.len(),
+                errors = ?errors,
+                "startup rollback report"
+            );
+        }
+        tracing::info!(phase = "closed");
     }
 
     /// Cancellation token fired when the engine shuts down through
@@ -236,6 +318,10 @@ impl Engine {
             config,
             runtime,
             acl,
+            plugins: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            started_plugins: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -249,40 +335,76 @@ impl Engine {
         // users (and the builtin admin, if it has one) exist by the time the
         // first request arrives.
         self.acl.load(self.runtime.store()).await?;
+        tracing::info!(phase = "building");
 
-        self.prepare(snapshots, plugins, packages).await?;
+        *self.plugins.lock() = plugins.clone();
+        self.register_snapshots(snapshots)?;
+        // Phase 1: validate every plugin and let it register what it provides.
+        // Nothing listens yet, so a failure here aborts with no resource to
+        // undo.
+        for (index, plugin) in plugins.iter().enumerate() {
+            plugin.prepare(self).await?;
+            tracing::debug!(plugin = index, phase = "plugin-prepared");
+        }
+        self.register_packages(packages).await?;
+        tracing::info!(phase = "prepared", plugins = plugins.len());
 
-        // Boot. The host *is* the engine — its driver task is already running
-        // (spawned in `Runtime::create`) and it recovers every pending
-        // operation on its own. The store-facing timers (delivery retries,
-        // terminal cleanup, schedule triggers, the snapshot TTL sweep) are
-        // ticks of that same serve loop — the timer guider is attached in
-        // `Runtime::create` — so there is nothing left to start here.
+        // The start assembly's own precondition: every registered `uses` step
+        // must be executable once the barrier opens. The builder's runtime
+        // attaches the package runner in `Runtime::create`; a future assembly
+        // that forgot it would fail here instead of deferring every act after
+        // Ready.
+        if !self.runtime.workers().effect_runner_attached() {
+            return Err(crate::ActError::Runtime(
+                "the start assembly has no effect runner attached".into(),
+            ));
+        }
+
+        // Phase 2: bind listeners and spawn tasks. A failure here returns to
+        // the builder, whose error path closes the engine: plugins started so
+        // far are shut down in reverse order and the runtime never reaches
+        // Ready.
+        tracing::info!(phase = "starting");
+        for (index, plugin) in plugins.iter().enumerate() {
+            plugin.start(self).await?;
+            self.started_plugins
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tracing::debug!(plugin = index, phase = "plugin-started");
+        }
+
+        // Ready commit: every registration and listener succeeded, so the
+        // driver's barrier opens.
+        self.ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.runtime.open_startup();
+        tracing::info!(phase = "ready", "engine ready");
+
+        // The host *is* the engine — its driver task was spawned in
+        // `Runtime::create`, every port and the timer guider were attached
+        // before the spawn, and the start barrier above kept it off the store
+        // until now. There is nothing left to start here.
 
         Ok(())
     }
-    async fn prepare(
-        &self,
-        snapshots: Vec<(String, SnapshotOptions)>,
-        plugins: Vec<Arc<dyn ActPlugin>>,
-        packages: Vec<ActPackageRegister>,
-    ) -> crate::Result<()> {
-        // Register snapshot targets (data feeds come from plugins/adapters).
+
+    /// Register the snapshot targets builder/plugins asked for.
+    fn register_snapshots(&self, snapshots: Vec<(String, SnapshotOptions)>) -> crate::Result<()> {
         for (name, options) in snapshots {
             self.runtime.register_snapshot(&name, options)?;
         }
+        Ok(())
+    }
 
-        for plugin in plugins {
-            plugin.on_init(self)?;
-        }
-
+    /// Publish and register the packages this start carries: what the plugins
+    /// registered in their `prepare`, the built-ins, then the builder's
+    /// explicit packages (definition and runtime instance).
+    async fn register_packages(&self, packages: Vec<ActPackageRegister>) -> crate::Result<()> {
         // Publishing a built-in package is the engine's own operation, not a
         // request: it runs as the unrestricted `system` principal, whatever
         // policy the deployment configured for its callers.
         let executor = self.executor(&Principal::unrestricted());
 
         // A plugin registers its package into the runtime registry from
-        // `on_init`; at this point the registry holds exactly those packages,
+        // `prepare`; at this point the registry holds exactly those packages,
         // so publish their definitions before the built-ins join it.
         for register in self.runtime.package().registers() {
             let meta = (register.meta)();

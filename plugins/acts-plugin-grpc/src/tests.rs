@@ -83,7 +83,7 @@ fn test_grpc_plugin_new() {
 
 #[test]
 fn test_grpc_plugin_default() {
-    let plugin = GrpcPlugin;
+    let plugin = GrpcPlugin::default();
     let _ = plugin;
 }
 
@@ -881,7 +881,7 @@ async fn bind_conflict_fails_the_engine_start() {
 }
 
 /// The default bind is loopback, not the wildcard: the listener is bound in
-/// `on_init` — before `start` returns — on exactly `127.0.0.1`, so a sibling
+/// `start` on exactly `127.0.0.1`, so a sibling
 /// loopback alias of the same port is still free. A caller on another
 /// interface cannot reach the service out of the box. The wildcard itself is
 /// the wrong probe: Linux refuses a wildcard bind that overlaps a listening
@@ -903,7 +903,7 @@ async fn grpc_server_defaults_to_loopback() {
     engine.close().await;
 }
 
-// ── uncovered paths: error mapping, guarded streams, on_init faults ──
+// ── uncovered paths: error mapping, guarded streams, lifecycle faults ──
 
 use crate::MessageClient;
 use acts::{AccessControl, AclError, Principal};
@@ -1151,7 +1151,7 @@ fn test_configure_listener_error_names_the_address() {
 
 /// An unparseable bind address must fail the engine start with the reason.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_on_init_rejects_invalid_bind_address() {
+async fn test_prepare_rejects_invalid_bind_address() {
     let table: toml::Table = toml::from_str("[grpc]\nhost = \"not a host\"\nport = 1\n").unwrap();
     let cfg = acts::Config {
         data: Default::default(),

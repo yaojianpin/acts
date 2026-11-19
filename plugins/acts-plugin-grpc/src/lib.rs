@@ -335,11 +335,30 @@ impl ActsService for GrpcServer {
 }
 
 #[derive(Clone)]
-pub struct GrpcPlugin;
+pub struct GrpcPlugin {
+    /// The serving task, so `shutdown` can join it. Clones share the handle.
+    task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
 
 impl GrpcPlugin {
     pub fn new() -> Self {
-        Self
+        Self {
+            task: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// The configured bind address, parsed and validated.
+    fn address(engine: &Engine) -> acts::Result<std::net::SocketAddr> {
+        let config = engine.config();
+        let grpc_config = config.get::<GrpcConfig>("grpc").unwrap_or_default();
+        let host = grpc_config
+            .host
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HOST.to_string());
+        let port = grpc_config.port.unwrap_or(10080);
+        format!("{host}:{port}").parse().map_err(|e| {
+            acts::ActError::Config(format!("invalid gRPC bind address {host}:{port}: {e}"))
+        })
     }
 }
 
@@ -351,18 +370,15 @@ impl Default for GrpcPlugin {
 
 #[async_trait::async_trait]
 impl ActPlugin for GrpcPlugin {
-    fn on_init(&self, engine: &Engine) -> acts::Result<()> {
+    /// Validate the bind address; nothing listens yet.
+    async fn prepare(&self, engine: &Engine) -> acts::Result<()> {
+        Self::address(engine)?;
+        Ok(())
+    }
+
+    async fn start(&self, engine: &Engine) -> acts::Result<()> {
         let engine = engine.clone();
-        let config = engine.config();
-        let grpc_config = config.get::<GrpcConfig>("grpc").unwrap_or_default();
-        let host = grpc_config
-            .host
-            .clone()
-            .unwrap_or_else(|| DEFAULT_HOST.to_string());
-        let port = grpc_config.port.unwrap_or(10080);
-        let addr: std::net::SocketAddr = format!("{host}:{port}").parse().map_err(|e| {
-            acts::ActError::Config(format!("invalid gRPC bind address {host}:{port}: {e}"))
-        })?;
+        let addr = Self::address(&engine)?;
         let shutdown = engine.shutdown_token();
 
         // The listener is bound here, not inside the spawned task: a bind
@@ -379,7 +395,7 @@ impl ActPlugin for GrpcPlugin {
             .map_err(|e| register_listener_error(addr, e))?;
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let server = GrpcServer::new(&engine);
             let grpc = ActsServiceServer::new(server);
             tracing::info!(addr = %addr, "The gRPC server is now ready to accept connections");
@@ -390,7 +406,7 @@ impl ActPlugin for GrpcPlugin {
             // answers `UNIMPLEMENTED` to anything else — the same thing the
             // router's fallback does — so the service goes to the incoming
             // stream directly and the transport stays free of the HTTP
-            // framework. The listener was bound in `on_init`, so serving
+            // framework. The listener was bound in `start`, so serving
             // accepts it instead of binding again.
             let serve = Server::builder().serve_with_incoming_shutdown(
                 grpc,
@@ -403,7 +419,19 @@ impl ActPlugin for GrpcPlugin {
                 tracing::info!(addr = %addr, "gRPC server stopped");
             }
         });
+        let mut slot = self.task.lock().await;
+        *slot = Some(handle);
 
+        Ok(())
+    }
+
+    /// The engine cancels the shutdown token before it calls this; joining the
+    /// serving task is what proves the port is released.
+    async fn shutdown(&self) -> acts::Result<()> {
+        let handle = self.task.lock().await.take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
         Ok(())
     }
 }
