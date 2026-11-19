@@ -1,10 +1,12 @@
 use crate::scheduler::core::outbox::records::{
-    DeliveryClaim, OutboxError, OutboxId, OutboxRecord, OutboxState,
+    DeliveryClaim, DurableMessageReceipt, OutboxError, OutboxId, OutboxReceipt, OutboxRecord,
+    OutboxState,
 };
 use std::fmt;
 
 const MAGIC: &[u8; 8] = b"ACTOBX\0\0";
 const SCHEMA_V1: u16 = 1;
+const SCHEMA_V2: u16 = 2;
 
 pub(crate) struct OutboxCodec;
 
@@ -13,7 +15,7 @@ impl OutboxCodec {
         record.validate().map_err(OutboxCodecError::InvalidRecord)?;
         let mut writer = Writer::default();
         writer.raw(MAGIC);
-        writer.u16(SCHEMA_V1);
+        writer.u16(SCHEMA_V2);
         writer.string(&record.id.process_id)?;
         writer.string(&record.id.key)?;
         writer.string(&record.topic)?;
@@ -36,7 +38,19 @@ impl OutboxCodec {
             }
             OutboxState::Delivered { receipt } => {
                 writer.u8(3);
-                writer.string(receipt)?;
+                match receipt {
+                    OutboxReceipt::DurableMessage(receipt) => {
+                        writer.u8(1);
+                        writer.string(&receipt.message_id)?;
+                        writer.u64(receipt.payload_hash);
+                        writer.u32(receipt.delivery_count);
+                        writer.u64(receipt.delivery_hash);
+                    }
+                    OutboxReceipt::Legacy(value) => {
+                        writer.u8(0);
+                        writer.string(value)?;
+                    }
+                }
             }
             OutboxState::Quarantined { reason } => {
                 writer.u8(4);
@@ -52,7 +66,7 @@ impl OutboxCodec {
             return Err(OutboxCodecError::InvalidMagic);
         }
         let schema = reader.u16()?;
-        if schema != SCHEMA_V1 {
+        if schema != SCHEMA_V1 && schema != SCHEMA_V2 {
             return Err(OutboxCodecError::UnsupportedSchema(schema));
         }
         let id = OutboxId {
@@ -72,8 +86,22 @@ impl OutboxCodec {
             2 => OutboxState::DeliveryUnknown {
                 reason: reader.string()?,
             },
+            3 if schema == SCHEMA_V1 => OutboxState::Delivered {
+                // A V1 receipt is the old bare string. It is readable, but it
+                // is not proof the next layer exists (see `OutboxReceipt`).
+                receipt: OutboxReceipt::Legacy(reader.string()?),
+            },
             3 => OutboxState::Delivered {
-                receipt: reader.string()?,
+                receipt: match reader.u8()? {
+                    0 => OutboxReceipt::Legacy(reader.string()?),
+                    1 => OutboxReceipt::DurableMessage(DurableMessageReceipt {
+                        message_id: reader.string()?,
+                        payload_hash: reader.u64()?,
+                        delivery_count: reader.u32()?,
+                        delivery_hash: reader.u64()?,
+                    }),
+                    tag => return Err(OutboxCodecError::UnknownState(tag)),
+                },
             },
             4 => OutboxState::Quarantined {
                 reason: reader.string()?,
@@ -213,6 +241,8 @@ impl std::error::Error for OutboxCodecError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::core::outbox::records::OutboxEvent;
+
     fn pending() -> OutboxRecord {
         OutboxRecord::pending(
             OutboxId {
@@ -356,6 +386,64 @@ mod tests {
             let bytes = OutboxCodec::encode(&record).unwrap();
             assert_eq!(OutboxCodec::decode(&bytes).unwrap(), record);
         }
+    }
+
+    #[test]
+    fn codec_round_trips_a_typed_receipt_and_reads_a_v1_string() {
+        let base = pending();
+        let delivered = base
+            .clone()
+            .evolve(OutboxEvent::Claim {
+                claim: DeliveryClaim {
+                    owner: "w".into(),
+                    fence: 1,
+                    lease_until_ms: 100,
+                    heartbeat_revision: 0,
+                },
+                now_ms: 0,
+            })
+            .unwrap()
+            .evolve(OutboxEvent::ConfirmDelivered {
+                claim: DeliveryClaim {
+                    owner: "w".into(),
+                    fence: 1,
+                    lease_until_ms: 100,
+                    heartbeat_revision: 0,
+                },
+                receipt: OutboxReceipt::durable(DurableMessageReceipt {
+                    message_id: "m1".into(),
+                    payload_hash: 7,
+                    delivery_count: 2,
+                    delivery_hash: 9,
+                }),
+                now_ms: 0,
+            })
+            .unwrap();
+        let bytes = OutboxCodec::encode(&delivered).unwrap();
+        assert_eq!(OutboxCodec::decode(&bytes).unwrap(), delivered);
+
+        // A V1 record wrote the receipt as a bare string immediately after
+        // the delivered state tag. It must stay readable, as an explicitly
+        // unverifiable legacy receipt.
+        let mut writer = Writer::default();
+        writer.raw(MAGIC);
+        writer.u16(SCHEMA_V1);
+        writer.string("p").unwrap();
+        writer.string("k").unwrap();
+        writer.string("topic").unwrap();
+        writer.string("payload").unwrap();
+        writer.u32(1);
+        writer.u64(1);
+        writer.u64(1);
+        writer.u8(3);
+        writer.string("shadow").unwrap();
+        let decoded = OutboxCodec::decode(&writer.bytes).unwrap();
+        assert_eq!(
+            decoded.state,
+            OutboxState::Delivered {
+                receipt: OutboxReceipt::legacy("shadow")
+            }
+        );
     }
 
     #[test]

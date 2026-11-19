@@ -441,7 +441,11 @@ async fn an_unacked_delivery_is_re_sent_with_its_own_row_inner() {
         .query(&Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone()))))
         .await
         .unwrap();
-    assert_eq!(rows.count, 1, "the canonical message row must stay single");
+    assert_eq!(
+        rows.rows.iter().filter(|row| row.id == first.id).count(),
+        1,
+        "the canonical message row must stay single per message id"
+    );
 
     // the delivery row keeps this channel's retry state: handed over
     // (`Delivered`) and never acked, so it keeps being re-sent

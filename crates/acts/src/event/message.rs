@@ -218,11 +218,14 @@ impl Message {
         }
     }
 
-    /// The delivery row of this message to one channel. The delivery gets its
-    /// own delivery id; the message id is shared by every channel delivery.
+    /// The delivery row of this message to one channel. The delivery id is
+    /// derived from the message id and the channel, so a duplicate dispatch
+    /// (a retried outbox record, a reconnect, a pre-created row) converges on
+    /// the same row instead of creating a second delivery responsibility. The
+    /// message id is shared by every channel delivery.
     pub fn into_delivery(&self, chan_id: &str, pattern: &str) -> data::Delivery {
         data::Delivery {
-            id: utils::longid(),
+            id: utils::stable_id("del_", &[&self.id, chan_id]),
             msg_id: self.id.clone(),
             pid: self.pid.clone(),
             tid: self.tid.clone(),

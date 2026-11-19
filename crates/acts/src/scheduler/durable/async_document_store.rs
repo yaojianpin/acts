@@ -16,8 +16,8 @@ use crate::{
             outbox::{
                 outbox_index::{OutboxIndexCodec, OutboxIndexState},
                 outbox_repository::{
-                    OutboxBatchOutcome, OutboxConfirmation, OutboxCursor, OutboxPage,
-                    OutboxPageFailure, OutboxRepositoryError,
+                    OutboxBatchOutcome, OutboxConfirmation, OutboxCursor, OutboxIndexDiagnosis,
+                    OutboxPage, OutboxPageFailure, OutboxRepositoryError,
                 },
                 records::{OutboxEvent, OutboxId, OutboxRecord},
             },
@@ -933,6 +933,8 @@ impl AsyncProcessRepository {
             .await
             .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?;
         let mut entries = Vec::new();
+        let mut index_documents: HashMap<String, (String, Vec<u8>)> = HashMap::new();
+        let mut orphans_removed = 0usize;
         let mut observed = 0usize;
         let mut due = 0usize;
         let mut oldest_due_at_ms: Option<i64> = None;
@@ -950,12 +952,14 @@ impl AsyncProcessRepository {
                     failures.push(OutboxPageFailure {
                         process_id,
                         error: format!("outbox index {key:?}: {error}"),
+                        diagnosis: OutboxIndexDiagnosis::IndexCorrupt,
                         repairable: true,
                     });
                     continue;
                 }
             };
             observed += index.entries.len();
+            index_documents.insert(index.process_id.clone(), (key.clone(), document.clone()));
             for entry in index.entries {
                 let available_at = match entry.state {
                     OutboxIndexState::Pending { available_at_ms } => available_at_ms,
@@ -980,6 +984,13 @@ impl AsyncProcessRepository {
         }
         let has_more = entries.len() > limit;
         entries.truncate(limit);
+        // The cursor is the last index entry this page *examined*, not the
+        // last record that survived loading. A page whose entries are all
+        // damaged (missing aggregate/record, stale revision) must still move
+        // the caller past them, or the same first page is rescanned forever
+        // and every healthy entry behind it is unreachable.
+        let last_examined = entries.last().map(|entry| entry.id.clone());
+        let examined = entries.len();
         let mut processes: HashMap<
             String,
             std::sync::Arc<crate::scheduler::core::commit::aggregate::ProcessSnapshot>,
@@ -989,7 +1000,7 @@ impl AsyncProcessRepository {
         // pid -> (error, repairable). A store-level failure is not isolated
         // here: it fails the whole pass below, because every pid on the page
         // would fail the same way and the loop's backoff is the right answer.
-        let mut failed: HashMap<String, (String, bool)> = HashMap::new();
+        let mut failed: HashMap<String, (String, bool, OutboxIndexDiagnosis)> = HashMap::new();
         let mut attempted: Vec<String> = Vec::new();
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -1011,14 +1022,33 @@ impl AsyncProcessRepository {
                         Ok(None) => {
                             // An interrupted cleanup left an index document
                             // whose aggregate is already gone. There is no
-                            // record to deliver: skip it instead of failing
-                            // the pass (and every later one) on work that
-                            // cannot exist. The cleanup retry removes the
-                            // document when it can name the process from its
-                            // rows.
+                            // record to deliver, and the pid is recorded as an
+                            // orphan index rather than silently skipped: an
+                            // operator needs to see the residue, and the page
+                            // cursor still advances past it.
                             tracing::debug!(
                                 process_id,
-                                "outbox index references a missing aggregate; skipping"
+                                "outbox index references a missing aggregate; removing the orphan index"
+                            );
+                            let removed = match index_documents.get(&process_id) {
+                                Some((key, bytes)) => {
+                                    self.remove_orphan_outbox_index(key, bytes).await
+                                }
+                                None => false,
+                            };
+                            if removed {
+                                orphans_removed += 1;
+                                continue;
+                            }
+                            failed.insert(
+                                process_id.clone(),
+                                (
+                                    format!(
+                                        "outbox index references a missing aggregate: {process_id}"
+                                    ),
+                                    true,
+                                    OutboxIndexDiagnosis::AggregateMissing,
+                                ),
                             );
                             continue;
                         }
@@ -1036,7 +1066,14 @@ impl AsyncProcessRepository {
                             // keeps its health degraded, and retries. No index
                             // repair can invent the missing truth, so it is
                             // not marked repairable.
-                            failed.insert(process_id.clone(), (error.to_string(), false));
+                            failed.insert(
+                                process_id.clone(),
+                                (
+                                    error.to_string(),
+                                    false,
+                                    OutboxIndexDiagnosis::AggregateCorrupt,
+                                ),
+                            );
                             continue;
                         }
                     }
@@ -1048,6 +1085,7 @@ impl AsyncProcessRepository {
                     (
                         format!("outbox index references missing record {:?}", entry.id),
                         true,
+                        OutboxIndexDiagnosis::RecordMissing,
                     ),
                 );
                 continue;
@@ -1069,26 +1107,63 @@ impl AsyncProcessRepository {
             records.push(record.clone());
         }
         let next = if has_more {
-            records.last().map(|last| OutboxCursor(last.id.clone()))
+            last_examined.map(OutboxCursor)
         } else {
             None
         };
-        failures.extend(failed.into_iter().map(|(process_id, (error, repairable))| {
-            OutboxPageFailure {
-                process_id,
-                error,
-                repairable,
-            }
-        }));
+        failures.extend(
+            failed
+                .into_iter()
+                .map(
+                    |(process_id, (error, repairable, diagnosis))| OutboxPageFailure {
+                        process_id,
+                        error,
+                        diagnosis,
+                        repairable,
+                    },
+                ),
+        );
         Ok(OutboxPage {
             records,
             next,
+            examined,
+            orphans_removed,
             observed,
             due,
             oldest_due_at_ms,
             attempted,
             failures,
         })
+    }
+
+    /// Delete an outbox index whose aggregate is already gone, guarded by the
+    /// exact document the page read. A concurrent rebuild that wrote a new
+    /// document makes the guard lose; the next pass re-reads it. A failure
+    /// here is logged and left to the next pass: the page already recorded the
+    /// pid as an orphan, and the main scan must keep moving.
+    async fn remove_orphan_outbox_index(&self, key: &str, bytes: &[u8]) -> bool {
+        let guards = [DocumentGuard {
+            key: key.to_string(),
+            expected: Some(bytes.to_vec()),
+        }];
+        let mutations = [DocumentMutation::Delete {
+            key: key.to_string(),
+        }];
+        match self.store.atomic_batch(&guards, &mutations).await {
+            Ok(true) => {
+                tracing::info!(key, "removed an orphan outbox index");
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(
+                    key,
+                    error = %error,
+                    "orphan outbox index deletion failed; the next pass retries"
+                );
+                false
+            }
+        }
     }
 
     /// Apply one outbox lifecycle event and persist the aggregate plus both
@@ -2476,6 +2551,14 @@ mod tests {
             .await
             .expect("a missing aggregate is stale, not damage");
         assert!(page.records.is_empty());
+        assert_eq!(page.orphans_removed, 1);
+        assert!(
+            kv.one(&outbox_index_key(pid).unwrap())
+                .await
+                .unwrap()
+                .is_none(),
+            "the guarded orphan-index deletion must remove the residue"
+        );
     }
 
     /// A store that cannot provide a native snapshot serves the trait's
@@ -4203,6 +4286,74 @@ mod tests {
         assert_eq!(page.failures[0].process_id, "outbox");
         assert!(page.failures[0].repairable);
         assert!(page.failures[0].error.contains("missing record"));
+    }
+
+    /// A page whose examined prefix is entirely damaged must still hand the
+    /// caller a cursor at the last examined entry. Otherwise the empty
+    /// `records` plus `next=None` made the caller stop, and the healthy entry
+    /// behind the damaged prefix stayed unreachable forever.
+    #[tokio::test]
+    async fn outbox_page_advances_past_a_fully_damaged_page() {
+        use crate::scheduler::core::outbox::outbox_index::{
+            OutboxIndex, OutboxIndexEntry, OutboxIndexState,
+        };
+
+        let (process, _) = outbox_snapshot();
+        let kv = Arc::new(crate::store::MemoryStore::new());
+        let inner = Arc::new(KvDocumentStore::new(kv));
+        let repository = AsyncProcessRepository::new(inner.clone());
+        repository.create(&process, 0, 800).await.unwrap();
+
+        let valid = process
+            .outbox
+            .get(&crate::scheduler::core::outbox::records::OutboxId {
+                process_id: "outbox".into(),
+                key: "a-pending".into(),
+            })
+            .unwrap();
+        let mut entries: Vec<OutboxIndexEntry> = ["0-missing", "1-missing", "2-missing"]
+            .into_iter()
+            .map(|key| OutboxIndexEntry {
+                id: crate::scheduler::core::outbox::records::OutboxId {
+                    process_id: "outbox".into(),
+                    key: key.into(),
+                },
+                revision: 0,
+                state: OutboxIndexState::Pending { available_at_ms: 0 },
+            })
+            .collect();
+        entries.push(OutboxIndexEntry {
+            id: valid.id.clone(),
+            revision: valid.revision,
+            state: OutboxIndexState::Pending { available_at_ms: 0 },
+        });
+        let index = OutboxIndex {
+            process_id: "outbox".into(),
+            entries,
+        };
+        let scanned = AsyncProcessRepository::new(Arc::new(StaleScanStore {
+            inner,
+            prefix: OUTBOX_INDEX_KEY_PREFIX.into(),
+            entries: vec![(
+                outbox_index_key("outbox").unwrap(),
+                OutboxIndexCodec::encode(&index).unwrap(),
+            )],
+        }));
+
+        let first = scanned.dispatchable_outbox_page(0, None, 3).await.unwrap();
+        assert!(first.records.is_empty(), "{first:?}");
+        assert_eq!(first.examined, 3);
+        let cursor = first
+            .next
+            .expect("the damaged page must advance the cursor");
+        assert_eq!(cursor.0.key, "2-missing");
+
+        let second = scanned
+            .dispatchable_outbox_page(0, Some(&cursor), 10)
+            .await
+            .unwrap();
+        assert_eq!(second.records.len(), 1, "{second:?}");
+        assert_eq!(second.records[0].id, valid.id);
     }
 
     #[tokio::test]

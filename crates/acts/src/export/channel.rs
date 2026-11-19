@@ -1,5 +1,8 @@
 use crate::{
-    Event, Message, Result, Vars, event::ActWorkflowMessageHandle, scheduler::Runtime, utils,
+    Event, Message, Result, Vars,
+    event::{ActWorkflowMessageHandle, DeliveryTarget},
+    scheduler::Runtime,
+    utils,
 };
 use std::pin::Pin;
 use std::sync::Arc;
@@ -152,6 +155,7 @@ impl Channel {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let glob = self.glob.clone();
+        let target_glob = glob.clone();
         let runtime = self.runtime.clone();
         let ack = self.ack;
         let chan_id = self.chan_id.clone();
@@ -169,6 +173,19 @@ impl Channel {
             async move {
                 deliver(&glob, &runtime, ack, &chan_id, &pattern, &handle, e).await;
             }
+        });
+        // The outbox publisher creates this channel's delivery row before the
+        // record is confirmed. Registration is what makes "which deliveries
+        // must exist" answerable without an online dispatch: an ack channel
+        // that matches the message owns a row, whether or not its handler is
+        // fast enough to run before a crash.
+        self.runtime.delivery_targets().register(DeliveryTarget {
+            chan_id: self.chan_id.clone(),
+            pattern: self.pattern.clone(),
+            ack: self.ack,
+            matches: Arc::new(move |msg: &Message| {
+                is_match(&target_glob, &Event::from_inner(msg.clone()))
+            }),
         });
     }
 
@@ -254,6 +271,7 @@ impl Channel {
     /// writes for channels nobody listens on anymore.
     pub fn close(&self) {
         self.runtime.emitter().remove(&self.chan_id);
+        self.runtime.delivery_targets().unregister(&self.chan_id);
     }
 }
 

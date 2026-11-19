@@ -79,8 +79,25 @@ impl MessageExecutor {
     }
 
     /// Ack one delivery row by its delivery id.
+    ///
+    /// Possession of the delivery id is not the whole authorization when the
+    /// channel id carries a subject (`{subject}/{client_id}`, the shape the
+    /// SSE and gRPC plugins register): a limited caller may only settle a
+    /// delivery addressed to that caller. Ids without that shape (a broker
+    /// channel, an embedder's own channel) keep the existing ACL-only check,
+    /// because the engine cannot interpret their naming.
     pub async fn ack(&self, id: &str) -> Result<()> {
         self.principal.check(ACK)?;
+        if !self.principal.is_unrestricted()
+            && let Ok(delivery) = self.runtime.store().deliveries().find(id).await
+            && let Some((subject, _)) = delivery.chan_id.split_once('/')
+            && subject != self.principal.subject()
+        {
+            return Err(crate::ActError::Denied(format!(
+                "delivery '{}' belongs to another subject",
+                id
+            )));
+        }
         self.runtime.ack(id).await
     }
 
@@ -214,6 +231,45 @@ mod tests {
             err.to_string()
                 .contains("cannot find message for delivery 'd1'"),
             "got: {err}"
+        );
+    }
+
+    /// Possession of a delivery id does not let one subject settle another
+    /// subject's delivery when the channel id carries a subject prefix (the
+    /// SSE/gRPC shape). An unrestricted principal keeps the operator path.
+    #[tokio::test]
+    async fn ack_cannot_cross_a_channel_subject_boundary() {
+        let engine = Engine::builder().start().await.unwrap();
+        let store = engine.runtime().store();
+        store.messages().create(&message("m1")).await.unwrap();
+        for (id, chan) in [("alice-d", "alice/client"), ("bob-d", "bob/client")] {
+            store
+                .deliveries()
+                .create(&Delivery {
+                    id: id.into(),
+                    msg_id: "m1".into(),
+                    chan_id: chan.into(),
+                    status: DeliveryStatus::Created,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        let alice = crate::Principal::from_policy(&crate::UserPolicy {
+            name: "alice".into(),
+            enabled: true,
+            allow: vec!["msg:ack".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let executor = MessageExecutor::new(&engine.runtime(), &Arc::new(alice));
+        executor.ack("alice-d").await.unwrap();
+        let error = executor.ack("bob-d").await.unwrap_err();
+        assert!(matches!(error, crate::ActError::Denied(_)), "{error}");
+        assert_eq!(
+            store.deliveries().find("bob-d").await.unwrap().status,
+            DeliveryStatus::Created,
+            "the refused ack must not move the row"
         );
     }
 

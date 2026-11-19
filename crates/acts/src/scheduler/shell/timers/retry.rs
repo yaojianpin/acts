@@ -39,19 +39,29 @@ impl TimerGuider {
         {
             Ok(rearmed) => {
                 for d in rearmed {
-                    match store.messages().find(&d.msg_id).await {
-                        Ok(message) => {
+                    match store.messages().find_opt(&d.msg_id).await {
+                        Ok(Some(message)) => {
                             let mut msg: crate::event::Message = message.into();
                             msg.delivery_id = Some(d.id.clone());
                             evt.emit_delivery(&d.chan_id, &msg);
                         }
-                        Err(err) => {
-                            // orphan delivery: its canonical message is gone,
-                            // it can never be re-sent — drop it
-                            error!(delivery_id = %d.id, msg_id = %d.msg_id, error = %err, "delivery without canonical message dropped");
+                        Ok(None) => {
+                            // A stable None proves the canonical message is
+                            // gone; the row can never be re-sent, so it is an
+                            // orphan.
+                            error!(delivery_id = %d.id, msg_id = %d.msg_id, "delivery without canonical message dropped");
                             if let Err(e) = store.deliveries().delete(&d.id).await {
                                 error!(error = %e, "orphan delivery delete failed");
                             }
+                        }
+                        Err(err) => {
+                            // A read failure is not proof of an orphan. Deleting
+                            // here would erase a real delivery responsibility on
+                            // a transient I/O error; keep the row armed and let
+                            // the next pass retry the read.
+                            error!(delivery_id = %d.id, msg_id = %d.msg_id, error = %err,
+                                "delivery message read failed; keeping the delivery for the next retry pass");
+                            failure.get_or_insert(err);
                         }
                     }
                 }

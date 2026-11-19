@@ -300,6 +300,19 @@ async fn cleanup_process(
     if runtime.store().has_unsettled_deliveries(pid).await? {
         return Ok(false);
     }
+    // A `Delivered` record is only cleanup evidence when its typed receipt can
+    // be checked against the canonical message. A shadow receipt is known not
+    // to have sent anything; a missing/mismatched message means the next layer
+    // was lost. Deleting the aggregate would erase the only proof, so retain.
+    if let Some(snapshot) = runtime.workers().snapshot(pid).await?
+        && !crate::scheduler::shell::caps::delivery::delivered_receipts_verified(
+            &runtime.store(),
+            &snapshot,
+        )
+        .await?
+    {
+        return Ok(false);
+    }
     if !marked {
         // The design's step 1: the mark is written before the authoritative
         // batch. It is also what makes an interrupted cleanup retryable —

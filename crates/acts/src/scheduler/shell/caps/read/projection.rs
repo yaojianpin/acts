@@ -776,10 +776,18 @@ impl RowProjector {
             return Ok(false);
         }
         self.writer.flush_pid(&snapshot.process_id).await?;
-        Ok(!self
+        if self
             .store()
             .has_unsettled_deliveries(&snapshot.process_id)
-            .await?)
+            .await?
+        {
+            return Ok(false);
+        }
+        crate::scheduler::shell::caps::delivery::delivered_receipts_verified(
+            &self.store(),
+            snapshot,
+        )
+        .await
     }
 
     /// The process env, as the legacy proc row carries it: the caller

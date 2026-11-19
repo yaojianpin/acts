@@ -23,6 +23,12 @@ use crate::scheduler::shell::*;
 pub(crate) struct OutboxPassReport {
     /// Records whose delivery settled (or was confirmed) in the pass.
     pub(crate) delivered: usize,
+    /// Index entries the pass examined, including damaged ones that produced
+    /// no record. This is what the pass's own budget bounds.
+    pub(crate) examined: usize,
+    /// Orphan index documents the page removed because their aggregate was
+    /// gone. Resolved residue, not a failure.
+    pub(crate) orphans_removed: usize,
     /// Distinct pids the pass isolated because their index or aggregate
     /// could not be used. Non-zero keeps the loop's health degraded without
     /// arming its backoff window.
@@ -42,19 +48,31 @@ pub(crate) struct OutboxPassReport {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DeliveryOutcome {
-    Delivered { receipt: String },
-    RetryAt { available_at_ms: i64, error: String },
-    OutcomeUnknown { reason: String },
-    Quarantine { reason: String },
+    Delivered {
+        receipt: crate::scheduler::core::outbox::records::OutboxReceipt,
+    },
+    RetryAt {
+        available_at_ms: i64,
+        error: String,
+    },
+    OutcomeUnknown {
+        reason: String,
+    },
+    Quarantine {
+        reason: String,
+    },
 }
 
 /// Delivers one durable outbox record.
 ///
-/// The host calls this synchronously, never across an await; an implementation
-/// that needs mutable state keeps it behind its own interior mutability, so a
-/// port handle can be shared.
+/// The host awaits this call. A durable transport (the serving message
+/// forwarder) uses the await to make the next layer's rows exist; a test
+/// transport may complete immediately. An implementation that needs mutable
+/// state keeps it behind its own interior mutability, so a port handle can be
+/// shared.
+#[async_trait::async_trait]
 pub(crate) trait OutboxTransport: Capability {
-    fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome;
+    async fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome;
 }
 
 /// The fence one delivery attempt uses. The normal path applies it only in
@@ -129,8 +147,9 @@ impl Capability for ShadowTransport {
 }
 
 #[cfg(test)]
+#[async_trait::async_trait]
 impl OutboxTransport for ShadowTransport {
-    fn deliver(
+    async fn deliver(
         &self,
         record: &crate::scheduler::core::outbox::records::OutboxRecord,
     ) -> DeliveryOutcome {
@@ -145,6 +164,57 @@ impl OutboxTransport for ShadowTransport {
         }
     }
 }
+/// Whether every `Delivered` record in `snapshot` carries proof the next
+/// layer exists. Cleanup calls this before deleting a run's rows: a delivered
+/// record whose canonical message is missing (or differs under the same id)
+/// is not settled, and a historical `shadow` receipt is known never to have
+/// sent anything.
+pub(crate) async fn delivered_receipts_verified(
+    store: &crate::store::Store,
+    snapshot: &crate::scheduler::core::commit::aggregate::ProcessSnapshot,
+) -> crate::Result<bool> {
+    use crate::scheduler::core::outbox::records::{OutboxReceipt, OutboxState};
+
+    for record in snapshot.outbox.values() {
+        let OutboxState::Delivered { receipt } = &record.state else {
+            continue;
+        };
+        match receipt {
+            OutboxReceipt::DurableMessage(receipt) => {
+                let Some(message) = store.messages().find_opt(&receipt.message_id).await? else {
+                    tracing::error!(
+                        pid = %record.id.process_id,
+                        key = %record.id.key,
+                        message_id = %receipt.message_id,
+                        "delivered outbox record has no canonical message; refusing cleanup"
+                    );
+                    return Ok(false);
+                };
+                if message.content_hash() != receipt.payload_hash {
+                    tracing::error!(
+                        pid = %record.id.process_id,
+                        key = %record.id.key,
+                        message_id = %receipt.message_id,
+                        "canonical message content does not match its outbox receipt; refusing cleanup"
+                    );
+                    return Ok(false);
+                }
+            }
+            OutboxReceipt::Legacy(value) => {
+                if value == "shadow" {
+                    tracing::warn!(
+                        pid = %record.id.process_id,
+                        key = %record.id.key,
+                        "shadow-delivered outbox record cannot be cleaned; it was never sent"
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 impl Workers {
     /// Deliver the records one operation just committed and persist every
     /// outcome in **one** follow-up aggregate commit. This is the normal path
@@ -189,7 +259,7 @@ impl Workers {
                 ) {
                     continue;
                 }
-                let outcome = transport.deliver(record);
+                let outcome = transport.deliver(record).await;
                 let claim = delivery_claim(record, now);
                 confirmations.push(
                     crate::scheduler::core::outbox::outbox_repository::OutboxConfirmation {
@@ -278,7 +348,7 @@ impl Workers {
         };
         drop(lane);
         let event = {
-            let outcome = transport.deliver(&claimed);
+            let outcome = transport.deliver(&claimed).await;
             outcome_event(&claim, outcome, now)
         };
         let delivered = matches!(&event, OutboxEvent::ConfirmDelivered { .. });
@@ -307,6 +377,13 @@ impl Workers {
     /// restarts the pass.
     pub(crate) async fn dispatch_outbox_batch(&self, budget: usize) -> Result<usize> {
         let report = self.dispatch_outbox_pass(budget).await?;
+        tracing::trace!(
+            delivered = report.delivered,
+            examined = report.examined,
+            orphans_removed = report.orphans_removed,
+            poisoned = report.poisoned,
+            "outbox pass finished"
+        );
         if report.poisoned > 0 {
             return Err(ActError::Runtime(format!(
                 "{} outbox process(es) isolated; the remaining records were delivered",
@@ -329,6 +406,8 @@ impl Workers {
         let budget = budget.max(1);
         let mut delivered = 0usize;
         let mut processed = 0usize;
+        let mut examined = 0usize;
+        let mut orphans_removed = 0usize;
         let mut deferred_records = 0u64;
         let mut settled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut attempted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -348,12 +427,17 @@ impl Workers {
         let mut first_page = true;
         let mut wrapped = false;
         'pass: loop {
-            let remaining = budget.saturating_sub(processed).max(1);
+            let remaining = budget
+                .saturating_sub(processed)
+                .min(budget.saturating_sub(examined))
+                .max(1);
             let page = self
                 .processes
                 .dispatchable_outbox_page(now, cursor.as_ref(), PAGE_SIZE.min(remaining))
                 .await
                 .map_err(runtime)?;
+            examined += page.examined;
+            orphans_removed += page.orphans_removed;
             attempted.extend(page.attempted.iter().cloned());
             failures.extend(page.failures.iter().cloned());
             if first_page {
@@ -367,6 +451,20 @@ impl Workers {
                 metrics.passes += 1;
             }
             if page.records.is_empty() {
+                // The page examined index entries but produced no deliverable
+                // record (missing aggregate/record, stale revision, all
+                // deferred). Advance to the last entry it examined even
+                // though no record survived: the cursor names examined work,
+                // so the next page is reachable and a damaged prefix cannot
+                // starve the entries behind it.
+                if let Some(next) = page.next {
+                    cursor = Some(next.clone());
+                    last_processed = Some(OutboxCursor(next.0.clone()));
+                    if examined >= budget {
+                        break 'pass;
+                    }
+                    continue;
+                }
                 // A cursor past the last due record only means the pass
                 // wrapped around: start once from the beginning before
                 // deciding the backlog is empty.
@@ -418,6 +516,9 @@ impl Workers {
             let mut metrics = self.outbox_metrics.lock();
             metrics.delivered += delivered as u64;
             metrics.deferred += deferred_records;
+            metrics.examined += examined as u64;
+            metrics.bad_index += failures.len() as u64;
+            metrics.orphans_removed += orphans_removed as u64;
         }
         // The deliveries that settled decide the read model's `removable`
         // flag: a run that finished before its records were delivered only
@@ -472,7 +573,118 @@ impl Workers {
             .len();
         Ok(OutboxPassReport {
             delivered,
+            examined,
+            orphans_removed,
             poisoned,
         })
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use crate::scheduler::core::outbox::records::{
+        DurableMessageReceipt, OutboxId, OutboxReceipt, OutboxRecord, OutboxState,
+    };
+    use crate::store::MemoryStore;
+    use std::sync::Arc;
+
+    fn snapshot_with(
+        state: OutboxState,
+    ) -> crate::scheduler::core::commit::aggregate::ProcessSnapshot {
+        let mut snapshot =
+            crate::scheduler::core::commit::aggregate::ProcessSnapshot::empty("p1").unwrap();
+        let id = OutboxId {
+            process_id: "p1".into(),
+            key: "k".into(),
+        };
+        snapshot.outbox.insert(
+            id.clone(),
+            OutboxRecord {
+                id,
+                topic: "message.created".into(),
+                payload: "{}".into(),
+                state,
+                attempt: 1,
+                last_fence: 1,
+                revision: 1,
+            },
+        );
+        snapshot
+    }
+
+    #[tokio::test]
+    async fn a_verified_durable_receipt_passes() {
+        let store = crate::store::Store::new(Arc::new(MemoryStore::new()));
+        let message = crate::data::Message {
+            id: "m1".into(),
+            pid: "p1".into(),
+            ..crate::data::Message::default()
+        };
+        store.messages().create(&message).await.unwrap();
+        let snapshot = snapshot_with(OutboxState::Delivered {
+            receipt: OutboxReceipt::DurableMessage(DurableMessageReceipt {
+                message_id: message.id.clone(),
+                payload_hash: message.content_hash(),
+                delivery_count: 0,
+                delivery_hash: 0,
+            }),
+        });
+        assert!(
+            delivered_receipts_verified(&store, &snapshot)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_mismatched_message_blocks_cleanup() {
+        let store = crate::store::Store::new(Arc::new(MemoryStore::new()));
+        let snapshot = snapshot_with(OutboxState::Delivered {
+            receipt: OutboxReceipt::DurableMessage(DurableMessageReceipt {
+                message_id: "missing".into(),
+                payload_hash: 1,
+                delivery_count: 1,
+                delivery_hash: 1,
+            }),
+        });
+        assert!(
+            !delivered_receipts_verified(&store, &snapshot)
+                .await
+                .unwrap()
+        );
+
+        let message = crate::data::Message {
+            id: "m1".into(),
+            pid: "p1".into(),
+            ..crate::data::Message::default()
+        };
+        store.messages().create(&message).await.unwrap();
+        let snapshot = snapshot_with(OutboxState::Delivered {
+            receipt: OutboxReceipt::DurableMessage(DurableMessageReceipt {
+                message_id: message.id.clone(),
+                payload_hash: message.content_hash() ^ 1,
+                delivery_count: 0,
+                delivery_hash: 0,
+            }),
+        });
+        assert!(
+            !delivered_receipts_verified(&store, &snapshot)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn shadow_blocks_but_other_legacy_receipts_are_historical() {
+        let store = crate::store::Store::new(Arc::new(MemoryStore::new()));
+        let shadow = snapshot_with(OutboxState::Delivered {
+            receipt: OutboxReceipt::legacy("shadow"),
+        });
+        assert!(!delivered_receipts_verified(&store, &shadow).await.unwrap());
+        let legacy = snapshot_with(OutboxState::Delivered {
+            receipt: OutboxReceipt::legacy("message"),
+        });
+        assert!(delivered_receipts_verified(&store, &legacy).await.unwrap());
     }
 }

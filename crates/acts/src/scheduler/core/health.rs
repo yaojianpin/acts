@@ -292,6 +292,12 @@ pub struct OutboxMetrics {
     pub delivered: u64,
     /// Records left for a later pass because their run's rows were behind.
     pub deferred: u64,
+    /// Index entries examined over the host's lifetime, damaged ones included.
+    pub examined: u64,
+    /// Per-pid index/aggregate failures isolated over the host's lifetime.
+    pub bad_index: u64,
+    /// Orphan index documents removed over the host's lifetime.
+    pub orphans_removed: u64,
 }
 
 /// What the recovery scanner observed and did (A10). `scanned` is the backlog

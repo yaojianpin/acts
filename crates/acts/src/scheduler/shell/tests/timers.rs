@@ -16,6 +16,69 @@ fn guider(runtime: &Arc<Runtime>) -> Arc<TimerGuider> {
     Arc::new(TimerGuider::new(runtime))
 }
 
+/// A store that fails exactly the next canonical-message point read. The
+/// delivery scan still works, so the retry pass reaches the per-row message
+/// lookup and must distinguish "the message is gone" from "the read failed".
+struct MessageReadFaultKv {
+    inner: crate::store::MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl MessageReadFaultKv {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: crate::store::MemoryStore::new(),
+            armed: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::store::KvStore for MessageReadFaultKv {
+    async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        if key.starts_with("messages-")
+            && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::ActError::Store(
+                "injected message read failure".into(),
+            ));
+        }
+        self.inner.one(key).await
+    }
+
+    async fn many(&self, keys: &[String]) -> crate::Result<Vec<Option<Vec<u8>>>> {
+        self.inner.many(keys).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> crate::Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[crate::store::StoreBatchOp],
+        guards: &[crate::store::StoreGuard],
+    ) -> crate::Result<bool> {
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: crate::store::ScanOptions,
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
 async fn insert_model(runtime: &Runtime, workflow: &Workflow) {
     runtime
         .store()
@@ -141,6 +204,67 @@ async fn sch_timers_retry_drops_a_delivery_without_a_canonical_message() {
             .unwrap()
             .is_none(),
         "the orphan delivery is dropped in the same pass that notices it"
+    );
+    runtime.close().await;
+}
+
+/// A transient failure to read the canonical message is not proof of an
+/// orphan. The retry pass must keep the delivery row (the responsibility is
+/// still open) and report the pass degraded; deleting here would erase a real
+/// client's unacked delivery on one I/O error.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn sch_timers_retry_keeps_a_delivery_when_the_message_read_fails() {
+    use crate::store::data::{Delivery, DeliveryStatus, Message};
+    use std::sync::Arc as StdArc;
+
+    let kv = MessageReadFaultKv::new();
+    let kv_handle: StdArc<dyn crate::store::KvStore> = kv.clone();
+    let runtime = Runtime::new(&Config::default(), Some(kv_handle)).unwrap();
+    let now = crate::utils::time::time_millis();
+    runtime
+        .store()
+        .messages()
+        .create(&Message {
+            id: "m1".into(),
+            pid: "p".into(),
+            tid: "t".into(),
+            ..Message::default()
+        })
+        .await
+        .unwrap();
+    let delivery = Delivery {
+        id: "d1".into(),
+        msg_id: "m1".into(),
+        pid: "p".into(),
+        tid: "t".into(),
+        chan_id: "chan".into(),
+        chan_pattern: "*".into(),
+        status: DeliveryStatus::Created,
+        retry_times: 0,
+        create_time: now,
+        update_time: now - 60_000,
+        timestamp: now,
+        ..Delivery::default()
+    };
+    runtime
+        .store()
+        .deliveries()
+        .create(&delivery)
+        .await
+        .unwrap();
+
+    kv.arm();
+    guider(&runtime).retry_tick().await;
+    assert!(
+        runtime
+            .store()
+            .deliveries()
+            .find_opt(&delivery.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "a message read error must not delete the delivery"
     );
     runtime.close().await;
 }

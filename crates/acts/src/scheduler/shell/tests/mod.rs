@@ -43,8 +43,9 @@ impl crate::scheduler::shell::caps::Capability for CountingTransport {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::scheduler::shell::caps::delivery::OutboxTransport for CountingTransport {
-    fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
+    async fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
         *self.delivered.lock() += 1;
         DeliveryOutcome::Delivered {
             receipt: "ok".into(),
@@ -7690,8 +7691,9 @@ async fn uses_steps_write_created_message_records() {
         }
     }
 
+    #[async_trait::async_trait]
     impl crate::scheduler::shell::caps::delivery::OutboxTransport for TopicTransport {
-        fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
+        async fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
             self.topics.lock().push(record.topic.clone());
             DeliveryOutcome::Delivered {
                 receipt: "ok".into(),
@@ -7863,6 +7865,93 @@ async fn effect_params_resolve_scope_variables() {
         Some("5"),
         "the params expression must resolve the workflow variable"
     );
+    engine.close().await;
+}
+
+/// The serving transport's handover: by the time the outbox record is
+/// confirmed `Delivered`, the canonical message must exist in the store and
+/// its typed receipt must verify against that row. This is the property the
+/// old synchronous forwarder could not provide.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn durable_forwarder_stores_the_message_before_confirming() {
+    use crate::scheduler::core::outbox::records::OutboxReceipt;
+    use crate::scheduler::shell::caps::message::DurableMessagePublisher;
+    use crate::store::writebehind::StoreWriter;
+    use crate::utils::LaneRouter;
+
+    let kv: Arc<dyn crate::store::KvStore> = Arc::new(MemoryStore::new());
+    let (host, mut wake_rx) = Workers::new(kv.clone(), 1, MAX_NODE_RUN_TIMES, 800);
+    let store = Arc::new(crate::store::Store::new(kv));
+    let writer = StoreWriter::spawn(store.clone(), 1, 8, Arc::new(LaneRouter::new(1)));
+    let publisher = Arc::new(DurableMessagePublisher::new(
+        store.clone(),
+        writer.clone(),
+        Arc::new(crate::event::DeliveryTargets::new()),
+    ));
+    let collected: Arc<parking_lot::Mutex<Vec<crate::Message>>> =
+        Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let sink = collected.clone();
+    host.attach_outbox_transport(Arc::new(MessageForwarder::durable(
+        move |msg: &crate::Message| sink.lock().push(msg.clone()),
+        publisher,
+    )));
+
+    let engine = crate::Engine::builder().start().await.unwrap();
+    host.attach_effect_runner(Arc::new(caps::effect::PackageEffectRunner::new(
+        engine.runtime().clone(),
+    )));
+    let package = engine.runtime().package().clone();
+    let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+    let workflow = crate::model::Workflow::new()
+        .with_id("wf-durable-message")
+        .with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_IRQ,
+                crate::Vars::new().with("key", "irq-1"),
+            )
+        });
+    let spec = ProcessSpec::from_workflow("p-durable-message", &workflow, &run_as).unwrap();
+    host.start_process(&spec).await.unwrap();
+    host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+    host.dispatch_outbox().await.unwrap();
+
+    let snapshot = host.snapshot("p-durable-message").await.unwrap().unwrap();
+    let mut receipts = 0usize;
+    let mut lifecycle = 0usize;
+    for record in snapshot.outbox.values() {
+        let crate::scheduler::core::outbox::records::OutboxState::Delivered { receipt } =
+            &record.state
+        else {
+            panic!(
+                "record {:?} is not delivered: {:?}",
+                record.id, record.state
+            );
+        };
+        match receipt {
+            OutboxReceipt::DurableMessage(receipt) => {
+                let message = store
+                    .messages()
+                    .find(&receipt.message_id)
+                    .await
+                    .expect("the receipt's canonical message must exist");
+                assert_eq!(message.content_hash(), receipt.payload_hash);
+                receipts += 1;
+            }
+            // A lifecycle note has no payload and maps to no engine message;
+            // confirming it is correct and carries no delivery responsibility.
+            OutboxReceipt::Legacy(value) if value == "lifecycle" => lifecycle += 1,
+            other => panic!("a serving transport must write a durable receipt: {other:?}"),
+        }
+    }
+    assert!(receipts > 0);
+    assert_eq!(collected.lock().len(), receipts);
+    assert_eq!(
+        receipts + lifecycle,
+        snapshot.outbox.len(),
+        "every outbox record is either a durable message or an explicit lifecycle note"
+    );
+    writer.close().await;
     engine.close().await;
 }
 
@@ -8631,8 +8720,9 @@ impl crate::scheduler::shell::caps::Capability for OrderingTransport {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::scheduler::shell::caps::delivery::OutboxTransport for OrderingTransport {
-    fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
+    async fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
         self.observed
             .lock()
             .push(self.kv.wrote_prefix(&self.proc_prefix));
@@ -8900,8 +8990,9 @@ async fn partial_delivery_failures_are_persisted_and_keep_the_run() {
         }
     }
 
+    #[async_trait::async_trait]
     impl crate::scheduler::shell::caps::delivery::OutboxTransport for PartialTransport {
-        fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
+        async fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             match record.topic.as_str() {
                 "task.started" => DeliveryOutcome::RetryAt {
@@ -10640,8 +10731,9 @@ async fn a_record_rescheduled_for_now_wakes_the_retry_pass() {
         }
     }
 
+    #[async_trait::async_trait]
     impl crate::scheduler::shell::caps::delivery::OutboxTransport for DueNowTransport {
-        fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
+        async fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             DeliveryOutcome::RetryAt {
                 available_at_ms: 0,
@@ -10741,12 +10833,15 @@ async fn the_outbox_pass_defers_wraps_and_delivers_after_repair() {
 /// outbox pass or arm the loop's backoff.
 #[tokio::test]
 async fn poisoned_outbox_pids_are_recorded_cleared_and_retryable() {
-    use crate::scheduler::core::outbox::outbox_repository::OutboxPageFailure;
+    use crate::scheduler::core::outbox::outbox_repository::{
+        OutboxIndexDiagnosis, OutboxPageFailure,
+    };
 
     let (host, _wake) = Workers::new(Arc::new(MemoryStore::new()), 1, MAX_NODE_RUN_TIMES, 800);
     let failure = OutboxPageFailure {
         process_id: "bad".into(),
         error: "outbox index references missing record".into(),
+        diagnosis: OutboxIndexDiagnosis::RecordMissing,
         repairable: true,
     };
     let attempted = std::collections::BTreeSet::from(["bad".to_string(), "good".to_string()]);
@@ -11323,8 +11418,9 @@ async fn a_lost_outbox_claim_skips_the_record_without_failing_the_pass() {
         }
     }
 
+    #[async_trait::async_trait]
     impl crate::scheduler::shell::caps::delivery::OutboxTransport for RescheduleNow {
-        fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
+        async fn deliver(&self, _record: &OutboxRecord) -> DeliveryOutcome {
             *self.delivered.lock() += 1;
             DeliveryOutcome::RetryAt {
                 available_at_ms: 0,
@@ -11393,7 +11489,10 @@ async fn the_shadow_audit_lists_the_test_transports_confirmations() {
         .outbox
         .values()
         .filter(|record| {
-            matches!(&record.state, OutboxState::Delivered { receipt } if receipt == "shadow")
+            matches!(
+                &record.state,
+                OutboxState::Delivered { receipt } if receipt.as_legacy() == Some("shadow")
+            )
         })
         .count();
     let keys = crate::scheduler::runtime::shadow_receipts(&snapshot);

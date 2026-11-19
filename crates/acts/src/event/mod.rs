@@ -1,6 +1,9 @@
 mod action;
 mod emitter;
 mod message;
+mod targets;
+
+pub(crate) use targets::{DeliveryTarget, DeliveryTargets};
 
 use crate::{ActError, Result};
 pub use action::Action;

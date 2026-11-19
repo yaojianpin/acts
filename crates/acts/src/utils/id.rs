@@ -18,6 +18,22 @@ pub fn shortid() -> String {
     nanoid!(8, &ALPHABETS)
 }
 
+/// A deterministic id for a derived object (a message, a delivery): the same
+/// domain tag and parts always produce the same value, and a different tag or
+/// any different part produces a different domain-separated value. Used where
+/// a retried dispatch must converge on the object the previous attempt
+/// created instead of minting a second one.
+pub(crate) fn stable_id(tag: &str, parts: &[&str]) -> String {
+    let mut bytes = Vec::new();
+    for part in parts {
+        bytes.extend_from_slice(part.as_bytes());
+        // A separator outside every id grammar makes ("a","bc") and
+        // ("ab","c") different inputs even before hashing.
+        bytes.push(0);
+    }
+    format!("{tag}{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes))
+}
+
 #[derive(Debug)]
 pub struct Id<'a> {
     pid: &'a str,
@@ -93,5 +109,16 @@ mod tests {
         assert_eq!(shortid().len(), 8);
         assert_eq!(longid().len(), 21);
         assert_ne!(shortid(), shortid());
+    }
+
+    #[test]
+    fn stable_ids_are_deterministic_and_domain_separated() {
+        let first = stable_id("msg_", &["p1", "k1", "topic"]);
+        assert_eq!(first, stable_id("msg_", &["p1", "k1", "topic"]));
+        assert_ne!(first, stable_id("del_", &["p1", "k1", "topic"]));
+        // Tuple boundaries are part of the input: ("a","bc") is not ("ab","c").
+        assert_ne!(stable_id("x_", &["a", "bc"]), stable_id("x_", &["ab", "c"]));
+        assert!(first.starts_with("msg_"));
+        assert_eq!(first.len(), "msg_".len() + 32);
     }
 }

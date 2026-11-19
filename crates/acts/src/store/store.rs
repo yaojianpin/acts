@@ -733,15 +733,97 @@ impl Store {
         if carries_task && !self.procs().exists(&delivery.pid).await? {
             return Ok(false);
         }
-        if !self.messages().exists(&message.id).await? {
-            self.messages().create(message).await?;
+        self.store_canonical_message(message).await?;
+        // The delivery id is derived from (message id, channel), so a retried
+        // dispatch must find the row it already created instead of minting a
+        // second responsibility. A row under the same id with a different
+        // message or channel is an id collision, not a duplicate.
+        if let Some(existing) = self.deliveries().find_opt(&delivery.id).await? {
+            if existing.msg_id != delivery.msg_id
+                || existing.chan_id != delivery.chan_id
+                || existing.pid != delivery.pid
+                || existing.tid != delivery.tid
+            {
+                return Err(ActError::Store(format!(
+                    "delivery id collision: '{}' names a different delivery",
+                    delivery.id
+                )));
+            }
+            return Ok(true);
         }
         let mut delivery = delivery.clone();
         if carries_task && self.task_closed(&delivery.pid, &delivery.tid).await? {
             delivery.status = DeliveryStatus::Completed;
         }
-        self.deliveries().create(&delivery).await?;
-        Ok(true)
+        match self.deliveries().create(&delivery).await {
+            Ok(true) => Ok(true),
+            Ok(false) | Err(_) => {
+                // A concurrent dispatch may have created the same derived row
+                // between the read and the create; the existing row proves the
+                // same identity, so accepting it is idempotence, not a lost
+                // write. A same-id row with another identity is a collision,
+                // never a silent success.
+                if let Some(existing) = self.deliveries().find_opt(&delivery.id).await? {
+                    if existing.msg_id == delivery.msg_id
+                        && existing.chan_id == delivery.chan_id
+                        && existing.pid == delivery.pid
+                        && existing.tid == delivery.tid
+                    {
+                        return Ok(true);
+                    }
+                    return Err(ActError::Store(format!(
+                        "delivery id collision: '{}' names a different delivery",
+                        delivery.id
+                    )));
+                }
+                match self.deliveries().create(&delivery).await {
+                    Ok(true) => Ok(true),
+                    Ok(false) => Err(ActError::Store(format!(
+                        "delivery id '{}' reported present but its row was not readable",
+                        delivery.id
+                    ))),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    /// Store one canonical message if its id is new, or verify that the row
+    /// already stored under that id is the same logical message. This is the
+    /// durable handover the outbox confirmation is allowed to trust: a retry
+    /// converges on the first attempt's row and a same-id/different-content
+    /// write is reported as corruption.
+    pub(crate) async fn store_canonical_message(&self, message: &data::Message) -> Result<()> {
+        if let Some(existing) = self.messages().find_opt(&message.id).await? {
+            if !existing.same_content(message) {
+                return Err(ActError::Store(format!(
+                    "message id collision: '{}' names different content",
+                    message.id
+                )));
+            }
+            return Ok(());
+        }
+        match self.messages().create(message).await {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => {
+                // Lost a create race: the winner's row is the canonical one,
+                // and it must agree with this attempt's content.
+                if let Some(existing) = self.messages().find_opt(&message.id).await? {
+                    if existing.same_content(message) {
+                        return Ok(());
+                    }
+                    return Err(ActError::Store(format!(
+                        "message id collision: '{}' names different content",
+                        message.id
+                    )));
+                }
+                // The create failed for a reason other than an existing row;
+                // retry once so a transient failure is not hidden by the
+                // idempotence read.
+                self.messages().create(message).await?;
+                Ok(())
+            }
+        }
     }
 
     /// Whether the task `tid` of `pid` is already in a terminal state — the
@@ -1402,6 +1484,58 @@ mod tests {
         assert!(store.procs().find("p-completed").await.is_err());
         assert!(store.messages().query(&q).await.unwrap().rows.is_empty());
         assert!(store.deliveries().query(&q).await.unwrap().rows.is_empty());
+    }
+
+    /// A retried outbox dispatch re-derives the same message and delivery ids.
+    /// The store must accept the duplicate when the content agrees, and report
+    /// a collision when one id names different content or another channel:
+    /// silently overwriting either would break the outbox receipt's proof.
+    #[tokio::test]
+    async fn canonical_message_and_delivery_creates_are_idempotent_and_checked() {
+        let (_, store) = counting_store();
+        let message = crate::store::data::Message {
+            id: "m-idem".into(),
+            pid: String::new(),
+            tid: String::new(),
+            inputs: "{}".into(),
+            outputs: "{}".into(),
+            ..Default::default()
+        };
+        let mut delivery = crate::store::data::Delivery {
+            id: "d-idem".into(),
+            msg_id: message.id.clone(),
+            chan_id: "chan".into(),
+            ..Default::default()
+        };
+        assert!(
+            store
+                .store_message_delivery(&message, &delivery)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .store_message_delivery(&message, &delivery)
+                .await
+                .unwrap(),
+            "the same logical row is accepted again"
+        );
+
+        delivery.chan_id = "other-chan".into();
+        assert!(
+            store
+                .store_message_delivery(&message, &delivery)
+                .await
+                .is_err(),
+            "one delivery id cannot name two channels"
+        );
+
+        let mut changed = message.clone();
+        changed.outputs = "{\"n\":1}".into();
+        assert!(
+            store.store_canonical_message(&changed).await.is_err(),
+            "one message id cannot name different content"
+        );
     }
 
     /// A delivery row is decided as it is written, on the process's own shard:

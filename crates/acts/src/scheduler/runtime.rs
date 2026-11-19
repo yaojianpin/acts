@@ -38,6 +38,9 @@ pub struct Runtime {
     /// is in flight.
     writer: writebehind::StoreWriter,
     emitter: Arc<Emitter>,
+    /// The live ack channels the durable message publisher writes delivery
+    /// rows for before confirming an outbox record (see `event::targets`).
+    delivery_targets: Arc<crate::event::DeliveryTargets>,
     package: Arc<Package>,
     shutdown: CancellationToken,
     schema_cache: Arc<SchemaCache>,
@@ -92,6 +95,11 @@ impl Runtime {
     /// what `sys:status` reports as the engine's `caps` list.
     pub fn caps(&self) -> Vec<String> {
         self.workers.caps()
+    }
+
+    /// The live ack-channel registry the durable message publisher consults.
+    pub(crate) fn delivery_targets(&self) -> &Arc<crate::event::DeliveryTargets> {
+        &self.delivery_targets
     }
 
     /// The write-behind queue, for the timers' barriered removals.
@@ -301,6 +309,7 @@ impl Runtime {
             "store flushed at shutdown"
         );
         self.emitter.close();
+        self.delivery_targets.clear();
     }
 
     pub(crate) fn shutdown_token(&self) -> CancellationToken {
@@ -698,6 +707,7 @@ impl Runtime {
         );
         let process_gate = ProcessGate::with_router(router.clone());
         let emitter = Arc::new(Emitter::with_process_gate(process_gate));
+        let delivery_targets = Arc::new(crate::event::DeliveryTargets::new());
         let package = Arc::new(Package::new());
         let shutdown = CancellationToken::new();
         let schema_cache = Arc::new(SchemaCache::new());
@@ -729,6 +739,7 @@ impl Runtime {
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
             emitter,
+            delivery_targets,
             env,
             store,
             writer,
@@ -752,9 +763,19 @@ impl Runtime {
             runtime.clone(),
         )));
         let emitter = runtime.emitter.clone();
-        host.attach_outbox_transport(Arc::new(crate::scheduler::shell::MessageForwarder::new(
-            move |msg: &crate::Message| emitter.emit_message(msg),
-        )));
+        let publisher = Arc::new(
+            crate::scheduler::shell::caps::message::DurableMessagePublisher::new(
+                runtime.store(),
+                runtime.writer().clone(),
+                runtime.delivery_targets.clone(),
+            ),
+        );
+        host.attach_outbox_transport(Arc::new(
+            crate::scheduler::shell::MessageForwarder::durable(
+                move |msg: &crate::Message| emitter.emit_message(msg),
+                publisher,
+            ),
+        ));
         let emitter = runtime.emitter.clone();
         host.attach_lifecycle_sink(Arc::new(
             crate::scheduler::shell::caps::lifecycle::FnLifecycleSink::new(
@@ -934,7 +955,11 @@ pub(crate) fn shadow_receipts(
         .outbox
         .values()
         .filter(|record| {
-            matches!(&record.state, OutboxState::Delivered { receipt } if receipt == "shadow")
+            matches!(
+                &record.state,
+                OutboxState::Delivered { receipt }
+                    if receipt.as_legacy() == Some("shadow")
+            )
         })
         .map(|record| record.id.key.clone())
         .collect()

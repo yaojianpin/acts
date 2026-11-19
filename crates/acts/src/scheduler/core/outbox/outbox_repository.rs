@@ -7,7 +7,14 @@ pub(crate) struct OutboxCursor(pub(crate) OutboxId);
 pub(crate) struct OutboxPage {
     pub(crate) records: Vec<OutboxRecord>,
     pub(crate) next: Option<OutboxCursor>,
-    /// Index entries the page walked (due or not), for the retry loop's
+    /// Index entries this page actually examined after the cursor and limit.
+    /// The caller charges its per-pass budget against this, not against the
+    /// records that survived loading: damaged entries consume work too.
+    pub(crate) examined: usize,
+    /// Orphan index documents removed by this page (their aggregate was
+    /// already gone). They are not failures: the residue is resolved.
+    pub(crate) orphans_removed: usize,
+    /// Index entries the scan walked (due or not), for the retry loop's
     /// backlog gauge.
     pub(crate) observed: usize,
     /// Entries due at the scan instant (pending at or before `now`, or a
@@ -27,6 +34,23 @@ pub(crate) struct OutboxPage {
     pub(crate) failures: Vec<OutboxPageFailure>,
 }
 
+/// Why one index entry or its aggregate could not be used. The categories
+/// drive different operator/repair actions; a single "bad pid" flag cannot:
+/// a missing aggregate after cleanup is an orphan index, a missing record is
+/// derived-index damage, and an undecodable index is a rewrite candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutboxIndexDiagnosis {
+    /// The per-process index document itself does not decode.
+    IndexCorrupt,
+    /// The index names a process whose aggregate is gone (usually an
+    /// interrupted cleanup).
+    AggregateMissing,
+    /// The aggregate exists but cannot be decoded consistently.
+    AggregateCorrupt,
+    /// The aggregate is readable but has no record under the indexed id.
+    RecordMissing,
+}
+
 /// One process whose outbox index or aggregate could not be used by a page.
 /// The error text is the operator-facing record of what is wrong; the pid is
 /// retried every pass until it reads cleanly or a repair rewrites its index.
@@ -34,6 +58,7 @@ pub(crate) struct OutboxPage {
 pub(crate) struct OutboxPageFailure {
     pub(crate) process_id: String,
     pub(crate) error: String,
+    pub(crate) diagnosis: OutboxIndexDiagnosis,
     /// Whether the derived-index repair can rewrite this run's outbox index
     /// from its aggregate (an index document that does not match its records)
     /// as opposed to a family that is itself inconsistent (no repair can

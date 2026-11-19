@@ -21,12 +21,80 @@ pub(crate) struct DeliveryClaim {
     pub(crate) heartbeat_revision: u64,
 }
 
+/// What the transport proved before the outbox record became `Delivered`.
+///
+/// A bare string cannot say whether the next layer exists, so every new
+/// delivery writes the typed variant. `Legacy` is only the read-side shape of
+/// a record written by an older build: verification treats it as unverifiable
+/// (and `shadow` specifically as a lost delivery), never as a durable proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OutboxReceipt {
+    DurableMessage(DurableMessageReceipt),
+    Legacy(String),
+}
+
+impl OutboxReceipt {
+    pub(crate) fn durable(receipt: DurableMessageReceipt) -> Self {
+        Self::DurableMessage(receipt)
+    }
+
+    pub(crate) fn legacy(value: impl Into<String>) -> Self {
+        Self::Legacy(value.into())
+    }
+
+    pub(crate) fn as_legacy(&self) -> Option<&str> {
+        match self {
+            Self::Legacy(value) => Some(value),
+            Self::DurableMessage(_) => None,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> bool {
+        match self {
+            Self::DurableMessage(receipt) => receipt.validate(),
+            Self::Legacy(value) => valid_diagnostic(value),
+        }
+    }
+}
+
+impl From<&str> for OutboxReceipt {
+    fn from(value: &str) -> Self {
+        Self::Legacy(value.to_string())
+    }
+}
+
+impl From<String> for OutboxReceipt {
+    fn from(value: String) -> Self {
+        Self::Legacy(value)
+    }
+}
+
+/// A durable handover to the message layer: the canonical message id, a hash
+/// over its stored content, and the delivery rows created for it. Recovery
+/// can read the message by id and prove the content still matches; a missing
+/// message (or a different hash) is corruption, not a successful delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DurableMessageReceipt {
+    pub(crate) message_id: String,
+    pub(crate) payload_hash: u64,
+    pub(crate) delivery_count: u32,
+    pub(crate) delivery_hash: u64,
+}
+
+impl DurableMessageReceipt {
+    pub(crate) fn validate(&self) -> bool {
+        !self.message_id.trim().is_empty()
+            && self.message_id.len() <= MAX_OUTBOX_KEY_BYTES
+            && self.delivery_count <= 65_535
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum OutboxState {
     Pending { available_at_ms: i64 },
     Claimed(DeliveryClaim),
     DeliveryUnknown { reason: String },
-    Delivered { receipt: String },
+    Delivered { receipt: OutboxReceipt },
     Quarantined { reason: String },
 }
 impl OutboxState {
@@ -70,7 +138,7 @@ pub(crate) enum OutboxEvent {
     },
     ConfirmDelivered {
         claim: DeliveryClaim,
-        receipt: String,
+        receipt: OutboxReceipt,
         now_ms: i64,
     },
     Reschedule {
@@ -150,7 +218,7 @@ impl OutboxRecord {
                 }
             }
             OutboxState::Delivered { receipt } => {
-                if self.attempt == 0 || !valid_diagnostic(receipt) {
+                if self.attempt == 0 || !receipt.validate() {
                     return Err(OutboxError::InvalidPersistedState);
                 }
             }
@@ -194,10 +262,7 @@ impl OutboxRecord {
                     receipt,
                     now_ms,
                 },
-            ) if current == &claim
-                && now_ms < current.lease_until_ms
-                && valid_diagnostic(&receipt) =>
-            {
+            ) if current == &claim && now_ms < current.lease_until_ms && receipt.validate() => {
                 S::Delivered { receipt }
             }
             (
@@ -1066,10 +1131,10 @@ mod tests {
         for state in [
             OutboxState::DeliveryUnknown { reason: " ".into() },
             OutboxState::Delivered {
-                receipt: String::new(),
+                receipt: OutboxReceipt::legacy(String::new()),
             },
             OutboxState::Delivered {
-                receipt: "x".repeat(MAX_OUTBOX_DIAGNOSTIC_BYTES + 1),
+                receipt: OutboxReceipt::legacy("x".repeat(MAX_OUTBOX_DIAGNOSTIC_BYTES + 1)),
             },
         ] {
             assert_eq!(

@@ -144,6 +144,51 @@ impl DbCollectionIden for Message {
 }
 
 impl Message {
+    /// A stable digest of the canonical fields that must not differ when the
+    /// same message id is written twice. A retried outbox dispatch re-derives
+    /// the row; `create` can then prove the id names the same content instead
+    /// of silently overwriting or duplicating a logical message.
+    pub(crate) fn content_hash(&self) -> u64 {
+        let mut bytes = Vec::new();
+        for part in [
+            self.id.as_str(),
+            self.tid.as_str(),
+            self.name.as_str(),
+            self.state.as_ref(),
+            self.r#type.as_str(),
+            self.pid.as_str(),
+            self.nid.as_str(),
+            self.mid.as_str(),
+            self.uses.as_deref().unwrap_or_default(),
+            self.inputs.as_str(),
+            self.outputs.as_str(),
+            self.owner.as_deref().unwrap_or_default(),
+            self.assignee.as_deref().unwrap_or_default(),
+            self.delegator.as_deref().unwrap_or_default(),
+            self.ref_msg_id.as_deref().unwrap_or_default(),
+        ] {
+            bytes.extend_from_slice(part.as_bytes());
+            bytes.push(0);
+        }
+        for number in [
+            self.start_time,
+            self.end_time,
+            self.timestamp,
+            self.rev as i64,
+        ] {
+            bytes.extend_from_slice(&number.to_be_bytes());
+        }
+        xxhash_rust::xxh3::xxh3_64(&bytes)
+    }
+
+    /// Whether a row already stored under this id carries the same logical
+    /// message. Timestamps and assignment projection are part of the content:
+    /// a retry with a different window or owner under one id is corruption,
+    /// not a duplicate to accept.
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
+        self.content_hash() == other.content_hash()
+    }
+
     /// v1 → v2: v1 rows were merged delivery records keyed by the message id
     /// (id == msg id, single delivery, embedded channel/status fields).
     /// Dropping the delivery-only fields yields the canonical message row —

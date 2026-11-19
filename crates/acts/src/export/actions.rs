@@ -1073,12 +1073,12 @@ mod tests {
     /// owner and the channel's namespace decide the rest.
     const MSG_ALLOW: &[&str] = &["model:deploy", "proc:start", "msg:ack", "msg:unsub"];
 
-    /// Acking is grant-based, like every other action: a user with `msg:ack`
-    /// may ack, one without it may not — the delivery's process owner plays no
-    /// part.
+    /// Acking needs both the `msg:ack` grant and the delivery's channel
+    /// subject: a peer with the same grant cannot settle another subject's
+    /// delivery, while the channel's own subject can.
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
-    async fn an_ack_follows_the_grant_not_the_process_owner() {
+    async fn an_ack_is_scoped_to_the_channel_subject() {
         let engine = acl_engine().await;
         let u1 = principal(&user("u1", MSG_ALLOW));
         let u2 = principal(&user("u2", MSG_ALLOW));
@@ -1133,11 +1133,22 @@ mod tests {
         let delivery_id = delivery.recv().await;
         assert!(!delivery_id.is_empty());
 
-        // u2 holds `msg:ack` too, so u1's delivery is u2's to ack as well:
-        // the check is the action grant, not who started the run.
-        apply_as(
+        // u2 holds `msg:ack` too, but the delivery is addressed to u1's
+        // channel namespace; possession plus the grant is not enough.
+        let err = apply_as(
             &engine,
             &u2,
+            "msg:ack",
+            Vars::new().with("id", delivery_id.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+
+        // The channel's own subject may ack it.
+        apply_as(
+            &engine,
+            &u1,
             "msg:ack",
             Vars::new().with("id", delivery_id.clone()),
         )

@@ -13,11 +13,14 @@
 use crate::{
     Message, MessageState, Vars,
     scheduler::{
-        core::outbox::records::OutboxRecord,
+        core::outbox::records::{OutboxReceipt, OutboxRecord},
         shell::caps::delivery::{DeliveryOutcome, OutboxTransport},
     },
     utils::consts,
 };
+use std::sync::Arc;
+
+use publisher::PublishError;
 
 /// Map one delivered record onto its engine message, or `None` when the
 /// record carries no payload (lifecycle notes such as `task.started` on an operation
@@ -144,7 +147,16 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         .get("msg_id")
         .and_then(|value| value.as_str())
         .map(str::to_string)
-        .unwrap_or_else(crate::utils::longid);
+        .unwrap_or_else(|| {
+            // A record without a pinned id still needs one identity across
+            // retries. The record's own durable identity (pid + key) is the
+            // stable input; hashing it means a duplicate dispatch converges on
+            // the same canonical message instead of minting another.
+            crate::utils::stable_id(
+                "msg_",
+                &[&record.id.process_id, &record.id.key, &record.topic],
+            )
+        });
 
     // The record's event time, pinned by the commit that wrote the payload
     // (`ts`); a payload an earlier shape wrote without one stamps at
@@ -180,17 +192,20 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
 }
 
 /// Drain a delivery pass into engine messages: the driver's transport runs
-/// the records through [`message_from_record`] and forwards the results.
+/// the records through [`message_from_record`], hands them to the durable
+/// publisher, and only then notifies the online subscribers.
 ///
-/// The outbox payload carries no wall-clock facts (the aggregate has no
-/// clocks), so the forwarder stamps the message's window as it observes the
-/// execution: a `created` record opens it, a terminal record closes it. The
-/// first and the last message of one execution instance therefore span the
-/// same interval a client sees on the run's lifecycle event, and
-/// `Message::cost()` is a real duration on every terminal message.
+/// The durable publisher owns the message window now (it reads the projected
+/// task row). The serving runtime constructs the forwarder with
+/// [`MessageForwarder::durable`]; the test-only [`MessageForwarder::new`]
+/// keeps the old in-memory window so unit tests can observe mapping and
+/// notification without an engine.
 pub(crate) struct MessageForwarder<F> {
     emit: F,
-    /// The instant each `(pid, tid)` was first announced as `created`.
+    publisher: Option<Arc<DurableMessagePublisher>>,
+    /// The instant each `(pid, tid)` was first announced as `created` — test
+    /// fallback only; production timing comes from the durable task row.
+    #[cfg(test)]
     started: parking_lot::Mutex<std::collections::HashMap<(String, String), i64>>,
 }
 
@@ -198,9 +213,26 @@ impl<F> MessageForwarder<F>
 where
     F: Fn(&Message),
 {
+    /// Test-only mapping/notification transport. It is not a production
+    /// delivery: its receipt is the legacy string and no durable message or
+    /// delivery row is created.
+    #[cfg(test)]
     pub(crate) fn new(emit: F) -> Self {
         Self {
             emit,
+            publisher: None,
+            started: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The serving transport: persist the canonical message and every matching
+    /// ack channel's delivery before the outbox record is confirmed, then
+    /// notify online subscribers.
+    pub(crate) fn durable(emit: F, publisher: Arc<DurableMessagePublisher>) -> Self {
+        Self {
+            emit,
+            publisher: Some(publisher),
+            #[cfg(test)]
             started: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -215,38 +247,66 @@ where
     }
 }
 
+#[async_trait::async_trait]
 impl<F> OutboxTransport for MessageForwarder<F>
 where
     F: Fn(&Message) + Send + Sync,
 {
-    fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
-        match message_from_record(record) {
-            Some(mut message) => {
-                let now = crate::utils::time::time_millis();
-                let key = (message.pid.clone(), message.tid.clone());
-                if message.state == MessageState::Created {
-                    message.start_time = now;
-                    self.started.lock().insert(key, now);
-                } else if message.state.is_completed() {
-                    // A terminal record closes the window: the first `created`
-                    // this forwarder saw is the start. Without one (a message
-                    // observed after a restart, or a task skipped before it was
-                    // ever announced) the window is the delivery instant, which
-                    // keeps `end_time` a real timestamp and `cost()` non-negative.
-                    message.start_time = self.started.lock().remove(&key).unwrap_or(now);
-                    message.end_time = now.max(message.start_time);
+    async fn deliver(&self, record: &OutboxRecord) -> DeliveryOutcome {
+        let Some(mut message) = message_from_record(record) else {
+            return DeliveryOutcome::Delivered {
+                receipt: OutboxReceipt::legacy("lifecycle"),
+            };
+        };
+        if let Some(publisher) = &self.publisher {
+            return match publisher.publish(&mut message).await {
+                Ok(receipt) => {
+                    // Online notification is now only a latency optimization:
+                    // the durable message and delivery rows already exist, so
+                    // a lost notification is recovered by the retry timer.
+                    (self.emit)(&message);
+                    DeliveryOutcome::Delivered { receipt }
                 }
-                (self.emit)(&message);
-                DeliveryOutcome::Delivered {
-                    receipt: "message".into(),
-                }
+                Err(PublishError::Corrupt(reason)) => DeliveryOutcome::Quarantine { reason },
+                Err(PublishError::Store(error)) => DeliveryOutcome::RetryAt {
+                    available_at_ms: crate::utils::time::time_millis()
+                        + DELIVERY_STORE_RETRY_BACKOFF_MS,
+                    error: error.to_string(),
+                },
+            };
+        }
+        #[cfg(test)]
+        {
+            let now = crate::utils::time::time_millis();
+            let key = (message.pid.clone(), message.tid.clone());
+            if message.state == MessageState::Created {
+                message.start_time = now;
+                self.started.lock().insert(key, now);
+            } else if message.state.is_completed() {
+                // Test fallback: a terminal record closes the window opened by
+                // the first `created` this forwarder saw. Production uses the
+                // durable task row instead (see `DurableMessagePublisher`).
+                message.start_time = self.started.lock().remove(&key).unwrap_or(now);
+                message.end_time = now.max(message.start_time);
             }
-            None => DeliveryOutcome::Delivered {
-                receipt: "lifecycle".into(),
-            },
+            (self.emit)(&message);
+            return DeliveryOutcome::Delivered {
+                receipt: OutboxReceipt::legacy("message"),
+            };
+        }
+        // Unreachable: a serving build has no constructor without a durable
+        // publisher. Fail closed rather than confirming what was not stored.
+        #[cfg(not(test))]
+        DeliveryOutcome::Quarantine {
+            reason: "message forwarder has no durable publisher".into(),
         }
     }
 }
+
+/// Backoff before a store failure is retried. The failure is local (no
+/// external effect exists), so retrying quickly is correct; the lease still
+/// bounds a hot loop if the store stays down.
+const DELIVERY_STORE_RETRY_BACKOFF_MS: i64 = 1_000;
 
 #[cfg(test)]
 mod tests {
@@ -449,8 +509,8 @@ mod tests {
     /// The forwarder stamps the window the payload cannot carry: the first
     /// `created` record opens it and the terminal record closes it, so every
     /// terminal task/act message has a non-zero end and a real `cost()`.
-    #[test]
-    fn a_forwarded_message_window_spans_created_to_terminal() {
+    #[tokio::test]
+    async fn a_forwarded_message_window_spans_created_to_terminal() {
         let payload = serde_json::json!({
             "nid": "s1",
             "tid": "t1",
@@ -465,8 +525,10 @@ mod tests {
             let sink = seen.clone();
             let forwarder =
                 MessageForwarder::new(move |message: &Message| sink.lock().push(message.clone()));
-            forwarder.deliver(&record("message.created", &payload));
-            forwarder.deliver(&record("task.completed", &payload));
+            forwarder
+                .deliver(&record("message.created", &payload))
+                .await;
+            forwarder.deliver(&record("task.completed", &payload)).await;
         }
         let seen = seen.lock();
         assert_eq!(seen.len(), 2);
@@ -566,8 +628,8 @@ mod tests {
     /// zero-length window at the delivery instant instead of leaving the
     /// message with no end (a restarted forwarder, or a skip before any
     /// announcement).
-    #[test]
-    fn an_unannounced_terminal_message_closes_at_the_delivery_instant() {
+    #[tokio::test]
+    async fn an_unannounced_terminal_message_closes_at_the_delivery_instant() {
         let payload = serde_json::json!({
             "nid": "s1",
             "tid": "t1",
@@ -582,7 +644,7 @@ mod tests {
             let sink = seen.clone();
             let forwarder =
                 MessageForwarder::new(move |message: &Message| sink.lock().push(message.clone()));
-            forwarder.deliver(&record("task.skipped", &payload));
+            forwarder.deliver(&record("task.skipped", &payload)).await;
         }
         let seen = seen.lock();
         assert_eq!(seen.len(), 1);
@@ -593,29 +655,35 @@ mod tests {
 
     /// A record with no payload maps onto no message but still confirms the
     /// delivery: the lifecycle note is a success, not an error.
-    #[test]
-    fn a_lifecycle_note_confirms_delivery_without_a_message() {
+    #[tokio::test]
+    async fn a_lifecycle_note_confirms_delivery_without_a_message() {
         use crate::scheduler::shell::caps::delivery::DeliveryOutcome;
         let forwarder = MessageForwarder::new(|_: &Message| {
             panic!("a lifecycle note must not reach the engine channel")
         });
-        let outcome = forwarder.deliver(&record("task.started", ""));
+        let outcome = forwarder.deliver(&record("task.started", "")).await;
         match outcome {
-            DeliveryOutcome::Delivered { receipt } => assert_eq!(receipt, "lifecycle"),
+            DeliveryOutcome::Delivered { receipt } => {
+                assert_eq!(receipt.as_legacy(), Some("lifecycle"))
+            }
             other => panic!("unexpected outcome: {other:?}"),
         }
     }
 
     /// A record with a payload is delivered as a message, not as a lifecycle
     /// note: the receipt names the other outcome.
-    #[test]
-    fn a_payload_record_confirms_delivery_as_a_message() {
+    #[tokio::test]
+    async fn a_payload_record_confirms_delivery_as_a_message() {
         use crate::scheduler::shell::caps::delivery::DeliveryOutcome;
         let payload = serde_json::json!({ "nid": "s1" }).to_string();
         let forwarder = MessageForwarder::new(|_: &Message| {});
-        let outcome = forwarder.deliver(&record("message.created", &payload));
+        let outcome = forwarder
+            .deliver(&record("message.created", &payload))
+            .await;
         match outcome {
-            DeliveryOutcome::Delivered { receipt } => assert_eq!(receipt, "message"),
+            DeliveryOutcome::Delivered { receipt } => {
+                assert_eq!(receipt.as_legacy(), Some("message"))
+            }
             other => panic!("unexpected outcome: {other:?}"),
         }
     }
@@ -630,5 +698,7 @@ mod tests {
 }
 
 mod payload;
+mod publisher;
 
 pub(crate) use payload::{attach_join_message, operation_message_payload, step_uses};
+pub(crate) use publisher::DurableMessagePublisher;
