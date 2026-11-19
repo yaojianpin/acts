@@ -1,7 +1,10 @@
 //! The evaluator's contract: what parses, what evaluates to what, and what is
 //! rejected.
 
-use crate::{Context, Error, Expr, Result, Value, eval};
+use crate::{
+    BudgetKind, BudgetProfile, CompileLimits, Context, Error, EvalBudget, EvalLimits, Expr,
+    ExprType, FunctionPurity, FunctionSpec, Result, Value, ValueLimits, eval,
+};
 
 /// Evaluate `source` against an empty context.
 fn value(source: &str) -> Result<Value> {
@@ -660,7 +663,9 @@ fn is_match_matches_a_regular_expression() {
         Value::Bool(false)
     );
 
-    let err = eval("code.is_match('(')", &context).unwrap_err();
+    // A literal pattern is compiled with the expression, so an invalid one
+    // is a deploy-time error rather than a per-task one.
+    let err = Expr::compile("code.is_match('(')").unwrap_err();
     assert!(err.to_string().contains("regular expression"), "{err}");
 }
 
@@ -1029,4 +1034,441 @@ fn json_carries_a_function_as_an_error() {
 
     let err = Value::from(f64::NAN).to_json().unwrap_err();
     assert!(err.to_string().contains("NaN"), "{err}");
+}
+
+// ---- compile and runtime budgets ----
+
+/// A left-deep binary chain is the shape the old evaluator turned into host
+/// recursion. The parser now rejects it before evaluation.
+#[test]
+fn a_wide_binary_chain_is_rejected_at_compile_time() {
+    let source = vec!["1"; 2000].join(" + ");
+    let err = Expr::compile(&source).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::TooDeep { .. } | Error::TooManyNodes { .. } | Error::TooManyTokens { .. }
+        ),
+        "{err}"
+    );
+}
+
+/// The deepest chain the default profile accepts still evaluates without
+/// touching the host stack.
+#[test]
+fn a_chain_at_the_depth_limit_evals_iteratively() {
+    let operands = CompileLimits::default().depth;
+    let source = vec!["1"; operands].join(" + ");
+    let expr = Expr::compile(&source).unwrap();
+
+    assert_eq!(expr.depth(), CompileLimits::default().depth);
+    assert_eq!(
+        expr.eval(&Context::new()).unwrap(),
+        Value::Int(operands as i64)
+    );
+}
+
+#[test]
+fn each_compile_budget_has_a_standalone_error() {
+    let mut limits = CompileLimits::default();
+    limits.source_bytes = 2;
+    assert!(matches!(
+        Expr::compile_with("123", &limits),
+        Err(Error::TooLarge { what: "source", .. })
+    ));
+
+    let mut limits = CompileLimits::default();
+    limits.tokens = 3;
+    assert!(matches!(
+        Expr::compile_with("1 + 1 + 1", &limits),
+        Err(Error::TooManyTokens { .. })
+    ));
+
+    let mut limits = CompileLimits::default();
+    limits.nodes = 2;
+    assert!(matches!(
+        Expr::compile_with("1 + 1", &limits),
+        Err(Error::TooManyNodes { .. })
+    ));
+
+    let mut limits = CompileLimits::default();
+    limits.depth = 2;
+    assert!(matches!(
+        Expr::compile_with("1 + 1 + 1", &limits),
+        Err(Error::TooDeep { .. })
+    ));
+
+    let mut limits = CompileLimits::default();
+    limits.literal_bytes = 2;
+    assert!(matches!(
+        Expr::compile_with("'abc'", &limits),
+        Err(Error::TooLarge {
+            what: "string literal",
+            ..
+        })
+    ));
+
+    let mut limits = CompileLimits::default();
+    limits.identifier_bytes = 2;
+    assert!(matches!(
+        Expr::compile_with("abcd", &limits),
+        Err(Error::TooLarge {
+            what: "identifier",
+            ..
+        })
+    ));
+
+    let mut limits = CompileLimits::default();
+    limits.call_args = 1;
+    assert!(matches!(
+        Expr::compile_with("f(1, 2)", &limits),
+        Err(Error::TooManyArguments { .. })
+    ));
+}
+
+#[test]
+fn runtime_budgets_are_typed_errors_not_false() {
+    use std::time::Duration;
+
+    let expr = Expr::compile("1 + 1 + 1").unwrap();
+
+    let mut budget = EvalBudget::with_limits(EvalLimits {
+        steps: 1,
+        ..BudgetProfile::Task.eval_limits()
+    });
+    assert!(matches!(
+        expr.eval_with_budget(&Context::new(), &mut budget),
+        Err(Error::BudgetExceeded {
+            kind: BudgetKind::Steps,
+            ..
+        })
+    ));
+
+    let mut budget = EvalBudget::with_limits(EvalLimits {
+        deadline: Duration::ZERO,
+        ..BudgetProfile::Task.eval_limits()
+    });
+    assert_eq!(
+        expr.eval_with_budget(&Context::new(), &mut budget),
+        Err(Error::DeadlineExceeded)
+    );
+
+    let mut budget = EvalBudget::for_profile(BudgetProfile::Task);
+    budget.cancellation().cancel();
+    assert_eq!(
+        expr.eval_with_budget(&Context::new(), &mut budget),
+        Err(Error::Cancelled)
+    );
+}
+
+#[test]
+fn collection_walks_and_string_growth_are_budgeted() {
+    let items = Value::list((0..100).map(Value::Int).collect::<Vec<_>>());
+    let mut context = Context::new();
+    context.set("items", items);
+
+    let expr = Expr::compile("items.contains(99)").unwrap();
+    let mut budget = EvalBudget::with_limits(EvalLimits {
+        collection_items: 5,
+        ..BudgetProfile::Task.eval_limits()
+    });
+    assert!(matches!(
+        expr.eval_with_budget(&context, &mut budget),
+        Err(Error::BudgetExceeded {
+            kind: BudgetKind::CollectionItems,
+            ..
+        })
+    ));
+
+    let mut context = Context::new();
+    context
+        .set("a", "x".repeat(600 * 1024))
+        .set("b", "y".repeat(600 * 1024));
+    let expr = Expr::compile("a + b").unwrap();
+
+    let mut budget = EvalBudget::with_limits(EvalLimits {
+        allocation_bytes: 1000,
+        output_bytes: 2 * 1024 * 1024,
+        value: ValueLimits {
+            string_bytes: 2 * 1024 * 1024,
+            total_bytes: 4 * 1024 * 1024,
+            ..ValueLimits::default()
+        },
+        ..BudgetProfile::Task.eval_limits()
+    });
+    assert!(matches!(
+        expr.eval_with_budget(&context, &mut budget),
+        Err(Error::BudgetExceeded {
+            kind: BudgetKind::Allocation,
+            ..
+        })
+    ));
+
+    let mut budget = EvalBudget::with_limits(EvalLimits {
+        allocation_bytes: 4 * 1024 * 1024,
+        output_bytes: 4 * 1024 * 1024,
+        value: ValueLimits {
+            total_bytes: 4 * 1024 * 1024,
+            ..ValueLimits::default()
+        },
+        ..BudgetProfile::Task.eval_limits()
+    });
+    assert!(matches!(
+        expr.eval_with_budget(&context, &mut budget),
+        Err(Error::ValueLimit {
+            what: "string value",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_deep_context_value_is_rejected_before_evaluation() {
+    let mut value = Value::Int(1);
+    for _ in 0..10 {
+        value = Value::list([value]);
+    }
+
+    let mut context = Context::new();
+    context.set("v", value);
+    let expr = Expr::compile("v").unwrap();
+    let mut budget = EvalBudget::with_limits(EvalLimits {
+        value: ValueLimits {
+            depth: 3,
+            ..ValueLimits::default()
+        },
+        ..BudgetProfile::Task.eval_limits()
+    });
+
+    assert!(matches!(
+        expr.eval_with_budget(&context, &mut budget),
+        Err(Error::ValueLimit { what: "depth", .. })
+    ));
+}
+
+// ---- values ----
+
+#[test]
+fn deep_values_are_walked_without_host_recursion() {
+    let mut value = Value::Int(1);
+    let mut other = Value::Int(1);
+    for _ in 0..500 {
+        value = Value::list([value]);
+        other = Value::list([other]);
+    }
+
+    assert!(value.equals(&other));
+    assert!(matches!(
+        value.validate(&ValueLimits::default()),
+        Err(Error::ValueLimit { what: "depth", .. })
+    ));
+
+    #[cfg(feature = "json")]
+    assert!(value.to_json().is_err());
+}
+
+#[test]
+fn non_finite_numbers_are_rejected_everywhere() {
+    assert!(Expr::compile("1e999").is_err());
+
+    let mut context = Context::new();
+    context.set("nan", Value::Float(f64::NAN));
+    let expr = Expr::compile("nan").unwrap();
+    assert_eq!(
+        expr.eval(&context),
+        Err(Error::NonFinite { operation: "value" })
+    );
+
+    let expr = Expr::compile("1e308 * 1e308").unwrap();
+    assert_eq!(
+        expr.eval(&Context::new()),
+        Err(Error::NonFinite { operation: "*" })
+    );
+}
+
+#[test]
+fn a_constant_string_chain_is_folded() {
+    let expr = Expr::compile("'a' + 'b' + 'c'").unwrap();
+    assert_eq!(expr.eval(&Context::new()).unwrap(), Value::from("abc"));
+}
+
+// ---- function contracts ----
+
+#[test]
+fn function_calls_are_counted_and_outputs_are_bounded() {
+    let mut context = Context::new();
+    context.set("f", Value::function(|_| Ok(Value::Null)));
+
+    let expr = Expr::compile("f() + f()").unwrap();
+    let mut budget = EvalBudget::with_limits(EvalLimits {
+        function_calls: 1,
+        ..BudgetProfile::Task.eval_limits()
+    });
+    assert!(matches!(
+        expr.eval_with_budget(&context, &mut budget),
+        Err(Error::BudgetExceeded {
+            kind: BudgetKind::FunctionCalls,
+            ..
+        })
+    ));
+
+    let mut context = Context::new();
+    context
+        .set("f", Value::function(|_| Ok(Value::Null)))
+        .set_spec(
+            "f",
+            FunctionSpec {
+                max_calls: 1,
+                ..FunctionSpec::default()
+            },
+        );
+    let expr = Expr::compile("f() + f()").unwrap();
+    assert!(matches!(
+        expr.eval(&context),
+        Err(Error::BudgetExceeded {
+            kind: BudgetKind::FunctionCalls,
+            limit: 1
+        })
+    ));
+
+    let mut context = Context::new();
+    context
+        .set(
+            "f",
+            Value::function(|_| Ok(Value::from("x".repeat(64)))),
+        )
+        .set_spec(
+            "f",
+            FunctionSpec {
+                max_output_bytes: 8,
+                ..FunctionSpec::default()
+            },
+        );
+    let expr = Expr::compile("f()").unwrap();
+    assert!(matches!(
+        expr.eval(&context),
+        Err(Error::ValueLimit {
+            what: "string bytes",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn an_effectful_function_needs_an_explicit_opt_in() {
+    let mut context = Context::new();
+    context
+        .set("f", Value::function(|_| Ok(Value::Null)))
+        .set_spec(
+            "f",
+            FunctionSpec {
+                purity: FunctionPurity::Effectful,
+                ..FunctionSpec::default()
+            },
+        );
+
+    let expr = Expr::compile("f()").unwrap();
+    assert!(matches!(
+        expr.eval(&context),
+        Err(Error::FunctionRejected { .. })
+    ));
+
+    let mut budget = EvalBudget::for_profile(BudgetProfile::Task);
+    budget.set_allow_effectful_functions(true);
+    assert_eq!(
+        expr.eval_with_budget(&context, &mut budget).unwrap(),
+        Value::Null
+    );
+}
+
+#[test]
+fn a_panicking_function_becomes_an_error() {
+    let mut context = Context::new();
+    context.set("boom", Value::function(|_| panic!("boom")));
+
+    let expr = Expr::compile("boom()").unwrap();
+    assert!(matches!(
+        expr.eval(&context),
+        Err(Error::FunctionPanicked { name }) if name == "boom"
+    ));
+}
+
+#[test]
+fn error_text_from_a_function_is_bounded() {
+    let mut context = Context::new();
+    context.set(
+        "fail",
+        Value::function(|_| {
+            Err(Error::Function {
+                name: "fail".to_string(),
+                message: "x".repeat(10_000),
+            })
+        }),
+    );
+
+    let error = Expr::compile("fail()").unwrap().eval(&context).unwrap_err();
+    assert!(error.to_string().len() <= 1100, "{}", error.to_string().len());
+    assert_eq!(error.code(), "expression_function");
+}
+
+// ---- typed results ----
+
+#[test]
+fn a_typed_result_is_checked_at_compile_and_run_time() {
+    assert!(Expr::compile_typed("1", ExprType::Bool).is_err());
+
+    let mut context = Context::new();
+    context.set("a", 1);
+    let expr = Expr::compile_typed("a", ExprType::Bool).unwrap();
+    assert_eq!(
+        expr.eval(&context),
+        Err(Error::ResultType {
+            expected: "bool",
+            got: "int"
+        })
+    );
+
+    context.set("a", "abcd");
+    let expr = Expr::compile_typed(
+        "a",
+        ExprType::String { max_bytes: 3 },
+    )
+    .unwrap();
+    assert!(matches!(
+        expr.eval(&context),
+        Err(Error::TooLarge {
+            what: "string result",
+            ..
+        })
+    ));
+
+    context.set("a", 20);
+    let expr = Expr::compile_typed("a", ExprType::Duration { max_ms: 10 }).unwrap();
+    assert!(matches!(
+        expr.eval(&context),
+        Err(Error::ValueLimit {
+            what: "duration result (ms)",
+            ..
+        })
+    ));
+}
+
+// ---- regex ----
+
+#[cfg(feature = "regex")]
+#[test]
+fn a_dynamic_regex_pattern_is_bounded() {
+    let mut context = Context::new();
+    context
+        .set("text", "a")
+        .set("pattern", "a".repeat(9 * 1024));
+
+    let expr = Expr::compile("text.is_match(pattern)").unwrap();
+    assert!(matches!(
+        expr.eval(&context),
+        Err(Error::TooLarge {
+            what: "regular expression pattern",
+            ..
+        })
+    ));
 }

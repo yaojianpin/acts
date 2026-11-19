@@ -181,7 +181,8 @@ scope——它们不是一次决策输入。
 ## 6. 表达式与作用域
 
 - 条件使用和分支守卫相同的 `acts-expr` 语言：算术、比较、布尔、成员访问、
-  内置函数；不支持语句/赋值/集合字面量。
+  内置函数；不支持语句/赋值/集合字面量。编译/运行预算、Value 边界、错误码和
+  求值器实现见 [`expression.md`](expression.md)。
 - 可读：
   - 步骤变量（`Step::vars`）与祖先作用域。
   - 已解析的包参数（按名字，覆盖同名变量）。
@@ -190,6 +191,9 @@ scope——它们不是一次决策输入。
   - 内置：`$get`/`$data`/`$inputs`/`$step_*`/`$env` 等。
 - 条件在启动时求值，此时包尚未执行；`$data`/`$inputs` 只包含启动前已解析的
   内容。不要依赖包运行后的 outputs。
+- 条件受 `acts-expr` Task Profile 的 Step/Allocation/Output/Deadline/Value
+  预算约束；预算、Value 或函数错误按“无法求值”处理（`Invalid` 或
+  `validation_failed`），不会被当成 `false` 继续下一条规则。
 - 规则按声明顺序求值，支持短路；后面的规则在第一条命中后不再执行。
 
 ## 7. 错误与边界

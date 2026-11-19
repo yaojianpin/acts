@@ -1,7 +1,7 @@
 //! The value type an expression reads and produces, and the injection surface:
 //! objects are [`Map`]s, methods are [`Value::Function`]s.
 
-use crate::{Error, Result};
+use crate::{Error, Result, ValueLimits};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -198,38 +198,87 @@ impl Value {
     /// `float`, `null` is only equal to `null`, lists and maps compare
     /// element-wise, and values of different kinds are simply not equal.
     pub fn equals(&self, other: &Value) -> bool {
-        match (self, other) {
-            (Value::Null, Value::Null) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::UInt(a), Value::UInt(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            // Exact across the integer kinds, in the one width both fit.
-            (Value::Int(a), Value::UInt(b)) | (Value::UInt(b), Value::Int(a)) => {
-                i128::from(*a) == i128::from(*b)
+        let mut stack = vec![(self, other)];
+
+        while let Some((left, right)) = stack.pop() {
+            match (left, right) {
+                (Value::Null, Value::Null) => {}
+                (Value::Bool(a), Value::Bool(b)) if a == b => {}
+                (Value::Str(a), Value::Str(b)) if a == b => {}
+                (Value::Int(a), Value::Int(b)) if a == b => {}
+                (Value::UInt(a), Value::UInt(b)) if a == b => {}
+                (Value::Float(a), Value::Float(b)) if a == b => {}
+                // Exact across the integer kinds, in the one width both fit.
+                (Value::Int(a), Value::UInt(b)) | (Value::UInt(b), Value::Int(a))
+                    if i128::from(*a) == i128::from(*b) => {}
+                (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a))
+                    if (*a as f64) == *b => {}
+                (Value::UInt(a), Value::Float(b)) | (Value::Float(b), Value::UInt(a))
+                    if (*a as f64) == *b => {}
+                // Immutable and usually shared, so the pointer check answers
+                // the common case (a value compared with itself) without
+                // walking.
+                (Value::List(a), Value::List(b)) => {
+                    if std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b)) {
+                        continue;
+                    }
+                    if a.len() != b.len() {
+                        return false;
+                    }
+                    stack.extend(a.iter().zip(b.iter()));
+                }
+                (Value::Map(a), Value::Map(b)) => {
+                    if std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b)) {
+                        continue;
+                    }
+                    if a.len() != b.len() {
+                        return false;
+                    }
+                    for (key, value) in a.iter() {
+                        let Some(other) = b.get(key) else {
+                            return false;
+                        };
+                        stack.push((value, other));
+                    }
+                }
+                (Value::Function(a), Value::Function(b)) if Arc::ptr_eq(a, b) => {}
+                _ => return false,
             }
-            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
-                (*a as f64) == *b
-            }
-            (Value::UInt(a), Value::Float(b)) | (Value::Float(b), Value::UInt(a)) => {
-                (*a as f64) == *b
-            }
-            // Immutable and usually shared, so the pointer check answers the
-            // common case (a value compared with itself) without walking.
-            (Value::List(a), Value::List(b)) => {
-                std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
-                    || (a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.equals(y)))
-            }
-            (Value::Map(a), Value::Map(b)) => {
-                std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
-                    || (a.len() == b.len()
-                        && a.iter()
-                            .all(|(k, v)| b.get(k).is_some_and(|other| v.equals(other))))
-            }
-            (Value::Function(a), Value::Function(b)) => Arc::ptr_eq(a, b),
-            _ => false,
         }
+
+        true
+    }
+
+    /// Check this value against [`ValueLimits`] without recursion.
+    ///
+    /// The limits apply to one value tree: depth, total nodes, per-container
+    /// items and the bytes of strings, keys and the whole tree.
+    pub fn validate(&self, limits: &ValueLimits) -> Result<()> {
+        ValueMeter::rejecting_non_finite(limits).measure(self)
+    }
+
+    /// The approximate byte size of this value tree, saturating rather than
+    /// failing.
+    pub fn byte_size(&self) -> usize {
+        let limits = ValueLimits {
+            depth: usize::MAX,
+            nodes: usize::MAX,
+            list_items: usize::MAX,
+            map_entries: usize::MAX,
+            key_bytes: usize::MAX,
+            string_bytes: usize::MAX,
+            total_bytes: usize::MAX,
+        };
+        let mut meter = ValueMeter::permissive(&limits);
+        let _ = meter.measure(self);
+        meter.bytes()
+    }
+
+    /// Convert a JSON value while enforcing [`ValueLimits`].
+    #[cfg(feature = "json")]
+    pub fn from_json_checked(value: serde_json::Value, limits: &ValueLimits) -> Result<Value> {
+        measure_json(&value, limits)?;
+        Ok(Value::from(value))
     }
 
     /// Ordering for `<`, `<=`, `>` and `>=`: numbers across `int` and `float`,
@@ -251,53 +300,147 @@ impl Value {
         }
     }
 
-    /// A JSON value for this value. Functions have no JSON form and are an
-    /// error; a non-finite float is too.
+    /// A JSON value for this value, checked against the default
+    /// [`ValueLimits`]. Functions have no JSON form and are an error; a
+    /// non-finite float is too.
     #[cfg(feature = "json")]
     pub fn to_json(&self) -> Result<serde_json::Value> {
+        self.to_json_checked(&ValueLimits::default())
+    }
+
+    /// A JSON value for this value, checked against explicit limits.
+    ///
+    /// The walk is iterative, so a deeply nested value cannot overflow the
+    /// host stack. A non-finite float keeps its specific `Convert` error.
+    #[cfg(feature = "json")]
+    pub fn to_json_checked(&self, limits: &ValueLimits) -> Result<serde_json::Value> {
         use serde_json::Value as Json;
 
-        Ok(match self {
-            Value::Null => Json::Null,
-            Value::Bool(b) => Json::Bool(*b),
-            Value::Int(i) => Json::from(*i),
-            Value::UInt(u) => Json::from(*u),
-            Value::Float(f) => serde_json::Number::from_f64(*f)
-                .map(Json::Number)
-                .ok_or_else(|| Error::Convert {
-                    message: format!("{f} has no JSON representation"),
-                })?,
-            Value::Str(s) => Json::String(s.to_string()),
-            Value::List(items) => {
-                Json::Array(items.iter().map(Value::to_json).collect::<Result<_>>()?)
+        // Structure and size are bounded first; non-finite floats are left to
+        // the conversion below, which names the value.
+        let mut meter = ValueMeter::permissive(limits);
+        meter.measure(self)?;
+
+        enum Frame<'a> {
+            Value(&'a Value),
+            List(usize),
+            Map(Vec<String>, usize),
+        }
+
+        let mut frames = vec![Frame::Value(self)];
+        let mut out: Vec<Json> = Vec::new();
+
+        while let Some(frame) = frames.pop() {
+            match frame {
+                Frame::Value(value) => match value {
+                    Value::Null => out.push(Json::Null),
+                    Value::Bool(b) => out.push(Json::Bool(*b)),
+                    Value::Int(i) => out.push(Json::from(*i)),
+                    Value::UInt(u) => out.push(Json::from(*u)),
+                    Value::Float(f) => out.push(
+                        serde_json::Number::from_f64(*f)
+                            .map(Json::Number)
+                            .ok_or_else(|| Error::Convert {
+                                message: format!("{f} has no JSON representation"),
+                            })?,
+                    ),
+                    Value::Str(s) => out.push(Json::String(s.to_string())),
+                    Value::List(items) => {
+                        frames.push(Frame::List(items.len()));
+                        for item in items.iter().rev() {
+                            frames.push(Frame::Value(item));
+                        }
+                    }
+                    Value::Map(map) => {
+                        let mut keys = Vec::with_capacity(map.len());
+                        let mut values = Vec::with_capacity(map.len());
+                        for (key, value) in map.iter() {
+                            keys.push(key.clone());
+                            values.push(value);
+                        }
+                        frames.push(Frame::Map(keys, values.len()));
+                        for value in values.into_iter().rev() {
+                            frames.push(Frame::Value(value));
+                        }
+                    }
+                    Value::Function(_) => {
+                        return Err(Error::Convert {
+                            message: "a function has no JSON representation".to_string(),
+                        });
+                    }
+                },
+                Frame::List(len) => {
+                    let start = out.len() - len;
+                    let items: Vec<Json> = out.drain(start..).collect();
+                    out.push(Json::Array(items));
+                }
+                Frame::Map(keys, len) => {
+                    let start = out.len() - len;
+                    let values: Vec<Json> = out.drain(start..).collect();
+                    let map: serde_json::Map<String, Json> = keys.into_iter().zip(values).collect();
+                    out.push(Json::Object(map));
+                }
             }
-            Value::Map(map) => Json::Object(
-                map.iter()
-                    .map(|(k, v)| Ok((k.clone(), v.to_json()?)))
-                    .collect::<Result<_>>()?,
-            ),
-            Value::Function(_) => {
-                return Err(Error::Convert {
-                    message: "a function has no JSON representation".to_string(),
-                });
-            }
+        }
+
+        out.pop().ok_or_else(|| Error::Convert {
+            message: "empty value stack".to_string(),
         })
+    }
+}
+
+/// Formatting a value is depth-bounded: a host can build a deeper value than
+/// the evaluator accepts, and `Display`/`Debug` must not be the stack overflow
+/// it then causes.
+const MAX_FORMAT_DEPTH: usize = 64;
+
+fn fmt_value(value: &Value, f: &mut fmt::Formatter<'_>, depth: usize, debug: bool) -> fmt::Result {
+    match value {
+        Value::Null => f.write_str("null"),
+        Value::Bool(b) => write!(f, "{b}"),
+        Value::Int(i) => write!(f, "{i}"),
+        Value::UInt(u) => write!(f, "{u}"),
+        Value::Float(v) => write!(f, "{v}"),
+        Value::Str(s) if debug => write!(f, "{s:?}"),
+        Value::Str(s) => f.write_str(s),
+        Value::List(items) => {
+            if depth >= MAX_FORMAT_DEPTH {
+                return f.write_str("…");
+            }
+            f.write_str("[")?;
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(", ")?;
+                }
+                fmt_value(item, f, depth + 1, debug)?;
+            }
+            f.write_str("]")
+        }
+        Value::Map(map) => {
+            if depth >= MAX_FORMAT_DEPTH {
+                return f.write_str("…");
+            }
+            f.write_str("{")?;
+            for (index, (key, item)) in map.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(", ")?;
+                }
+                if debug {
+                    write!(f, "{key:?}: ")?;
+                } else {
+                    write!(f, "{key}: ")?;
+                }
+                fmt_value(item, f, depth + 1, debug)?;
+            }
+            f.write_str("}")
+        }
+        Value::Function(_) => f.write_str("<function>"),
     }
 }
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Null => f.write_str("null"),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Int(i) => write!(f, "{i}"),
-            Value::UInt(u) => write!(f, "{u}"),
-            Value::Float(v) => write!(f, "{v}"),
-            Value::Str(s) => write!(f, "{s:?}"),
-            Value::List(items) => f.debug_list().entries(items.iter()).finish(),
-            Value::Map(map) => f.debug_map().entries(map.iter()).finish(),
-            Value::Function(_) => f.write_str("<function>"),
-        }
+        fmt_value(self, f, 0, true)
     }
 }
 
@@ -309,35 +452,7 @@ impl PartialEq for Value {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Null => write!(f, "null"),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Int(i) => write!(f, "{i}"),
-            Value::UInt(u) => write!(f, "{u}"),
-            Value::Float(v) => write!(f, "{v}"),
-            Value::Str(s) => write!(f, "{s}"),
-            Value::List(items) => {
-                write!(f, "[")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{item}")?;
-                }
-                write!(f, "]")
-            }
-            Value::Map(map) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in map.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{k}: {v}")?;
-                }
-                write!(f, "}}")
-            }
-            Value::Function(_) => write!(f, "<function>"),
-        }
+        fmt_value(self, f, 0, false)
     }
 }
 
@@ -435,22 +550,261 @@ impl From<serde_json::Value> for Value {
     fn from(value: serde_json::Value) -> Self {
         use serde_json::Value as Json;
 
-        match value {
-            Json::Null => Value::Null,
-            Json::Bool(b) => Value::Bool(b),
-            // The same ladder `serde_json` reads its own numbers with: an
-            // `i64`, then a `u64`, and a float only past both.
-            Json::Number(n) => match (n.as_i64(), n.as_u64()) {
-                (Some(i), _) => Value::Int(i),
-                (None, Some(u)) => Value::UInt(u),
-                (None, None) => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
-            },
-            Json::String(s) => Value::Str(Arc::from(s)),
-            Json::Array(items) => Value::List(items.into_iter().map(Value::from).collect()),
-            Json::Object(map) => Value::Map(Arc::new(
-                map.into_iter().map(|(k, v)| (k, Value::from(v))).collect(),
-            )),
+        // Post-order with an explicit stack: serde_json can hold a deeply
+        // nested value, and the host stack must not be the depth bound.
+        enum Frame {
+            Value(Json),
+            List(usize),
+            Map(Vec<String>, usize),
         }
+
+        let mut frames = vec![Frame::Value(value)];
+        let mut out: Vec<Value> = Vec::new();
+
+        while let Some(frame) = frames.pop() {
+            match frame {
+                Frame::Value(value) => match value {
+                    Json::Null => out.push(Value::Null),
+                    Json::Bool(b) => out.push(Value::Bool(b)),
+                    // The same ladder `serde_json` reads its own numbers with:
+                    // an `i64`, then a `u64`, and a float only past both.
+                    Json::Number(n) => out.push(match (n.as_i64(), n.as_u64()) {
+                        (Some(i), _) => Value::Int(i),
+                        (None, Some(u)) => Value::UInt(u),
+                        (None, None) => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
+                    }),
+                    Json::String(s) => out.push(Value::Str(Arc::from(s))),
+                    Json::Array(items) => {
+                        frames.push(Frame::List(items.len()));
+                        for item in items.into_iter().rev() {
+                            frames.push(Frame::Value(item));
+                        }
+                    }
+                    Json::Object(map) => {
+                        let mut keys = Vec::with_capacity(map.len());
+                        let mut values = Vec::with_capacity(map.len());
+                        for (key, value) in map {
+                            keys.push(key);
+                            values.push(value);
+                        }
+                        frames.push(Frame::Map(keys, values.len()));
+                        for value in values.into_iter().rev() {
+                            frames.push(Frame::Value(value));
+                        }
+                    }
+                },
+                Frame::List(len) => {
+                    let start = out.len() - len;
+                    let items: Vec<Value> = out.drain(start..).collect();
+                    out.push(Value::List(items.into()));
+                }
+                Frame::Map(keys, len) => {
+                    let start = out.len() - len;
+                    let values: Vec<Value> = out.drain(start..).collect();
+                    let map: Map = keys.into_iter().zip(values).collect();
+                    out.push(Value::Map(Arc::new(map)));
+                }
+            }
+        }
+
+        out.pop().unwrap_or(Value::Null)
+    }
+}
+
+/// Check a JSON tree before converting it, so a deeply nested or oversized
+/// input is refused before the `Value` tree is allocated.
+#[cfg(feature = "json")]
+fn measure_json(value: &serde_json::Value, limits: &ValueLimits) -> Result<()> {
+    use serde_json::Value as Json;
+
+    let mut stack = vec![(value, 1usize)];
+    let mut nodes = 0usize;
+    let mut bytes = 0usize;
+
+    while let Some((value, depth)) = stack.pop() {
+        if depth > limits.depth {
+            return Err(Error::ValueLimit {
+                what: "depth",
+                limit: limits.depth,
+            });
+        }
+        nodes = nodes.saturating_add(1);
+        if nodes > limits.nodes {
+            return Err(Error::ValueLimit {
+                what: "nodes",
+                limit: limits.nodes,
+            });
+        }
+
+        match value {
+            Json::String(text) => {
+                bytes = bytes.saturating_add(text.len());
+                if bytes > limits.total_bytes {
+                    return Err(Error::ValueLimit {
+                        what: "string bytes",
+                        limit: limits.total_bytes,
+                    });
+                }
+            }
+            Json::Array(items) => {
+                if items.len() > limits.list_items {
+                    return Err(Error::ValueLimit {
+                        what: "list items",
+                        limit: limits.list_items,
+                    });
+                }
+                bytes =
+                    bytes.saturating_add(items.len().saturating_mul(std::mem::size_of::<Value>()));
+                for item in items.iter() {
+                    stack.push((item, depth + 1));
+                }
+            }
+            Json::Object(map) => {
+                if map.len() > limits.map_entries {
+                    return Err(Error::ValueLimit {
+                        what: "map entries",
+                        limit: limits.map_entries,
+                    });
+                }
+                bytes =
+                    bytes.saturating_add(map.len().saturating_mul(
+                        std::mem::size_of::<String>() + std::mem::size_of::<Value>(),
+                    ));
+                for (key, value) in map.iter() {
+                    if key.len() > limits.key_bytes {
+                        return Err(Error::ValueLimit {
+                            what: "map key bytes",
+                            limit: limits.key_bytes,
+                        });
+                    }
+                    bytes = bytes.saturating_add(key.len());
+                    stack.push((value, depth + 1));
+                }
+            }
+            _ => {}
+        }
+
+        if bytes > limits.total_bytes {
+            return Err(Error::ValueLimit {
+                what: "total bytes",
+                limit: limits.total_bytes,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// A non-recursive value walker used by evaluation, JSON conversion and
+/// `byte_size`.
+pub(crate) struct ValueMeter<'a> {
+    limits: &'a ValueLimits,
+    nodes: usize,
+    bytes: usize,
+    reject_non_finite: bool,
+}
+
+impl<'a> ValueMeter<'a> {
+    pub(crate) fn rejecting_non_finite(limits: &'a ValueLimits) -> ValueMeter<'a> {
+        ValueMeter {
+            limits,
+            nodes: 0,
+            bytes: 0,
+            reject_non_finite: true,
+        }
+    }
+
+    pub(crate) fn permissive(limits: &'a ValueLimits) -> ValueMeter<'a> {
+        ValueMeter {
+            limits,
+            nodes: 0,
+            bytes: 0,
+            reject_non_finite: false,
+        }
+    }
+
+    pub(crate) fn measure(&mut self, value: &Value) -> Result<()> {
+        let mut stack = vec![(value, 1usize)];
+
+        while let Some((value, depth)) = stack.pop() {
+            if depth > self.limits.depth {
+                return Err(Error::ValueLimit {
+                    what: "depth",
+                    limit: self.limits.depth,
+                });
+            }
+            self.nodes = self.nodes.saturating_add(1);
+            if self.nodes > self.limits.nodes {
+                return Err(Error::ValueLimit {
+                    what: "nodes",
+                    limit: self.limits.nodes,
+                });
+            }
+
+            match value {
+                Value::Str(text) => self.add_bytes(text.len(), "string bytes")?,
+                Value::List(items) => {
+                    if items.len() > self.limits.list_items {
+                        return Err(Error::ValueLimit {
+                            what: "list items",
+                            limit: self.limits.list_items,
+                        });
+                    }
+                    self.add_bytes(
+                        items.len().saturating_mul(std::mem::size_of::<Value>()),
+                        "list bytes",
+                    )?;
+                    for item in items.iter() {
+                        stack.push((item, depth + 1));
+                    }
+                }
+                Value::Map(map) => {
+                    if map.len() > self.limits.map_entries {
+                        return Err(Error::ValueLimit {
+                            what: "map entries",
+                            limit: self.limits.map_entries,
+                        });
+                    }
+                    self.add_bytes(
+                        map.len().saturating_mul(
+                            std::mem::size_of::<String>() + std::mem::size_of::<Value>(),
+                        ),
+                        "map bytes",
+                    )?;
+                    for (key, value) in map.iter() {
+                        if key.len() > self.limits.key_bytes {
+                            return Err(Error::ValueLimit {
+                                what: "map key bytes",
+                                limit: self.limits.key_bytes,
+                            });
+                        }
+                        self.add_bytes(key.len(), "map key bytes")?;
+                        stack.push((value, depth + 1));
+                    }
+                }
+                Value::Float(f) if self.reject_non_finite && !f.is_finite() => {
+                    return Err(Error::NonFinite { operation: "value" });
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn add_bytes(&mut self, bytes: usize, what: &'static str) -> Result<()> {
+        self.bytes = self.bytes.saturating_add(bytes);
+        if self.bytes > self.limits.total_bytes {
+            return Err(Error::ValueLimit {
+                what,
+                limit: self.limits.total_bytes,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -731,5 +1085,219 @@ mod tests {
                 .is_err()
         );
         assert!(Value::map([("f", function)]).to_json().is_err());
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn every_value_limit_has_a_typed_error() {
+        let limits = ValueLimits::default();
+        assert!(Value::Int(1).validate(&limits).is_ok());
+        assert!(Value::from("abc").byte_size() >= 3);
+        assert!(Value::list([1, 2]).byte_size() > 0);
+        assert!(Value::map([("k", 1)]).byte_size() > 0);
+
+        let mut deep = Value::Int(1);
+        for _ in 0..3 {
+            deep = Value::list([deep]);
+        }
+        assert!(matches!(
+            deep.validate(&ValueLimits { depth: 2, ..limits }),
+            Err(Error::ValueLimit { what: "depth", .. })
+        ));
+        assert!(matches!(
+            Value::list([1, 2]).validate(&ValueLimits { nodes: 1, ..limits }),
+            Err(Error::ValueLimit { what: "nodes", .. })
+        ));
+        assert!(matches!(
+            Value::from("ab").validate(&ValueLimits {
+                total_bytes: 1,
+                ..limits
+            }),
+            Err(Error::ValueLimit {
+                what: "string bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::list([1, 2]).validate(&ValueLimits {
+                list_items: 1,
+                ..limits
+            }),
+            Err(Error::ValueLimit {
+                what: "list items",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::list([1, 2]).validate(&ValueLimits {
+                total_bytes: 1,
+                list_items: 10,
+                ..limits
+            }),
+            Err(Error::ValueLimit {
+                what: "list bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::map([("a", 1), ("b", 2)]).validate(&ValueLimits {
+                map_entries: 1,
+                ..limits
+            }),
+            Err(Error::ValueLimit {
+                what: "map entries",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::map([("a", 1)]).validate(&ValueLimits {
+                total_bytes: 1,
+                ..limits
+            }),
+            Err(Error::ValueLimit {
+                what: "map bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::map([("abcd", 1)]).validate(&ValueLimits {
+                key_bytes: 2,
+                ..limits
+            }),
+            Err(Error::ValueLimit {
+                what: "map key bytes",
+                ..
+            })
+        ));
+        assert_eq!(
+            Value::Float(f64::NAN).validate(&limits).unwrap_err(),
+            Error::NonFinite { operation: "value" }
+        );
+    }
+
+    #[test]
+    fn equality_covers_every_pair_and_a_missing_map_key() {
+        let function = Value::function(|_| Ok(Value::Null));
+        assert!(function.equals(&function));
+        assert!(!Value::map([("a", 1), ("b", 2)]).equals(&Value::map([("a", 1), ("c", 2)])));
+        assert!(!Value::Int(1).equals(&Value::UInt(2)));
+        assert!(!Value::Int(1).equals(&Value::Float(2.0)));
+        assert!(!Value::UInt(1).equals(&Value::Float(2.0)));
+        assert!(!Value::Null.equals(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn value_formatting_is_depth_bounded() {
+        let mut deep = Value::Int(1);
+        for _ in 0..80 {
+            deep = Value::list([deep]);
+        }
+        assert!(deep.to_string().contains('…'));
+        assert!(format!("{deep:?}").contains('…'));
+
+        let mut map = Value::from(1);
+        for index in 0..80 {
+            map = Value::map([(format!("k{index}"), map)]);
+        }
+        assert!(map.to_string().contains('…'));
+        assert!(format!("{map:?}").contains('…'));
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_entry_limits_are_checked_before_conversion() {
+        use serde_json::json;
+
+        let limits = ValueLimits::default();
+        assert_eq!(
+            Value::from_json_checked(json!({"k": [1, "x"]}), &limits).unwrap(),
+            Value::map([("k", Value::list([Value::Int(1), Value::from("x")]))])
+        );
+
+        assert!(matches!(
+            Value::from_json_checked(json!([[[1]]]), &ValueLimits { depth: 2, ..limits }),
+            Err(Error::ValueLimit { what: "depth", .. })
+        ));
+        assert!(matches!(
+            Value::from_json_checked(json!([1, 2]), &ValueLimits { nodes: 1, ..limits }),
+            Err(Error::ValueLimit { what: "nodes", .. })
+        ));
+        assert!(matches!(
+            Value::from_json_checked(
+                json!("ab"),
+                &ValueLimits {
+                    total_bytes: 1,
+                    ..limits
+                }
+            ),
+            Err(Error::ValueLimit {
+                what: "string bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::from_json_checked(
+                json!([1, 2]),
+                &ValueLimits {
+                    list_items: 1,
+                    ..limits
+                }
+            ),
+            Err(Error::ValueLimit {
+                what: "list items",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::from_json_checked(
+                json!({"a": 1}),
+                &ValueLimits {
+                    total_bytes: 1,
+                    ..limits
+                }
+            ),
+            Err(Error::ValueLimit {
+                what: "total bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::from_json_checked(
+                json!({"a": 1, "b": 2}),
+                &ValueLimits {
+                    map_entries: 1,
+                    ..limits
+                }
+            ),
+            Err(Error::ValueLimit {
+                what: "map entries",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Value::from_json_checked(
+                json!({"abcd": 1}),
+                &ValueLimits {
+                    key_bytes: 2,
+                    ..limits
+                }
+            ),
+            Err(Error::ValueLimit {
+                what: "map key bytes",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            Value::from("abc").to_json_checked(&ValueLimits {
+                total_bytes: 1,
+                ..limits
+            }),
+            Err(Error::ValueLimit { .. })
+        ));
     }
 }

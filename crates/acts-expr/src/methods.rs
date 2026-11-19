@@ -6,22 +6,54 @@
 //! applies to. A function of the same name injected in the context, or one
 //! carried by the receiver object itself, is found first and wins.
 
+use crate::eval::{EvalBudget, equals_budgeted};
+use crate::regex_pool::RegexPool;
 use crate::value::Value;
 use crate::{Error, Result};
+
+/// The shared state a built-in method may spend: the evaluator's budget and
+/// the expression's bounded regex pool.
+pub(crate) struct CallState<'a> {
+    pub(crate) budget: &'a mut EvalBudget,
+    #[cfg(feature = "regex")]
+    pub(crate) regex: &'a RegexPool,
+}
+
+impl<'a> CallState<'a> {
+    pub(crate) fn new(budget: &'a mut EvalBudget, regex: &'a RegexPool) -> CallState<'a> {
+        #[cfg(feature = "regex")]
+        {
+            CallState { budget, regex }
+        }
+        #[cfg(not(feature = "regex"))]
+        {
+            let _ = regex;
+            CallState { budget }
+        }
+    }
+}
 
 /// Call `receiver.name(args)`.
 ///
 /// `Ok(None)` when `name` is not a built-in method at all, which the evaluator
 /// reports as an unknown method; `Err` when it is one but the receiver or an
 /// argument has the wrong type.
-pub(crate) fn call(name: &str, receiver: &Value, args: &[Value]) -> Result<Option<Value>> {
+pub(crate) fn call(
+    name: &str,
+    receiver: &Value,
+    args: &[Value],
+    state: &mut CallState<'_>,
+) -> Result<Option<Value>> {
     let value = match name {
         // `length()` counts characters for a string (not bytes), items for a
         // list, entries for a map.
         "length" => {
             arity(name, args, 0)?;
             match receiver {
-                Value::Str(text) => Value::from(text.chars().count()),
+                Value::Str(text) => {
+                    charge_text(state, text.len())?;
+                    Value::from(text.chars().count())
+                }
                 Value::List(items) => Value::from(items.len()),
                 Value::Map(map) => Value::from(map.len()),
                 other => return Err(receiver_error(name, other, "a string, list or map")),
@@ -34,11 +66,12 @@ pub(crate) fn call(name: &str, receiver: &Value, args: &[Value]) -> Result<Optio
                 return Err(receiver_error(name, receiver, "a string"));
             };
             let needle = text_arg(name, args, 0)?;
+            charge_text(state, text.len())?;
 
             Value::Bool(if name == "startsWith" {
-                text.starts_with(needle.as_str())
+                text.starts_with(needle)
             } else {
-                text.ends_with(needle.as_str())
+                text.ends_with(needle)
             })
         }
 
@@ -51,9 +84,10 @@ pub(crate) fn call(name: &str, receiver: &Value, args: &[Value]) -> Result<Optio
                 return Err(receiver_error(name, receiver, "a string"));
             };
             let needle = text_arg(name, args, 0)?;
+            charge_text(state, text.len())?;
 
             Value::Int(
-                text.find(needle.as_str())
+                text.find(needle)
                     .map_or(-1, |byte| text[..byte].chars().count() as i64),
             )
         }
@@ -63,8 +97,21 @@ pub(crate) fn call(name: &str, receiver: &Value, args: &[Value]) -> Result<Optio
             arity(name, args, 1)?;
             let needle = &args[0];
             match receiver {
-                Value::Str(text) => Value::Bool(text.contains(text_arg(name, args, 0)?.as_str())),
-                Value::List(items) => Value::Bool(items.iter().any(|item| item.equals(needle))),
+                Value::Str(text) => {
+                    let needle = text_arg(name, args, 0)?;
+                    charge_text(state, text.len().saturating_add(needle.len()))?;
+                    Value::Bool(text.contains(needle))
+                }
+                Value::List(items) => {
+                    let mut found = false;
+                    for item in items.iter() {
+                        if equals_budgeted(item, needle, state.budget)? {
+                            found = true;
+                            break;
+                        }
+                    }
+                    Value::Bool(found)
+                }
                 other => return Err(receiver_error(name, other, "a string or list")),
             }
         }
@@ -76,10 +123,8 @@ pub(crate) fn call(name: &str, receiver: &Value, args: &[Value]) -> Result<Optio
                 return Err(receiver_error(name, receiver, "a string"));
             };
             let pattern = text_arg(name, args, 0)?;
-            let regex = regex::Regex::new(&pattern).map_err(|err| Error::Function {
-                name: name.to_string(),
-                message: format!("'{pattern}' is not a regular expression: {err}"),
-            })?;
+            state.regex.check_input(text, state.budget)?;
+            let regex = state.regex.get(pattern, state.budget)?;
 
             Value::Bool(regex.is_match(text))
         }
@@ -88,6 +133,10 @@ pub(crate) fn call(name: &str, receiver: &Value, args: &[Value]) -> Result<Optio
     };
 
     Ok(Some(value))
+}
+
+fn charge_text(state: &mut CallState<'_>, bytes: usize) -> Result<()> {
+    state.budget.step(1u64.saturating_add((bytes as u64) / 64))
 }
 
 fn arity(name: &str, args: &[Value], expected: usize) -> Result<()> {
@@ -101,9 +150,9 @@ fn arity(name: &str, args: &[Value], expected: usize) -> Result<()> {
     })
 }
 
-fn text_arg(name: &str, args: &[Value], index: usize) -> Result<String> {
+fn text_arg<'a>(name: &str, args: &'a [Value], index: usize) -> Result<&'a str> {
     match args.get(index) {
-        Some(Value::Str(text)) => Ok(text.to_string()),
+        Some(Value::Str(text)) => Ok(text.as_ref()),
         Some(other) => Err(Error::Function {
             name: name.to_string(),
             message: format!(
@@ -135,6 +184,14 @@ mod tests {
             name: name.to_string(),
             message: message.to_string(),
         }
+    }
+
+    fn call(name: &str, receiver: &Value, args: &[Value]) -> Result<Option<Value>> {
+        let mut budget = EvalBudget::for_profile(crate::BudgetProfile::Task);
+        let regex = RegexPool::new();
+        let mut state = CallState::new(&mut budget, &regex);
+
+        super::call(name, receiver, args, &mut state)
     }
 
     fn call_err(name: &str, receiver: &Value, args: &[Value]) -> Error {

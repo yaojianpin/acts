@@ -212,7 +212,10 @@ pub enum CandidateExpr {
 
 ### 4.2 求值语义
 
-本地求值：
+本地求值使用 `acts-expr`；编译上限、运行预算、Value 边界和错误码见
+[`expression.md`](expression.md)。
+
+集合语义：
 
 - 每个原子求值为 `Vec<Participant>`；`Participant` 至少包含 `id`，
   `code`/`name` 缺省时等于 `id`。

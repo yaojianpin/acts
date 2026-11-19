@@ -4,7 +4,7 @@
 //! `$`-prefixed built-ins are ordinary identifiers here and need no rewriting
 //! before compilation.
 
-use crate::{Error, Result};
+use crate::{CompileLimits, Error, Result};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,14 +89,23 @@ pub(crate) struct Lexer<'a> {
     src: &'a str,
     pos: usize,
     token_start: usize,
+    limits: CompileLimits,
+    tokens: usize,
 }
 
 impl<'a> Lexer<'a> {
+    #[cfg(test)]
     pub(crate) fn new(src: &'a str) -> Self {
+        Lexer::with_limits(src, CompileLimits::default())
+    }
+
+    pub(crate) fn with_limits(src: &'a str, limits: CompileLimits) -> Self {
         Lexer {
             src,
             pos: 0,
             token_start: 0,
+            limits,
+            tokens: 0,
         }
     }
 
@@ -130,6 +139,13 @@ impl<'a> Lexer<'a> {
             return Ok(Token::End);
         };
 
+        self.tokens += 1;
+        if self.tokens > self.limits.tokens {
+            return Err(Error::TooManyTokens {
+                limit: self.limits.tokens,
+            });
+        }
+
         match c {
             b'0'..=b'9' => self.number(),
             b'\'' | b'"' => self.string(c),
@@ -137,7 +153,7 @@ impl<'a> Lexer<'a> {
             // (`@answer`, `#candidates`): the engine stores such names
             // verbatim in the scope map, so an expression reads them under
             // the marker it declared.
-            b'@' | b'#' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'$' => Ok(self.ident()),
+            b'@' | b'#' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'$' => self.ident(),
             b'+' => self.punct(Token::Plus),
             b'-' => self.punct(Token::Minus),
             b'*' => self.punct(Token::Star),
@@ -243,10 +259,16 @@ impl<'a> Lexer<'a> {
         let text = &self.src[start..self.pos];
 
         if float {
-            return text
+            let value = text
                 .parse::<f64>()
-                .map(Token::Float)
-                .map_err(|_| Error::parse(format!("'{text}' is not a number"), start));
+                .map_err(|_| Error::parse(format!("'{text}' is not a number"), start))?;
+            if !value.is_finite() {
+                return Err(Error::parse(
+                    format!("the float literal '{text}' is not finite"),
+                    start,
+                ));
+            }
+            return Ok(Token::Float(value));
         }
 
         text.parse::<i64>()
@@ -275,12 +297,12 @@ impl<'a> Lexer<'a> {
                         return Err(Error::parse("unterminated string", start));
                     };
                     match escaped {
-                        b'n' => text.push('\n'),
-                        b'r' => text.push('\r'),
-                        b't' => text.push('\t'),
-                        b'\\' => text.push('\\'),
-                        b'\'' => text.push('\''),
-                        b'"' => text.push('"'),
+                        b'n' => self.push_literal(&mut text, '\n')?,
+                        b'r' => self.push_literal(&mut text, '\r')?,
+                        b't' => self.push_literal(&mut text, '\t')?,
+                        b'\\' => self.push_literal(&mut text, '\\')?,
+                        b'\'' => self.push_literal(&mut text, '\'')?,
+                        b'"' => self.push_literal(&mut text, '"')?,
                         b'u' => {
                             let hex_start = self.pos + 1;
                             let end = hex_start + 4;
@@ -302,7 +324,7 @@ impl<'a> Lexer<'a> {
                                     self.pos - 1,
                                 ));
                             };
-                            text.push(c);
+                            self.push_literal(&mut text, c)?;
                             self.pos += 4;
                         }
                         other => {
@@ -317,14 +339,27 @@ impl<'a> Lexer<'a> {
                 _ => {
                     // Copy the whole UTF-8 character, not the byte.
                     let c = self.src[self.pos..].chars().next().unwrap_or_default();
-                    text.push(c);
+                    self.push_literal(&mut text, c)?;
                     self.pos += c.len_utf8();
                 }
             }
         }
     }
 
-    fn ident(&mut self) -> Token {
+    /// Append one decoded character, checking the literal byte budget before
+    /// the string grows.
+    fn push_literal(&self, text: &mut String, c: char) -> Result<()> {
+        if text.len() + c.len_utf8() > self.limits.literal_bytes {
+            return Err(Error::TooLarge {
+                what: "string literal",
+                limit: self.limits.literal_bytes,
+            });
+        }
+        text.push(c);
+        Ok(())
+    }
+
+    fn ident(&mut self) -> Result<Token> {
         let start = self.pos;
         // A leading `@`/`#` marker is the identifier's first character (the
         // dispatch sent the byte here): consume it, then read the name.
@@ -338,12 +373,20 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
         }
 
-        match &self.src[start..self.pos] {
+        let name = &self.src[start..self.pos];
+        if name.len() > self.limits.identifier_bytes {
+            return Err(Error::TooLarge {
+                what: "identifier",
+                limit: self.limits.identifier_bytes,
+            });
+        }
+
+        Ok(match name {
             "true" => Token::True,
             "false" => Token::False,
             "null" => Token::Null,
             name => Token::Ident(Arc::from(name)),
-        }
+        })
     }
 }
 
@@ -688,5 +731,69 @@ mod tests {
     fn an_empty_source_is_only_the_end_token() {
         assert_eq!(lex("").unwrap(), [Token::End]);
         assert_eq!(lex("   ").unwrap(), [Token::End]);
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    fn lex_with(source: &str, limits: CompileLimits) -> Result<Vec<Token>> {
+        let mut lexer = Lexer::with_limits(source, limits);
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next_token()?;
+            let end = token == Token::End;
+            tokens.push(token);
+            if end {
+                return Ok(tokens);
+            }
+        }
+    }
+
+    #[test]
+    fn token_literal_and_identifier_limits_are_enforced() {
+        let limits = CompileLimits {
+            tokens: 1,
+            ..CompileLimits::default()
+        };
+        assert!(matches!(
+            lex_with("1 + 2", limits),
+            Err(Error::TooManyTokens { limit: 1 })
+        ));
+
+        let limits = CompileLimits {
+            literal_bytes: 2,
+            ..CompileLimits::default()
+        };
+        assert!(matches!(
+            lex_with("'abc'", limits),
+            Err(Error::TooLarge {
+                what: "string literal",
+                limit: 2
+            })
+        ));
+
+        let limits = CompileLimits {
+            identifier_bytes: 2,
+            ..CompileLimits::default()
+        };
+        assert!(matches!(
+            lex_with("abcd", limits),
+            Err(Error::TooLarge {
+                what: "identifier",
+                limit: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn a_non_finite_float_literal_is_a_parse_error() {
+        for source in ["1e999", "1e309"] {
+            assert!(matches!(
+                lex_with(source, CompileLimits::default()),
+                Err(Error::Parse { .. })
+            ));
+        }
     }
 }

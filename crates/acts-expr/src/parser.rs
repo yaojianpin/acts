@@ -6,13 +6,15 @@
 //! can be shared and evaluated from any number of threads.
 
 use crate::lexer::{Lexer, Token};
-use crate::{Error, Result};
+use crate::{CompileLimits, Error, Result};
 use std::sync::Arc;
 
-/// How deep operands may nest (`((((...))))`, `!!!!x`, `f(f(f(...)))`). A
-/// source is data from a workflow author, not trusted code, and the evaluator
-/// walks the tree recursively.
-const MAX_DEPTH: usize = 64;
+/// What a parse produced: the arena, its root and the logical height.
+pub(crate) struct Parsed {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) root: u32,
+    pub(crate) depth: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BinOp {
@@ -80,12 +82,22 @@ pub(crate) struct Parser<'a> {
     current: Token,
     current_pos: usize,
     nodes: Vec<Node>,
+    heights: Vec<u32>,
     depth: usize,
+    folded_bytes: usize,
+    limits: CompileLimits,
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn new(source: &'a str) -> Result<Self> {
-        let mut lexer = Lexer::new(source);
+    pub(crate) fn new(source: &'a str, limits: CompileLimits) -> Result<Self> {
+        if source.len() > limits.source_bytes {
+            return Err(Error::TooLarge {
+                what: "source",
+                limit: limits.source_bytes,
+            });
+        }
+
+        let mut lexer = Lexer::with_limits(source, limits);
         let current = lexer.next_token()?;
         let current_pos = lexer.token_start();
 
@@ -94,24 +106,114 @@ impl<'a> Parser<'a> {
             current,
             current_pos,
             nodes: Vec::new(),
+            heights: Vec::new(),
             depth: 0,
+            folded_bytes: 0,
+            limits,
         })
     }
 
-    /// Parse the whole source into `(nodes, root)`.
-    pub(crate) fn parse(mut self) -> Result<(Vec<Node>, u32)> {
+    /// Parse the whole source.
+    pub(crate) fn parse(mut self) -> Result<Parsed> {
         let root = self.expression()?;
 
         if self.current != Token::End {
             return Err(self.unexpected("after the expression"));
         }
 
-        Ok((self.nodes, root))
+        let depth = self.heights[root as usize];
+
+        Ok(Parsed {
+            nodes: self.nodes,
+            root,
+            depth,
+        })
     }
 
-    fn push(&mut self, node: Node) -> u32 {
+    fn push(&mut self, node: Node) -> Result<u32> {
+        let node = self.fold(node)?;
+        if self.nodes.len() >= self.limits.nodes {
+            return Err(Error::TooManyNodes {
+                limit: self.limits.nodes,
+            });
+        }
+
+        let height = self.height(&node);
+        if height as usize > self.limits.depth {
+            return Err(Error::TooDeep {
+                limit: self.limits.depth,
+            });
+        }
+
         self.nodes.push(node);
-        (self.nodes.len() - 1) as u32
+        self.heights.push(height);
+
+        Ok((self.nodes.len() - 1) as u32)
+    }
+
+    /// Fold a literal `'a' + 'b'` while it stays inside the literal budget.
+    /// This keeps a long constant string chain from re-copying its prefix at
+    /// evaluation time; a dynamic chain is still bounded by the evaluator's
+    /// allocation budget.
+    fn fold(&mut self, node: Node) -> Result<Node> {
+        let Node::Binary(BinOp::Add, left, right) = node else {
+            return Ok(node);
+        };
+        let (Node::Str(a), Node::Str(b)) =
+            (&self.nodes[left as usize], &self.nodes[right as usize])
+        else {
+            return Ok(Node::Binary(BinOp::Add, left, right));
+        };
+
+        let Some(len) = a.len().checked_add(b.len()) else {
+            return Ok(Node::Binary(BinOp::Add, left, right));
+        };
+        if len > self.limits.literal_bytes
+            || self.folded_bytes.saturating_add(len) > self.limits.source_bytes
+        {
+            return Ok(Node::Binary(BinOp::Add, left, right));
+        }
+
+        let mut text = String::with_capacity(len);
+        text.push_str(a);
+        text.push_str(b);
+        self.folded_bytes = self.folded_bytes.saturating_add(len);
+
+        Ok(Node::Str(Arc::from(text)))
+    }
+
+    /// The logical height of a node: its deepest child plus itself. The
+    /// parser depth bound covers grouped operands, but a left-deep binary
+    /// chain grows here and is what the evaluator's old recursion followed.
+    fn height(&self, node: &Node) -> u32 {
+        let child = |height: u32| height.saturating_add(1);
+        match node {
+            Node::Null
+            | Node::Bool(_)
+            | Node::Int(_)
+            | Node::Float(_)
+            | Node::Str(_)
+            | Node::Ident(_) => 1,
+            Node::Member(target, _) => child(self.heights[*target as usize]),
+            Node::Index(target, key) => {
+                child(self.heights[*target as usize].max(self.heights[*key as usize]))
+            }
+            Node::Call(_, args) => child(self.args_height(args)),
+            Node::Method(receiver, _, args) => {
+                child(self.heights[*receiver as usize].max(self.args_height(args)))
+            }
+            Node::Not(operand) | Node::Neg(operand) => child(self.heights[*operand as usize]),
+            Node::Binary(_, left, right) => {
+                child(self.heights[*left as usize].max(self.heights[*right as usize]))
+            }
+        }
+    }
+
+    fn args_height(&self, args: &[u32]) -> u32 {
+        args.iter()
+            .map(|arg| self.heights[*arg as usize])
+            .max()
+            .unwrap_or(0)
     }
 
     /// Consume the current token and return it.
@@ -143,7 +245,7 @@ impl<'a> Parser<'a> {
         while self.current == Token::OrOr {
             self.advance()?;
             let right = self.and()?;
-            left = self.push(Node::Binary(BinOp::Or, left, right));
+            left = self.push(Node::Binary(BinOp::Or, left, right))?;
         }
 
         Ok(left)
@@ -155,7 +257,7 @@ impl<'a> Parser<'a> {
         while self.current == Token::AndAnd {
             self.advance()?;
             let right = self.equality()?;
-            left = self.push(Node::Binary(BinOp::And, left, right));
+            left = self.push(Node::Binary(BinOp::And, left, right))?;
         }
 
         Ok(left)
@@ -172,7 +274,7 @@ impl<'a> Parser<'a> {
             };
             self.advance()?;
             let right = self.comparison()?;
-            left = self.push(Node::Binary(op, left, right));
+            left = self.push(Node::Binary(op, left, right))?;
         }
 
         Ok(left)
@@ -193,7 +295,7 @@ impl<'a> Parser<'a> {
         };
         self.advance()?;
         let right = self.additive()?;
-        let tree = self.push(Node::Binary(op, left, right));
+        let tree = self.push(Node::Binary(op, left, right))?;
 
         if matches!(self.current, Token::Lt | Token::Le | Token::Gt | Token::Ge) {
             return Err(Error::parse(
@@ -219,7 +321,7 @@ impl<'a> Parser<'a> {
             };
             self.advance()?;
             let right = self.multiplicative()?;
-            left = self.push(Node::Binary(op, left, right));
+            left = self.push(Node::Binary(op, left, right))?;
         }
 
         Ok(left)
@@ -237,7 +339,7 @@ impl<'a> Parser<'a> {
             };
             self.advance()?;
             let right = self.unary()?;
-            left = self.push(Node::Binary(op, left, right));
+            left = self.push(Node::Binary(op, left, right))?;
         }
 
         Ok(left)
@@ -259,11 +361,11 @@ impl<'a> Parser<'a> {
         let operand = self.unary()?;
         self.leave();
 
-        Ok(self.push(if negate {
+        self.push(if negate {
             Node::Neg(operand)
         } else {
             Node::Not(operand)
-        }))
+        })
     }
 
     /// `target.name`, `target[index]` and `name(args)` / `target.name(args)`,
@@ -276,14 +378,14 @@ impl<'a> Parser<'a> {
                 Token::Dot => {
                     self.advance()?;
                     let name = self.member_name()?;
-                    target = self.push(Node::Member(target, name));
+                    target = self.push(Node::Member(target, name))?;
                 }
                 Token::LBracket => {
                     let pos = self.current_pos;
                     self.advance()?;
                     let index = self.nested(pos)?;
                     self.expect(Token::RBracket, "']' to close the index")?;
-                    target = self.push(Node::Index(target, index));
+                    target = self.push(Node::Index(target, index))?;
                 }
                 Token::LParen => {
                     let pos = self.current_pos;
@@ -298,9 +400,9 @@ impl<'a> Parser<'a> {
                     };
                     target = match called {
                         Some((name, Some(receiver))) => {
-                            self.push(Node::Method(receiver, name, args))
+                            self.push(Node::Method(receiver, name, args))?
                         }
-                        Some((name, None)) => self.push(Node::Call(name, args)),
+                        Some((name, None)) => self.push(Node::Call(name, args))?,
                         None => {
                             return Err(Error::parse(
                                 "only a function or a method can be called",
@@ -328,7 +430,7 @@ impl<'a> Parser<'a> {
 
     fn enter(&mut self, pos: usize) -> Result<()> {
         self.depth += 1;
-        if self.depth > MAX_DEPTH {
+        if self.depth > self.limits.depth {
             self.depth -= 1;
             return Err(Error::parse("the expression nests too deeply", pos));
         }
@@ -350,6 +452,11 @@ impl<'a> Parser<'a> {
 
         let mut args = Vec::new();
         loop {
+            if args.len() >= self.limits.call_args {
+                return Err(Error::TooManyArguments {
+                    limit: self.limits.call_args,
+                });
+            }
             let pos = self.current_pos;
             args.push(self.nested(pos)?);
             if self.current != Token::Comma {
@@ -382,13 +489,13 @@ impl<'a> Parser<'a> {
         let pos = self.current_pos;
 
         match self.advance()? {
-            Token::Int(i) => Ok(self.push(Node::Int(i))),
-            Token::Float(f) => Ok(self.push(Node::Float(f))),
-            Token::Str(s) => Ok(self.push(Node::Str(s))),
-            Token::True => Ok(self.push(Node::Bool(true))),
-            Token::False => Ok(self.push(Node::Bool(false))),
-            Token::Null => Ok(self.push(Node::Null)),
-            Token::Ident(name) => Ok(self.push(Node::Ident(name))),
+            Token::Int(i) => Ok(self.push(Node::Int(i))?),
+            Token::Float(f) => Ok(self.push(Node::Float(f))?),
+            Token::Str(s) => Ok(self.push(Node::Str(s))?),
+            Token::True => Ok(self.push(Node::Bool(true))?),
+            Token::False => Ok(self.push(Node::Bool(false))?),
+            Token::Null => Ok(self.push(Node::Null)?),
+            Token::Ident(name) => Ok(self.push(Node::Ident(name))?),
             Token::LParen => {
                 let inner = self.nested(pos)?;
                 self.expect(Token::RParen, "')' to close the group")?;
@@ -576,8 +683,8 @@ mod tests {
     fn nesting_is_bounded_in_groups_unaries_and_arguments() {
         let grouped = format!(
             "{}1{}",
-            "(".repeat(MAX_DEPTH + 1),
-            ")".repeat(MAX_DEPTH + 1)
+            "(".repeat(CompileLimits::default().depth + 1),
+            ")".repeat(CompileLimits::default().depth + 1)
         );
         assert!(
             parse_error(&grouped)
@@ -585,13 +692,14 @@ mod tests {
                 .contains("nests too deeply")
         );
 
-        let unary = format!("{}true", "!".repeat(MAX_DEPTH + 1));
+        let unary = format!("{}true", "!".repeat(CompileLimits::default().depth + 1));
         assert!(parse_error(&unary).to_string().contains("nests too deeply"));
 
-        let call = format!("f({})", "(".repeat(MAX_DEPTH + 1));
+        let call = format!("f({})", "(".repeat(CompileLimits::default().depth + 1));
         assert!(parse_error(&call).to_string().contains("nests too deeply"));
 
-        let allowed = format!("{}1{}", "(".repeat(MAX_DEPTH), ")".repeat(MAX_DEPTH));
+        let depth = CompileLimits::default().depth;
+        let allowed = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
         assert_eq!(Expr::compile(&allowed).unwrap().len(), 1);
     }
 
@@ -631,5 +739,104 @@ mod tests {
         assert!(!Expr::compile("1").unwrap().is_empty());
         assert_eq!(BinOp::Add.symbol(), "+");
         assert_eq!(BinOp::Rem.symbol(), "%");
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::{Context, Expr, Value};
+
+    #[test]
+    fn every_binary_symbol_and_parser_source_limit() {
+        for (op, symbol) in [
+            (BinOp::Add, "+"),
+            (BinOp::Sub, "-"),
+            (BinOp::Mul, "*"),
+            (BinOp::Div, "/"),
+            (BinOp::Rem, "%"),
+            (BinOp::Eq, "=="),
+            (BinOp::Ne, "!="),
+            (BinOp::Lt, "<"),
+            (BinOp::Le, "<="),
+            (BinOp::Gt, ">"),
+            (BinOp::Ge, ">="),
+            (BinOp::And, "&&"),
+            (BinOp::Or, "||"),
+        ] {
+            assert_eq!(op.symbol(), symbol);
+        }
+
+        let limits = CompileLimits {
+            source_bytes: 2,
+            ..CompileLimits::default()
+        };
+        assert!(matches!(
+            Parser::new("abc", limits),
+            Err(Error::TooLarge {
+                what: "source",
+                limit: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn literal_folding_succeeds_and_stops_at_its_budget() {
+        let expr = Expr::compile("'a' + 'b' + 'c'").unwrap();
+        assert_eq!(expr.eval(&Context::new()).unwrap(), Value::from("abc"));
+
+        let limits = CompileLimits {
+            literal_bytes: 1,
+            ..CompileLimits::default()
+        };
+        let expr = Expr::compile_with("'a' + 'b'", &limits).unwrap();
+        assert_eq!(expr.eval(&Context::new()).unwrap(), Value::from("ab"));
+
+        let source = ["'a'"; 10].join("+");
+        let limits = CompileLimits {
+            source_bytes: source.len(),
+            literal_bytes: 1024,
+            ..CompileLimits::default()
+        };
+        let expr = Expr::compile_with(&source, &limits).unwrap();
+        assert_eq!(
+            expr.eval(&Context::new()).unwrap(),
+            Value::from("a".repeat(10))
+        );
+    }
+
+    #[test]
+    fn argument_limit_and_every_height_shape() {
+        let limits = CompileLimits {
+            call_args: 1,
+            ..CompileLimits::default()
+        };
+        assert!(matches!(
+            Expr::compile_with("f(1, 2)", &limits),
+            Err(Error::TooManyArguments { limit: 1 })
+        ));
+
+        let mut context = Context::new();
+        context
+            .set("x", Value::list([1, 2]))
+            .set("o", Value::map([("v", 1)]))
+            .set("f", Value::function(|_| Ok(Value::Int(1))));
+        for source in [
+            "!true",
+            "-1",
+            "x[0]",
+            "o.v",
+            "f()",
+            "o.f()",
+            "1 + 1",
+            "1 < 2",
+            "true && false",
+            "true || false",
+        ] {
+            let _ = Expr::compile(source)
+                .unwrap()
+                .eval(&context)
+                .unwrap_or(Value::Null);
+        }
     }
 }
