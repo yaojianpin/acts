@@ -131,7 +131,7 @@ rocksdb = { version = "0.25", default-features = false, features = [
     "bindgen-runtime",
     "snappy",
 ] }
-async-nats = "0.50"
+async-nats = "0.52"
 redis = { version = "1.7", default-features = false, features = [
     "aio",
     "tokio-comp",
