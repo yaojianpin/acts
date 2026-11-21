@@ -695,11 +695,12 @@ async fn channel_subject_and_id_defaults() {
     std::fs::remove_file(&path).ok();
 }
 
-/// A broker that cannot be reached disables the plugin instead of failing the
-/// engine: the transport is optional, and its connect errors are logged. Both
-/// credential shapes (token, user/password) take the same path.
+/// A broker that cannot be reached fails the engine start with the reason:
+/// the plugin connects in `prepare`, so a refused connection is a start
+/// failure that names the broker. Both credential shapes (token,
+/// user/password) take the same path.
 #[tokio::test(flavor = "multi_thread")]
-async fn unreachable_broker_leaves_the_engine_running() {
+async fn unreachable_broker_fails_the_start() {
     for credentials in [
         "token = \"secret\"\n",
         "username = \"u\"\npassword = \"p\"\n",
@@ -707,17 +708,20 @@ async fn unreachable_broker_leaves_the_engine_running() {
         let (path, config) = temp_config(&format!(
             "[nats]\nurl = \"nats://127.0.0.1:1\"\n{credentials}"
         ));
-        let engine = engine_with_nats_unrestricted(&config).await;
-        // the connect attempt fails in the plugin's background task
-        tokio::time::sleep(Duration::from_millis(1_000)).await;
-        let models = engine
-            .executor(&acts::Principal::unrestricted())
-            .model()
-            .list(&acts::query::Query::new().limit(1))
+        let err = match Engine::builder()
+            .set_config(&config)
+            .disable_acl()
+            .add_plugin(&NatsPlugin::new())
+            .start()
             .await
-            .expect("the engine serves local calls while NATS is unreachable");
-        assert_eq!(models.count, 0);
-        engine.close().await;
+        {
+            Ok(_) => panic!("an unreachable broker must fail the start"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("nats://127.0.0.1:1"),
+            "the failure must name the broker: {err}"
+        );
         std::fs::remove_file(&path).ok();
     }
 }
