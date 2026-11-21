@@ -62,13 +62,12 @@ multiple-versions = "deny"
 wildcards = "deny"
 
 skip = [
-    { crate = "base64@0.22.1", reason = "async-nats 0.50, tonic 0.14 and sqlx-postgres 0.8 are on base64 0.22; acts-package-http 0.23 and bashkit's archive/byte builtins use 0.23" },
+    { crate = "base64@0.22.1", reason = "async-nats 0.52, tonic 0.14 and sqlx-postgres 0.8 are on base64 0.22; acts-package-http 0.23 and bashkit's archive/byte builtins use 0.23" },
     { crate = "blake2@0.10.6", reason = "argon2 0.5.3 — the ACL's password KDF — is on the RustCrypto 0.10 line; bashkit 0.20's checksum builtins use blake2 0.11" },
     { crate = "block-buffer@0.10.4", reason = "digest 0.10.7, which sha2 0.10.9 (acts' token hashing), hmac 0.12.1 (sqlx-postgres) and curve25519-dalek 4 remain on" },
     { crate = "const-oid@0.9.6", reason = "der 0.7 through signatory 0.27 (async-nats nkeys) has not moved past const-oid 0.9" },
     { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7 (hyper-util) is still on 0.9 while security-framework 3 uses 0.10; macOS-only" },
     { crate = "cpufeatures@0.2.17", reason = "sha2 0.10, blake2 0.10.6 (argon2) and curve25519-dalek 4 (nkeys) pin cpufeatures 0.2, chacha20 0.10 needs 0.3" },
-    { crate = "fancy-regex@0.20.2", reason = "bashkit 0.20.3's regex builtins are on fancy-regex 0.20; jsonschema 0.60.2, which validates the packages' schemas, pins ^0.19" },
     { crate = "crypto-common@0.1.7", reason = "digest 0.10.7 (sha2 0.10.9, hmac 0.12.1, md-5 0.10.6) has not moved past crypto-common 0.1" },
     { crate = "digest@0.10.7", reason = "sha2 0.10.9 (acts' token hashing), hmac 0.12.1 and md-5 0.10.6 (sqlx-postgres), curve25519-dalek 4 and blake2 0.10.6 (argon2, the ACL's KDF) are on digest 0.10; bashkit's checksum builtins are on 0.11" },
     { crate = "foldhash@0.1.5", reason = "hashbrown 0.15.5 (hashlink/sqlx-core, and petgraph 0.8 behind prost-build 0.14) is still on foldhash 0.1 while hashbrown 0.17 (indexmap 2, rquickjs-core) uses 0.2" },
@@ -84,7 +83,7 @@ skip = [
     { crate = "rand@0.9.5", reason = "mockito 1.7, used only by examples/packages/http" },
     { crate = "rand_chacha@0.3.1", reason = "rand 0.8.8" },
     { crate = "rand_core@0.6.4", reason = "rand 0.8.8 and signatory 0.27 (async-nats nkeys)" },
-    { crate = "rand_core@0.9.5", reason = "rand 0.9.5 via mockito 1.7 (examples/packages/http); async-nats 0.50 already uses rand 0.10" },
+    { crate = "rand_core@0.9.5", reason = "rand 0.9.5 via mockito 1.7 (examples/packages/http); async-nats 0.52 already uses rand 0.10" },
     { crate = "shlex@1.3.0", reason = "bindgen 0.72 (the librocksdb-sys build dependency) is still on shlex 1.3; cc 1.4 and acts-cli use 2.0" },
     { crate = "sha2@0.10.9", reason = "acts' token hashing, sqlx 0.8 and ed25519-dalek 2 are on sha2 0.10; bashkit's checksum builtins use 0.11" },
     { crate = "syn@2.0.119", reason = "derive crates (prost-derive, tracing-attributes, rquickjs-macro, sqlx-macros, validator_derive, ...) are still on syn 2" },
@@ -124,6 +123,7 @@ private = { ignore = true }
 # fails the check instead of sliding in.
 allow = [
     "Apache-2.0",          # ours, and most of the tree
+    "Apache-2.0 WITH LLVM-exception", # ar_archive_writer 0.5.5 — psm 0.1.32's build dependency (stacker 0.1.25 ← bashkit 0.21), permissive
     "MIT",                 # most of the tree
     "BSD-2-Clause",        # zerocopy, zerocopy-derive
     "BSD-3-Clause",        # redis 0.31, curve25519-dalek, encoding_rs
