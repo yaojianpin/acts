@@ -4,10 +4,7 @@ use crate::{
     utils::{LaneRouter, shared},
 };
 use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::{
     Mutex,
     mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
@@ -29,6 +26,13 @@ enum KeyEvent {
     Complete(Message),
     Message(Message),
     Error(Message),
+    /// A synthetic server→client request (the snapshot variable's
+    /// fetch-on-miss `req`). It rides the same ordered per-process queue and
+    /// the channel filters as a `Message`, but nothing else: no
+    /// starts/completes bookkeeping, no delivery row, no store write — and
+    /// never the act semantics (`Message::is_act`), so a consumer cannot
+    /// mistake it for an act to complete.
+    Req(Message),
     /// a stored delivery row is re-sent to the single channel it belongs to
     Delivery {
         chan_id: String,
@@ -113,6 +117,7 @@ fn spawn_pid_worker(
     completes: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     messages: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     errors: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    req_gate: ShareLock<Option<ReqGate>>,
     gate: ProcessGate,
     pid: String,
 ) -> PidWorker {
@@ -124,6 +129,7 @@ fn spawn_pid_worker(
         completes,
         messages,
         errors,
+        req_gate,
         gate,
         pid,
         rx,
@@ -146,6 +152,7 @@ async fn consume_pid_events(
     completes: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     messages: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     errors: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    req_gate: ShareLock<Option<ReqGate>>,
     gate: ProcessGate,
     pid: String,
     mut rx: UnboundedReceiver<KeyEvent>,
@@ -177,6 +184,11 @@ async fn consume_pid_events(
             KeyEvent::Error(item) => {
                 let gate = gate.lock(&item.pid).await;
                 dispatch_key_event(&errors, item).await;
+                drop(gate);
+            }
+            KeyEvent::Req(item) => {
+                let gate = gate.lock(&item.pid).await;
+                dispatch_req_event(&messages, &req_gate, item).await;
                 drop(gate);
             }
             KeyEvent::Delivery { chan_id, msg } => {
@@ -213,6 +225,7 @@ async fn consume_pid_events(
                 completes.clone(),
                 messages.clone(),
                 errors.clone(),
+                req_gate.clone(),
                 gate.clone(),
                 pid.clone(),
             );
@@ -270,6 +283,45 @@ async fn dispatch_key_event(
     }
 }
 
+/// Deliver a `req` to the channels the req gate admits — the gate answers
+/// "may the subject of this channel read the scope this request names?" (see
+/// [`ReqGate`]). Without a gate — an engine without a user registry — every
+/// matching channel sees the request. A withheld request does not reach the
+/// channel handler at all: the provider never learns of a scope it may not
+/// read.
+async fn dispatch_req_event(
+    handlers: &ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    req_gate: &ShareLock<Option<ReqGate>>,
+    item: Message,
+) {
+    let gate = req_gate.read().clone();
+    // the map guard must not span the awaits below (a raw lock is not Send)
+    let entries: Vec<(String, ActWorkflowMessageHandle)> = handlers
+        .read()
+        .iter()
+        .map(|(chan_id, handle)| (chan_id.clone(), handle.clone()))
+        .collect();
+    for (chan_id, handle) in entries {
+        if let Some(gate) = &gate {
+            let admitted = gate(chan_id.clone(), item.clone()).await;
+            if !admitted {
+                debug!(chan = %chan_id, "req withheld by the gate");
+                continue;
+            }
+        }
+        let event = Event::from_inner(item.clone());
+        run_handle(handle, event).await;
+    }
+}
+
+/// The fetch-request admission gate: may the channel of this subject see
+/// this request? Wired by the engine when its ACL manages users — the gate
+/// answers the subject's snapshot scopes against the request's
+/// `(target, scope)`, so a request never reaches a provider that may not
+/// read the scope it names. See [`crate::acl::AccessControl::principal_of`].
+pub(crate) type ReqGate =
+    Arc<dyn Fn(String, Message) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+
 pub struct Emitter {
     starts: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     completes: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
@@ -279,6 +331,9 @@ pub struct Emitter {
 
     workers: Workers,
     process_gate: ProcessGate,
+    /// The `req` admission gate (see [`ReqGate`]); `None` — no user registry
+    /// — delivers to every channel whose filters match.
+    req_gate: ShareLock<Option<ReqGate>>,
 }
 
 impl std::fmt::Debug for Emitter {
@@ -306,7 +361,14 @@ impl Emitter {
             errors: Arc::new(RwLock::new(HashMap::new())),
             process_gate,
             workers: Arc::new(RwLock::new(HashMap::new())),
+            req_gate: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Wire (or unwire) the fetch-request admission gate; the engine sets it
+    /// once at start when its ACL manages users (see [`ReqGate`]).
+    pub(crate) fn set_req_gate(&self, gate: Option<ReqGate>) {
+        *self.req_gate.write() = gate;
     }
 
     #[cfg(test)]
@@ -383,7 +445,8 @@ impl Emitter {
             KeyEvent::Start(m)
             | KeyEvent::Complete(m)
             | KeyEvent::Message(m)
-            | KeyEvent::Error(m) => m.pid.clone(),
+            | KeyEvent::Error(m)
+            | KeyEvent::Req(m) => m.pid.clone(),
             KeyEvent::Delivery { msg, .. } => msg.pid.clone(),
         };
         {
@@ -419,6 +482,7 @@ impl Emitter {
             self.completes.clone(),
             self.messages.clone(),
             self.errors.clone(),
+            self.req_gate.clone(),
             self.process_gate(),
             pid.clone(),
         );
@@ -486,6 +550,17 @@ impl Emitter {
     pub fn emit_message(&self, msg: &Message) {
         debug!("message emitted");
         self.route(KeyEvent::Message(msg.clone()));
+    }
+
+    /// Emit a synthetic server→client request (the snapshot variable's
+    /// fetch-on-miss `req`). Unlike [`Self::emit_message`] it carries no
+    /// workflow semantics: no starts/completes bookkeeping, no delivery row,
+    /// no store write — only the channels whose filters match see it, so a
+    /// consumer cannot mistake it for an act to complete.
+    #[instrument(skip(self, msg), fields(pid = %msg.pid, tid = %msg.tid, mid = %msg.mid))]
+    pub fn emit_req(&self, msg: &Message) {
+        debug!("req emitted");
+        self.route(KeyEvent::Req(msg.clone()));
     }
 
     /// Re-send a stored delivery row only to the channel it belongs to
@@ -646,6 +721,83 @@ mod tests {
         drop(read);
         for thread in threads {
             thread.join().unwrap();
+        }
+    }
+
+    /// The fetch-request gate: a `req` reaches only the channels its gate
+    /// admits (the subject may read the scope the request names); without a
+    /// gate every matching channel sees it.
+    #[tokio::test]
+    async fn a_req_reaches_only_the_channels_the_gate_admits() {
+        let emitter = Emitter::new();
+
+        // a synthetic registry: "alice" reads t1 only, "bob" nothing
+        emitter.set_req_gate(Some(Arc::new(|chan_id: String, msg: Message| {
+            Box::pin(async move {
+                let subject = chan_id.split('/').next().unwrap_or("");
+                let scope = msg.inputs.get::<String>("scope").unwrap_or_default();
+                subject == "alice" && scope == "t1"
+            }) as Pin<Box<dyn Future<Output = bool> + Send>>
+        })));
+
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let alice_seen = seen.clone();
+        emitter.on_message("alice/c1", move |_e| {
+            let seen = alice_seen.clone();
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let bob_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bob_in_channel = bob_seen.clone();
+        emitter.on_message("bob/c1", move |_e| {
+            let seen = bob_in_channel.clone();
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let mut req = message("p1");
+        req.r#type = "req".into();
+        req.uses = Some("profile".into());
+        req.inputs.set("scope", "t1");
+        emitter.emit_req(&req);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while seen.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "alice's channel must receive the admitted request"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            bob_seen.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "bob's channel must never see a scope it cannot read"
+        );
+
+        // a scope alice does not read reaches nobody
+        req.inputs.set("scope", "t2");
+        emitter.emit_req(&req);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "alice sees only t1"
+        );
+        assert_eq!(bob_seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // removing the gate reopens the channel face
+        emitter.set_req_gate(None);
+        emitter.emit_req(&req);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while bob_seen.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "without a gate every channel sees the request"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 }

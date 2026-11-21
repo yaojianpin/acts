@@ -38,7 +38,7 @@ use crate::{ActError, Result};
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -159,6 +159,49 @@ pub struct UserPolicy {
     /// per snapshot target, the scope patterns the user owns
     /// (`$subject` is replaced by the user name)
     pub snapshot: HashMap<String, Vec<String>>,
+    /// Organization-dimension vocabulary (`tenant`, `unit`, `department`, …)
+    /// the user's patterns may substitute as `$ctx.<key>`. Keys are
+    /// `[a-z][a-z0-9_]{0,31}`, values non-empty and at most 128 bytes, at
+    /// most 16 entries (see [`validate_context`]).
+    #[serde(default)]
+    pub context: BTreeMap<String, String>,
+}
+
+/// Validate one user's context vocabulary. A bad entry is a config error:
+/// a pattern that substitutes a value the policy does not carry must be
+/// refused when the user is written, not silently fail closed at seal time.
+pub fn validate_context(context: &BTreeMap<String, String>) -> Result<()> {
+    const MAX_ENTRIES: usize = 16;
+    const MAX_VALUE_BYTES: usize = 128;
+    if context.len() > MAX_ENTRIES {
+        return Err(ActError::Config(format!(
+            "acl user context carries {} entries; at most {MAX_ENTRIES} are allowed",
+            context.len()
+        )));
+    }
+    for (key, value) in context {
+        let valid_key = {
+            let mut chars = key.chars();
+            match chars.next() {
+                Some(first) if first.is_ascii_lowercase() => {
+                    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                        && key.len() <= 32
+                }
+                _ => false,
+            }
+        };
+        if !valid_key {
+            return Err(ActError::Config(format!(
+                "acl user context key '{key}' is invalid: it must match [a-z][a-z0-9_]{{0,31}}"
+            )));
+        }
+        if value.is_empty() || value.len() > MAX_VALUE_BYTES {
+            return Err(ActError::Config(format!(
+                "acl user context key '{key}' has an invalid value: it must be 1..={MAX_VALUE_BYTES} bytes"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// One `acl:setuser` request. `None` fields leave the user's setting
@@ -192,6 +235,10 @@ pub struct UserSpec {
     /// Per snapshot target, the scope patterns the user owns; replaces the
     /// current map. `$subject` is allowed.
     pub snapshot: Option<HashMap<String, Vec<String>>>,
+    /// Organization-dimension vocabulary (`$ctx.<key>` substitution source);
+    /// replaces the current map. `None` leaves it unchanged.
+    #[serde(default)]
+    pub context: Option<BTreeMap<String, String>>,
 }
 
 /// What `acl:login` and `acl:refresh` answer.
@@ -273,6 +320,12 @@ pub struct ScopePolicy {
     /// [`crate::Config::workdir`]); `None` means no directory control.
     #[serde(default)]
     pub workdir_root: Option<std::path::PathBuf>,
+    /// The organization vocabulary sealed with the run: the substitution
+    /// source for `$ctx.<key>` in the scope patterns below. It travels with
+    /// the authority (`#owner`), so a run reads patterns against the context
+    /// its starter carried — later policy edits never widen a live run.
+    #[serde(default)]
+    pub context: BTreeMap<String, String>,
 }
 
 impl Default for ScopePolicy {
@@ -309,6 +362,7 @@ impl ScopePolicy {
             rn: Vec::new(),
             enforce_rn: true,
             workdir_root: None,
+            context: BTreeMap::new(),
         }
     }
 
@@ -322,6 +376,7 @@ impl ScopePolicy {
             rn: Vec::new(),
             enforce_rn: false,
             workdir_root: None,
+            context: BTreeMap::new(),
         }
     }
 
@@ -331,9 +386,10 @@ impl ScopePolicy {
             return true;
         }
         match self.scopes.get(target) {
-            Some(patterns) => patterns
-                .iter()
-                .any(|pattern| scope_matches(&substitute(pattern, &self.subject), scope)),
+            Some(patterns) => patterns.iter().any(|pattern| {
+                substitute(pattern, &self.subject, &self.context)
+                    .is_some_and(|pattern| scope_matches(&pattern, scope))
+            }),
             None => false,
         }
     }
@@ -349,9 +405,10 @@ impl ScopePolicy {
         if rn.is_empty() {
             return false;
         }
-        self.rn
-            .iter()
-            .any(|pattern| scope_matches(&substitute(pattern, &self.subject), rn))
+        self.rn.iter().any(|pattern| {
+            substitute(pattern, &self.subject, &self.context)
+                .is_some_and(|pattern| scope_matches(&pattern, rn))
+        })
     }
 }
 
@@ -497,6 +554,9 @@ pub struct Principal {
     /// policy declares none (no directory control). A process's own directory
     /// is `<workdir_root>/<pid>`.
     workdir_root: Option<std::path::PathBuf>,
+    /// The organization vocabulary the principal's patterns substitute
+    /// (`$ctx.<key>`); travels into every [`Self::scope_policy`] it seals.
+    context: BTreeMap<String, String>,
 }
 
 impl Principal {
@@ -521,6 +581,7 @@ impl Principal {
             scopes: HashMap::new(),
             rn: Vec::new(),
             workdir_root: None,
+            context: BTreeMap::new(),
         }
     }
 
@@ -543,6 +604,7 @@ impl Principal {
             scopes: HashMap::new(),
             rn: Vec::new(),
             workdir_root: None,
+            context: BTreeMap::new(),
         }
     }
 
@@ -586,6 +648,7 @@ impl Principal {
             // "matches nothing" at seal time.
             compile_patterns(patterns, name, "snapshot")?;
         }
+        validate_context(&policy.context)?;
 
         Ok(Self {
             subject: name.to_string(),
@@ -600,6 +663,7 @@ impl Principal {
             scopes: policy.snapshot.clone(),
             rn: policy.patterns.clone(),
             workdir_root: None,
+            context: policy.context.clone(),
         })
     }
 
@@ -698,6 +762,7 @@ impl Principal {
             // compiled from a caller: its resource patterns decide
             enforce_rn: true,
             workdir_root: self.workdir_root.clone(),
+            context: self.context.clone(),
         }
     }
 
@@ -713,6 +778,7 @@ impl Principal {
             "patterns": self.rn,
             "scopes": self.scopes,
             "workdir_root": self.workdir_root.as_ref().map(|dir| dir.display().to_string()),
+            "context": self.context,
         })
     }
 }
@@ -773,6 +839,26 @@ pub trait AccessControl: Send + Sync + fmt::Debug {
     fn password_change_required(&self, subject: &str) -> bool {
         let _ = subject;
         false
+    }
+
+    /// Whether the implementation keeps a user registry an authorization
+    /// question can be asked of. `false` — the anonymous registry knows no
+    /// users — keeps the fetch-request gate open: channel filters are then
+    /// all that decides who sees a request (an engine without users has no
+    /// subject scopes to leak).
+    fn manages_users(&self) -> bool {
+        false
+    }
+
+    /// The compiled principal of a stored user — **not** of a session: what
+    /// a subscription under `subject` may read. `None` — unknown or disabled
+    /// user. Answered only by the fetch-request gate (`Emitter::emit_req`
+    /// withholds a request from channels whose subject may not read the
+    /// scope it names); a request carries no data, but its scope name need
+    /// not reach subjects that cannot read it.
+    async fn principal_of(&self, subject: &str) -> Option<Principal> {
+        let _ = subject;
+        None
     }
 
     /// Resolve a request's token into a principal. An absent, unknown or
@@ -1010,9 +1096,45 @@ fn compile_patterns(patterns: &[String], user: &str, field: &str) -> Result<Vec<
         .collect()
 }
 
-/// Replace every `$subject` in a pattern with `subject`.
-fn substitute(pattern: &str, subject: &str) -> String {
-    pattern.replace("$subject", subject)
+/// Replace every `$subject` and `$ctx.<key>` in a pattern.
+///
+/// `None` means the pattern names a context key the policy does not carry:
+/// the pattern must then match **nothing** (fail-closed). Substituting an
+/// empty string instead could let `""` combine with the rest of the pattern
+/// into a scope it was never meant to name. `$subject` is always present.
+fn substitute(pattern: &str, subject: &str, context: &BTreeMap<String, String>) -> Option<String> {
+    if !pattern.contains('$') {
+        return Some(pattern.to_string());
+    }
+    let mut out = String::with_capacity(pattern.len());
+    let mut rest = pattern;
+    while let Some(idx) = rest.find('$') {
+        out.push_str(&rest[..idx]);
+        let tail = &rest[idx + 1..];
+        if let Some(after) = tail.strip_prefix("subject") {
+            out.push_str(subject);
+            rest = after;
+        } else if let Some(after) = tail.strip_prefix("ctx.") {
+            let key = after
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or("");
+            if key.is_empty() {
+                // a malformed `$ctx.` token names no key: it must not
+                // silently degrade into a literal or an empty substitution
+                return None;
+            }
+            let value = context.get(key)?;
+            out.push_str(value);
+            rest = &after[key.len()..];
+        } else {
+            // not our token: keep the `$` verbatim
+            out.push('$');
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// Match one scope against one pattern. A pattern without glob metacharacters
@@ -1061,6 +1183,7 @@ mod tests {
         assert_eq!(action_catalog("msg:redo_all"), "write");
         assert_eq!(action_catalog("model:rm"), "write");
         assert_eq!(action_catalog("snap:upsert"), "write");
+        assert_eq!(action_catalog("snap:reply"), "write");
         assert_eq!(action_catalog("acl:setuser"), "write");
         assert_eq!(action_catalog("acl:login"), "write");
         assert_eq!(action_catalog("msg:unsub"), "write");
@@ -1081,6 +1204,7 @@ mod tests {
             deny: vec!["@write".to_string(), "msg:ack".to_string()],
             patterns: vec!["orders:*".to_string()],
             snapshot: HashMap::from([("secrets".to_string(), vec!["$subject".to_string()])]),
+            ..Default::default()
         })
         .unwrap();
 
@@ -1291,10 +1415,14 @@ mod tests {
         assert!(!policy.allows_rn("billing:eu"));
     }
 
-    #[test]
-    fn an_anonymous_acl_answers_no_login_and_no_users() {
+    #[tokio::test]
+    async fn an_anonymous_acl_answers_no_login_and_no_users() {
         let acl = AnonymousAcl;
         assert!(acl.enabled());
+        // no user registry: the fetch-request gate stays open, channel
+        // filters are all that decides who sees a request
+        assert!(!acl.manages_users());
+        assert!(acl.principal_of("op").await.is_none());
         assert!(
             !acl.authenticate(Some("anything"))
                 .unwrap()
@@ -1303,10 +1431,11 @@ mod tests {
         assert!(!acl.anonymous().is_authenticated());
     }
 
-    #[test]
-    fn a_disabled_acl_passes_everything() {
+    #[tokio::test]
+    async fn a_disabled_acl_passes_everything() {
         let acl = DisabledAcl;
         assert!(!acl.enabled());
+        assert!(!acl.manages_users());
         let principal = acl.authenticate(None).unwrap();
         assert!(principal.is_unrestricted());
         principal.check("model:rm").unwrap();
@@ -1400,5 +1529,179 @@ mod tests {
         assert!(acl.del_user("u").await.is_err());
         assert!(acl.user_names().await.is_empty());
         assert!(acl.get_user("u").await.is_none());
+    }
+
+    #[test]
+    fn substitute_replaces_subject_and_context_keys() {
+        let ctx = BTreeMap::from([
+            ("tenant".to_string(), "t1".to_string()),
+            ("unit".to_string(), "u9".to_string()),
+        ]);
+        // fast path: no `$` at all
+        assert_eq!(substitute("plain", "u", &ctx).as_deref(), Some("plain"));
+        // `$subject`
+        assert_eq!(
+            substitute("$subject/own", "alice", &ctx).as_deref(),
+            Some("alice/own")
+        );
+        // `$ctx.<key>`
+        assert_eq!(
+            substitute("$ctx.tenant/$ctx.unit/*", "alice", &ctx).as_deref(),
+            Some("t1/u9/*")
+        );
+        // mixed with `$subject`
+        assert_eq!(
+            substitute("$subject@$ctx.tenant", "bob", &ctx).as_deref(),
+            Some("bob@t1")
+        );
+        // a `$` that names neither token stays verbatim
+        assert_eq!(substitute("a$b", "u", &ctx).as_deref(), Some("a$b"));
+        assert_eq!(substitute("$$", "u", &ctx).as_deref(), Some("$$"));
+    }
+
+    #[test]
+    fn substitute_fails_closed_on_absent_or_malformed_context_keys() {
+        let ctx = BTreeMap::from([("tenant".to_string(), "t1".to_string())]);
+        // a key the policy does not carry: the pattern matches nothing
+        assert_eq!(substitute("$ctx.unit/*", "u", &ctx), None);
+        // a malformed `$ctx.` token names no key: fail closed, never literal
+        assert_eq!(substitute("$ctx./x", "u", &ctx), None);
+        assert_eq!(substitute("$ctx.", "u", &ctx), None);
+        // an empty context denies every `$ctx.` pattern
+        assert_eq!(substitute("$ctx.tenant", "u", &BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn context_patterns_confine_scopes_per_tenant() {
+        let owner = |tenant: &str| {
+            Principal::from_policy(&UserPolicy {
+                name: format!("op-{tenant}"),
+                enabled: true,
+                snapshot: HashMap::from([(
+                    "profile".to_string(),
+                    vec!["$ctx.tenant/$ctx.unit/*".to_string()],
+                )]),
+                patterns: vec!["orders:$ctx.tenant:*".to_string()],
+                context: BTreeMap::from([
+                    ("tenant".to_string(), tenant.to_string()),
+                    ("unit".to_string(), "u9".to_string()),
+                ]),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let alice = owner("t1");
+        let bob = owner("t2");
+
+        // each tenant reads only its own scope key
+        assert!(alice.check_scope("profile", "t1/u9/uid").is_ok());
+        assert!(
+            alice.check_scope("profile", "t2/u9/uid").is_err(),
+            "another tenant's scope must be denied"
+        );
+        assert!(alice.check_rn("orders:t1:flow").is_ok());
+        assert!(alice.check_rn("orders:t2:flow").is_err());
+        assert!(bob.check_scope("profile", "t2/u9/uid").is_ok());
+        assert!(bob.check_scope("profile", "t1/u9/uid").is_err());
+
+        // the sealed policy carries the vocabulary, so subflows and the
+        // seal-time re-check substitute against the starter's context
+        let sealed = alice.scope_policy();
+        assert_eq!(sealed.context.get("tenant").map(String::as_str), Some("t1"));
+        assert!(sealed.allows("profile", "t1/u9/x"));
+        assert!(!sealed.allows("profile", "t2/u9/x"));
+
+        // whoami answers the vocabulary back to its own caller
+        let who = alice.to_value();
+        assert_eq!(who["context"]["tenant"], json!("t1"));
+        assert_eq!(who["context"]["unit"], json!("u9"));
+    }
+
+    #[test]
+    fn a_pattern_naming_an_absent_context_key_matches_nothing() {
+        let policy = Principal::from_policy(&UserPolicy {
+            name: "op".to_string(),
+            enabled: true,
+            snapshot: HashMap::from([(
+                "profile".to_string(),
+                vec!["$ctx.department/*".to_string()],
+            )]),
+            // the policy carries no `department`
+            context: BTreeMap::from([("tenant".to_string(), "t1".to_string())]),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            policy.check_scope("profile", "d3").is_err(),
+            "an absent $ctx key must fail closed, never widen"
+        );
+        assert!(!policy.scope_policy().allows("profile", ""));
+    }
+
+    #[test]
+    fn context_validation_refuses_bad_keys_and_values() {
+        let ok = BTreeMap::from([("tenant".to_string(), "t1".to_string())]);
+        validate_context(&ok).unwrap();
+        validate_context(&BTreeMap::new()).unwrap();
+
+        for bad_key in ["", "Tenant", "1tenant", "ten-ant", "a".repeat(33).as_str()] {
+            let err = validate_context(&BTreeMap::from([(bad_key.to_string(), "v".to_string())]))
+                .unwrap_err();
+            assert!(err.to_string().contains("invalid"), "{err}");
+        }
+        // 32 bytes is exactly the key limit
+        validate_context(&BTreeMap::from([("a".repeat(32), "v".to_string())])).unwrap();
+
+        // values: empty and oversized are refused, 128 bytes is the limit
+        let err =
+            validate_context(&BTreeMap::from([("tenant".to_string(), String::new())])).unwrap_err();
+        assert!(err.to_string().contains("invalid value"), "{err}");
+        let err = validate_context(&BTreeMap::from([("tenant".to_string(), "x".repeat(129))]))
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid value"), "{err}");
+        validate_context(&BTreeMap::from([("tenant".to_string(), "x".repeat(128))])).unwrap();
+
+        // at most 16 entries
+        let too_many: BTreeMap<String, String> = (0..17)
+            .map(|i| (format!("k{i}"), "v".to_string()))
+            .collect();
+        let err = validate_context(&too_many).unwrap_err();
+        assert!(err.to_string().contains("at most 16"), "{err}");
+        let sixteen: BTreeMap<String, String> = (0..16)
+            .map(|i| (format!("k{i}"), "v".to_string()))
+            .collect();
+        validate_context(&sixteen).unwrap();
+    }
+
+    #[test]
+    fn a_policy_with_an_invalid_context_is_refused_at_compile() {
+        let err = Principal::from_policy(&UserPolicy {
+            name: "op".to_string(),
+            enabled: true,
+            context: BTreeMap::from([("Bad-Key".to_string(), "v".to_string())]),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid"), "{err}");
+    }
+
+    #[test]
+    fn a_userspec_carries_context_through_serde() {
+        let spec: UserSpec = serde_json::from_value(json!({
+            "name": "alice",
+            "context": { "tenant": "t1", "unit": "u9" }
+        }))
+        .unwrap();
+        assert_eq!(
+            spec.context
+                .as_ref()
+                .unwrap()
+                .get("tenant")
+                .map(String::as_str),
+            Some("t1")
+        );
+        // absent on the wire = unchanged
+        let spec: UserSpec = serde_json::from_value(json!({ "name": "alice" })).unwrap();
+        assert!(spec.context.is_none());
     }
 }

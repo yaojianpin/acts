@@ -44,8 +44,8 @@
 2. **新持久状态 / 新操作 → core**（设计评审）。
 3. **新传输 → 插件**（`ActPlugin` 注册包/挂 transport；无能力注册 API）。
 4. **确定性内核封闭**：操作状态机、plan、提交、授权、投影不接受实现替换。
-5. **环境扩展**：`ActUserVar` / `ActFunction`（`Engine::register_env_var` /
-   `register_env_function`）扩展表达式可读/可调用的面，不绕过授权。
+5. **环境扩展**：`ActUserVar` / `ActFunction` / 快照变量（`Engine::register_var` /
+   `register_fn` / `register_snap`）扩展表达式可读/可调用的面，不绕过授权。
 
 ## 4. 能力 trait 与 key
 

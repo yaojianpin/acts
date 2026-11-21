@@ -223,6 +223,24 @@ pub struct SnapRef {
     pub scope: Option<String>,
 }
 
+/// The answer to a snapshot fetch (`snap:reply`): the request id the provider
+/// received, the target/scope it answers for (its caller must own that scope,
+/// exactly like a feed write) and the value with its revision.
+#[derive(Debug, Deserialize)]
+pub struct SnapReply {
+    /// the fetch request id (`Message.id` of the `req` event)
+    pub req_id: String,
+    /// snapshot target name, e.g. profile
+    pub name: String,
+    /// scope key the value answers for
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// monotonic revision of the value
+    pub rev: u64,
+    /// snapshot data object
+    pub data: acts::Vars,
+}
+
 pub async fn pack_list(
     State(state): State<Arc<Engine>>,
     Extension(principal): Extension<Principal>,
@@ -379,6 +397,26 @@ pub async fn snap_ls(
 ) -> Result<impl IntoResponse, AppError> {
     let payload = acts::Vars::new().with("name", req.name.clone());
     call(&state, &principal, "snap:ls", payload).await
+}
+
+/// Answer a snapshot fetch (`snap:reply`). Delegates to the shared dispatch
+/// table like every snapshot route: the caller must own the scope it answers
+/// for, the value lands under the same revision guard a push feed uses, and
+/// the waiting prepare is woken. `data: false` in the answer means nobody
+/// waits on the request id anymore — the value still took effect.
+pub async fn snap_reply(
+    State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<SnapReply>,
+) -> Result<impl IntoResponse, AppError> {
+    let scope = req.scope.clone().unwrap_or_default();
+    let payload = acts::Vars::new()
+        .with("req_id", req.req_id)
+        .with("name", req.name)
+        .with("scope", scope)
+        .with("rev", req.rev)
+        .with("data", req.data);
+    call(&state, &principal, "snap:reply", payload).await
 }
 
 /// Fire a deployed trigger from an HTTP POST whose JSON body becomes the

@@ -489,6 +489,31 @@ pub async fn apply_as(
             principal.check_scope(&target, &scope).map_err(deny)?;
             unit_ok(engine.snapshot().remove(&target, &scope))
         }
+        // The answer to a snapshot fetch: the replying provider must own the
+        // scope it answers for — the same gate a push feed (`snap:upsert`)
+        // passes — then the value lands in the cache under the same rev
+        // guard and the waiting prepare re-reads it. A `false` answer means
+        // nobody waits on the request id anymore (the leader timed out); the
+        // upserted value still took effect for future reads.
+        "snap:reply" => {
+            let req_id = pop(&mut options, "req_id")?;
+            let target = pop(&mut options, "name")?;
+            let scope = options.get::<String>("scope").unwrap_or_default();
+            principal.check_scope(&target, &scope).map_err(deny)?;
+            let rev = options
+                .get::<u64>("rev")
+                .ok_or_else(|| Error::Invalid("rev is required".to_string()))?;
+            let data = options
+                .pop::<Vars>("data")
+                .ok_or_else(|| Error::Invalid("data is required".to_string()))?;
+            engine
+                .snapshot()
+                .upsert(&target, &scope, rev, data)
+                .map_err(|err| Error::Internal(err.to_string()))?;
+            let resolved = engine.runtime().fetch_registry().resolve(&req_id);
+            tracing::debug!(req_id, target, scope, resolved, "snapshot fetch replied");
+            Ok(json!(resolved))
+        }
         "snap:get" => {
             let target = pop(&mut options, "name")?;
             let scope = options.get::<String>("scope").unwrap_or_default();
@@ -511,7 +536,10 @@ pub async fn apply_as(
             let target = pop(&mut options, "name")?;
             // A listing answers only the scopes this subject owns — the
             // others are filtered out rather than failing the whole call, so
-            // one tenant cannot enumerate the rest.
+            // one tenant cannot enumerate the rest. A variable's registered
+            // provider packages travel with the answer (empty for a plain
+            // push target), so an operator can tell who serves it.
+            let providers = engine.runtime().snapshots.providers(&target);
             let rows: Vec<JsonValue> = engine
                 .snapshot()
                 .list(&target)
@@ -525,6 +553,7 @@ pub async fn apply_as(
                         "rev": entry.rev,
                         "timestamp": entry.timestamp,
                         "data": data,
+                        "providers": providers,
                     }))
                 })
                 .collect::<std::result::Result<_, Error>>()?;
@@ -929,6 +958,7 @@ mod tests {
         "snap:get",
         "snap:ls",
         "snap:upsert",
+        "snap:reply",
     ];
 
     /// The snapshot scopes both tenants own: their own subject, substituted
@@ -1354,6 +1384,69 @@ mod tests {
         );
     }
 
+    /// The `snap:reply` answer: the replying subject must own the scope it
+    /// answers for, the value lands under the same rev guard a push feed
+    /// uses, the waiting fetch resolves exactly once, and a late reply
+    /// reports that nobody waits anymore.
+    #[tokio::test]
+    async fn a_snapshot_reply_needs_the_scope_and_wakes_one_waiter() {
+        let engine = acl_engine().await;
+        let u1 = tenant("u1");
+        let u2 = tenant("u2");
+
+        // a pending fetch for a scope only u1 owns
+        let req_id = engine
+            .runtime()
+            .fetch_registry()
+            .preannounce("profile", "u1");
+        async fn reply(
+            engine: &crate::Engine,
+            principal: &crate::Principal,
+            req_id: &str,
+            rev: u64,
+        ) -> Ret {
+            let payload = Vars::new()
+                .with("req_id", req_id)
+                .with("name", "profile")
+                .with("scope", "u1")
+                .with("rev", rev)
+                .with("data", Vars::new().with("TOKEN", "t"));
+            apply_as(engine, principal, "snap:reply", payload).await
+        }
+
+        // u2 owns only "u2": the scope gate refuses before anything lands
+        let err = reply(&engine, &u2, &req_id, 1).await.unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "{err:?}");
+        assert!(engine.snapshot().read("profile", "u1").is_none());
+        assert_eq!(engine.runtime().fetch_registry().pending_scopes().len(), 1);
+
+        // u1's reply wakes the waiter and feeds the cache
+        assert_eq!(reply(&engine, &u1, &req_id, 1).await.unwrap(), json!(true));
+        let entry = engine.snapshot().read("profile", "u1").unwrap();
+        assert_eq!(entry.rev, 1);
+        assert!(
+            engine
+                .runtime()
+                .fetch_registry()
+                .pending_scopes()
+                .is_empty()
+        );
+
+        // a newer push lands, then u1's stale reply resolves nobody and
+        // cannot roll the scope back
+        engine
+            .snapshot()
+            .upsert("profile", "u1", 2, Vars::new().with("TOKEN", "newer"))
+            .unwrap();
+        assert_eq!(reply(&engine, &u1, &req_id, 1).await.unwrap(), json!(false));
+        assert_eq!(
+            engine.snapshot().read("profile", "u1").unwrap().rev,
+            2,
+            "a stale reply must not roll the scope back"
+        );
+        engine.close().await;
+    }
+
     /// The decisive case: a workflow may not read another subject's sealed
     /// data just because it was started with that subject's `uid`. The
     /// authority is the caller's, sealed into the process at start.
@@ -1362,12 +1455,14 @@ mod tests {
     async fn a_run_cannot_seal_another_subjects_scope() {
         let engine = acl_engine().await;
         engine
-            .add_snapshot(
+            .runtime()
+            .register_snap(
                 "secrets",
                 crate::SnapshotOptions {
                     scope: vec!["uid".to_string()],
                     ..crate::SnapshotOptions::per_proc()
                 },
+                None,
             )
             .unwrap();
 

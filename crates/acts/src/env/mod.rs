@@ -89,10 +89,15 @@ impl ActUserVar for SecretsVar {
 
 #[derive(Clone)]
 pub struct Environment {
-    pub(crate) user_vars: ShareLock<Vec<Box<dyn ActUserVar>>>,
+    /// `(provider, var)` in registration order; a name is answered by the
+    /// first registration. The provider is the registrant's identity (a
+    /// package id or an embedder name): the same name from two providers is
+    /// two registrations, the same name from one provider twice is an error.
+    pub(crate) user_vars: ShareLock<Vec<(String, Box<dyn ActUserVar>)>>,
     /// Plugin-registered expression methods, in registration order. A name is
-    /// answered by the first registration, exactly like a user var.
-    functions: ShareLock<Vec<Arc<dyn ActFunction>>>,
+    /// answered by the first registration, exactly like a user var — keyed
+    /// `(provider, name)` like the vars.
+    functions: ShareLock<Vec<(String, Arc<dyn ActFunction>)>>,
 }
 
 impl fmt::Debug for Environment {
@@ -110,7 +115,10 @@ impl Default for Environment {
 impl Environment {
     pub fn new() -> Self {
         Environment {
-            user_vars: Arc::new(RwLock::new(vec![Box::new(SecretsVar)])),
+            user_vars: Arc::new(RwLock::new(vec![(
+                "system".to_string(),
+                Box::new(SecretsVar) as Box<dyn ActUserVar>,
+            )])),
             functions: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -120,32 +128,115 @@ impl Environment {
         self.user_vars.read().len()
     }
 
-    pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) {
-        let mut user_envs = self.user_vars.write();
-        user_envs.push(Box::new(module.clone()));
-    }
-
-    /// Register an expression method. The first registration of a name wins;
-    /// a later duplicate is kept but never resolved.
-    pub fn register_function<T: ActFunction + Clone + 'static>(&self, function: &T) {
-        self.functions.write().push(Arc::new(function.clone()));
-    }
-
-    /// The first registered method under `name`.
-    pub(crate) fn function(&self, name: &str) -> Option<Arc<dyn ActFunction>> {
-        self.functions
-            .read()
+    /// Register a user var under an optional `provider` (the registrant's
+    /// identity — a package id or an embedder name). `None` is the **global**
+    /// registration: it answers every run. A provider-scoped registration is
+    /// preferred by runs whose sealed context names that provider
+    /// (`context.provider`) — two providers may carry one var name (the
+    /// scoped one wins there, the global elsewhere), and the same name
+    /// **and** provider twice is refused.
+    pub fn register_var<T: ActUserVar + Clone + 'static>(
+        &self,
+        module: &T,
+        provider: Option<&str>,
+    ) -> Result<()> {
+        let provider = provider.unwrap_or_default().trim().to_string();
+        let name = module.name();
+        let mut vars = self.user_vars.write();
+        if vars
             .iter()
-            .find(|function| function.name() == name)
-            .cloned()
+            .any(|(registered, var)| registered == &provider && var.name() == name)
+        {
+            let shown = if provider.is_empty() {
+                "global".to_string()
+            } else {
+                provider.clone()
+            };
+            return Err(ActError::Config(format!(
+                "provider '{shown}' already registered variable '{name}'"
+            )));
+        }
+        vars.push((provider, Box::new(module.clone())));
+        Ok(())
+    }
+
+    /// Register an expression method under an optional `provider` — same
+    /// rules as [`Self::register_var`]: `None` is global, a provider-scoped
+    /// registration wins inside runs whose context names that provider, and
+    /// the same name and provider twice is refused.
+    pub fn register_fn<T: ActFunction + Clone + 'static>(
+        &self,
+        function: &T,
+        provider: Option<&str>,
+    ) -> Result<()> {
+        let provider = provider.unwrap_or_default().trim().to_string();
+        let name = function.name();
+        let mut functions = self.functions.write();
+        if functions
+            .iter()
+            .any(|(registered, function)| registered == &provider && function.name() == name)
+        {
+            let shown = if provider.is_empty() {
+                "global".to_string()
+            } else {
+                provider.clone()
+            };
+            return Err(ActError::Config(format!(
+                "provider '{shown}' already registered function '{name}'"
+            )));
+        }
+        functions.push((provider, Arc::new(function.clone())));
+        Ok(())
+    }
+
+    /// The provider the running context prefers, if its sealed owner context
+    /// names one (`context.provider`). Read through the ambient scope like
+    /// every other context-dependent resolution.
+    fn preferred_provider() -> Option<String> {
+        Context::try_with_current(|ctx| ctx.proc.owner_scope().context.get("provider").cloned())
+            .ok()
+            .flatten()
+    }
+
+    /// Pick the registration of `name` the caller's context prefers: the
+    /// context's provider first, then the global one, then the first
+    /// provider-scoped registration.
+    fn pick<'a, T>(
+        entries: &'a [(String, T)],
+        name: &str,
+        name_of: impl Fn(&T) -> String,
+        preferred: Option<&str>,
+    ) -> Option<&'a T> {
+        let matching = || entries.iter().filter(|(_, item)| name_of(item) == name);
+        if let Some(preferred) = preferred.filter(|p| !p.is_empty())
+            && let Some((_, item)) = matching().find(|(p, _)| p == preferred)
+        {
+            return Some(item);
+        }
+        if let Some((_, item)) = matching().find(|(p, _)| p.is_empty()) {
+            return Some(item);
+        }
+        matching().next().map(|(_, item)| item)
+    }
+
+    /// The registered method under `name` — the caller context's provider
+    /// first (see [`Self::preferred_provider`]), then the global one, then
+    /// the first scoped registration.
+    pub(crate) fn function(&self, name: &str) -> Option<Arc<dyn ActFunction>> {
+        let preferred = Self::preferred_provider();
+        let functions = self.functions.read();
+        Self::pick(&functions, name, |f| f.name(), preferred.as_deref()).cloned()
     }
 
     /// One user var's data — `default_data` overlaid with what the current
     /// task holds under that name — or `None` if no var is registered by it.
+    /// The registration is picked with the same provider preference as
+    /// [`Self::function`].
     pub fn user_var(&self, name: &str) -> Option<Vars> {
+        let preferred = Self::preferred_provider();
         let mut data = {
             let vars = self.user_vars.read();
-            let var = vars.iter().find(|var| var.name() == name)?;
+            let var = Self::pick(&vars, name, |v| v.name(), preferred.as_deref())?;
 
             var.default_data().unwrap_or_default()
         };

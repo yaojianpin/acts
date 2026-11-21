@@ -5,9 +5,9 @@ use crate::{
     export::{Channel, Executor},
     package::{self, ActPackageRegister},
     scheduler::Runtime,
-    snapshot::{SnapshotManager, SnapshotOptions},
+    snapshot::SnapshotManager,
 };
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 /// One operation whose external effect may have run but whose commit was lost
@@ -105,15 +105,6 @@ impl Engine {
         self.acl.anonymous()
     }
 
-    /// Register (or replace) a snapshot-backed sealed-data target at runtime.
-    /// Returns an error when the options are invalid (see
-    /// [`SnapshotOptions::validate`]). Prefer [`EngineBuilder::add_snapshot`]
-    /// when the options are known before starting.
-    pub fn add_snapshot(&self, name: &str, options: SnapshotOptions) -> crate::Result<()> {
-        self.runtime.register_snapshot(name, options)?;
-        Ok(())
-    }
-
     /// Register a package instance from [`ActPlugin::prepare`].
     ///
     /// This writes the package into the runtime registry directly. The start
@@ -133,23 +124,54 @@ impl Engine {
             .register(id, &ActPackageRegister::new::<T>());
     }
 
-    /// Register a user var module into the engine's expression environment.
+    /// Register a user var module into the engine's expression environment
+    /// under `provider` (the registrant's identity: the same var name from
+    /// two providers coexists — the first answers — while one provider
+    /// registering a name twice is refused).
     ///
     /// Call it from [`ActPlugin::prepare`] (or an embedder that owns the
     /// engine). A transport caller registers through the ACL-checked
     /// `executor.ext().register_var` instead.
-    pub fn register_env_var<T: ActUserVar + Clone + 'static>(&self, var: &T) {
-        self.runtime.env().register_var(var);
+    pub fn register_var<T: ActUserVar + Clone + 'static>(
+        &self,
+        var: &T,
+        provider: Option<&str>,
+    ) -> crate::Result<()> {
+        self.runtime.env().register_var(var, provider)
     }
 
-    /// Register an expression method into the engine's expression environment.
+    /// Register an expression method into the engine's expression environment
+    /// under `provider` (see [`Self::register_var`] for the conflict
+    /// rules).
     ///
     /// The method is callable by name from a workflow expression
     /// (`owner_of(...)`, or `$owner_of(...)` by the built-in convention). Call
     /// it from [`ActPlugin::prepare`] or an embedder; the ACL-checked runtime
-    /// entry is `executor.ext().register_function`.
-    pub fn register_env_function<T: ActFunction + Clone + 'static>(&self, function: &T) {
-        self.runtime.env().register_function(function);
+    /// entry is `executor.ext().register_fn`.
+    pub fn register_fn<T: ActFunction + Clone + 'static>(
+        &self,
+        function: &T,
+        provider: Option<&str>,
+    ) -> crate::Result<()> {
+        self.runtime.env().register_fn(function, provider)
+    }
+
+    /// Register a snapshot variable at the engine level — the in-process twin
+    /// of a provider package's `pack:publish` metadata (`options.var`).
+    /// `provider` is the publishing package id (`None` — global); the
+    /// `(name, provider)` pair is the conflict key: the same provider twice
+    /// is refused, another provider joins the variable's provider list and
+    /// must declare the same pull parameters. A run whose sealed context
+    /// names the provider is served by it; the rest fall back to the global
+    /// registration.
+    pub fn register_snap(
+        &self,
+        name: &str,
+        options: crate::SnapshotOptions,
+        provider: Option<&str>,
+    ) -> crate::Result<()> {
+        self.runtime.register_snap(name, options, provider)?;
+        Ok(())
     }
 
     /// The engine's operations, bound to `principal`.
@@ -327,7 +349,6 @@ impl Engine {
 
     pub(crate) async fn initialize(
         &self,
-        snapshots: Vec<(String, SnapshotOptions)>,
         plugins: Vec<Arc<dyn ActPlugin>>,
         packages: Vec<ActPackageRegister>,
     ) -> crate::Result<()> {
@@ -337,8 +358,35 @@ impl Engine {
         self.acl.load(self.runtime.store()).await?;
         tracing::info!(phase = "building");
 
+        // A registry that manages users also gates the fetch requests: a
+        // `req` reaches only the channels whose subject may read the scope
+        // it names (see `AccessControl::principal_of`). Without a user
+        // registry there is nothing to ask — channel filters decide.
+        if self.acl.manages_users() {
+            let acl = self.acl.clone();
+            self.runtime.emitter().set_req_gate(Some(Arc::new(
+                move |chan_id: String, msg: crate::Message| {
+                    let acl = acl.clone();
+                    Box::pin(async move {
+                        let subject = chan_id.split('/').next().unwrap_or("");
+                        let Some(principal) = acl.principal_of(subject).await else {
+                            return false;
+                        };
+                        let target = msg.uses.as_deref().unwrap_or_default();
+                        let scope = msg.inputs.get::<String>("scope").unwrap_or_default();
+                        match principal.check_scope(target, &scope) {
+                            Ok(()) => true,
+                            Err(err) => {
+                                tracing::debug!(chan = %chan_id, error = %err, "req withheld");
+                                false
+                            }
+                        }
+                    }) as Pin<Box<dyn Future<Output = bool> + Send>>
+                },
+            )));
+        }
+
         *self.plugins.lock() = plugins.clone();
-        self.register_snapshots(snapshots)?;
         // Phase 1: validate every plugin and let it register what it provides.
         // Nothing listens yet, so a failure here aborts with no resource to
         // undo.
@@ -383,14 +431,6 @@ impl Engine {
         // before the spawn, and the start barrier above kept it off the store
         // until now. There is nothing left to start here.
 
-        Ok(())
-    }
-
-    /// Register the snapshot targets builder/plugins asked for.
-    fn register_snapshots(&self, snapshots: Vec<(String, SnapshotOptions)>) -> crate::Result<()> {
-        for (name, options) in snapshots {
-            self.runtime.register_snapshot(&name, options)?;
-        }
         Ok(())
     }
 

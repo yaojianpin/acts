@@ -45,6 +45,8 @@ pub struct Runtime {
     shutdown: CancellationToken,
     schema_cache: Arc<SchemaCache>,
     pub(crate) snapshots: Arc<SnapshotRegistry>,
+    /// The fetch-on-miss single-flight coordinator (see `crate::snapshot`).
+    fetches: crate::snapshot::SnapFetchRegistry,
     /// The deterministic kernel host: it *is* the engine — it owns every
     /// started process (start, actions, effects, messages) and drives the operations
     /// over the aggregate documents, including the store-facing timers
@@ -256,17 +258,31 @@ impl Runtime {
     pub fn config(&self) -> &Arc<Config> {
         &self.config
     }
-    pub(crate) fn register_snapshot(
-        &self,
-        name: &str,
-        options: SnapshotOptions,
-    ) -> Result<Arc<SnapshotStore>> {
-        options.validate()?;
-        Ok(self.snapshots.register(name, options))
-    }
 
     pub(crate) fn snapshot_store(&self, name: &str) -> Option<Arc<SnapshotStore>> {
         self.snapshots.store(name)
+    }
+
+    /// The fetch-on-miss coordinator (single-flight per `(target, scope)`).
+    pub(crate) fn fetch_registry(&self) -> &crate::snapshot::SnapFetchRegistry {
+        &self.fetches
+    }
+
+    /// Register a variable-provided snapshot target (`pack:publish` with
+    /// `options.var`). `provider` is the publishing package id (`None` — a
+    /// global target, the default a plain feed sees). The `(name, provider)`
+    /// pair is the conflict key: the same provider twice is refused, another
+    /// provider joins the list and must declare the same pull parameters.
+    pub(crate) fn register_snap(
+        &self,
+        name: &str,
+        options: SnapshotOptions,
+        provider: Option<&str>,
+    ) -> Result<Arc<SnapshotStore>> {
+        options.validate()?;
+        self.snapshots
+            .register_snap(name, options, provider)
+            .map_err(ActError::Config)
     }
 
     pub async fn close(&self) {
@@ -747,6 +763,7 @@ impl Runtime {
             shutdown,
             schema_cache,
             snapshots,
+            fetches: crate::snapshot::SnapFetchRegistry::new(),
             workers,
             driver: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(not(test))]
@@ -991,7 +1008,9 @@ mod tests {
         let runtime = runtime();
         let registry = runtime.snapshot_registry();
         assert_eq!(registry.len(), 0);
-        registry.register("profile", SnapshotOptions::default());
+        registry
+            .register_snap("profile", SnapshotOptions::default(), None)
+            .unwrap();
         assert_eq!(registry.len(), 1);
         assert!(registry.store("profile").is_some());
         assert_eq!(registry.list().len(), 1);

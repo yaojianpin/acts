@@ -8,9 +8,9 @@ use std::sync::Arc;
 /// equivalent: only an embedder registers one.
 pub(crate) const REGISTER_VAR: &str = "ext:register_var";
 
-/// `ext:register_function` — install an expression method into the engine's
+/// `ext:register_fn` — install an expression method into the engine's
 /// environment. Like `ext:register_var`, it has no wire equivalent.
-pub(crate) const REGISTER_FUNCTION: &str = "ext:register_function";
+pub(crate) const REGISTER_FUNCTION: &str = "ext:register_fn";
 
 /// `pack:publish` — a package definition is written to the store, which is
 /// what `pack().publish()` does too, so the two share one grant.
@@ -38,7 +38,12 @@ impl ExtExecutor {
         }
     }
 
-    /// register a user var module, so `$env`/expressions can read it
+    /// register a user var module under `provider` (the registrant's
+    /// identity — a package id or an embedder name): the same var name from
+    /// two providers coexists (the first registration answers expressions),
+    /// while one provider registering a name twice is refused. In-process
+    /// vars send no requests; a remote, request-answering variable is a
+    /// snapshot variable (`pack:publish` metadata), not this.
     ///
     /// ## Example
     /// ```no_run
@@ -66,25 +71,32 @@ impl ExtExecutor {
     ///     engine
     ///         .executor(&Principal::unrestricted())
     ///         .ext()
-    ///         .register_var(&module)
+    ///         .register_var(&module, Some("my-embedder"))
     ///         .unwrap();
     /// }
     /// ```
-    pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) -> Result<()> {
+    pub fn register_var<T: ActUserVar + Clone + 'static>(
+        &self,
+        module: &T,
+        provider: Option<&str>,
+    ) -> Result<()> {
         self.principal.check(REGISTER_VAR)?;
-        self.runtime.env().register_var(module);
-        Ok(())
+        self.runtime.env().register_var(module, provider)
     }
 
-    /// register an expression method, so a workflow expression can call it
+    /// register an expression method under `provider` (see
+    /// [`Self::register_var`] for the conflict rules)
     ///
     /// The method is resolved by name when the expression references it; the
     /// engine's own built-ins take precedence over a plugin method of the same
     /// name.
-    pub fn register_function<T: ActFunction + Clone + 'static>(&self, function: &T) -> Result<()> {
+    pub fn register_fn<T: ActFunction + Clone + 'static>(
+        &self,
+        function: &T,
+        provider: Option<&str>,
+    ) -> Result<()> {
         self.principal.check(REGISTER_FUNCTION)?;
-        self.runtime.env().register_function(function);
-        Ok(())
+        self.runtime.env().register_fn(function, provider)
     }
 
     /// publish a package definition into the package catalogue

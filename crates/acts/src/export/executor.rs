@@ -47,13 +47,23 @@ pub struct Executor {
 /// Publish one package and drop the compiled-schema cache entry the write
 /// invalidates. Both `pack:publish` and `ext:register_package` run exactly
 /// this, so the two entry points cannot drift apart.
+///
+/// A package whose `options` metadata declares `{"var": …}` is the
+/// registration of a snapshot variable: the metadata is validated **before**
+/// the store write (a rejected variable must not leave a definition behind)
+/// and the target registers after the publish lands.
 pub(super) async fn publish_package(
     runtime: &Arc<Runtime>,
     pack: &crate::data::Package,
 ) -> crate::Result<bool> {
+    let variable = crate::snapshot::variable_target(pack)?;
     let published = runtime.store().publish(pack).await?;
     if published {
         runtime.schema_cache().invalidate_package(&pack.id);
+        if let Some((var, options)) = variable {
+            runtime.register_snap(&var, options, Some(&pack.id))?;
+            tracing::info!(package = %pack.id, variable = %var, "snapshot variable registered");
+        }
     }
     Ok(published)
 }
@@ -261,7 +271,10 @@ mod tests {
                 .act()
                 .do_action("p1", "t1", crate::event::EventAction::Push, Vars::new())
                 .await,
-            executor.ext().register_var(&TestVar).map(|_| ()),
+            executor
+                .ext()
+                .register_var(&TestVar, Some("test"))
+                .map(|_| ()),
             executor
                 .ext()
                 .register_package(&TestVar::definition())
@@ -442,7 +455,7 @@ mod tests {
             crate::ActUserVar::name(&var),
             "executor_test_var".to_string()
         );
-        executor.ext().register_var(&var).unwrap();
+        executor.ext().register_var(&var, Some("test")).unwrap();
         executor
             .ext()
             .register_package(&TestVar::definition())

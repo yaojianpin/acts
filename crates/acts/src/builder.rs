@@ -1,4 +1,3 @@
-use crate::snapshot::SnapshotOptions;
 use crate::{
     AccessControl, ActPackage, ActPlugin, Config, Engine, config::ConfigLog,
     package::ActPackageRegister, scheduler::Runtime, store::KvStore,
@@ -10,7 +9,6 @@ pub struct EngineBuilder {
     config: Config,
     plugins: Vec<Arc<dyn ActPlugin>>,
     packages: Vec<ActPackageRegister>,
-    snapshots: Vec<(String, SnapshotOptions)>,
     store: Option<Arc<dyn KvStore>>,
     acl: Option<Arc<dyn AccessControl>>,
 }
@@ -43,7 +41,6 @@ impl EngineBuilder {
             config,
             plugins: Vec::new(),
             packages: Vec::new(),
-            snapshots: Vec::new(),
             store: None,
             acl: None,
         }
@@ -261,17 +258,6 @@ impl EngineBuilder {
         self
     }
 
-    /// Pre-register a snapshot-backed sealed-data target before `start()`.
-    ///
-    /// Data is fed later through [`Engine::snapshot`](crate::Engine::snapshot)
-    /// (message-channel adapters or the embedding application) and is sealed
-    /// into tasks at their prepare from the local cache — no network I/O on
-    /// the scheduling path.
-    pub fn add_snapshot(mut self, name: &str, options: SnapshotOptions) -> Self {
-        self.snapshots.push((name.to_string(), options));
-        self
-    }
-
     /// set the store
     ///
     /// The store backend is created externally and set here. When unset, an
@@ -313,7 +299,6 @@ impl EngineBuilder {
             config,
             plugins,
             packages,
-            snapshots,
             store,
             acl,
         } = self;
@@ -328,7 +313,7 @@ impl EngineBuilder {
         let acl: Arc<dyn AccessControl> = acl.unwrap_or_else(|| Arc::new(crate::AnonymousAcl));
         let engine = Engine::with_runtime(config, runtime.clone(), acl)?;
 
-        match engine.initialize(snapshots, plugins, packages).await {
+        match engine.initialize(plugins, packages).await {
             Ok(()) => {
                 info!("engine started");
                 Ok(engine)

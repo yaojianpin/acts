@@ -192,13 +192,22 @@ of leaving behind a task that waits for room with the message in hand. Its
 unacked deliveries of processes that have not settled stay in the store, so the
 retry timer re-sends them when the client subscribes again.
 
-### Snapshot targets
+### Snapshot variables
 
-`[[snapshot]]` entries (see the default config) pre-register
-snapshot-backed sealed-data targets: data fed through the snapshot APIs is
-sealed into the headless scope of each effect at its prepare, under each
-target's `policy`/`scope`/`on_missing`/`ttl` settings. A seal is per effect
-and is not durable run state — it is not recovered after a restart.
+Snapshot-backed sealed data is **not** configured in the server config any
+more (`[[snapshot]]` sections are ignored with a migration warning). A
+variable exists once its provider registers it: an operator publishes a
+package whose `options` metadata names the variable —
+`{"var": "profile", "timeout_ms": 3000, "ttl_secs": 300, "on_missing": "error",
+"scope": ["tenant", "unit"]}` — through `pack:publish` (the `deploy` grant),
+and the clients that serve it subscribe with `uses: "<var>"` and answer the
+engine's fetch requests with `snap:reply` (a `@write` action gated by the
+replying subject's snapshot scopes, exactly like a feed write). A target
+without a provider is pure push: a feed's first `snap:upsert` auto-registers
+it with default options, and the seal reads the local cache at each effect
+prepare. A seal is per effect and is not durable run state — it is not
+recovered after a restart (the cache rebuilds from the message bus or the
+next fetch).
 
 ## Build & run (development)
 

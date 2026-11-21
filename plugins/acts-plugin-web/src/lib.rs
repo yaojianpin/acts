@@ -80,6 +80,7 @@ impl ActPlugin for WebPlugin {
             .route("/snap/remove", post(routes::snap_remove))
             .route("/snap/get", post(routes::snap_get))
             .route("/snap/ls", post(routes::snap_ls))
+            .route("/snap/reply", post(routes::snap_reply))
             .route_layer(middleware::from_fn_with_state(
                 engine.clone(),
                 auth::require_auth,

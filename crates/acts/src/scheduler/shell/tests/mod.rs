@@ -8233,12 +8233,14 @@ fn scope_vars_carry_the_run_variables_without_the_engine_facts() {
 async fn effect_seals_snapshot_params() {
     let engine = crate::Engine::builder().start().await.unwrap();
     engine
-        .add_snapshot(
+        .runtime()
+        .register_snap(
             "profile",
             crate::SnapshotOptions {
                 scope: vec!["uid".to_string()],
                 ..crate::SnapshotOptions::per_task()
             },
+            None,
         )
         .unwrap();
     engine
@@ -8323,12 +8325,14 @@ async fn effect_seals_snapshot_params() {
 async fn effect_denies_a_snapshot_scope_the_owner_lacks() {
     let engine = crate::Engine::builder().start().await.unwrap();
     engine
-        .add_snapshot(
+        .runtime()
+        .register_snap(
             "profile",
             crate::SnapshotOptions {
                 scope: vec!["uid".to_string()],
                 ..crate::SnapshotOptions::per_task()
             },
+            None,
         )
         .unwrap();
     engine

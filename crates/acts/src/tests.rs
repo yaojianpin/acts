@@ -801,7 +801,8 @@ fn engine_builder_set_store_duplicate() {
 async fn a_run_that_cannot_seal_fails_instead_of_waiting() {
     let engine = Engine::builder().start().await.unwrap();
     engine
-        .add_snapshot("profile", crate::SnapshotOptions::per_proc())
+        .runtime()
+        .register_snap("profile", crate::SnapshotOptions::per_proc(), None)
         .unwrap();
     engine
         .snapshot()
@@ -860,33 +861,28 @@ async fn a_run_that_cannot_seal_fails_instead_of_waiting() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_rejects_unrepresentable_ttl() {
-    // builder path: start() validates and fails loudly
-    let err = Engine::builder()
-        .add_snapshot(
-            "profile",
-            crate::SnapshotOptions::default().with_ttl(u64::MAX),
-        )
-        .start()
-        .await
-        .map(|_| ())
-        .unwrap_err();
-    assert!(matches!(err, crate::ActError::Config(_)), "got: {err}");
-
-    // runtime path, plus the exact boundary accepted
+    // the variable-registration path (the only publish-facing one) validates
+    // and refuses, plus the exact boundary accepted
     let engine = Engine::builder().start().await.unwrap();
     for ttl in [u64::MAX, crate::MAX_TTL_SECS + 1] {
-        let err = engine
-            .add_snapshot("profile", crate::SnapshotOptions::default().with_ttl(ttl))
-            .unwrap_err();
+        let Err(err) = engine.runtime().register_snap(
+            "profile",
+            crate::SnapshotOptions::default().with_ttl(ttl),
+            Some("acts.test.profile"),
+        ) else {
+            panic!("ttl {ttl} must be refused");
+        };
         assert!(
             matches!(err, crate::ActError::Config(_)),
             "ttl {ttl}: {err}"
         );
     }
     engine
-        .add_snapshot(
+        .runtime()
+        .register_snap(
             "profile",
             crate::SnapshotOptions::default().with_ttl(crate::MAX_TTL_SECS),
+            Some("acts.test.profile"),
         )
         .unwrap();
     engine.close().await;

@@ -274,10 +274,13 @@ async fn sch_timers_retry_keeps_a_delivery_when_the_message_read_fails() {
 async fn sch_timers_snapshot_purges_expired_entries() {
     let runtime = runtime();
     let registry = runtime.snapshot_registry();
-    let store = registry.register(
-        "ttl",
-        crate::snapshot::SnapshotOptions::default().with_ttl(0),
-    );
+    let store = registry
+        .register_snap(
+            "ttl",
+            crate::snapshot::SnapshotOptions::default().with_ttl(0),
+            None,
+        )
+        .unwrap();
     store.upsert("scope", 1, Vars::new().with("a", 1));
     guider(&runtime).purge_tick().await;
     assert!(

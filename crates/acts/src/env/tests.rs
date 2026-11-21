@@ -167,16 +167,201 @@ fn env_eval_plugin_function() {
     }
 
     let env = Environment::new();
-    env.register_function(&Join);
+    env.register_fn(&Join, Some("test")).unwrap();
     assert_eq!(env.eval::<String>("join('a', 'b')").unwrap(), "a-b");
     // The first registration of a name is the one an expression calls.
     assert!(env.eval::<String>("join('a')").is_ok());
+}
+
+/// The `(name, provider)` pair is the conflict key: one provider
+/// registering a name twice is refused; two providers (global included)
+/// carrying one name coexist, and the caller context's provider picks.
+#[test]
+fn a_function_registration_conflicts_on_name_and_provider() {
+    #[derive(Clone)]
+    struct J1;
+    impl ActFunction for J1 {
+        fn name(&self) -> String {
+            "conflict_probe".to_string()
+        }
+        fn call(&self, _args: &[serde_json::Value]) -> crate::Result<serde_json::Value> {
+            Ok(json!("one"))
+        }
+    }
+    #[derive(Clone)]
+    struct J2;
+    impl ActFunction for J2 {
+        fn name(&self) -> String {
+            "conflict_probe".to_string()
+        }
+        fn call(&self, _args: &[serde_json::Value]) -> crate::Result<serde_json::Value> {
+            Ok(json!("two"))
+        }
+    }
+
+    let env = Environment::new();
+    // global registration (`None`): the default answer
+    env.register_fn(&J1, None).unwrap();
+    assert_eq!(env.eval::<String>("conflict_probe()").unwrap(), "one");
+    // the same provider (global), the same name: refused — "global" is the
+    // provider shown in the message
+    let err = env.register_fn(&J2, None).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("provider 'global' already registered function 'conflict_probe'"),
+        "{err}"
+    );
+    // a scoped provider, the same name: registered; without a context
+    // preference the global one still answers
+    env.register_fn(&J2, Some("acts.other")).unwrap();
+    assert_eq!(env.eval::<String>("conflict_probe()").unwrap(), "one");
+}
+
+/// A user-var registration is conflict-keyed the same way.
+#[test]
+fn a_var_registration_conflicts_on_name_and_provider() {
+    use crate::{ActUserVar, Vars};
+
+    #[derive(Clone)]
+    struct MyVar;
+    impl ActUserVar for MyVar {
+        fn name(&self) -> String {
+            "myvar".to_string()
+        }
+        fn default_data(&self) -> Option<Vars> {
+            Some(Vars::new().with("origin", "first"))
+        }
+    }
+
+    let env = Environment::new();
+    env.register_var(&MyVar, None).unwrap();
+    let err = env.register_var(&MyVar, None).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("provider 'global' already registered variable 'myvar'"),
+        "{err}"
+    );
+    env.register_var(&MyVar, Some("acts.other")).unwrap();
+    assert_eq!(
+        env.user_var("myvar")
+            .unwrap()
+            .get::<String>("origin")
+            .as_deref(),
+        Some("first")
+    );
 }
 
 #[test]
 fn env_eval_undeclared_var_is_error() {
     let env = Environment::new();
     assert!(env.eval::<serde_json::Value>("not_exists").is_err());
+}
+
+/// A run whose sealed context names a provider reads that provider's
+/// registrations; without one it reads the global registrations.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_context_provider_prefers_its_vars_and_functions() {
+    use crate::{ActUserVar, Principal, UserPolicy, Vars};
+
+    #[derive(Clone)]
+    struct GlobalVar;
+    impl ActUserVar for GlobalVar {
+        fn name(&self) -> String {
+            "greeting".to_string()
+        }
+        fn default_data(&self) -> Option<Vars> {
+            Some(Vars::new().with("origin", "global"))
+        }
+    }
+    #[derive(Clone)]
+    struct ScopedVar;
+    impl ActUserVar for ScopedVar {
+        fn name(&self) -> String {
+            "greeting".to_string()
+        }
+        fn default_data(&self) -> Option<Vars> {
+            Some(Vars::new().with("origin", "scoped"))
+        }
+    }
+    #[derive(Clone)]
+    struct GlobalFn;
+    impl crate::ActFunction for GlobalFn {
+        fn name(&self) -> String {
+            "who".to_string()
+        }
+        fn call(&self, _args: &[serde_json::Value]) -> crate::Result<serde_json::Value> {
+            Ok(json!("global"))
+        }
+    }
+    #[derive(Clone)]
+    struct ScopedFn;
+    impl crate::ActFunction for ScopedFn {
+        fn name(&self) -> String {
+            "who".to_string()
+        }
+        fn call(&self, _args: &[serde_json::Value]) -> crate::Result<serde_json::Value> {
+            Ok(json!("scoped"))
+        }
+    }
+
+    let env = Environment::new();
+    env.register_var(&GlobalVar, None).unwrap();
+    env.register_var(&ScopedVar, Some("acts.a")).unwrap();
+    env.register_fn(&GlobalFn, None).unwrap();
+    env.register_fn(&ScopedFn, Some("acts.a")).unwrap();
+
+    let engine = Engine::builder().start().await.unwrap();
+    let workflow = Workflow::new()
+        .with_id("provider-pref")
+        .with_rn("ops:run")
+        .with_step(|step| step.with_id("step1"));
+
+    // a run whose sealed owner context names the provider
+    let op = Principal::from_policy(&UserPolicy {
+        name: "op".into(),
+        enabled: true,
+        allow: vec!["@execute".into(), "@deploy".into()],
+        patterns: vec!["ops:*".into()],
+        context: [("provider".to_string(), "acts.a".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    })
+    .unwrap();
+    engine
+        .executor(&op)
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
+    let handle = engine
+        .executor(&op)
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+    handle.wait().await.unwrap();
+    let context = completed_context(&engine, handle.pid()).await;
+    Context::scope(&context, || {
+        assert_eq!(env.eval::<String>("greeting.origin").unwrap(), "scoped");
+        assert_eq!(env.eval::<String>("who()").unwrap(), "scoped");
+    });
+
+    // a run without a provider context reads the global registrations
+    let handle = engine
+        .executor(&Principal::unrestricted())
+        .proc()
+        .start(&workflow.id, Vars::new())
+        .await
+        .unwrap();
+    handle.wait().await.unwrap();
+    let context = completed_context(&engine, handle.pid()).await;
+    Context::scope(&context, || {
+        assert_eq!(env.eval::<String>("greeting.origin").unwrap(), "global");
+        assert_eq!(env.eval::<String>("who()").unwrap(), "global");
+    });
+    engine.close().await;
 }
 
 #[test]
@@ -208,7 +393,7 @@ fn env_eval_large_numbers_round_trip_exactly() {
     }
 
     let env = Environment::new();
-    env.register_var(&BigNumberVar);
+    env.register_var(&BigNumberVar, Some("test")).unwrap();
 
     // Above i32, inside the i64 range: preserved exactly.
     assert_eq!(
@@ -431,7 +616,7 @@ async fn env_user_var_get_from_context() {
     engine
         .executor(&crate::Principal::unrestricted())
         .ext()
-        .register_var(&MyVarPlugin)
+        .register_var(&MyVarPlugin, Some("test"))
         .unwrap();
     let env = engine.runtime().env().clone();
 
@@ -478,7 +663,7 @@ async fn env_user_var_get_default() {
     engine
         .executor(&crate::Principal::unrestricted())
         .ext()
-        .register_var(&MyVarPlugin)
+        .register_var(&MyVarPlugin, Some("test"))
         .unwrap();
     let env = engine.runtime().env().clone();
 

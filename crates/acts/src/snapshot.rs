@@ -4,8 +4,31 @@
 //! through [`SnapshotManager`] (the write path: a gRPC/NATS/Kafka adapter,
 //! or an embedder calling `engine.snapshot()` directly). At each effect
 //! prepare the scheduler reads the local snapshot for the acting
-//! execution's scope and seals it — `resolve` never performs network I/O,
-//! so remote latency and outages stay out of the scheduling hot path.
+//! execution's scope and seals it — the *seal itself* is a local cache read,
+//! so expression evaluation never performs network I/O; remote latency and
+//! outages stay out of the evaluation path.
+//!
+//! Two data paths meet at that cache:
+//!
+//! - **push** (the default): feeds write out-of-band; the seal reads what is
+//!   there and a miss follows the target's `on_missing`.
+//! - **pull** (a *snapshot variable*, registered by a provider package's
+//!   `pack:publish` metadata — `options.var`): on a miss the seal asks the
+//!   variable's provider once — a `type: "req"` message to the matching
+//!   channels, one bounded wait (`FetchOptions::timeout_ms`, clamped to
+//!   `[100, 30_000]`) — and the provider answers through `snap:reply`, which
+//!   lands the value under the same revision guard as a push feed. The
+//!   request carries only names (target, scope, the run's pid, the sealed
+//!   owner context); the engine's req gate withholds it from channels whose
+//!   subject may not read the scope it names (see
+//!   [`crate::acl::AccessControl::principal_of`]), and only the first
+//!   prepare per `(target, scope)` calls out — the rest join its wait. A
+//!   timed-out fetch folds into `on_missing`, and a plain feed's
+//!   auto-registration can never open the pull path.
+//!
+//! The scope key of a fetch target without declared `scope` params is the
+//! sealed owner context, sorted and `/`-joined — the same keys the provider
+//! filters its subscription on.
 //!
 //! Feeds stamp a monotonic `rev` per scope. `upsert` applies a value only
 //! when its revision is newer than the cached one, so a delayed retry, an
@@ -46,7 +69,13 @@
 //! read-path drop is revision-guarded: it only removes the exact expired entry
 //! the reader observed, never a refresh that landed while it was reading.
 
-use crate::{ActError, Vars, config::MissingParamAction, scheduler::Runtime};
+use crate::{
+    ActError, ActRunAs, ShareLock, Vars,
+    config::MissingParamAction,
+    event::{Message, MessageState},
+    scheduler::Runtime,
+    utils::time,
+};
 use parking_lot::RwLock;
 use std::{
     collections::HashMap,
@@ -81,13 +110,15 @@ pub enum SnapshotPolicy {
 pub const MAX_TTL_SECS: u64 = i64::MAX as u64 / 1000;
 
 /// Registration options of a snapshot-backed sealed-data target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotOptions {
     /// When a value is resolved. Both variants resolve at each effect
     /// prepare in the kernel; see [`SnapshotPolicy`].
     pub policy: SnapshotPolicy,
     /// Task param names whose values join with `/` into this target's scope
-    /// key. Empty: one global scope per target.
+    /// key. Empty: one global scope per target — except on a fetch target,
+    /// where the sealed owner context composes the scope key instead (see
+    /// [`Self::fetch`]).
     pub scope: Vec<String>,
     /// What happens when a scope param or the snapshot data is absent.
     pub on_missing: MissingParamAction,
@@ -100,6 +131,36 @@ pub struct SnapshotOptions {
     /// is read. Values above [`MAX_TTL_SECS`] cannot be represented as a
     /// deadline and are rejected by [`SnapshotOptions::validate`].
     pub ttl_secs: Option<u64>,
+    /// The pull path. `Some`: on a cache miss the seal may ask the target's
+    /// provider once (a `req` message to the matching channels, one bounded
+    /// wait, the reply lands as a `snap:reply` — the same rev guard as a
+    /// push feed). `None`: pure push, the historical behavior. Only a
+    /// variable registration (`pack:publish` metadata) opens this — a plain
+    /// feed auto-registration can never turn a target into a caller.
+    pub fetch: Option<FetchOptions>,
+}
+
+/// The pull parameters of a fetch-enabled snapshot target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchOptions {
+    /// Single-fetch upper bound in milliseconds; clamped to `[100, 30_000]`
+    /// by [`Self::timeout`] so a misconfiguration can neither spin the seal
+    /// nor hold an effect on a dead provider for half a minute.
+    pub timeout_ms: u64,
+}
+
+impl Default for FetchOptions {
+    fn default() -> Self {
+        Self { timeout_ms: 3000 }
+    }
+}
+
+impl FetchOptions {
+    /// The clamped wait. Below 100 ms no remote round trip completes
+    /// reliably; above 30 s an outage would hold every cold act of the run.
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.timeout_ms.clamp(100, 30_000))
+    }
 }
 
 impl Default for SnapshotOptions {
@@ -109,6 +170,7 @@ impl Default for SnapshotOptions {
             scope: Vec::new(),
             on_missing: MissingParamAction::Skip,
             ttl_secs: None,
+            fetch: None,
         }
     }
 }
@@ -303,26 +365,20 @@ impl SnapshotManager {
         }
     }
 
-    /// Register a snapshot target with its options (replaces any existing
-    /// registration of the same name — its cache is reset). Returns an error
-    /// when the options are invalid (see [`SnapshotOptions::validate`]).
-    pub fn register(&self, name: &str, options: SnapshotOptions) -> crate::Result<()> {
-        self.runtime.register_snapshot(name, options)?;
-        Ok(())
-    }
-
     /// Feed a new value for `name`/`scope`. Auto-registers the target with
     /// [`SnapshotOptions::default`] when missing, so the write only fails
     /// when those options are rejected (see [`SnapshotOptions::validate`]).
     /// Revisions are monotonic per scope: a value whose `rev` is not newer
     /// than the cached one is ignored (a stale revision cannot roll the
-    /// scope back).
+    /// scope back). An auto-registered target is always pure push — a
+    /// fetch-capable variable can only come from a `pack:publish` carrying
+    /// `options.var` metadata.
     pub fn upsert(&self, name: &str, scope: &str, rev: u64, data: Vars) -> crate::Result<()> {
         let store = match self.runtime.snapshot_store(name) {
             Some(store) => store,
             None => self
                 .runtime
-                .register_snapshot(name, SnapshotOptions::default())?,
+                .register_snap(name, SnapshotOptions::default(), None)?,
         };
         store.upsert(scope, rev, data);
         Ok(())
@@ -358,6 +414,282 @@ fn missing_err(name: &str, missing: &[String]) -> crate::ActError {
     ActError::Runtime(format!(
         "snapshot '{name}' missing required params: {missing:?}"
     ))
+}
+
+/// Single-flight coordinator of the fetch-on-miss pull path.
+///
+/// One prepare per `(target, scope)` becomes the **leader**: it emits the
+/// request message (a `type: "req"` event to the matching channels) and waits
+/// a bounded time; concurrent prepares of the same scope **join** the same
+/// wait instead of calling out again. The reply itself lands through the
+/// `snap:reply` action — the same rev guard as a push feed — and a woken
+/// prepare simply re-reads the store, so a late or stale reply cannot poison
+/// anything.
+#[derive(Clone, Default)]
+pub(crate) struct SnapFetchRegistry {
+    pending: ShareLock<HashMap<(String, String), Arc<FetchWaiter>>>,
+}
+
+#[derive(Debug)]
+struct FetchWaiter {
+    req_id: String,
+    tx: tokio::sync::watch::Sender<bool>,
+    /// how many prepares still wait on this slot; the last one out removes it
+    waiters: std::sync::atomic::AtomicUsize,
+}
+
+impl SnapFetchRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// One bounded fetch. `true` = a reply landed: the caller re-reads the
+    /// store. `emit` runs once, on the leader only, with the request id.
+    pub(crate) async fn fetch(
+        &self,
+        target: &str,
+        scope: &str,
+        timeout: std::time::Duration,
+        emit: impl FnOnce(&str),
+    ) -> bool {
+        let key = (target.to_string(), scope.to_string());
+        let (waiter, rx, is_leader) = {
+            let mut pending = self.pending.write();
+            match pending.get(&key) {
+                Some(waiter) => (waiter.clone(), waiter.tx.subscribe(), false),
+                None => {
+                    let waiter = Arc::new(FetchWaiter {
+                        req_id: crate::utils::shortid(),
+                        tx: tokio::sync::watch::channel(false).0,
+                        waiters: std::sync::atomic::AtomicUsize::new(0),
+                    });
+                    let rx = waiter.tx.subscribe();
+                    pending.insert(key.clone(), waiter.clone());
+                    (waiter, rx, true)
+                }
+            }
+        };
+        waiter
+            .waiters
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let wait = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+            // a reply may have landed before this waiter subscribed: the
+            // watch channel keeps the latest value, so read it first
+            if *rx.borrow_and_update() {
+                return true;
+            }
+            loop {
+                if rx.changed().await.is_err() {
+                    return false;
+                }
+                if *rx.borrow_and_update() {
+                    return true;
+                }
+            }
+        };
+        let replied = if is_leader {
+            emit(&waiter.req_id);
+            let replied = tokio::time::timeout(timeout, wait(rx))
+                .await
+                .unwrap_or(false);
+            tracing::debug!(target, scope, replied, "snapshot fetch settled");
+            replied
+        } else {
+            let replied = tokio::time::timeout(timeout, wait(rx))
+                .await
+                .unwrap_or(false);
+            tracing::debug!(target, scope, replied, "snapshot fetch joiner settled");
+            replied
+        };
+        self.release(&key, &waiter);
+        replied
+    }
+
+    /// The leaving prepare decrements the slot's waiter count; the last one
+    /// out removes the slot — but only if it is still that exact waiter (a
+    /// later leader may have replaced it after a timeout).
+    fn release(&self, key: &(String, String), waiter: &Arc<FetchWaiter>) {
+        if waiter
+            .waiters
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+            == 1
+        {
+            let mut pending = self.pending.write();
+            if pending
+                .get(key)
+                .map(|w| Arc::ptr_eq(w, waiter))
+                .unwrap_or(false)
+            {
+                pending.remove(key);
+            }
+        }
+    }
+
+    /// A `snap:reply` landed for `req_id`: mark the waiter replied (the watch
+    /// value persists, so a waiter that subscribes later still reads it) and
+    /// wake whoever waits. When no fetch is counting on the slot (a request
+    /// announced for a reply that landed before any prepare joined), the
+    /// slot is released here — the value is in the store, and the next miss
+    /// starts a fresh request. `false` — unknown request (a late reply after
+    /// the leader gave up); the value is still cached, only nobody waits.
+    pub(crate) fn resolve(&self, req_id: &str) -> bool {
+        let waiter = self
+            .pending
+            .read()
+            .iter()
+            .find(|(_, waiter)| waiter.req_id == req_id)
+            .map(|(key, waiter)| (key.clone(), waiter.clone()));
+        match waiter {
+            Some((key, waiter)) => {
+                // the send succeeds only with a live receiver; the stored
+                // value is what a later subscriber reads either way
+                let _ = waiter.tx.send(true);
+                if waiter.waiters.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    let mut pending = self.pending.write();
+                    if pending
+                        .get(&key)
+                        .map(|w| Arc::ptr_eq(w, &waiter))
+                        .unwrap_or(false)
+                    {
+                        pending.remove(&key);
+                    }
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preannounce(&self, target: &str, scope: &str) -> String {
+        let req_id = crate::utils::shortid();
+        let waiter = Arc::new(FetchWaiter {
+            req_id: req_id.clone(),
+            tx: tokio::sync::watch::channel(false).0,
+            waiters: std::sync::atomic::AtomicUsize::new(0),
+        });
+        self.pending
+            .write()
+            .insert((target.to_string(), scope.to_string()), waiter);
+        req_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_scopes(&self) -> Vec<(String, String)> {
+        self.pending.read().keys().cloned().collect()
+    }
+}
+
+/// Emit one fetch request for `target`/`scope` and wait a bounded time for a
+/// reply. `true` — a provider answered through `snap:reply`: re-read the
+/// store. The request carries only names (`target`, `scope`, the run's pid
+/// and the sealed owner context for provider self-filtering) — never sealed
+/// data.
+pub(crate) async fn snap_fetch(
+    runtime: &Runtime,
+    pid: &str,
+    owner: &crate::acl::ScopePolicy,
+    target: &str,
+    scope: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let registry = runtime.fetch_registry();
+    let context: serde_json::Value = owner
+        .context
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::from(v.as_str())))
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into();
+    let emit = |req_id: &str| {
+        let mut msg = Message {
+            id: req_id.to_string(),
+            r#type: "req".to_string(),
+            name: "snap_fetch".to_string(),
+            pid: pid.to_string(),
+            uses: Some(target.to_string()),
+            state: MessageState::Created,
+            timestamp: time::timestamp(),
+            ..Default::default()
+        };
+        msg.inputs.set("scope", scope);
+        msg.inputs.set("req_id", req_id);
+        msg.inputs.set("options", context.clone());
+        runtime.emitter().emit_req(&msg);
+        tracing::debug!(pid, target, scope, req_id, "snapshot fetch requested");
+    };
+    registry.fetch(target, scope, timeout, emit).await
+}
+
+/// The variable registration a `pack:publish` carries: the `options.var`
+/// metadata turns the published package into the snapshot variable's
+/// provider and registers the target under the given pull parameters.
+/// `Ok(None)` — the package declares no variable (the common case: every
+/// `acts.core.*` package and any package with arbitrary options).
+pub(crate) fn variable_target(
+    pack: &crate::data::Package,
+) -> crate::Result<Option<(String, SnapshotOptions)>> {
+    let Some(raw) = &pack.options else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        // options are free-form; not a JSON object simply means "no variable"
+        return Ok(None);
+    };
+    let Some(var) = value.get("var").and_then(|v| v.as_str()).map(str::trim) else {
+        return Ok(None);
+    };
+    if var.is_empty() || var.len() > 64 || var.contains('/') {
+        return Err(ActError::Config(format!(
+            "package '{}' declares an invalid snapshot variable '{var}': \
+             it must be 1..=64 bytes without a '/'",
+            pack.id
+        )));
+    }
+    if pack.run_as != ActRunAs::Irq {
+        return Err(ActError::Config(format!(
+            "package '{}' declares snapshot variable '{var}' but its run_as \
+             cannot answer fetches; only 'irq' providers can",
+            pack.id
+        )));
+    }
+    let ttl_secs = value.get("ttl_secs").and_then(|v| v.as_u64());
+    let on_missing = match value.get("on_missing").and_then(|v| v.as_str()) {
+        None | Some("skip") => MissingParamAction::Skip,
+        Some("error") => MissingParamAction::Error,
+        Some(other) => {
+            return Err(ActError::Config(format!(
+                "package '{}' declares snapshot variable '{var}' with an \
+                 invalid on_missing '{other}' (skip|error)",
+                pack.id
+            )));
+        }
+    };
+    let scope = match value.get("scope") {
+        None => Vec::new(),
+        Some(v) => serde_json::from_value::<Vec<String>>(v.clone()).map_err(|err| {
+            ActError::Config(format!(
+                "package '{}' declares snapshot variable '{var}' with an \
+                 invalid scope array: {err}",
+                pack.id
+            ))
+        })?,
+    };
+    let options = SnapshotOptions {
+        policy: SnapshotPolicy::default(),
+        scope,
+        on_missing,
+        ttl_secs,
+        fetch: Some(FetchOptions {
+            timeout_ms: value
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| FetchOptions::default().timeout_ms),
+        }),
+    };
+    options.validate()?;
+    Ok(Some((var.to_string(), options)))
 }
 
 /// Canonical scope-key fragment: strings without quotes, other json verbatim.
@@ -405,7 +737,10 @@ pub(crate) fn resolve_scope_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::shell::snapshot::SnapshotRegistry;
     use std::sync::Barrier;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     #[test]
     fn join_scope_strings_and_numbers() {
@@ -679,9 +1014,10 @@ mod tests {
         let runtime = Runtime::new(&crate::Config::default(), None).unwrap();
         let manager = SnapshotManager::new(&runtime);
 
-        // A valid registration, then the full write/read/remove surface.
-        manager
-            .register("profile", SnapshotOptions::default())
+        // A valid variable registration, then the full write/read/remove
+        // surface.
+        runtime
+            .register_snap("profile", SnapshotOptions::default(), None)
             .unwrap();
         assert!(manager.read("profile", "u1").is_none());
         assert!(manager.list("profile").is_empty());
@@ -708,9 +1044,18 @@ mod tests {
         assert!(manager.read("never-registered", "s").is_none());
         assert!(manager.list("never-registered").is_empty());
 
-        // Invalid options are refused at registration.
+        // Invalid options are refused at registration (both paths).
         let invalid = SnapshotOptions::default().with_ttl(MAX_TTL_SECS + 1);
-        assert!(manager.register("bad", invalid).is_err());
+        assert!(runtime.register_snap("bad", invalid, None).is_err());
+        assert!(
+            runtime
+                .register_snap(
+                    "bad",
+                    SnapshotOptions::default().with_ttl(1),
+                    Some("acts.test.bad")
+                )
+                .is_ok()
+        );
 
         runtime.close().await;
     }
@@ -732,5 +1077,275 @@ mod tests {
         assert_eq!(got.rev, 1);
         assert_eq!(got.data.get::<i32>("a").unwrap(), 1);
         assert!(store.get("s1").is_some());
+    }
+
+    #[test]
+    fn fetch_timeout_clamps_to_a_usable_window() {
+        assert_eq!(FetchOptions::default().timeout().as_millis(), 3000);
+        assert_eq!(
+            FetchOptions { timeout_ms: 50 }.timeout().as_millis(),
+            100,
+            "below the floor no remote round trip is reliable"
+        );
+        assert_eq!(
+            FetchOptions { timeout_ms: 60_000 }.timeout().as_millis(),
+            30_000,
+            "above the ceiling an outage would hold every cold act"
+        );
+        assert_eq!(
+            FetchOptions { timeout_ms: 1234 }.timeout().as_millis(),
+            1234
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_fetches_share_one_request_and_one_reply() {
+        let registry = SnapFetchRegistry::new();
+        let emits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let leader_registry = registry.clone();
+        let leader_emits = emits.clone();
+        let leader = tokio::spawn(async move {
+            leader_registry
+                .fetch("profile", "u9", Duration::from_secs(5), |_| {
+                    leader_emits.fetch_add(1, Ordering::SeqCst);
+                })
+                .await
+        });
+        // give the leader the slot, then join as the concurrent prepare
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let joiner = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry
+                    .fetch("profile", "u9", Duration::from_secs(5), |_| {
+                        panic!("a joiner must not emit its own request");
+                    })
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // exactly one request went out; its reply wakes both waiters
+        assert_eq!(emits.load(Ordering::SeqCst), 1);
+        let req_id = registry
+            .pending
+            .read()
+            .values()
+            .next()
+            .unwrap()
+            .req_id
+            .clone();
+        assert!(registry.resolve(&req_id));
+        assert!(leader.await.unwrap());
+        assert!(joiner.await.unwrap());
+        assert!(registry.pending_scopes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_fetch_frees_the_slot_and_answers_false() {
+        let registry = SnapFetchRegistry::new();
+        let replied = registry
+            .fetch("profile", "u9", Duration::from_millis(80), |_| {})
+            .await;
+        assert!(!replied);
+        assert!(
+            registry.pending_scopes().is_empty(),
+            "the timed-out leader must release the slot"
+        );
+
+        // a reply for the dead request resolves nothing
+        assert!(!registry.resolve("no-such-req"));
+
+        // the freed slot accepts a fresh fetch
+        let replied = registry
+            .fetch("profile", "u9", Duration::from_millis(80), |_| {})
+            .await;
+        assert!(!replied);
+    }
+
+    #[test]
+    fn register_snap_conflicts_and_provider_duplicates_are_refused() {
+        let registry = SnapshotRegistry::new();
+        let base = SnapshotOptions {
+            fetch: Some(FetchOptions { timeout_ms: 3000 }),
+            ..SnapshotOptions::default()
+        };
+        registry
+            .register_snap("profile", base.clone(), Some("acts.clientA.profile"))
+            .unwrap();
+
+        // the same name **and** provider twice is the one hard error: a
+        // provider registers a variable once
+        let Err(err) =
+            registry.register_snap("profile", base.clone(), Some("acts.clientA.profile"))
+        else {
+            panic!("a duplicate provider registration must be refused");
+        };
+        assert!(err.contains("already registered by provider"), "{err}");
+        assert_eq!(registry.providers("profile").len(), 1);
+
+        // identical parameters from a **different** provider: the second
+        // package joins the provider list — same-name variables are
+        // distinguished by their providers
+        registry
+            .register_snap("profile", base.clone(), Some("acts.clientB.profile"))
+            .unwrap();
+        // the global registration (`None`) is yet another entry: the default
+        // every run reads unless its context names a provider
+        registry
+            .register_snap("profile", base.clone(), None)
+            .unwrap();
+        // and the global duplicate is refused just the same
+        let Err(err) = registry.register_snap("profile", base.clone(), None) else {
+            panic!("a duplicate global registration must be refused");
+        };
+        assert!(err.contains("provider 'global'"), "{err}");
+        assert_eq!(
+            registry.providers("profile"),
+            vec![
+                "acts.clientA.profile".to_string(),
+                "acts.clientB.profile".to_string(),
+                String::new(),
+            ]
+        );
+        // anything else: refused — the first publisher fixes the pull shape
+        let Err(err) = registry.register_snap(
+            "profile",
+            SnapshotOptions {
+                fetch: Some(FetchOptions { timeout_ms: 5000 }),
+                ..SnapshotOptions::default()
+            },
+            Some("acts.clientC.profile"),
+        ) else {
+            panic!("conflicting parameters must be refused");
+        };
+        assert!(err.contains("different parameters"), "{err}");
+        // a push target collides with a fetch target just the same
+        let Err(err) = registry.register_snap(
+            "profile",
+            SnapshotOptions::default(),
+            Some("acts.clientD.profile"),
+        ) else {
+            panic!("a push registration over a fetch variable must be refused");
+        };
+        assert!(err.contains("different parameters"), "{err}");
+        assert_eq!(
+            registry.providers("profile").len(),
+            3,
+            "a refused registration must not join the provider list"
+        );
+    }
+
+    #[test]
+    fn variable_target_parses_the_publish_metadata() {
+        let pack = |options: Option<serde_json::Value>, run_as: ActRunAs| crate::data::Package {
+            id: "acts.clientA.profile".into(),
+            options: options.map(|v| v.to_string()),
+            run_as,
+            ..Default::default()
+        };
+        // no options, or options without `var`: not a variable package
+        assert!(
+            variable_target(&pack(None, ActRunAs::Irq))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            variable_target(&pack(Some(serde_json::json!({"other": 1})), ActRunAs::Irq))
+                .unwrap()
+                .is_none()
+        );
+        // non-JSON options are free-form package data, not an error
+        let mut free_form = pack(Some(serde_json::json!([])), ActRunAs::Irq);
+        free_form.options = Some("not json".to_string());
+        assert!(variable_target(&free_form).unwrap().is_none());
+
+        // full metadata
+        let (var, options) = variable_target(&pack(
+            Some(serde_json::json!({
+                "var": "profile",
+                "ttl_secs": 300,
+                "timeout_ms": 1500,
+                "on_missing": "error",
+                "scope": ["tenant", "unit"]
+            })),
+            ActRunAs::Irq,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(var, "profile");
+        assert_eq!(options.ttl_secs, Some(300));
+        assert_eq!(options.on_missing, MissingParamAction::Error);
+        assert_eq!(
+            options.scope,
+            vec!["tenant".to_string(), "unit".to_string()]
+        );
+        assert_eq!(options.fetch, Some(FetchOptions { timeout_ms: 1500 }));
+
+        // minimal metadata: the defaults
+        let (var, options) = variable_target(&pack(
+            Some(serde_json::json!({ "var": "security" })),
+            ActRunAs::Irq,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(var, "security");
+        assert_eq!(
+            options,
+            SnapshotOptions {
+                fetch: Some(FetchOptions::default()),
+                ..SnapshotOptions::default()
+            }
+        );
+        assert_eq!(
+            options.fetch.as_ref().unwrap().timeout(),
+            FetchOptions::default().timeout()
+        );
+
+        // refusals
+        for (options, expected) in [
+            (serde_json::json!({"var": ""}), "invalid snapshot variable"),
+            (
+                serde_json::json!({"var": "a/b"}),
+                "invalid snapshot variable",
+            ),
+            (
+                serde_json::json!({"var": "x", "on_missing": "boom"}),
+                "invalid on_missing",
+            ),
+            (
+                serde_json::json!({"var": "x", "scope": "tenant"}),
+                "invalid scope array",
+            ),
+            (
+                serde_json::json!({"var": "x", "ttl_secs": MAX_TTL_SECS + 1}),
+                "exceeds the maximum",
+            ),
+        ] {
+            let err = variable_target(&pack(Some(options), ActRunAs::Irq)).unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+        // only an irq package can answer fetches
+        for run_as in [ActRunAs::Func, ActRunAs::Msg] {
+            let err = variable_target(&pack(Some(serde_json::json!({ "var": "profile" })), run_as))
+                .unwrap_err();
+            assert!(err.to_string().contains("run_as"), "{err}");
+        }
+        // a long name is refused, a 64-byte name passes
+        let err = variable_target(&pack(
+            Some(serde_json::json!({ "var": "x".repeat(65) })),
+            ActRunAs::Irq,
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid snapshot variable"),
+            "{err}"
+        );
+        variable_target(&pack(
+            Some(serde_json::json!({ "var": "x".repeat(64) })),
+            ActRunAs::Irq,
+        ))
+        .unwrap()
+        .unwrap();
     }
 }

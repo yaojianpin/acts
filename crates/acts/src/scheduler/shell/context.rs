@@ -319,6 +319,16 @@ impl Context {
                 continue;
             }
             let values = match resolve_scope_params(&task, &self.proc, options) {
+                Ok(values) if values.is_empty() && options.fetch.is_some() => {
+                    // a fetch target with no declared scope params composes
+                    // its scope key from the sealed owner context: the
+                    // provider self-filters on the same keys
+                    owner
+                        .context
+                        .values()
+                        .map(|value| serde_json::Value::from(value.as_str()))
+                        .collect::<Vec<_>>()
+                }
                 Ok(values) => values,
                 Err(missing) => match options.on_missing {
                     MissingParamAction::Skip => continue,
@@ -338,14 +348,39 @@ impl Context {
             }
             match store.get(&scope) {
                 Some(entry) => task.set_sealed(&name, entry.data.clone()),
-                None => match options.on_missing {
-                    MissingParamAction::Skip => continue,
-                    MissingParamAction::Error => {
-                        return Err(ActError::Runtime(format!(
-                            "snapshot '{name}' has no data for scope '{scope}'"
-                        )));
+                None => {
+                    // The pull path: a fetch-enabled target asks its provider
+                    // once, bounded — and only after the scope check above
+                    // passed, so a run never fetches a scope it does not own.
+                    // No fetch configured, or no reply in time: the target's
+                    // `on_missing` decides, exactly like a push miss.
+                    let mut entry = None;
+                    if let Some(fetch) = &store.options.fetch {
+                        let fetched = crate::snapshot::snap_fetch(
+                            &self.runtime,
+                            self.proc.id(),
+                            &owner,
+                            &name,
+                            &scope,
+                            fetch.timeout(),
+                        )
+                        .await;
+                        if fetched {
+                            entry = store.get(&scope);
+                        }
                     }
-                },
+                    match entry {
+                        Some(entry) => task.set_sealed(&name, entry.data.clone()),
+                        None => match options.on_missing {
+                            MissingParamAction::Skip => continue,
+                            MissingParamAction::Error => {
+                                return Err(ActError::Runtime(format!(
+                                    "snapshot '{name}' has no data for scope '{scope}'"
+                                )));
+                            }
+                        },
+                    }
+                }
             }
         }
         Ok(())
@@ -515,7 +550,7 @@ mod tests {
             on_missing: MissingParamAction::Error,
             ..crate::snapshot::SnapshotOptions::per_task()
         };
-        runtime.register_snapshot("profile", options).unwrap();
+        runtime.register_snap("profile", options, None).unwrap();
         runtime.snapshot_store("profile").unwrap().upsert(
             "u9",
             1,
@@ -544,7 +579,7 @@ mod tests {
         let mut skip = crate::snapshot::SnapshotOptions::per_task();
         skip.scope = vec!["uid".into()];
         skip.on_missing = MissingParamAction::Skip;
-        runtime.register_snapshot("skip", skip).unwrap();
+        runtime.register_snap("skip", skip, None).unwrap();
         let ctx = ctx(&runtime, &spec(open_owner(), Vec::new()));
         ctx.prepare().await.unwrap();
         assert!(!ctx.task().has_sealed_local("skip"));
@@ -552,7 +587,7 @@ mod tests {
         let mut error = crate::snapshot::SnapshotOptions::per_task();
         error.scope = vec!["uid".into()];
         error.on_missing = MissingParamAction::Error;
-        runtime.register_snapshot("error", error).unwrap();
+        runtime.register_snap("error", error, None).unwrap();
         let failure = ctx.prepare().await.unwrap_err();
         assert!(
             format!("{failure}").contains("missing required params"),
@@ -570,7 +605,7 @@ mod tests {
             on_missing: MissingParamAction::Error,
             ..crate::snapshot::SnapshotOptions::per_task()
         };
-        runtime.register_snapshot("profile", options).unwrap();
+        runtime.register_snap("profile", options, None).unwrap();
         runtime.snapshot_store("profile").unwrap().upsert(
             "u9",
             1,
@@ -607,7 +642,7 @@ mod tests {
             ..crate::snapshot::SnapshotOptions::per_task()
         };
         skip.on_missing = MissingParamAction::Skip;
-        runtime.register_snapshot("skip", skip).unwrap();
+        runtime.register_snap("skip", skip, None).unwrap();
         let missing = ctx(
             &runtime,
             &spec(open_owner(), vec![("uid".into(), "\"u-missing\"".into())]),
@@ -622,7 +657,11 @@ mod tests {
     async fn a_per_proc_seal_is_resolved_once_per_lineage() {
         let runtime = new_runtime(&Config::default());
         runtime
-            .register_snapshot("profile", crate::snapshot::SnapshotOptions::per_proc())
+            .register_snap(
+                "profile",
+                crate::snapshot::SnapshotOptions::per_proc(),
+                None,
+            )
             .unwrap();
         runtime
             .snapshot_store("profile")
@@ -645,5 +684,173 @@ mod tests {
             Some("first"),
             "the local seal is the preparation's value"
         );
+    }
+
+    /// The pull path: a fetch target with a pending request seals once its
+    /// provider answers (`snap:reply` upserts the cache, the prepare re-reads
+    /// it); an unanswered request folds into the target's `on_missing`.
+    #[tokio::test]
+    async fn a_fetch_reply_seals_and_a_timeout_folds_into_on_missing() {
+        let runtime = new_runtime(&Config::default());
+        let options = crate::snapshot::SnapshotOptions {
+            scope: vec!["uid".into()],
+            on_missing: MissingParamAction::Error,
+            fetch: Some(crate::snapshot::FetchOptions { timeout_ms: 100 }),
+            ..crate::snapshot::SnapshotOptions::default()
+        };
+        runtime.register_snap("profile", options, None).unwrap();
+
+        // pre-announce the request the leader will join, then answer it
+        let req_id = runtime.fetch_registry().preannounce("profile", "u9");
+        let store = runtime.snapshot_store("profile").unwrap();
+        let registry = runtime.fetch_registry().clone();
+        let resolver = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            store.upsert("u9", 7, Vars::new().with("name", "fetched"));
+            assert!(registry.resolve(&req_id));
+        });
+
+        let flow_ctx = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("uid".into(), "\"u9\"".into())]),
+        );
+        flow_ctx.prepare().await.unwrap();
+        resolver.await.unwrap();
+        let sealed = flow_ctx.task().sealed(&flow_ctx.proc, "profile").unwrap();
+        assert_eq!(sealed.get::<String>("name").as_deref(), Some("fetched"));
+
+        // No answer within the window: `Error` refuses with the same miss
+        // message a push target gives, `Skip` leaves the target unsealed.
+        let runtime = new_runtime(&Config::default());
+        let options = crate::snapshot::SnapshotOptions {
+            scope: vec!["uid".into()],
+            on_missing: MissingParamAction::Error,
+            fetch: Some(crate::snapshot::FetchOptions { timeout_ms: 100 }),
+            ..crate::snapshot::SnapshotOptions::default()
+        };
+        runtime.register_snap("profile", options, None).unwrap();
+        let err_ctx = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("uid".into(), "\"u9\"".into())]),
+        );
+        let failure = err_ctx.prepare().await.unwrap_err();
+        assert!(
+            format!("{failure}").contains("has no data for scope"),
+            "{failure}"
+        );
+
+        let runtime = new_runtime(&Config::default());
+        let options = crate::snapshot::SnapshotOptions {
+            scope: vec!["uid".into()],
+            on_missing: MissingParamAction::Skip,
+            fetch: Some(crate::snapshot::FetchOptions { timeout_ms: 100 }),
+            ..crate::snapshot::SnapshotOptions::default()
+        };
+        runtime.register_snap("skip", options, None).unwrap();
+        let skip_ctx = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("uid".into(), "\"u9\"".into())]),
+        );
+        skip_ctx.prepare().await.unwrap();
+        assert!(!skip_ctx.task().has_sealed_local("skip"));
+    }
+
+    /// A fetch target with no declared scope params composes its scope key
+    /// from the sealed owner context — the same keys a provider self-filters
+    /// its subscription on.
+    #[tokio::test]
+    async fn a_fetch_target_defaults_its_scope_to_the_owner_context() {
+        let runtime = new_runtime(&Config::default());
+        let options = crate::snapshot::SnapshotOptions {
+            on_missing: MissingParamAction::Error,
+            fetch: Some(crate::snapshot::FetchOptions { timeout_ms: 100 }),
+            ..crate::snapshot::SnapshotOptions::default()
+        };
+        runtime.register_snap("profile", options, None).unwrap();
+
+        let owner = crate::ScopePolicy {
+            subject: "u1".into(),
+            scopes: std::collections::HashMap::from([(
+                "profile".to_string(),
+                vec!["t1/u9".to_string()],
+            )]),
+            context: [
+                ("unit".to_string(), "u9".to_string()),
+                ("tenant".to_string(), "t1".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..crate::ScopePolicy::default()
+        };
+        // the context keys, sorted, joined with `/`: `t1/u9`
+        let req_id = runtime.fetch_registry().preannounce("profile", "t1/u9");
+        let store = runtime.snapshot_store("profile").unwrap();
+        let registry = runtime.fetch_registry().clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            store.upsert("t1/u9", 1, Vars::new().with("uid", "who"));
+            assert!(registry.resolve(&req_id));
+        });
+
+        let ctx = ctx(&runtime, &spec(owner, Vec::new()));
+        ctx.prepare().await.unwrap();
+        let sealed = ctx.task().sealed(&ctx.proc, "profile").unwrap();
+        assert_eq!(sealed.get::<String>("uid").as_deref(), Some("who"));
+        assert!(runtime.fetch_registry().pending_scopes().is_empty());
+    }
+
+    /// The scope check precedes the fetch: a run never even asks for a scope
+    /// its owner does not read — nothing is pending after a denial.
+    #[tokio::test]
+    async fn a_denied_scope_is_never_fetched() {
+        let runtime = new_runtime(&Config::default());
+        let options = crate::snapshot::SnapshotOptions {
+            scope: vec!["uid".into()],
+            on_missing: MissingParamAction::Skip,
+            fetch: Some(crate::snapshot::FetchOptions { timeout_ms: 100 }),
+            ..crate::snapshot::SnapshotOptions::default()
+        };
+        runtime.register_snap("profile", options, None).unwrap();
+
+        // the owner reads t1 only; the params spell t2
+        let owner = crate::ScopePolicy {
+            subject: "u1".into(),
+            scopes: std::collections::HashMap::from([(
+                "profile".to_string(),
+                vec!["t1/*".to_string()],
+            )]),
+            ..crate::ScopePolicy::default()
+        };
+        let ctx = ctx(
+            &runtime,
+            &spec(owner, vec![("uid".into(), "\"t2/secret\"".into())]),
+        );
+        // the denial is unconditional (a denied scope is never skipped over
+        // into silence): the run must fail knowing why
+        let failure = ctx.prepare().await.unwrap_err();
+        assert!(matches!(failure, ActError::Denied(_)), "{failure:?}");
+        assert!(
+            runtime.fetch_registry().pending_scopes().is_empty(),
+            "a denied scope must never reach the providers"
+        );
+    }
+
+    /// A push target (no `fetch`) never emits a request: its miss is the
+    /// historical behavior, untouched.
+    #[tokio::test]
+    async fn a_push_target_never_emits_a_fetch_request() {
+        let runtime = new_runtime(&Config::default());
+        let options = crate::snapshot::SnapshotOptions {
+            scope: vec!["uid".into()],
+            ..crate::snapshot::SnapshotOptions::default()
+        };
+        runtime.register_snap("profile", options, None).unwrap();
+        let ctx = ctx(
+            &runtime,
+            &spec(open_owner(), vec![("uid".into(), "\"u9\"".into())]),
+        );
+        ctx.prepare().await.unwrap();
+        assert!(!ctx.task().has_sealed_local("profile"));
+        assert!(runtime.fetch_registry().pending_scopes().is_empty());
     }
 }

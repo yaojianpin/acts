@@ -342,6 +342,10 @@ pub struct AclUser {
     /// per snapshot target, the scope patterns the user owns
     /// (json `HashMap<String, Vec<String>>`; `$subject` allowed)
     pub snapshot: String,
+    /// organization vocabulary (json `BTreeMap<String, String>`; the
+    /// `$ctx.<key>` substitution source), empty string = none
+    #[serde(default)]
+    pub context: String,
 
     pub create_time: i64,
     pub update_time: i64,
@@ -364,6 +368,16 @@ impl AclUser {
                 serde_json::from_str(&self.snapshot).map_err(|err| {
                     ActError::Store(format!(
                         "acl user '{}' has an invalid snapshot rule: {err}",
+                        self.id
+                    ))
+                })?
+            },
+            context: if self.context.trim().is_empty() {
+                Default::default()
+            } else {
+                serde_json::from_str(&self.context).map_err(|err| {
+                    ActError::Store(format!(
+                        "acl user '{}' has an invalid context rule: {err}",
                         self.id
                     ))
                 })?
@@ -1161,6 +1175,12 @@ impl AccessControl for UserAcl {
         true
     }
 
+    /// The store-backed registry manages users: the fetch-request gate may
+    /// ask it for a subject's scopes.
+    fn manages_users(&self) -> bool {
+        true
+    }
+
     fn password_change_required(&self, subject: &str) -> bool {
         self.users
             .read()
@@ -1449,6 +1469,22 @@ impl AccessControl for UserAcl {
         .await
     }
 
+    /// The stored user's compiled principal (the fetch-request gate's
+    /// question): an enabled user answers with its grants, an unknown or
+    /// disabled one with `None`.
+    async fn principal_of(&self, subject: &str) -> Option<Principal> {
+        let store = self
+            .store()
+            .ok_or_else(|| ActError::Store("the acl is not bound to a store".to_string()))
+            .ok()?;
+        let col = store.collection::<AclUser>();
+        let row = col.find_opt(subject.trim()).await.ok()??;
+        if !row.enabled {
+            return None;
+        }
+        Principal::from_policy(&row.policy().ok()?).ok()
+    }
+
     async fn set_user(&self, spec: &UserSpec) -> Result<()> {
         let name = spec.name.trim().to_string();
         if name.is_empty() {
@@ -1502,6 +1538,10 @@ impl AccessControl for UserAcl {
         if let Some(snapshot) = &spec.snapshot {
             row.snapshot = serde_json::to_string(snapshot)
                 .map_err(|err| ActError::Config(format!("invalid snapshot rule: {err}")))?;
+        }
+        if let Some(context) = &spec.context {
+            row.context = serde_json::to_string(context)
+                .map_err(|err| ActError::Config(format!("invalid context rule: {err}")))?;
         }
         for password in spec
             .rm_passwords
@@ -1630,6 +1670,7 @@ impl AccessControl for UserAcl {
             "deny": row.deny,
             "patterns": row.patterns,
             "snapshot": row.policy().map(|p| p.snapshot).unwrap_or_default(),
+            "context": row.policy().map(|p| p.context).unwrap_or_default(),
             "passwords": row.passwords.len(),
             "must_change_password": row.must_change_password,
             "unrestricted": user.principal.is_unrestricted(),
@@ -1685,6 +1726,7 @@ fn admin_row_with(password: &str, must_change_password: bool) -> Result<AclUser>
         deny: Vec::new(),
         patterns: vec!["*".to_string()],
         snapshot: "{}".to_string(),
+        context: String::new(),
         create_time: now,
         update_time: now,
         timestamp: now,
@@ -1782,6 +1824,109 @@ mod tests {
         assert_eq!(principal.subject(), "op");
         principal.check("model:ls").unwrap();
         assert!(principal.check("model:deploy").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_users_context_roundtrips_through_the_store_and_authenticates() {
+        use std::collections::BTreeMap;
+        let (acl, _store) = acl().await;
+        set_user(
+            &acl,
+            UserSpec {
+                name: "op".to_string(),
+                add_passwords: vec!["op-pass".to_string()],
+                snapshot: Some(HashMap::from([(
+                    "profile".to_string(),
+                    vec!["$ctx.tenant/$ctx.unit/*".to_string()],
+                )])),
+                context: Some(BTreeMap::from([
+                    ("tenant".to_string(), "t1".to_string()),
+                    ("unit".to_string(), "u9".to_string()),
+                ])),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // the stored row compiles into a principal that substitutes the
+        // vocabulary; the pattern without its key would read nothing
+        let tokens = acl.login("op", "op-pass").await.unwrap();
+        let principal = acl.authenticate(Some(&tokens.token)).unwrap();
+        principal.check_scope("profile", "t1/u9/uid").unwrap();
+        assert!(principal.check_scope("profile", "t2/u9/uid").is_err());
+
+        // whoami carries the vocabulary back to the caller
+        let who = principal.to_value();
+        assert_eq!(who["context"]["tenant"], serde_json::json!("t1"));
+
+        // get_user answers the stored policy including the context
+        let view = acl.get_user("op").await.unwrap();
+        assert_eq!(view["context"]["unit"], serde_json::json!("u9"));
+
+        // update in place: `None` keeps, `Some` **replaces the whole map**
+        // (list semantics, like every other UserSpec field)
+        acl.set_user(&UserSpec {
+            name: "op".to_string(),
+            context: Some(BTreeMap::from([
+                ("tenant".to_string(), "t7".to_string()),
+                ("unit".to_string(), "u9".to_string()),
+            ])),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let principal = acl
+            .authenticate(Some(&acl.login("op", "op-pass").await.unwrap().token))
+            .unwrap();
+        assert!(principal.check_scope("profile", "t7/u9/uid").is_ok());
+        assert!(
+            principal.check_scope("profile", "t1/u9/uid").is_err(),
+            "the old context must not survive a replacement"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_context_is_refused_by_setuser() {
+        use std::collections::BTreeMap;
+        let (acl, _store) = acl().await;
+        let err = acl
+            .set_user(&UserSpec {
+                name: "op".into(),
+                context: Some(BTreeMap::from([("Bad-Key".to_string(), "v".to_string())])),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActError::Config(_)), "{err:?}");
+    }
+
+    /// The fetch-request gate's question: an enabled user answers with its
+    /// compiled grants, an unknown or disabled one with `None`.
+    #[tokio::test]
+    async fn principal_of_answers_enabled_users_only() {
+        let (acl, _store) = acl().await;
+        set_user(
+            &acl,
+            UserSpec {
+                name: "op".into(),
+                add_passwords: vec!["pw".into()],
+                snapshot: Some(HashMap::from([("profile".into(), vec!["t1/*".into()])])),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let principal = acl.principal_of("op").await.unwrap();
+        principal.check_scope("profile", "t1/x").unwrap();
+        assert!(principal.check_scope("profile", "t2/x").is_err());
+        assert!(acl.principal_of("nobody").await.is_none());
+
+        // a disabled user answers nothing: its channel would be silent
+        acl.set_user_enabled("op", false).await.unwrap();
+        assert!(acl.principal_of("op").await.is_none());
+
+        // the registry is a gate-answering one
+        assert!(acl.manages_users());
     }
 
     #[tokio::test]

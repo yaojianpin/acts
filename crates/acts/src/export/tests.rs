@@ -1539,7 +1539,7 @@ async fn export_extender_register_module() {
 
     let before_count = engine.runtime().env().user_env_count();
     let module = test_module::TestModule;
-    extender.ext().register_var(&module).unwrap();
+    extender.ext().register_var(&module, Some("test")).unwrap();
     let count = engine.runtime().env().user_env_count();
     assert_eq!(count, before_count + 1);
 }

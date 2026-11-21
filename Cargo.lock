@@ -163,6 +163,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "acts-example-plugin-snap-provider"
+version = "0.1.0"
+dependencies = [
+ "acts",
+ "acts-proto",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "acts-example-plugin-web"
 version = "0.1.0"
 dependencies = [
