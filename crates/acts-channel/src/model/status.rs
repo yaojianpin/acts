@@ -23,8 +23,14 @@ pub struct SystemStatus {
     /// The installed capabilities' keys, one entry per capability
     /// implementation the server's assembly attached.
     pub caps: Vec<String>,
-    /// The server's effective configuration, as parsed from its config file.
+    /// The server's effective configuration, as parsed from its config file
+    /// (redacted server-side: sensitive fields answer `"[configured]"`,
+    /// unclassified ones `"[redacted]"`).
     pub config: serde_json::Value,
+    /// The server's ingress counters and subscription gauges. Absent in
+    /// answers from a server that predates the field.
+    #[serde(default)]
+    pub metrics: std::collections::BTreeMap<String, u64>,
 }
 
 /// Memory usage in bytes.

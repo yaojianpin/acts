@@ -142,8 +142,9 @@ fn test_app_error_from_validation_errors_is_a_400() {
     assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
 }
 
-/// An action refusal keeps its kind: no credential is 401, no grant is 403,
-/// and everything else is a server failure (500).
+/// An action refusal keeps its kind — the stable HTTP status the shared
+/// external-error contract assigns each code (404 for a missing target, 400
+/// for bad input, 409 for a lost race, 429 for load, 503 for shutdown).
 #[test]
 fn app_error_maps_action_error_kinds() {
     use acts::actions::Error as ActionError;
@@ -163,11 +164,23 @@ fn app_error_maps_action_error_kinds() {
         ),
         (
             ActionError::NotFound("no:such".to_string()),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::StatusCode::NOT_FOUND,
         ),
         (
             ActionError::Invalid("bad input".to_string()),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::StatusCode::BAD_REQUEST,
+        ),
+        (
+            ActionError::Conflict("moved".to_string()),
+            axum::http::StatusCode::CONFLICT,
+        ),
+        (
+            ActionError::ResourceExhausted("busy".to_string()),
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+        ),
+        (
+            ActionError::Unavailable("draining".to_string()),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
         ),
     ] {
         let resp = AppError::from(err).into_response();
@@ -427,7 +440,7 @@ use crate::routes::{
 };
 use crate::sse::{self, MessageAck, MessageQuery};
 use acts::query::Query as ActsQuery;
-use acts::{Engine, Principal, Vars, Workflow};
+use acts::{Engine, Principal, RunningTransport, Vars, Workflow};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 
@@ -1113,6 +1126,8 @@ async fn sse_honors_explicit_filters() {
     let response = sse::sse(
         State(Arc::new(engine.clone())),
         Extension(principal),
+        axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 41_000))),
+        None,
         Query(query),
     )
     .await
@@ -1463,4 +1478,1072 @@ async fn http_call(
         .map(|(_, body)| body.to_string())
         .unwrap_or_default();
     (status, body)
+}
+
+// ── admission middleware stack (limit.rs, design §4.1) ──
+
+use crate::limit::{LimitState, WebTransport};
+
+/// A one-slot hang: the handler waits until the test drops the sender, and
+/// the test can poll the admission counter to see the request go inflight.
+type HangSlot = Arc<tokio::sync::Notify>;
+
+async fn hang_handler(State(hang): State<HangSlot>) -> &'static str {
+    hang.notified().await;
+    "done"
+}
+
+/// The middleware stack (`limit::apply_layers`) over two routes: `/act/hang`
+/// (hangs until released; the `/act/` prefix puts it under the `default`
+/// profile, so the timeout gate resolves a real deadline for it) and
+/// `/act/ping`.
+async fn limited_server(engine: &acts::Engine, web: &str) -> (u16, Arc<LimitState>, HangSlot) {
+    let config: HttpConfig = toml::from_str(web).expect("a valid [web] section");
+    let limits = LimitState::new(engine, &config).unwrap();
+    let hang: HangSlot = Arc::new(tokio::sync::Notify::new());
+    let router = axum::Router::new()
+        .route("/act/hang", axum::routing::post(hang_handler))
+        .route("/act/ping", axum::routing::post(|| async { "pong" }))
+        .with_state(hang.clone());
+    let router = crate::limit::apply_layers(&limits, router);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+    (port, limits, hang)
+}
+
+/// Parse one `X-Forwarded-For`-carrying response header out of a raw
+/// response (the body is split off first).
+fn response_header(port_headers: &[(String, String)], name: &str) -> Option<String> {
+    port_headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+}
+
+async fn http_call_with_headers(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> (u16, Vec<(String, String)>, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("the server accepts connections");
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if let Some(body) = body {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+    request.push_str(body.unwrap_or_default());
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .expect("the server answers")
+    .expect("the response is readable");
+    let text = String::from_utf8_lossy(&response).to_string();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(": "))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    (status, headers, body.to_string())
+}
+
+/// The global concurrency gate: a transport at `[web].max_concurrent` answers
+/// `429` with a `Retry-After` header, and frees up as soon as an inflight
+/// request finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn global_concurrency_refuses_the_overflow_with_retry_after() {
+    let engine = acts::Engine::builder().disable_acl().start().await.unwrap();
+    let (port, limits, hang) =
+        limited_server(&engine, "max_concurrent = 1\nrate_limit_per_min = 0\n").await;
+
+    // one inflight request holds the transport's only slot
+    let hang_port = tokio::spawn(async move {
+        let (status, _, _) = http_call_with_headers(port, "POST", "/act/hang", &[], None).await;
+        status
+    });
+    // Wait for the counter (the ground truth the gate and the drain share)
+    // to show the hung request admitted; only then can the overflow answer
+    // be the gate's refusal rather than a request that has not arrived yet.
+    let started = std::time::Instant::now();
+    while limits.counter.active() == 0 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the hang request was never admitted (counter stayed 0)"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (status, headers, body) =
+        http_call_with_headers(port, "POST", "/act/ping", &[], None).await;
+    assert_eq!(status, 429, "the overflow answers 429, body: {body}");
+    assert_eq!(
+        response_header(&headers, "retry-after").as_deref(),
+        Some("1"),
+        "the caller is told when to retry"
+    );
+
+    // the hung request finishes; the freed slot admits again
+    hang.notify_one();
+    assert_eq!(hang_port.await.unwrap(), 200, "the hung request completes");
+    let (status, _, _) = http_call_with_headers(port, "POST", "/act/ping", &[], None).await;
+    assert_eq!(status, 200, "a freed slot admits again");
+
+    engine.close().await;
+}
+
+/// The per-IP concurrency gate: the same client IP cannot hold a second
+/// request, a different IP is unaffected. Both IPs come from
+/// `X-Forwarded-For` because the peer (127.0.0.1) is a trusted proxy.
+#[tokio::test(flavor = "multi_thread")]
+async fn per_ip_concurrency_refuses_the_same_ip_only() {
+    let engine = acts::Engine::builder().disable_acl().start().await.unwrap();
+    let (port, _limits, hang) = limited_server(
+        &engine,
+        "max_concurrent = 8\nmax_concurrent_per_ip = 1\nrate_limit_per_min = 0\ntrusted_proxy_cidrs = [\"127.0.0.1/32\"]\n",
+    )
+    .await;
+
+    let hang_task = tokio::spawn(async move {
+        let (status, _, _) = http_call_with_headers(
+            port,
+            "POST",
+            "/act/hang",
+            &[("x-forwarded-for", "9.9.9.9")],
+            None,
+        )
+        .await;
+        status
+    });
+    // wait until the first request is inflight by polling the gate with a
+    // distinct IP: it must succeed, so retry until it does
+    let distinct = loop {
+        let (status, _, _) = http_call_with_headers(
+            port,
+            "POST",
+            "/act/ping",
+            &[("x-forwarded-for", "8.8.8.8")],
+            None,
+        )
+        .await;
+        if status == 200 {
+            break status;
+        }
+        assert!(
+            tokio::time::Instant::now().elapsed() < std::time::Duration::from_secs(10),
+            "a distinct ip is never refused by per-ip concurrency"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(distinct, 200);
+
+    // the same ip is at its one-request bound
+    let (status, _, _) = http_call_with_headers(
+        port,
+        "POST",
+        "/act/ping",
+        &[("x-forwarded-for", "9.9.9.9")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 429, "the same ip holds no second request");
+
+    hang.notify_one();
+    assert_eq!(hang_task.await.unwrap(), 200);
+
+    engine.close().await;
+}
+
+/// An untrusted peer cannot pick its own limit bucket: with no trusted
+/// proxies configured, a forged `X-Forwarded-For` is ignored and both
+/// requests converge onto the peer's own IP.
+#[tokio::test(flavor = "multi_thread")]
+async fn untrusted_forwarded_for_is_ignored() {
+    let engine = acts::Engine::builder().disable_acl().start().await.unwrap();
+    // rate limit off would let both through; a rate of 1 per minute makes
+    // the second request's bucket observable
+    let (port, _limits, _hang) = limited_server(&engine, "rate_limit_per_min = 1\n").await;
+
+    let (first, _, _) = http_call_with_headers(
+        port,
+        "POST",
+        "/act/ping",
+        &[("x-forwarded-for", "5.5.5.5")],
+        None,
+    )
+    .await;
+    assert_eq!(first, 200);
+    let (second, _, body) = http_call_with_headers(
+        port,
+        "POST",
+        "/act/ping",
+        &[("x-forwarded-for", "4.4.4.4")],
+        None,
+    )
+    .await;
+    assert_eq!(
+        second, 429,
+        "a forged forwarded-for must not open a fresh bucket: {body}"
+    );
+
+    engine.close().await;
+}
+
+/// The token-bucket rate limit: the (N+1)th request of a minute is refused
+/// `429`, and another IP's budget is its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn rate_limit_refuses_past_the_per_minute_budget() {
+    let engine = acts::Engine::builder().disable_acl().start().await.unwrap();
+    let (port, _limits, _hang) = limited_server(
+        &engine,
+        "rate_limit_per_min = 2\ntrusted_proxy_cidrs = [\"127.0.0.1/32\"]\n",
+    )
+    .await;
+
+    for _ in 0..2 {
+        let (status, _, _) = http_call_with_headers(
+            port,
+            "POST",
+            "/act/ping",
+            &[("x-forwarded-for", "7.7.7.7")],
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    let (status, headers, _) = http_call_with_headers(
+        port,
+        "POST",
+        "/act/ping",
+        &[("x-forwarded-for", "7.7.7.7")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 429, "the (N+1)th request of the minute is refused");
+    assert_eq!(
+        response_header(&headers, "retry-after").as_deref(),
+        Some("1")
+    );
+
+    let (status, _, _) = http_call_with_headers(
+        port,
+        "POST",
+        "/act/ping",
+        &[("x-forwarded-for", "6.6.6.6")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "another ip's budget is its own");
+
+    engine.close().await;
+}
+
+/// The quiesce gate and the drain: once the transport quiesces, new requests
+/// answer `503 unavailable` while the inflight request keeps running; the
+/// drain reports what was still active at its deadline.
+#[tokio::test(flavor = "multi_thread")]
+async fn quiesce_refuses_new_requests_and_drain_reports_the_inflight() {
+    let engine = acts::Engine::builder().disable_acl().start().await.unwrap();
+    let (port, limits, hang) = limited_server(&engine, "rate_limit_per_min = 0\n").await;
+    let transport = WebTransport::new(limits.counter.clone());
+
+    let hang_task = tokio::spawn(async move {
+        let (status, _, _) = http_call_with_headers(port, "POST", "/act/hang", &[], None).await;
+        status
+    });
+    // wait for the request to be admitted (its guard is what the drain
+    // counts)
+    loop {
+        if limits.counter.active() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    transport.quiesce().await;
+    let (status, _, body) = http_call_with_headers(port, "POST", "/act/ping", &[], None).await;
+    assert_eq!(status, 503, "a quiescing transport admits nothing");
+    assert!(
+        body.contains("unavailable"),
+        "stable code in the answer: {body}"
+    );
+
+    // the inflight request is still running when a tiny drain gives up
+    let report = transport.drain(std::time::Duration::from_millis(50)).await;
+    assert_eq!(report.transport, acts::TRANSPORT_WEB);
+    assert_eq!(report.active_after, 1, "the hung request is what remains");
+    assert!(!report.drained);
+
+    hang.notify_one();
+    assert_eq!(hang_task.await.unwrap(), 200);
+    let report = transport.drain(std::time::Duration::from_secs(2)).await;
+    assert!(report.drained, "a finished request lets the drain complete");
+    assert_eq!(report.active_after, 0);
+
+    engine.close().await;
+}
+
+/// The timeout gate cancels a request past its action profile's deadline:
+/// `503 deadline_exceeded`, and the inflight slot is released.
+#[tokio::test(flavor = "multi_thread")]
+async fn timeout_cancels_past_the_profile_deadline() {
+    // the `default` class deadline overridden to a testable minimum
+    let engine = {
+        let table: toml::Table =
+            toml::from_str("[ingress.profile.default]\ndeadline_ms = 1000\n").unwrap();
+        let config = acts::Config {
+            data: Default::default(),
+            table,
+        };
+        acts::Engine::builder()
+            .set_config(&config)
+            .disable_acl()
+            .start()
+            .await
+            .unwrap()
+    };
+    let (port, limits, _hang) = limited_server(&engine, "rate_limit_per_min = 0\n").await;
+
+    // a request that outlives its deadline
+    let sleeper = tokio::spawn(async move {
+        let (status, _, body) = http_call_with_headers(port, "POST", "/act/hang", &[], None).await;
+        (status, body)
+    });
+    loop {
+        if limits.counter.active() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(5), sleeper)
+        .await
+        .expect("the timeout gate answers well before the 10s client deadline")
+        .unwrap();
+    assert_eq!(status, 503, "a request past its deadline is cancelled");
+    assert!(body.contains("deadline_exceeded"), "stable code: {body}");
+    // the cancelled request's admission is released
+    let report = WebTransport::new(limits.counter.clone())
+        .drain(std::time::Duration::from_secs(2))
+        .await;
+    assert!(report.drained, "the cancelled request released its slot");
+
+    engine.close().await;
+}
+
+/// Strict mode: a non-loopback bind with neither TLS nor an explicit
+/// `plain_behind_proxy` refuses the start, naming the address; an explicit
+/// opt-out or a loopback bind starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_mode_refuses_a_plain_non_loopback_bind() {
+    use crate::PlaintextPosture;
+
+    let non_loopback: std::net::SocketAddr = "192.168.1.10:10082".parse().unwrap();
+    let loopback: std::net::SocketAddr = "127.0.0.1:10082".parse().unwrap();
+    let posture =
+        |level, plain: bool| crate::WebPlugin::plaintext_posture(level, non_loopback, false, plain);
+
+    // permissive only warns on a plain non-loopback bind
+    assert!(matches!(
+        posture(acts::Level::Permissive, false),
+        PlaintextPosture::Warn(_)
+    ));
+    // standard refuses without an explicit opt-in, allows it with one
+    let refusal = match posture(acts::Level::Standard, false) {
+        PlaintextPosture::Refuse(reason) => reason,
+        other => panic!("standard must refuse a plain non-loopback bind: {other:?}"),
+    };
+    assert!(
+        refusal.contains("192.168.1.10"),
+        "the refusal names the address: {refusal}"
+    );
+    assert!(
+        matches!(
+            posture(acts::Level::Standard, true),
+            PlaintextPosture::Allow
+        ),
+        "an explicit plain_behind_proxy satisfies standard"
+    );
+    // strict refuses even the explicit opt-in: the proxy hop is what strict
+    // mode refuses to trust
+    assert!(
+        matches!(
+            posture(acts::Level::Strict, true),
+            PlaintextPosture::Refuse(_)
+        ),
+        "strict refuses a plaintext bind behind a proxy"
+    );
+    // tls satisfies every level, and a loopback bind needs no opt-in
+    for level in [
+        acts::Level::Permissive,
+        acts::Level::Standard,
+        acts::Level::Strict,
+    ] {
+        assert!(
+            matches!(
+                crate::WebPlugin::plaintext_posture(level, non_loopback, true, false),
+                PlaintextPosture::Allow
+            ),
+            "tls satisfies strict mode at {level:?}"
+        );
+        assert!(
+            matches!(
+                crate::WebPlugin::plaintext_posture(level, loopback, false, false),
+                PlaintextPosture::Allow
+            ),
+            "a loopback bind needs no opt-in at {level:?}"
+        );
+    }
+
+    // enforced at start: `host = "0.0.0.0"` (level standard by default)
+    // without tls is a config error, before anything binds
+    let port = free_port();
+    let table: toml::Table =
+        toml::from_str(&format!("[web]\nhost = \"0.0.0.0\"\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let started = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await;
+    let err = match started {
+        Ok(_) => panic!("strict mode must refuse 0.0.0.0 without tls"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains(&port.to_string()),
+        "the error names the address: {err}"
+    );
+
+    // permissive warns but starts: the same bind, level = "permissive"
+    let table: toml::Table = toml::from_str(&format!(
+        "[web]\nhost = \"0.0.0.0\"\nport = {port}\nlevel = \"permissive\"\n"
+    ))
+    .unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await
+        .expect("permissive starts a plain non-loopback bind (with a warning)");
+    engine.close().await;
+
+    // strict refuses even with the explicit plain_behind_proxy opt-in
+    let table: toml::Table = toml::from_str(&format!(
+        "[web]\nhost = \"0.0.0.0\"\nport = {port}\nlevel = \"strict\"\nplain_behind_proxy = true\n"
+    ))
+    .unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let started = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await;
+    assert!(
+        started.is_err(),
+        "strict must refuse a plaintext non-loopback bind behind a proxy"
+    );
+
+    // strict with tls starts (the PEM pair the TLS-loading test ships).
+    // The paths are anchored at the crate root, not the process cwd: a test
+    // binary run from the workspace root must find the same files.
+    let cert = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_cert.pem");
+    let key = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_key.pem");
+    let table: toml::Table = toml::from_str(&format!(
+        "[web]\nhost = \"127.0.0.1\"\nport = {port}\nlevel = \"strict\"\n[web.tls]\ncert = {cert:?}\nkey = {key:?}\n"
+    ))
+    .unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await
+        .expect("strict with tls starts");
+    assert!(wait_for_port("127.0.0.1", port, true).await);
+    engine.close().await;
+
+    // the loopback default trivially passes strict mode (a real start, bound
+    // to a free port)
+    let table: toml::Table = toml::from_str(&format!("[web]\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await
+        .expect("the loopback bind passes strict mode");
+    engine.close().await;
+}
+
+/// `[web].tls` loading fails closed: a missing cert file, a malformed PEM and
+/// a cert/key mismatch are config errors, and the section itself parses from
+/// the deployment config.
+#[test]
+fn tls_config_parses_and_load_fails_closed() {
+    let json = serde_json::json!({
+        "tls": {"cert": "certs/server.pem", "key": "certs/server.key", "client_ca": "certs/ca.pem"}
+    });
+    let config: HttpConfig = serde_json::from_value(json).unwrap();
+    let tls = config.tls.as_ref().expect("the tls section parses");
+    assert_eq!(tls.cert, "certs/server.pem");
+    assert_eq!(tls.key, "certs/server.key");
+    assert_eq!(tls.client_ca.as_deref(), Some("certs/ca.pem"));
+
+    let config: HttpConfig =
+        serde_json::from_value(serde_json::json!({"plain_behind_proxy": true})).unwrap();
+    assert!(config.plain_behind_proxy);
+    assert!(HttpConfig::default().tls.is_none(), "tls is opt-in");
+
+    // missing cert file
+    let missing = crate::WebPlugin::load_tls_server_config(&crate::TlsConfig {
+        cert: "definitely-missing.pem".to_string(),
+        key: "also-missing.key".to_string(),
+        client_ca: None,
+    });
+    assert!(missing.is_err(), "a missing cert file refuses the start");
+
+    // malformed pem
+    let dir = std::env::temp_dir().join(format!("acts-web-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad_cert = dir.join("bad.pem");
+    let bad_key = dir.join("bad.key");
+    std::fs::write(&bad_cert, "this is not pem at all\n").unwrap();
+    std::fs::write(&bad_key, "-----BEGIN NOPE-----\nnope\n-----END NOPE-----\n").unwrap();
+    let malformed = crate::WebPlugin::load_tls_server_config(&crate::TlsConfig {
+        cert: bad_cert.to_string_lossy().into_owned(),
+        key: bad_key.to_string_lossy().into_owned(),
+        client_ca: None,
+    });
+    assert!(malformed.is_err(), "a malformed pem refuses the start");
+
+    // real pem files that do not match each other
+    let (cert_pem, key_pem) = minimal_self_signed_pair();
+    let cert_path = dir.join("server.pem");
+    let key_path = dir.join("server.key");
+    std::fs::write(&cert_path, cert_pem).unwrap();
+    std::fs::write(&key_path, key_pem).unwrap();
+    let loaded = crate::WebPlugin::load_tls_server_config(&crate::TlsConfig {
+        cert: cert_path.to_string_lossy().into_owned(),
+        key: key_path.to_string_lossy().into_owned(),
+        client_ca: None,
+    });
+    assert!(
+        loaded.is_ok(),
+        "a matching cert/key pair loads: {:?}",
+        loaded.err()
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A minimal self-signed RSA cert/key pair, PEM-encoded without any new
+/// dependency: the point is "the PEM loader parses it and the pieces match",
+/// not certificate quality.
+fn minimal_self_signed_pair() -> (String, String) {
+    // a fixed PKCS#8 RSA key (2048-bit) and its self-signed certificate,
+    // generated once with openssl and pasted as constants — generating keys
+    // in-process would need an RSA dependency this crate does not have
+    const KEY: &str = include_str!("../tests/test_key.pem");
+    const CERT: &str = include_str!("../tests/test_cert.pem");
+    (CERT.to_string(), KEY.to_string())
+}
+
+// ── body caps, auth hardening, error contract, metrics (over real HTTP) ──
+
+/// A plugin server on a free port, with a user that may read models.
+async fn server_with_web(extra_web: &str) -> (acts::Engine, u16, String) {
+    use acts_acl::AclUsers;
+
+    let port = free_port();
+    let table: toml::Table = toml::from_str(&format!("[web]\nport = {port}\n{extra_web}")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts::Engine::builder()
+        .set_config(&cfg)
+        .with_user_acl()
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await
+        .unwrap();
+    engine
+        .acl()
+        .set_user(&acts::UserSpec {
+            name: "reader".to_string(),
+            add_passwords: vec!["reader-pass".to_string()],
+            allow: Some(vec![
+                "model:ls".to_string(),
+                "model:get".to_string(),
+                "model:deploy".to_string(),
+                "evt:start".to_string(),
+                "msg:sub".to_string(),
+            ]),
+            patterns: Some(vec!["*".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(wait_for_port("127.0.0.1", port, true).await);
+    let token = login(&engine, "reader", "reader-pass").await;
+    (engine, port, token)
+}
+
+/// Like `http_call`, but tolerates a server that gives up reading mid-request
+/// (a `413` answer closes the connection while the oversized body is still
+/// being written) and answers the raw head plus body.
+async fn http_call_lenient(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> (u16, Vec<(String, String)>, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("the web server accepts connections");
+    let mut head =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if let Some(body) = body {
+        head.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        ));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await.ok();
+    if let Some(body) = body {
+        for chunk in body.as_bytes().chunks(64 * 1024) {
+            // a server that already answered (e.g. 413) stops reading; the
+            // rest of the body is irrelevant to what we assert
+            if stream.write_all(chunk).await.is_err() {
+                break;
+            }
+        }
+        stream.flush().await.ok();
+    }
+    let mut response = Vec::new();
+    // A server that answered early (413) may reset the connection while the
+    // rest of the oversized body is still in flight (windows: 10053). The
+    // answer bytes, if any, are already in the buffer; the reset after them
+    // is the expected shape of this test, not a failure.
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        stream.read_to_end(&mut response),
+    )
+    .await;
+    if let Ok(Err(err)) = read {
+        assert!(
+            !response.is_empty(),
+            "the connection reset before answering: {err}"
+        );
+    }
+    let text = String::from_utf8_lossy(&response).to_string();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(": "))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    (status, headers, body.to_string())
+}
+
+fn header_of<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+/// The per-route body caps: a deploy body past the 8 MiB deploy profile is
+/// `413`, a hook body inside its 1 MiB event profile is served, and a hook
+/// body past it is `413` — the cap follows the route's action profile.
+///
+/// Driven in-process (`oneshot`): the cap is a body-layer answer, and a real
+/// socket on windows resets an oversized request before the `413` is read
+/// (the server closes with unread bytes in flight), which would make the
+/// assertion about *which* refusal flaky rather than wrong.
+#[tokio::test(flavor = "multi_thread")]
+async fn body_caps_follow_the_route_profiles() {
+    use tower::ServiceExt;
+
+    let engine = Arc::new(acts::Engine::builder().disable_acl().start().await.unwrap());
+    let config: HttpConfig = toml::from_str("").unwrap();
+    let limits = crate::limit::LimitState::new(&engine, &config).unwrap();
+    let router = crate::WebPlugin::build_router(&engine, &limits);
+
+    let call = |path: &'static str, body: Vec<u8>| {
+        let router = router.clone();
+        async move {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.1:40000".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            router.oneshot(request).await.unwrap().status()
+        }
+    };
+
+    // a deploy body past the 8 MiB profile
+    assert_eq!(
+        call("/api/model/deploy", vec![b'x'; 9 * 1024 * 1024]).await,
+        413,
+        "a deploy body past 8 MiB is refused"
+    );
+
+    // a hook body inside the 1 MiB event profile reaches the handler
+    let hook_body = serde_json::json!({"key": "x".repeat(900 * 1024)})
+        .to_string()
+        .into_bytes();
+    let status = call("/hooks/some-model:some-trigger", hook_body).await;
+    assert_ne!(
+        status, 413,
+        "a hook body inside 1 MiB passes the cap (status {status})"
+    );
+
+    // the same route past its cap
+    let oversized_hook = serde_json::json!({"key": "x".repeat(1024 * 1024 + 1)})
+        .to_string()
+        .into_bytes();
+    assert_eq!(
+        call("/hooks/some-model:some-trigger", oversized_hook).await,
+        413,
+        "a hook body past 1 MiB is refused"
+    );
+
+    engine.close().await;
+}
+
+/// Duplicate or oversized `Authorization` headers are refused before the
+/// credential is resolved, and every invalid credential is counted under
+/// `acts_auth_invalid_total{transport="web"}`.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorization_headers_are_hardened() {
+    let (engine, port, token) = server_with_web("").await;
+    let auth = format!("Bearer {token}");
+    let before = engine
+        .ingress()
+        .metrics
+        .snapshot()
+        .get("acts_auth_invalid_total{transport=web}")
+        .copied()
+        .unwrap_or(0);
+
+    // two credentials at once is never an identity
+    let (status, _, body) = http_call_lenient(
+        port,
+        "POST",
+        "/api/model/list",
+        &[("authorization", &auth), ("authorization", &auth)],
+        Some(r#"{"offset":0,"limit":10,"order_by":[]}"#),
+    )
+    .await;
+    assert_eq!(status, 401, "two authorization headers are refused");
+    assert!(
+        body.contains("unauthenticated"),
+        "stable code in the answer: {body}"
+    );
+
+    // a credential-sized header is not a token dump
+    let huge = format!("Bearer {}", "x".repeat(9 * 1024));
+    let (status, _, _) = http_call_lenient(
+        port,
+        "POST",
+        "/api/model/list",
+        &[("authorization", &huge)],
+        Some(r#"{"offset":0,"limit":10,"order_by":[]}"#),
+    )
+    .await;
+    assert_eq!(status, 401, "a 9 KiB authorization header is refused early");
+
+    // a credential that does not check out
+    let (status, _, _) = http_call_lenient(
+        port,
+        "POST",
+        "/api/model/list",
+        &[("authorization", "Bearer not-a-token")],
+        Some(r#"{"offset":0,"limit":10,"order_by":[]}"#),
+    )
+    .await;
+    assert_eq!(status, 401);
+
+    let after = engine
+        .ingress()
+        .metrics
+        .snapshot()
+        .get("acts_auth_invalid_total{transport=web}")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        after - before,
+        3,
+        "every refused credential is counted: {before} -> {after}"
+    );
+
+    engine.close().await;
+}
+
+/// Every error answer carries the shared contract — `ecode`,
+/// `correlation_id`, `retryable` in the body and the `x-correlation-id`
+/// response header.
+#[tokio::test(flavor = "multi_thread")]
+async fn errors_carry_the_shared_contract() {
+    let (engine, port, token) = server_with_web("").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, headers, body) = http_call_lenient(
+        port,
+        "POST",
+        "/api/model/get",
+        &[("authorization", &auth)],
+        Some(r#"{"id":"no-such-model","fmt":"yml"}"#),
+    )
+    .await;
+    assert!(status >= 400, "a missing model is an error, got {status}");
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|_| panic!("the answer is the contract JSON: {body}"));
+    assert!(
+        value.get("ecode").is_some(),
+        "the stable code is present: {body}"
+    );
+    assert!(
+        value.get("correlation_id").is_some(),
+        "the correlation id is present: {body}"
+    );
+    assert!(
+        value.get("retryable").is_some(),
+        "retryable is present: {body}"
+    );
+    let cid = value
+        .get("correlation_id")
+        .and_then(|v| v.as_str())
+        .expect("a string correlation id");
+    assert_eq!(
+        header_of(&headers, "x-correlation-id"),
+        Some(cid),
+        "the header and the body carry the same correlation id"
+    );
+
+    engine.close().await;
+}
+
+/// The ingress metrics: after served requests and a refusal, the engine's
+/// snapshot counts web requests per action and result.
+#[tokio::test(flavor = "multi_thread")]
+async fn ingress_metrics_count_web_requests() {
+    let (engine, port, token) = server_with_web("").await;
+    let auth = format!("Bearer {token}");
+
+    let _ = http_call_lenient(
+        port,
+        "POST",
+        "/api/model/list",
+        &[("authorization", &auth)],
+        Some(r#"{"offset":0,"limit":10,"order_by":[]}"#),
+    )
+    .await;
+    // a refusal: an unknown credential is counted as an invalid auth, and a
+    // request that reaches the stack lands in the requests counter
+    let _ = http_call_lenient(
+        port,
+        "POST",
+        "/api/model/list",
+        &[("authorization", "Bearer nope")],
+        Some(r#"{"offset":0,"limit":10,"order_by":[]}"#),
+    )
+    .await;
+
+    let snapshot = engine.ingress().metrics.snapshot();
+    assert!(
+        snapshot
+            .keys()
+            .any(|key| key.starts_with("acts_ingress_requests_total{")
+                && key.contains("transport=web")),
+        "web requests are counted: {:?}",
+        snapshot.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        snapshot
+            .keys()
+            .any(|key| key.contains("acts_auth_invalid_total{transport=web}")),
+        "invalid credentials are counted"
+    );
+
+    engine.close().await;
+}
+
+/// `[web].level` resolves per-section over `[security].level` over the
+/// `standard` default (the core's `resolve_level`).
+#[tokio::test(flavor = "multi_thread")]
+async fn web_level_resolves_through_security() {
+    let make_config = |web: &str, security: Option<&str>| {
+        let mut toml_text = format!("[web]\n{web}");
+        if let Some(security) = security {
+            toml_text.push_str(&format!("\n[security]\nlevel = \"{security}\"\n"));
+        }
+        let table: toml::Table = toml::from_str(&toml_text).unwrap();
+        acts::Config {
+            data: Default::default(),
+            table,
+        }
+    };
+    let config_of = |engine: &acts::Engine| {
+        let web: HttpConfig = engine.config().get::<HttpConfig>("web").unwrap_or_default();
+        acts::resolve_level(web.level.as_deref(), &engine.config())
+    };
+
+    // no level anywhere: standard
+    let config = make_config("port = 10082", None);
+    let engine = acts::Engine::builder()
+        .set_config(&config)
+        .start()
+        .await
+        .unwrap();
+    assert_eq!(config_of(&engine), acts::Level::Standard);
+    engine.close().await;
+
+    // [security].level wins over the default
+    let config = make_config("port = 10082", Some("strict"));
+    let engine = acts::Engine::builder()
+        .set_config(&config)
+        .start()
+        .await
+        .unwrap();
+    assert_eq!(config_of(&engine), acts::Level::Strict);
+    engine.close().await;
+
+    // the section's own level wins over [security].level
+    let config = make_config("port = 10082\nlevel = \"permissive\"", Some("strict"));
+    let engine = acts::Engine::builder()
+        .set_config(&config)
+        .start()
+        .await
+        .unwrap();
+    assert_eq!(config_of(&engine), acts::Level::Permissive);
+    engine.close().await;
+}
+
+// ── TLS loader and posture verdicts ──
+
+use crate::{PlaintextPosture, pem_certs, pem_key};
+
+/// The PEM loader names the file it could not use, and empty files say
+/// what is missing.
+#[test]
+fn pem_loader_errors_name_the_file() {
+    let dir = std::env::temp_dir().join(format!("acts-web-pem-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let empty = dir.join("empty.pem");
+    std::fs::write(&empty, "").unwrap();
+    let garbage = dir.join("garbage.pem");
+    std::fs::write(&garbage, "not a pem").unwrap();
+
+    let empty = empty.to_string_lossy().into_owned();
+    let err = pem_certs(&empty).unwrap_err();
+    assert!(err.contains("holds no certificate"), "{err}");
+
+    let garbage = garbage.to_string_lossy().into_owned();
+    let err = pem_certs(&garbage).unwrap_err();
+    assert!(err.contains("garbage.pem"), "{err}");
+    let err = pem_key(&garbage).unwrap_err();
+    assert!(err.contains("garbage.pem"), "{err}");
+
+    let missing = dir.join("missing.pem").to_string_lossy().into_owned();
+    let err = pem_certs(&missing).unwrap_err();
+    assert!(err.contains("missing.pem"), "{err}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The plaintext verdict per level: permissive warns, standard refuses
+/// without the acknowledged proxy, strict refuses even with it.
+#[test]
+fn plaintext_posture_follows_the_level() {
+    use acts::Level;
+    use std::net::SocketAddr;
+    let non_loopback: SocketAddr = "0.0.0.0:10082".parse().unwrap();
+    let loopback: SocketAddr = "127.0.0.1:10082".parse().unwrap();
+
+    assert!(matches!(
+        WebPlugin::plaintext_posture(Level::Permissive, non_loopback, false, false),
+        PlaintextPosture::Warn(_)
+    ));
+    assert!(matches!(
+        WebPlugin::plaintext_posture(Level::Standard, non_loopback, false, false),
+        PlaintextPosture::Refuse(_)
+    ));
+    assert!(matches!(
+        WebPlugin::plaintext_posture(Level::Standard, non_loopback, false, true),
+        PlaintextPosture::Allow
+    ));
+    assert!(matches!(
+        WebPlugin::plaintext_posture(Level::Strict, non_loopback, false, true),
+        PlaintextPosture::Refuse(_)
+    ));
+    assert!(matches!(
+        WebPlugin::plaintext_posture(Level::Strict, non_loopback, true, false),
+        PlaintextPosture::Allow
+    ));
+    assert!(matches!(
+        WebPlugin::plaintext_posture(Level::Strict, loopback, false, false),
+        PlaintextPosture::Allow
+    ));
 }

@@ -39,5 +39,28 @@ async-nats = { workspace = true }
 async-trait = { workspace = true }
 toml = { workspace = true }
 
+# the fs_hardening integration tests read back the DACL the module applied
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_SystemServices",
+] }
+
+# filesystem hardening: an explicit safe umask on unix, an exclusive DACL
+# (the service account, SYSTEM and Administrators) on windows.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_SystemServices",
+] }
+
 [features]
 default = []

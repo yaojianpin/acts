@@ -1,9 +1,11 @@
 use crate::HttpConfig;
 use crate::objects::{AppError, RespData};
-use acts::{Channel, ChannelOptions, Engine, Message, Principal, Vars};
+use acts::{
+    Channel, ChannelOptions, Engine, Message, Principal, SubscriptionKey, TRANSPORT_WEB, Vars,
+};
 use axum::{
     Extension, Json,
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive},
@@ -11,7 +13,7 @@ use axum::{
 };
 use futures_util::stream::Stream;
 use serde::Deserialize;
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::warn;
 
@@ -59,8 +61,13 @@ impl Drop for CloseChannelOnDrop {
 pub async fn sse(
     State(state): State<Arc<Engine>>,
     Extension(principal): Extension<Principal>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request_cid: Option<Extension<crate::limit::CorrelationId>>,
     Query(query): Query<MessageQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    // the id the admission stack stamped on the request (the correlation
+    // middleware's extension) — the refusal and the log record share it
+    let cid = request_cid.as_ref().map(|cid| cid.0.0.to_string());
     let chan_id = acts::actions::apply_as(
         &state,
         &principal,
@@ -71,6 +78,44 @@ pub async fn sse(
     .as_str()
     .unwrap_or_default()
     .to_string();
+
+    // The subscription quota is taken *before* the channel and its queue
+    // exist: a refusal costs the caller nothing but this answer, and the
+    // lease's `Drop` (inside the response stream, so the client's
+    // disconnect releases it) gives every bucket back. `msg:sub` composes
+    // the client id into the returned channel key, so the key dedupes the
+    // subscriber exactly the way the delivery path addresses it — a second
+    // connection for the same channel is refused `client_busy`, because two
+    // live streams must never ack the same delivery.
+    // The channel key is `<subject>/<client id>` (`subscription_id`): the
+    // quota's subject bucket must aggregate every client of one principal,
+    // while the client bucket dedupes one principal's own connections.
+    let (key_subject, key_client) = chan_id
+        .split_once('/')
+        .map(|(subject, client)| (subject.to_string(), client.to_string()))
+        .unwrap_or_else(|| (chan_id.clone(), String::new()));
+    let lease = state
+        .ingress()
+        .subscriptions
+        .clone()
+        .try_acquire(SubscriptionKey {
+            transport: TRANSPORT_WEB,
+            subject: key_subject,
+            client_id: key_client,
+            ip: Some(peer.ip()),
+        })
+        .map_err(|reject| {
+            let cid = cid.unwrap_or_else(acts::export::new_correlation_id);
+            AppError::from_external(acts::ExternalError::new(
+                acts::ExternalCode::ResourceExhausted,
+                format!(
+                    "the subscription quota is exhausted ({}) for channel {}",
+                    reject.reason(),
+                    acts::export::safe_text(&chan_id, 128)
+                ),
+                cid,
+            ))
+        })?;
 
     let queue_size = state
         .config()
@@ -135,6 +180,9 @@ pub async fn sse(
     let guard = CloseChannelOnDrop { chan: chan.clone() };
     let stream = async_stream::stream! {
         let _guard = guard;
+        // the quota lease lives with the stream: a disconnect (the body is
+        // dropped) releases every subscription bucket it took
+        let _lease = lease;
         // when all sender clones are gone (channel deregistered), the
         // stream ends instead of spinning on a closed queue
         while let Some(data) = rx.recv().await {
@@ -167,6 +215,13 @@ mod tests {
     use acts::{Workflow, actions};
     use acts_acl::AclUsers;
     use axum::body::Bytes;
+    use axum::extract::ConnectInfo;
+
+    /// The peer address every direct call hands the handler (the real one
+    /// comes from `into_make_service_with_connect_info` over a socket).
+    fn lease_peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41_000)))
+    }
     use axum::response::IntoResponse;
     use futures_util::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -253,6 +308,8 @@ mod tests {
         let response = sse(
             State(Arc::new(engine.clone())),
             Extension(principal.clone()),
+            lease_peer(),
+            None,
             Query(query),
         )
         .await
@@ -380,6 +437,8 @@ mod tests {
         let response = sse(
             State(Arc::new(engine.clone())),
             Extension(engine.anonymous()),
+            lease_peer(),
+            None,
             Query(query),
         )
         .await;
@@ -570,6 +629,8 @@ mod tests {
         let err = sse(
             State(Arc::new(engine.clone())),
             Extension(reader),
+            lease_peer(),
+            None,
             Query(MessageQuery {
                 id: "reader-client".to_string(),
                 r#type: None,
@@ -591,6 +652,8 @@ mod tests {
         let response = sse(
             State(Arc::new(engine.clone())),
             Extension(granted),
+            lease_peer(),
+            None,
             Query(MessageQuery {
                 id: "granted-client".to_string(),
                 r#type: None,
@@ -648,6 +711,8 @@ mod tests {
         let response = sse(
             State(Arc::new(engine.clone())),
             Extension(engine.anonymous()),
+            lease_peer(),
+            None,
             Query(query),
         )
         .await
@@ -708,6 +773,127 @@ mod tests {
         assert!(
             !redelivered.is_empty(),
             "a disconnected subscriber must receive its unacked deliveries again after resubscribing"
+        );
+
+        engine.close().await;
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    /// The peer address a direct handler call hands in (the real one comes
+    /// from `into_make_service_with_connect_info` over a socket).
+    fn lease_peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41_000)))
+    }
+
+    /// A second stream for the same `(channel, client id)` is refused with
+    /// `429 client_busy`: two live connections must never ack the same
+    /// delivery. Dropping the first stream releases the quota, and the
+    /// channel subscribes again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_same_client_cannot_hold_two_streams() {
+        let engine = Engine::builder().disable_acl().start().await.unwrap();
+        let principal = engine.acl().authenticate(None).unwrap();
+
+        let open = |principal: Principal| {
+            let engine = engine.clone();
+            let principal = principal;
+            async move {
+                sse(
+                    State(Arc::new(engine.clone())),
+                    Extension(principal),
+                    lease_peer(),
+                    None,
+                    Query(MessageQuery {
+                        id: "dup-client".to_string(),
+                        r#type: None,
+                        uses: None,
+                        state: None,
+                        key: None,
+                        options: Vars::new(),
+                    }),
+                )
+                .await
+            }
+        };
+        let principal2 = engine.acl().authenticate(None).unwrap();
+
+        let first = open(principal).await.into_response();
+        assert_eq!(first.status(), axum::http::StatusCode::OK);
+
+        // the same channel key, a second connection: refused
+        let second = open(principal2.clone()).await;
+        let err = match second {
+            Ok(_) => panic!("a second stream for the same client must be refused"),
+            Err(err) => err,
+        };
+        let response = err.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body).to_string();
+        assert!(body.contains("resource_exhausted"), "stable code: {body}");
+        assert!(
+            body.contains("client_busy"),
+            "the refusal names the bucket: {body}"
+        );
+
+        // the first stream is dropped (client disconnected); the quota slot
+        // is released with it, and the same channel subscribes again
+        drop(first);
+        let third = open(principal2).await;
+        assert!(
+            third.is_ok(),
+            "a released client may subscribe again: {:?}",
+            third.err().map(|e| format!("{:?}", e))
+        );
+
+        engine.close().await;
+    }
+
+    /// The lease's release is observable in the registry gauges: one live
+    /// stream holds one web subscription; dropping it releases every bucket.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_lease_shows_up_in_the_gauges() {
+        let engine = Engine::builder().disable_acl().start().await.unwrap();
+        let principal = engine.acl().authenticate(None).unwrap();
+
+        let response = sse(
+            State(Arc::new(engine.clone())),
+            Extension(principal),
+            lease_peer(),
+            None,
+            Query(MessageQuery {
+                id: "gauged-client".to_string(),
+                r#type: None,
+                uses: None,
+                state: None,
+                key: None,
+                options: Vars::new(),
+            }),
+        )
+        .await
+        .expect("the stream opens")
+        .into_response();
+
+        let gauges = engine.ingress().subscriptions.gauges();
+        assert_eq!(
+            gauges.get("acts_subscriptions{transport=web}").copied(),
+            Some(1),
+            "the live stream holds one web subscription: {gauges:?}"
+        );
+
+        // dropping the stream releases the lease (the guard lives inside it)
+        drop(response);
+        let gauges = engine.ingress().subscriptions.gauges();
+        assert_eq!(
+            gauges.get("acts_subscriptions{transport=web}").copied(),
+            Some(0),
+            "a dropped stream releases the subscription: {gauges:?}"
         );
 
         engine.close().await;

@@ -264,7 +264,7 @@ async fn test_do_action_rejects_malformed_data() {
             data: Some(data.to_vec()),
         };
         let status = server
-            .do_action(message, None)
+            .do_action(message, None, None)
             .await
             .expect_err("malformed data must be rejected");
         assert_eq!(
@@ -293,7 +293,7 @@ async fn test_do_action_rejects_malformed_data() {
             data,
         };
         let response = server
-            .do_action(message, None)
+            .do_action(message, None, None)
             .await
             .expect("absent or object data must be accepted")
             .into_inner();
@@ -852,14 +852,18 @@ async fn test_subscription_needs_the_grant() {
 }
 
 /// A bind failure must fail the engine start with its reason, not be logged
-/// inside the transport task while the engine reports a clean start: the port
-/// here is already taken, so the plugin cannot listen.
+/// inside the transport task while the engine reports a clean start.
+///
+/// The address is TEST-NET-1 (`192.0.2.0/24`): assigned to no local
+/// interface, so the bind fails on every platform. A port held by another
+/// listener would not: windows lets a second listener bind the same
+/// address unless the first took `SO_EXCLUSIVEADDRUSE`, and the unit test
+/// cannot ask a plain `TcpListener` for that.
 #[tokio::test(flavor = "multi_thread")]
 async fn bind_conflict_fails_the_engine_start() {
-    let blocker = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = blocker.local_addr().unwrap().port();
-
-    let table: toml::Table = toml::from_str(&format!("[grpc]\nport = {port}\n")).unwrap();
+    let port = free_port();
+    let table: toml::Table =
+        toml::from_str(&format!("[grpc]\nhost = \"192.0.2.1\"\nport = {port}\n")).unwrap();
     let cfg = acts::Config {
         data: Default::default(),
         table,
@@ -870,12 +874,12 @@ async fn bind_conflict_fails_the_engine_start() {
         .start()
         .await;
     let err = match started {
-        Ok(_) => panic!("a taken port must fail the engine start"),
+        Ok(_) => panic!("an unassignable address must fail the engine start"),
         Err(err) => err,
     };
 
     assert!(
-        err.to_string().contains(&port.to_string()),
+        err.to_string().contains("192.0.2.1") && err.to_string().contains(&port.to_string()),
         "the failure must name the address it could not bind: {err}"
     );
 }
@@ -951,6 +955,7 @@ async fn test_action_status_maps_each_error_kind() {
                     data,
                 },
                 None,
+                None,
             )
             .await
             .err()
@@ -967,6 +972,7 @@ async fn test_action_status_maps_each_error_kind() {
                 ack: None,
                 data: None,
             },
+            None,
             None,
         )
         .await
@@ -1198,5 +1204,1084 @@ async fn test_on_message_over_the_wire_tracks_the_remote_address() {
         .expect("the subscription opens over the wire");
     drop(response);
 
+    engine.close().await;
+}
+
+// ---- ingress hardening (design §4.2) ----
+
+use crate::TlsConfig;
+use acts::RunningTransport as _;
+use tonic::{Code, Status};
+
+/// An engine with the `[grpc]` port pinned plus any extra config table text
+/// (the `[ingress]`/`[subscriptions]` overrides the admission cases need).
+async fn engine_with_table(port: u16, extra: &str) -> Engine {
+    let table: toml::Table = toml::from_str(&format!("[grpc]\nport = {port}\n{extra}")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    Engine::builder()
+        .set_config(&cfg)
+        .disable_acl()
+        .add_plugin(&GrpcPlugin::new())
+        .start()
+        .await
+        .unwrap()
+}
+
+/// A wire client on `port`, retried until the server accepts connections.
+async fn wire_client(port: u16) -> ActsServiceClient<tonic::transport::Channel> {
+    let url = format!("http://127.0.0.1:{port}");
+    loop {
+        if let Ok(client) = ActsServiceClient::connect(url.clone()).await {
+            return client;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The status details as the external-error JSON they carry.
+fn details(status: &Status) -> serde_json::Value {
+    let raw = status.details();
+    serde_json::from_slice(raw).unwrap_or_else(|e| {
+        panic!(
+            "status details must be the external-error json: {e}; {}",
+            status.message()
+        )
+    })
+}
+
+/// A store that can hold every write behind a gate: while the gate is shut,
+/// each `put` awaits until it reopens. The deadline and drain cases use it
+/// to pin a dispatch mid-flight deterministically — the write-behind writer
+/// awaits the backend, and the dispatch awaits the writer.
+struct GateStore {
+    inner: acts::MemoryStore,
+    gate: tokio::sync::watch::Receiver<bool>,
+}
+
+#[async_trait::async_trait]
+impl acts::KvStore for GateStore {
+    async fn one(&self, key: &str) -> acts::Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> acts::Result<()> {
+        // Startup writes must pass: the gate only ever shuts after the
+        // engine is up, and reopens before the next phase asserts.
+        while !*self.gate.borrow() {
+            self.gate
+                .clone()
+                .changed()
+                .await
+                .map_err(|_| acts::ActError::Store("gate dropped".to_string()))?;
+        }
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> acts::Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(
+        &self,
+        ops: &[acts::StoreBatchOp],
+        guards: &[acts::StoreGuard],
+    ) -> acts::Result<bool> {
+        while !*self.gate.borrow() {
+            self.gate
+                .clone()
+                .changed()
+                .await
+                .map_err(|_| acts::ActError::Store("gate dropped".to_string()))?;
+        }
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: acts::ScanOptions,
+    ) -> acts::Result<Vec<(String, Vec<u8>)>> {
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+fn gated_store() -> (Arc<dyn acts::KvStore>, tokio::sync::watch::Sender<bool>) {
+    let (tx, rx) = tokio::sync::watch::channel(true);
+    (
+        Arc::new(GateStore {
+            inner: acts::MemoryStore::new(),
+            gate: rx,
+        }),
+        tx,
+    )
+}
+
+/// The `[grpc]` keepalive knobs keep their documented defaults and clamp
+/// their extremes, and the `[grpc].tls` table deserializes with an optional
+/// client CA.
+#[test]
+fn test_grpc_config_keepalive_and_tls() {
+    let config: GrpcConfig = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(
+        config.http2_keepalive_secs(),
+        crate::config::DEFAULT_HTTP2_KEEPALIVE_SECS
+    );
+    assert_eq!(
+        config.http2_keepalive_timeout_secs(),
+        crate::config::DEFAULT_HTTP2_KEEPALIVE_TIMEOUT_SECS
+    );
+    assert!(
+        !config.plain_behind_proxy,
+        "the plaintext-behind-proxy acknowledgement is opt-in"
+    );
+    assert!(config.tls.is_none(), "TLS is opt-in");
+
+    let config: GrpcConfig = serde_json::from_value(json!({
+        "http2_keepalive_secs": 1,
+        "http2_keepalive_timeout_secs": 100_000,
+        "plain_behind_proxy": true,
+        "tls": {"cert": "/tmp/c.pem", "key": "/tmp/k.pem", "client_ca": "/tmp/ca.pem"},
+    }))
+    .unwrap();
+    assert_eq!(
+        config.http2_keepalive_secs(),
+        5,
+        "a ping faster than 5 s clamps to 5"
+    );
+    assert_eq!(
+        config.http2_keepalive_timeout_secs(),
+        600,
+        "a ping timeout past 10 min clamps to 600"
+    );
+    assert!(config.plain_behind_proxy);
+    assert_eq!(config.tls.as_ref().unwrap().cert, "/tmp/c.pem");
+    assert_eq!(
+        config.tls.as_ref().unwrap().client_ca.as_deref(),
+        Some("/tmp/ca.pem")
+    );
+
+    // client_ca is optional: server-only TLS is the common shape
+    let config: GrpcConfig =
+        serde_json::from_value(json!({"tls": {"cert": "/tmp/c.pem", "key": "/tmp/k.pem"}}))
+            .unwrap();
+    assert!(config.tls.as_ref().unwrap().client_ca.is_none());
+}
+
+/// Strict mode, level-driven (§2.0): a non-loopback gRPC bind must carry
+/// TLS (strict), TLS or the proxy acknowledgement (standard), or nothing in
+/// particular beyond a warning (permissive). The loopback default is always
+/// allowed.
+#[test]
+fn test_strict_bind_check() {
+    use acts::Level;
+    use std::net::SocketAddr;
+    let remote: SocketAddr = "203.0.113.7:10080".parse().unwrap();
+    let loopback: SocketAddr = "127.0.0.1:10080".parse().unwrap();
+    let tls = Some(TlsConfig {
+        cert: "c".to_string(),
+        key: "k".to_string(),
+        client_ca: None,
+    });
+
+    // standard (the default): refused without TLS or the acknowledgement
+    let err = GrpcPlugin::strict_bind_check(remote, &None, false, Level::Standard)
+        .expect_err("a remote plaintext bind without the proxy acknowledgement refuses");
+    assert!(err.to_string().contains("plain_behind_proxy"), "{err}");
+    GrpcPlugin::strict_bind_check(remote, &tls, false, Level::Standard)
+        .expect("a remote bind with TLS configured is accepted");
+    GrpcPlugin::strict_bind_check(remote, &None, true, Level::Standard)
+        .expect("a remote bind behind an acknowledged proxy is accepted");
+
+    // permissive: warns and starts anyway
+    GrpcPlugin::strict_bind_check(remote, &None, false, Level::Permissive)
+        .expect("permissive starts a remote plaintext bind with a warning");
+
+    // strict: only TLS rescues the bind, never the proxy acknowledgement
+    let err = GrpcPlugin::strict_bind_check(remote, &None, true, Level::Strict)
+        .expect_err("strict refuses a remote plaintext bind even behind a proxy");
+    assert!(err.to_string().contains("strict"), "{err}");
+    GrpcPlugin::strict_bind_check(remote, &tls, false, Level::Strict)
+        .expect("strict accepts a remote bind with TLS");
+
+    // the loopback default is allowed at every level
+    for level in [Level::Permissive, Level::Standard, Level::Strict] {
+        GrpcPlugin::strict_bind_check(loopback, &None, false, level)
+            .expect("the loopback default is always allowed");
+    }
+}
+
+/// The section's own `level` key wins over `[security].level`, and the
+/// start-time refusal for a non-loopback plaintext bind follows it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_level_drives_the_start_refusal() {
+    let port = free_port();
+
+    // standard (inherited): the wildcard bind refuses the start
+    let table: toml::Table =
+        toml::from_str(&format!("[grpc]\nport = {port}\nhost = \"0.0.0.0\"\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let err = Engine::builder()
+        .set_config(&cfg)
+        .disable_acl()
+        .add_plugin(&GrpcPlugin::new())
+        .start()
+        .await
+        .map(|_| ())
+        .expect_err("a wildcard plaintext bind refuses under the default level");
+    assert!(err.to_string().contains("plain_behind_proxy"), "{err}");
+
+    // strict via [security]: the same bind refuses with the strict wording
+    let table: toml::Table = toml::from_str(&format!(
+        "[security]\nlevel = \"strict\"\n\n[grpc]\nport = {}\nhost = \"0.0.0.0\"\nplain_behind_proxy = true\n",
+        free_port()
+    ))
+    .unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let err = Engine::builder()
+        .set_config(&cfg)
+        .disable_acl()
+        .add_plugin(&GrpcPlugin::new())
+        .start()
+        .await
+        .map(|_| ())
+        .expect_err("strict refuses a plaintext wildcard bind despite the proxy flag");
+    assert!(err.to_string().contains("strict"), "{err}");
+
+    // permissive: the same bind starts (warned, not refused)
+    let table: toml::Table = toml::from_str(&format!(
+        "[grpc]\nport = {port}\nhost = \"0.0.0.0\"\nlevel = \"permissive\"\n"
+    ))
+    .unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = Engine::builder()
+        .set_config(&cfg)
+        .disable_acl()
+        .add_plugin(&GrpcPlugin::new())
+        .start()
+        .await
+        .expect("permissive starts a wildcard plaintext bind with a warning");
+    engine.close().await;
+}
+
+/// A message past the 8 MiB decode cap is refused by the transport with
+/// RESOURCE_EXHAUSTED and never reaches a dispatch (no request metric for
+/// the action).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_oversize_message_is_resource_exhausted() {
+    let port = free_port();
+    let engine = engine_with_table(port, "").await;
+    let mut client = wire_client(port).await;
+
+    let message = Message {
+        name: "snap:upsert".to_string(),
+        seq: "seq-1".to_string(),
+        ack: None,
+        data: Some(vec![b' '; 9 * 1024 * 1024]),
+    };
+    let status = client
+        .send(tonic::Request::new(message))
+        .await
+        .expect_err("an oversize message must be refused");
+    // The decode cap is enforced by the generated server before prost
+    // allocates the message; tonic answers its own `OutOfRange` for a length
+    // past `max_decoding_message_size` (the action budget's
+    // `resource_exhausted` is a different, later refusal).
+    assert_eq!(
+        status.code(),
+        Code::OutOfRange,
+        "the server-level decode cap answers before the handler: {status}"
+    );
+    assert!(
+        status.message().contains("limit"),
+        "the refusal names the limit: {status}"
+    );
+
+    // the refusal happened before admission: no request metric exists for
+    // the action, so no dispatch was ever started
+    let snapshot = engine.ingress().metrics.snapshot();
+    assert!(
+        !snapshot.keys().any(|k| k.contains("action=snap:upsert")),
+        "an oversize refusal must not count a dispatch: {snapshot:?}"
+    );
+    engine.close().await;
+}
+
+/// Wire fields are bounded before anything is allocated from them: an
+/// oversized `name`, `client_id` or options map answers invalid_argument.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_field_bounds_are_invalid_argument() {
+    let port = free_port();
+    let engine = engine_with_table(port, "").await;
+    let mut client = wire_client(port).await;
+
+    // a 300-byte action name over the wire
+    let status = client
+        .send(action(&"n".repeat(300), json!({})))
+        .await
+        .expect_err("an oversized name must be refused");
+    assert_eq!(status.code(), Code::InvalidArgument, "{status}");
+    let body = details(&status);
+    assert_eq!(body["code"], "invalid_argument");
+    assert!(body["correlation_id"].as_str().is_some(), "{body}");
+
+    // an oversized `ack` on an otherwise valid request
+    let status = client
+        .send(tonic::Request::new(Message {
+            name: "snap:upsert".to_string(),
+            seq: "seq-1".to_string(),
+            ack: Some("a".repeat(1025)),
+            data: Some(b"{}".to_vec()),
+        }))
+        .await
+        .expect_err("an oversized ack must be refused");
+    assert_eq!(status.code(), Code::InvalidArgument, "{status}");
+
+    engine.close().await;
+}
+
+/// The subscription request's own fields are bounded before the channel
+/// allocation: an oversized client id or a too-large options map answers
+/// invalid_argument.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_field_bounds() {
+    let engine = engine_with_grpc(free_port()).await;
+    let server = GrpcServer::new(&engine);
+
+    let oversized_client = MessageOptions {
+        client_id: "c".repeat(300),
+        r#type: "*".to_string(),
+        state: "*".to_string(),
+        uses: "*".to_string(),
+        options: Default::default(),
+    };
+    let status = server
+        .on_message(tonic::Request::new(oversized_client))
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("an oversized client_id must be refused"));
+    assert_eq!(status.code(), Code::InvalidArgument, "{status}");
+
+    // 65 options entries past the 64 cap
+    let many_options: std::collections::HashMap<String, String> = (0..65)
+        .map(|i| (format!("k{i}"), "v".to_string()))
+        .collect();
+    let oversized_map = MessageOptions {
+        client_id: "bounded".to_string(),
+        r#type: "*".to_string(),
+        state: "*".to_string(),
+        uses: "*".to_string(),
+        options: many_options,
+    };
+    let status = server
+        .on_message(tonic::Request::new(oversized_map))
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("a 65-entry options map must be refused"));
+    assert_eq!(status.code(), Code::InvalidArgument, "{status}");
+
+    // a value past its 1 KiB cap
+    let big_value = MessageOptions {
+        client_id: "bounded".to_string(),
+        r#type: "*".to_string(),
+        state: "*".to_string(),
+        uses: "*".to_string(),
+        options: [("k".to_string(), "v".repeat(1025))].into_iter().collect(),
+    };
+    let status = server
+        .on_message(tonic::Request::new(big_value))
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("an oversized option value must be refused"));
+    assert_eq!(status.code(), Code::InvalidArgument, "{status}");
+
+    engine.close().await;
+}
+
+/// Authentication happens before the payload decode: an invalid credential
+/// with a malformed payload answers UNAUTHENTICATED, not invalid_argument —
+/// the order the audit finding demanded.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_auth_precedes_the_payload_decode() {
+    let engine = engine_with_users(&[("alice", "wonderland", &["snap:upsert"])]).await;
+    let server = GrpcServer::new(&engine);
+    let token = login(&engine, "alice", "wonderland").await;
+    let _ = token;
+
+    let message = Message {
+        name: "snap:upsert".to_string(),
+        seq: "seq-1".to_string(),
+        ack: None,
+        data: Some(b"{ malformed".to_vec()),
+    };
+    let status = server
+        .do_action(message, Some("stale-or-forged".to_string()), None)
+        .await
+        .expect_err("an invalid credential must be refused");
+    assert_eq!(
+        status.code(),
+        Code::Unauthenticated,
+        "auth must run before the decode: {status}"
+    );
+    engine.close().await;
+}
+
+/// Under parse pressure (every parse permit held) a send answers
+/// resource_exhausted with the `busy` code and counts the reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_parse_pressure_is_busy() {
+    let port = free_port();
+    let engine = engine_with_table(port, "").await;
+    let mut client = wire_client(port).await;
+
+    let parse_inflight = engine
+        .config()
+        .get::<acts::IngressConfig>("ingress")
+        .unwrap_or_default()
+        .parse_inflight
+        .unwrap_or(128);
+    let permits: Vec<_> = (0..parse_inflight)
+        .map(|_| {
+            engine
+                .ingress()
+                .try_enter_parse()
+                .expect("the parse pool starts full")
+        })
+        .collect();
+    assert_eq!(permits.len(), parse_inflight);
+
+    let status = client
+        .send(action(
+            "snap:upsert",
+            json!({"name": "profile", "scope": "u1", "rev": 1, "data": {}}),
+        ))
+        .await
+        .expect_err("a send under parse pressure must be refused");
+    assert_eq!(status.code(), Code::ResourceExhausted, "{status}");
+    let body = details(&status);
+    assert_eq!(body["code"], "resource_exhausted", "{body}");
+    assert_eq!(body["retryable"], true, "{body}");
+
+    let snapshot = engine.ingress().metrics.snapshot();
+    assert!(
+        snapshot
+            .keys()
+            .any(|k| k.starts_with("acts_ingress_rejected_total")
+                && k.contains("reason=parse_pressure")),
+        "the parse refusal must be counted: {snapshot:?}"
+    );
+
+    // the permits release: the same request goes through
+    drop(permits);
+    let answer = client
+        .send(action(
+            "snap:upsert",
+            json!({"name": "profile", "scope": "u1", "rev": 1, "data": {}}),
+        ))
+        .await
+        .expect("after the parse pool frees, the request passes");
+    assert_eq!(payload(&answer.into_inner()), json!(true));
+    engine.close().await;
+}
+
+/// The per-action inflight cap refuses a second concurrent send with
+/// resource_exhausted and counts `action_inflight`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_action_cap_refuses_the_second_send() {
+    let port = free_port();
+    let engine = engine_with_table(
+        port,
+        "[ingress.profile.\"snap:upsert\"]\nmax_inflight = 1\n",
+    )
+    .await;
+    let mut client = wire_client(port).await;
+
+    let _held = engine
+        .ingress()
+        .try_enter_action("snap:upsert")
+        .expect("the cap of one has room for the first");
+    let status = client
+        .send(action(
+            "snap:upsert",
+            json!({"name": "profile", "scope": "u1", "rev": 1, "data": {}}),
+        ))
+        .await
+        .expect_err("the second concurrent send must be refused");
+    assert_eq!(status.code(), Code::ResourceExhausted, "{status}");
+    let snapshot = engine.ingress().metrics.snapshot();
+    assert!(
+        snapshot
+            .keys()
+            .any(|k| k.starts_with("acts_ingress_rejected_total")
+                && k.contains("reason=action_inflight")),
+        "the action-cap refusal must be counted: {snapshot:?}"
+    );
+
+    drop(_held);
+    let answer = client
+        .send(action(
+            "snap:upsert",
+            json!({"name": "profile", "scope": "u1", "rev": 1, "data": {}}),
+        ))
+        .await
+        .expect("after the permit releases, the send passes");
+    assert_eq!(payload(&answer.into_inner()), json!(true));
+    engine.close().await;
+}
+
+/// The dispatch deadline: a dispatch that does not finish inside the
+/// profile's budget answers `unavailable` with the `deadline_exceeded` code
+/// and the reconcile-via-reads wording; a normal dispatch under the same
+/// profile passes.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_deadline_exceeded_and_normal_pass() {
+    let port = free_port();
+    let (store, gate) = gated_store();
+    let table: toml::Table = toml::from_str(&format!(
+        "[grpc]\nport = {port}\n[ingress.profile.\"acl:login\"]\ndeadline_ms = 2000\n"
+    ))
+    .unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    // A user registry, because its login session write is one of the few
+    // dispatch paths that awaits the store (a gated batch) instead of the
+    // write-behind queue: it gives the deadline something real to cut.
+    let engine = Engine::builder()
+        .set_config(&cfg)
+        .set_store(store)
+        .with_user_acl()
+        .add_plugin(&GrpcPlugin::new())
+        .start()
+        .await
+        .unwrap();
+    engine
+        .acl()
+        .set_user(&acts::UserSpec {
+            name: "reader".to_string(),
+            add_passwords: vec!["reader-pass".to_string()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut client = wire_client(port).await;
+
+    let login = |client: &mut ActsServiceClient<tonic::transport::Channel>| {
+        let mut client = client.clone();
+        async move {
+            client
+                .send(action(
+                    "acl:login",
+                    json!({"user": "reader", "password": "reader-pass"}),
+                ))
+                .await
+        }
+    };
+
+    // a plain login under the same profile passes
+    login(&mut client)
+        .await
+        .expect("a fast login passes the deadline");
+
+    // shut the store gate: the session write can never finish, so the
+    // server-side deadline must elapse first
+    gate.send(false).unwrap();
+    let status = login(&mut client)
+        .await
+        .expect_err("a dispatch past the deadline must answer unavailable");
+    assert_eq!(status.code(), Code::Unavailable, "{status}");
+    let body = details(&status);
+    assert_eq!(body["code"], "unavailable", "{body}");
+    assert!(
+        status.message().contains("deadline_exceeded"),
+        "the wording tells the caller to reconcile, not retry: {status}"
+    );
+    gate.send(true).unwrap();
+    engine.close().await;
+}
+
+/// The client's own gRPC deadline is honored when it is tighter than the
+/// server's profile deadline: the request metadata maps onto a duration and
+/// the dispatch budget takes the minimum. A request with a generous client
+/// timeout passes normally.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_client_timeout_is_honored() {
+    // the grpc-timeout metadata grammar: value + unit
+    assert_eq!(
+        crate::parse_grpc_timeout("500m"),
+        Some(Duration::from_millis(500))
+    );
+    assert_eq!(
+        crate::parse_grpc_timeout("2S"),
+        Some(Duration::from_secs(2))
+    );
+    assert_eq!(
+        crate::parse_grpc_timeout("1H"),
+        Some(Duration::from_secs(3600))
+    );
+    assert_eq!(
+        crate::parse_grpc_timeout("10u"),
+        Some(Duration::from_micros(10))
+    );
+    assert_eq!(
+        crate::parse_grpc_timeout("10n"),
+        Some(Duration::from_nanos(10))
+    );
+    assert_eq!(
+        crate::parse_grpc_timeout("2M"),
+        Some(Duration::from_secs(120))
+    );
+    assert_eq!(crate::parse_grpc_timeout("x"), None);
+    assert_eq!(crate::parse_grpc_timeout("1Q"), None);
+
+    let port = free_port();
+    let engine = engine_with_table(
+        port,
+        "[ingress.profile.\"snap:upsert\"]\ndeadline_ms = 1000\n",
+    )
+    .await;
+    let mut client = wire_client(port).await;
+
+    // a client deadline of 100 ms under a 1 s profile: the fast write passes
+    let mut request = action(
+        "snap:upsert",
+        json!({"name": "profile", "scope": "u1", "rev": 3, "data": {}}),
+    );
+    request
+        .metadata_mut()
+        .insert("grpc-timeout", "100m".parse().unwrap());
+    let answer = client
+        .send(request)
+        .await
+        .expect("a fast dispatch passes the tighter client deadline");
+    assert_eq!(payload(&answer.into_inner()), json!(true));
+    engine.close().await;
+}
+
+/// Subscription quotas: the same client id cannot open a second stream on
+/// the subject (`client_busy`), a saturated per-subject cap refuses further
+/// subscribers (`subject_full`), and a dropped stream frees its slots so the
+/// same client subscribes again.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_quotas() {
+    let port = free_port();
+    let engine = engine_with_table(port, "[subscriptions]\nper_subject = 2\n").await;
+    let mut client = wire_client(port).await;
+
+    let options = |client_id: &str| MessageOptions {
+        client_id: client_id.to_string(),
+        r#type: "*".to_string(),
+        state: "*".to_string(),
+        uses: "*".to_string(),
+        options: Default::default(),
+    };
+
+    let first = client
+        .on_message(options("dup"))
+        .await
+        .expect("the first opens");
+    // the same client id on the same subject cannot hold a second stream
+    let second = client
+        .on_message(options("dup"))
+        .await
+        .expect_err("the same client id cannot double-subscribe");
+    assert_eq!(second.code(), Code::ResourceExhausted, "{second}");
+    assert!(
+        second.message().contains("client_busy"),
+        "{}",
+        second.message()
+    );
+
+    // a second live stream (different client id) fills the per-subject cap
+    let other = client
+        .on_message(options("other"))
+        .await
+        .expect("a second client opens the subject's last slot");
+    wait_until(
+        || engine.ingress().subscriptions.len() == 2,
+        "two live subscription leases",
+    )
+    .await;
+
+    let third = client
+        .on_message(options("third"))
+        .await
+        .expect_err("a saturated subject refuses further subscribers");
+    assert_eq!(third.code(), Code::ResourceExhausted, "{third}");
+    assert!(
+        third.message().contains("subject_full"),
+        "{}",
+        third.message()
+    );
+
+    // dropping both live streams releases every bucket, and the same client
+    // id can subscribe again
+    drop(first);
+    drop(other);
+    wait_until(
+        || engine.ingress().subscriptions.is_empty(),
+        "the dropped streams to release their leases",
+    )
+    .await;
+    let resumed = client
+        .on_message(options("dup"))
+        .await
+        .expect("a dropped stream frees its lease");
+    drop(resumed);
+
+    let snapshot = engine.ingress().metrics.snapshot();
+    assert!(
+        snapshot
+            .keys()
+            .any(|k| k.starts_with("acts_ingress_rejected_total")
+                && k.contains("reason=client_busy")),
+        "the client_busy refusal must be counted: {snapshot:?}"
+    );
+    assert!(
+        snapshot
+            .keys()
+            .any(|k| k.starts_with("acts_ingress_rejected_total")
+                && k.contains("reason=subject_full")),
+        "the subject_full refusal must be counted: {snapshot:?}"
+    );
+    engine.close().await;
+}
+
+/// Strict mode at start: a loopback bind without TLS starts; the refusal of
+/// the non-loopback case is asserted by `test_strict_bind_check` (the check
+/// runs before the bind, so the error path is the same one).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_loopback_plain_start_succeeds() {
+    let port = free_port();
+    let engine = engine_with_table(port, "").await;
+    // the transport came up: a request over the wire passes
+    let mut client = wire_client(port).await;
+    let answer = client
+        .send(action(
+            "snap:upsert",
+            json!({"name": "profile", "scope": "u1", "rev": 1, "data": {}}),
+        ))
+        .await
+        .expect("the plain loopback transport serves");
+    assert_eq!(payload(&answer.into_inner()), json!(true));
+    engine.close().await;
+}
+
+/// After quiesce, a send answers UNAVAILABLE and the drain report reflects
+/// the unary dispatch still running; once it finishes, the drain completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_quiesce_refuses_and_drain_reports_the_hanging_unary() {
+    let port = free_port();
+    let (store, gate) = gated_store();
+    let plugin = GrpcPlugin::new();
+    let table: toml::Table = toml::from_str(&format!(
+        "[grpc]\nport = {port}\n[ingress.profile.\"acl:login\"]\ndeadline_ms = 30000\n"
+    ))
+    .unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = Engine::builder()
+        .set_config(&cfg)
+        .set_store(store)
+        .with_user_acl()
+        .add_plugin(&plugin)
+        .start()
+        .await
+        .unwrap();
+    engine
+        .acl()
+        .set_user(&acts::UserSpec {
+            name: "reader".to_string(),
+            add_passwords: vec!["reader-pass".to_string()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // a unary stuck on the gated session write: the drain must see it
+    let mut client = wire_client(port).await;
+    gate.send(false).unwrap();
+    let unary = tokio::spawn(async move {
+        client
+            .send(action(
+                "acl:login",
+                json!({"user": "reader", "password": "reader-pass"}),
+            ))
+            .await
+            .map(|response| response.into_inner())
+    });
+    wait_until(
+        || plugin.transport_handle().inflight_active() == 1,
+        "the unary dispatch to be admitted",
+    )
+    .await;
+
+    plugin.transport_handle().quiesce().await;
+    // a new dispatch through the *shared* server (same counter the transport
+    // drains) is refused instead of admitted
+    let status = plugin
+        .server_for_test(&engine)
+        .do_action(wire_message("snap:upsert"), None, None)
+        .await
+        .expect_err("a quiesced transport refuses new work");
+    assert_eq!(status.code(), Code::Unavailable, "{status}");
+
+    // the report names the unary still running
+    let report = plugin
+        .transport_handle()
+        .drain(Duration::from_millis(200))
+        .await;
+    assert!(!report.drained, "the hanging unary must hold the drain");
+    assert_eq!(report.active_after, 1);
+
+    // releasing the store lets the admitted unary finish; the drain then
+    // completes
+    gate.send(true).unwrap();
+    let answer = unary.await.unwrap().expect("the admitted unary completes");
+    assert_eq!(answer.name, "acl:login");
+    let report = plugin
+        .transport_handle()
+        .drain(Duration::from_secs(5))
+        .await;
+    assert!(
+        report.drained,
+        "the finished unary must not hold the drain: {report:?}"
+    );
+    assert_eq!(report.active_after, 0);
+    engine.close().await;
+}
+
+/// The request metrics exist after calls: every unary send is counted with
+/// the transport, action and result labels.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_request_metrics_are_counted() {
+    let port = free_port();
+    let engine = engine_with_table(port, "").await;
+    let mut client = wire_client(port).await;
+
+    client
+        .send(action(
+            "snap:upsert",
+            json!({"name": "profile", "scope": "u1", "rev": 1, "data": {}}),
+        ))
+        .await
+        .expect("the ok request passes");
+    let _ = client
+        .send(action("snap:upsert", json!({"rev": "missing-fields"})))
+        .await;
+
+    let snapshot = engine.ingress().metrics.snapshot();
+    let ok = snapshot
+        .iter()
+        .find(|(k, _)| {
+            k.starts_with("acts_ingress_requests_total")
+                && k.contains("transport=grpc")
+                && k.contains("action=snap:upsert")
+                && k.contains("result=ok")
+        })
+        .map(|(_, v)| *v)
+        .unwrap_or(0);
+    assert!(ok >= 1, "the ok send must be counted: {snapshot:?}");
+    let error = snapshot
+        .iter()
+        .find(|(k, _)| {
+            k.starts_with("acts_ingress_requests_total")
+                && k.contains("transport=grpc")
+                && k.contains("action=snap:upsert")
+                && k.contains("result=error")
+        })
+        .map(|(_, v)| *v)
+        .unwrap_or(0);
+    assert!(error >= 1, "the failing send must be counted: {snapshot:?}");
+    engine.close().await;
+}
+
+// ── TLS loading, strict-mode verdicts, field bounds ──
+
+use crate::validate_message_options;
+use std::path::Path;
+
+/// The TLS loader: a valid pair builds an acceptor; every failure names the
+/// file it could not use (missing, empty, malformed).
+#[tokio::test(flavor = "multi_thread")]
+async fn tls_acceptor_loads_a_pair_and_names_its_failures() {
+    let dir = std::env::temp_dir().join(format!("acts-grpc-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cert_src = include_str!("../../acts-plugin-web/tests/test_cert.pem");
+    let key_src = include_str!("../../acts-plugin-web/tests/test_key.pem");
+    let cert = dir.join("c.pem");
+    let key = dir.join("k.pem");
+    std::fs::write(&cert, cert_src).unwrap();
+    std::fs::write(&key, key_src).unwrap();
+    let empty = dir.join("empty.pem");
+    std::fs::write(&empty, "").unwrap();
+
+    let engine_with = |cert: &Path, key: &Path, client_ca: Option<&Path>| {
+        let ca = client_ca
+            .map(|ca| format!("\nclient_ca = {ca:?}"))
+            .unwrap_or_default();
+        let table: toml::Table = toml::from_str(&format!(
+            "[grpc]\nport = {}\n[grpc.tls]\ncert = {cert:?}\nkey = {key:?}\n{ca}",
+            free_port()
+        ))
+        .unwrap();
+        let cfg = acts::Config {
+            data: Default::default(),
+            table,
+        };
+        Engine::builder().set_config(&cfg).start()
+    };
+
+    let engine = engine_with(&cert, &key, None).await.unwrap();
+    let acceptor = GrpcPlugin::tls_acceptor(&engine).unwrap();
+    assert!(acceptor.is_some(), "a matching pair builds an acceptor");
+    let acceptor_err = |engine: &Engine| -> String {
+        match GrpcPlugin::tls_acceptor(engine) {
+            Ok(_) => panic!("the load must fail"),
+            Err(err) => err.to_string(),
+        }
+    };
+    engine.close().await;
+
+    // a missing file is a config error naming the path
+    let engine = engine_with(&dir.join("missing.pem"), &key, None)
+        .await
+        .unwrap();
+    let err = acceptor_err(&engine);
+    assert!(err.contains("missing.pem"), "{err}");
+    engine.close().await;
+
+    // an empty cert file names the file and says what is missing
+    let engine = engine_with(&empty, &key, None).await.unwrap();
+    let err = acceptor_err(&engine);
+    assert!(err.contains("contains no certificate"), "{err}");
+    engine.close().await;
+
+    // a missing client CA is named too
+    let engine = engine_with(&cert, &key, Some(&dir.join("ca-missing.pem")))
+        .await
+        .unwrap();
+    let err = acceptor_err(&engine);
+    assert!(err.contains("ca-missing.pem"), "{err}");
+    engine.close().await;
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The strict-mode verdict per posture level: permissive warns, standard
+/// needs TLS or the proxy acknowledgement, strict needs TLS outright.
+#[test]
+fn strict_bind_check_follows_the_level() {
+    use acts::Level;
+    let non_loopback: std::net::SocketAddr = "0.0.0.0:10080".parse().unwrap();
+    let tls = Some(TlsConfig {
+        cert: "/tmp/c.pem".to_string(),
+        key: "/tmp/k.pem".to_string(),
+        client_ca: None,
+    });
+
+    assert!(
+        GrpcPlugin::strict_bind_check(non_loopback, &None, false, Level::Permissive).is_ok(),
+        "permissive only warns"
+    );
+    let err = GrpcPlugin::strict_bind_check(non_loopback, &None, false, Level::Standard)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("plain_behind_proxy"), "{err}");
+    assert!(
+        GrpcPlugin::strict_bind_check(non_loopback, &None, true, Level::Standard).is_ok(),
+        "the acknowledgement is the standard escape hatch"
+    );
+    let err = GrpcPlugin::strict_bind_check(non_loopback, &None, true, Level::Strict)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not enough"), "{err}");
+    assert!(
+        GrpcPlugin::strict_bind_check(non_loopback, &tls, false, Level::Strict).is_ok(),
+        "TLS satisfies every level"
+    );
+    let loopback: std::net::SocketAddr = "127.0.0.1:10080".parse().unwrap();
+    assert!(GrpcPlugin::strict_bind_check(loopback, &None, false, Level::Strict).is_ok());
+}
+
+/// Subscription request bounds: the options map count, key and value sizes,
+/// and the client id are all capped before allocation.
+#[test]
+fn subscription_field_bounds_reject_each_dimension() {
+    let base = || MessageOptions {
+        client_id: "c1".to_string(),
+        r#type: "*".to_string(),
+        state: "*".to_string(),
+        uses: "*".to_string(),
+        options: Default::default(),
+    };
+
+    assert!(validate_message_options(&base()).is_ok());
+
+    let mut too_many = base();
+    for i in 0..65 {
+        too_many.options.insert(format!("k{i}"), "v".to_string());
+    }
+    assert!(validate_message_options(&too_many).is_err(), "65 options");
+
+    let mut long_key = base();
+    long_key.options.insert("k".repeat(129), "v".to_string());
+    assert!(validate_message_options(&long_key).is_err(), "129-byte key");
+
+    let mut long_value = base();
+    long_value.options.insert("k".to_string(), "v".repeat(1025));
+    assert!(
+        validate_message_options(&long_value).is_err(),
+        "1025-byte value"
+    );
+
+    let mut long_client = base();
+    long_client.client_id = "c".repeat(257);
+    assert!(
+        validate_message_options(&long_client).is_err(),
+        "257-byte client id"
+    );
+}
+
+/// A unary without `data` runs with empty options instead of failing the
+/// envelope: `acl:whoami` answers the anonymous identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_unary_without_data_runs_with_empty_options() {
+    let engine = Engine::builder().disable_acl().start().await.unwrap();
+    let server = GrpcServer::new(&engine);
+    let answer = server
+        .do_action(
+            Message {
+                name: "acl:whoami".to_string(),
+                seq: "seq-1".to_string(),
+                ack: None,
+                data: None,
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("a dataless action runs");
+    let payload: serde_json::Value =
+        serde_json::from_slice(answer.get_ref().data.as_deref().unwrap()).unwrap();
+    // a disabled ACL resolves every caller to the unrestricted principal,
+    // so the probe answers `authenticated: true` — the point here is that
+    // the dataless envelope reached the action at all.
+    assert_eq!(payload["authenticated"], true);
+    assert_eq!(answer.get_ref().ack.as_deref(), Some("seq-1"));
     engine.close().await;
 }

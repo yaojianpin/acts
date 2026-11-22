@@ -1,5 +1,10 @@
 use crate::Engine;
 
+mod transport;
+pub use transport::{
+    InflightCounter, InflightGuard, RunningTransport, ShutdownConfig, TransportDrainReport,
+};
+
 #[cfg(test)]
 mod tests;
 

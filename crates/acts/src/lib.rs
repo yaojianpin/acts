@@ -46,7 +46,8 @@ mod engine;
 mod env;
 mod error;
 mod event;
-mod export;
+pub mod export;
+mod ingress;
 mod model;
 mod package;
 mod plugin;
@@ -85,15 +86,27 @@ pub use env::{ActFunction, ActUserVar};
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};
 pub use export::actions;
+pub use export::error::{
+    ExternalCode, ExternalError, INTERNAL_MESSAGE, new_correlation_id, safe_text,
+};
 pub use export::{
     Channel, ChannelOptions, CpuStatus, Executor, HealthStatus, LoopStatus, MemoryStatus,
     ProcessCounts, RunHandle, RunOutcome, StorageStatus, StoreWriterStatus, SystemStatus,
+};
+pub use ingress::{
+    ActionPermit, AdmissionReject, Ingress, IngressConfig, Level, Metrics, ParsePermit, Profile,
+    ProfileOverride, SecurityConfig, SubscriptionKey, SubscriptionLease, SubscriptionLimitsConfig,
+    SubscriptionRegistry, SubscriptionReject, TRANSPORT_GRPC, TRANSPORT_NATS, TRANSPORT_WEB,
+    class_of, resolve_level,
 };
 pub use model::*;
 pub use package::{
     ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRuntime, ActResource, ActRunAs,
 };
-pub use plugin::ActPlugin;
+pub use plugin::{
+    ActPlugin, InflightCounter, InflightGuard, RunningTransport, ShutdownConfig,
+    TransportDrainReport,
+};
 pub use signal::Signal;
 pub use snapshot::{MAX_TTL_SECS, SnapshotEntry, SnapshotManager, SnapshotOptions, SnapshotPolicy};
 pub use store::*;

@@ -9,6 +9,19 @@ pub const DEFAULT_MAX_IN_FLIGHT: usize = 256;
 /// no bound.
 const MAX_IN_FLIGHT: usize = 65_536;
 
+/// The raw payload cap when `[nats].max_payload_bytes` does not say otherwise:
+/// 1 MiB. Deploy-sized actions are additionally capped by the broker's own
+/// `max_payload` — this knob bounds what the plugin accepts, the broker what
+/// it transports at all.
+pub const DEFAULT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+
+/// Floor of `[nats].max_payload_bytes`: below 1 KiB even the small actions
+/// (`msg:ack`, `snap:remove`) cannot carry their arguments.
+const MIN_MAX_PAYLOAD_BYTES: usize = 1024;
+
+/// Ceiling of `[nats].max_payload_bytes`: past 64 MiB it is no cap at all.
+const MAX_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
 /// Plugin configuration, read from the engine config section `[nats]`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NatsConfig {
@@ -36,6 +49,28 @@ pub struct NatsConfig {
     /// is refused to its caller instead of started. `0` selects the default.
     #[serde(default)]
     pub max_in_flight: Option<usize>,
+    /// The raw payload cap, in bytes, checked **before** the payload is
+    /// parsed: an oversize message is refused unread, so no byte of it ever
+    /// reaches `serde_json` (allocation, parse work, hostile-JSON probes are
+    /// all out). Clamped to 1 KiB..64 MiB — a configured `0` is a floor, not
+    /// an off switch.
+    #[serde(default)]
+    pub max_payload_bytes: Option<usize>,
+    /// Require TLS on the broker connection (`require_tls`): the access token
+    /// travels inside the action payload, and over a plaintext link it is
+    /// readable by anything between the publisher and the broker — production
+    /// must not cross plaintext.
+    #[serde(default)]
+    pub tls_required: bool,
+    /// Refuse to start while a JetStream stream's subjects capture
+    /// `<subject>.cmd`: a stream holding the command subject persists and
+    /// redelivers command messages, and with the token living in the payload
+    /// a replayed command is a replayed credential. When set, the check runs
+    /// at startup (after the broker connect) and a stream overlap **or an
+    /// unrunnable listing** fails the start — the check must be able to say
+    /// "clean" for the start to pass.
+    #[serde(default)]
+    pub reject_jetstream_capture: bool,
     /// Engine message subscriptions forwarded to NATS. Empty by default —
     /// add one entry per remote subscriber, mirroring a gRPC `OnMessage`
     /// client whose `MessageOptions` are the filter fields below.
@@ -52,6 +87,9 @@ impl Default for NatsConfig {
             password: None,
             subject: default_subject(),
             max_in_flight: None,
+            max_payload_bytes: None,
+            tls_required: false,
+            reject_jetstream_capture: false,
             channels: Vec::new(),
         }
     }
@@ -66,6 +104,17 @@ impl NatsConfig {
         match self.max_in_flight {
             Some(0) | None => DEFAULT_MAX_IN_FLIGHT,
             Some(max_in_flight) => max_in_flight.clamp(1, MAX_IN_FLIGHT),
+        }
+    }
+
+    /// The raw payload cap, in bytes, refused before the payload is parsed.
+    /// An absent field selects [`DEFAULT_MAX_PAYLOAD_BYTES`]; a configured
+    /// value is clamped to 1 KiB..64 MiB, so a `0` is the floor — never an
+    /// off switch.
+    pub fn max_payload_bytes(&self) -> usize {
+        match self.max_payload_bytes {
+            None => DEFAULT_MAX_PAYLOAD_BYTES,
+            Some(bytes) => bytes.clamp(MIN_MAX_PAYLOAD_BYTES, MAX_MAX_PAYLOAD_BYTES),
         }
     }
 }
@@ -120,6 +169,47 @@ mod tests {
         assert_eq!(cfg.url, "nats://127.0.0.1:4222");
         assert_eq!(cfg.subject, "acts");
         assert!(cfg.channels.is_empty());
+        assert_eq!(cfg.max_payload_bytes(), DEFAULT_MAX_PAYLOAD_BYTES);
+        assert!(
+            !cfg.tls_required,
+            "TLS is opt-in: a local dev broker is plaintext"
+        );
+        assert!(
+            !cfg.reject_jetstream_capture,
+            "the jetstream capture check is opt-in strictness"
+        );
+    }
+
+    /// The raw payload cap is configured, defaulted when absent, and clamped
+    /// to 1 KiB..64 MiB — a `0` (or anything smaller) is the floor, never an
+    /// off switch: a cap that admits everything is no cap at all.
+    #[test]
+    fn max_payload_bytes_is_configured_defaulted_and_clamped() {
+        let cfg: NatsConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(cfg.max_payload_bytes(), DEFAULT_MAX_PAYLOAD_BYTES);
+
+        let cfg: NatsConfig = serde_json::from_value(json!({"max_payload_bytes": 4096})).unwrap();
+        assert_eq!(cfg.max_payload_bytes(), 4096);
+
+        let cfg: NatsConfig = serde_json::from_value(json!({"max_payload_bytes": 0})).unwrap();
+        assert_eq!(cfg.max_payload_bytes(), 1024);
+        let cfg: NatsConfig = serde_json::from_value(json!({"max_payload_bytes": 512})).unwrap();
+        assert_eq!(cfg.max_payload_bytes(), 1024);
+
+        let cfg: NatsConfig =
+            serde_json::from_value(json!({"max_payload_bytes": u64::MAX as usize})).unwrap();
+        assert_eq!(cfg.max_payload_bytes(), 64 * 1024 * 1024);
+    }
+
+    /// The strict startup knobs are plain booleans: set, they turn the broker
+    /// TLS requirement and the jetstream capture check on.
+    #[test]
+    fn strict_start_flags_deserialize() {
+        let cfg: NatsConfig =
+            serde_json::from_value(json!({"tls_required": true, "reject_jetstream_capture": true}))
+                .unwrap();
+        assert!(cfg.tls_required);
+        assert!(cfg.reject_jetstream_capture);
     }
 
     /// The in-flight bound is what the actions subscription is built with:

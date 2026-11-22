@@ -8,6 +8,18 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    // A safe umask before anything exists: every file the process creates —
+    // rolling-appender hours, sqlite -wal/-shm, rocksdb children — then
+    // lands 0600/0700 regardless of the caller's umask (a systemd unit with
+    // UMask unset runs 0022, and nothing else fixes that). One line, unix
+    // only; windows has no umask and its exclusivity comes from the DACL
+    // applied by the fs_hardening module.
+    #[cfg(unix)]
+    // SAFETY: umask has no preconditions and only affects this process.
+    unsafe {
+        libc::umask(0o077);
+    }
+
     // Config home: ~/.acts (or $ACTS_CONFIG_DIR). The default acts.toml is
     // auto-created there on first start (embedded at build time), so a binary
     // installed with `cargo install acts-server` works with zero setup.
@@ -18,6 +30,12 @@ async fn main() -> Result<(), anyhow::Error> {
     // defaults with a deep per-key merge.
     let mut config = Config::create(&config_file)?;
     config.overlay_file(Path::new("acts.toml"))?;
+
+    // Filesystem-hardening pass over every path the server owns, before any
+    // store opens. Strict mode (`[server].fs_strict`) refuses the start on a
+    // violation; the default warns and fixes what fixing can fix.
+    let strict = acts_server::fs_strict(&config)?;
+    acts_server::validate_startup_dirs(&config_dir, &config, strict)?;
 
     init_log(&config)?;
     println!("config file: {}", config_file.display());
@@ -246,17 +264,22 @@ mod tests {
     async fn serve_releases_the_lease_when_the_engine_fails() {
         let dir = scratch("engine-fail");
         let (db, url) = sqlite_db(&dir);
-        // `snapshot` is a scalar where the server expects an array of tables:
-        // engine construction fails with a config error.
+        // `[acl] max_sessions` is a number: a string makes engine
+        // construction fail with a config error — after the store (and its
+        // lease) are open, which is exactly the window the release covers.
+        // (A stale `[[snapshot]]` section no longer fails anything: it is a
+        // migration warning.)
         let config = load(
             &dir,
-            &format!("snapshot = \"bad\"\n[db]\ntype = \"sqlite\"\ndatabase_url = '{url}'\n"),
+            &format!(
+                "[acl]\nmax_sessions = \"bad\"\n[db]\ntype = \"sqlite\"\ndatabase_url = '{url}'\n"
+            ),
         );
 
         let err = serve(dir.clone(), config, ServerPlugins::default(), async {})
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("snapshot"), "got: {err}");
+        assert!(err.to_string().contains("acl"), "got: {err}");
 
         let reopened = acts_server::open_store(&dir, &db).await.unwrap();
         assert_eq!(

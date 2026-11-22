@@ -108,7 +108,28 @@ tonic = { version = "0.14", default-features = false, features = [
 tonic-prost = "0.14"
 prost = "0.14"
 axum = "0.8"
+# `tower` is axum's own service layer crate, pinned here so a member's test can
+# drive a router in-process (`oneshot`) instead of racing a socket.
+tower = { version = "0.5", features = ["util"] }
 validator = { version = "0.21.0", features = ["derive"] }
+# ingress hardening: explicit TLS for the web/gRPC transports (`ring`, not
+# aws-lc-rs — no C toolchain in the build graph), and the wire type that
+# carries a gRPC status's external-error details.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "std",
+    "tls12",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# PEM loading lives in rustls-pki-types since 1.9 (rustls-pemfile is archived;
+# RUSTSEC-2025-0134). `std` unlocks the file-based pem helpers.
+rustls-pki-types = { version = "1", features = ["std"] }
+bytes = "1"
+# platform gates for the server's filesystem hardening (umask on unix, an
+# exclusive DACL on windows)
+libc = "0.2"
+windows-sys = { version = "0.61", default-features = false }
 # shell
 # `acts-package-shell` runs a workflow's script in bashkit's virtual bash. The
 # `realfs` feature is what lets the interpreter's root be the run's own

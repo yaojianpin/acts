@@ -1,5 +1,12 @@
 //! Engine construction for the acts server binary — shared with the
 //! integration tests so they exercise exactly what `acts-server` runs.
+//! Filesystem-hardening behavior is tested in `tests/fs_hardening.rs`.
+
+mod fs_hardening;
+
+pub use fs_hardening::{
+    ensure_dir_secure, ensure_file_secure, validate_dir_secure, validate_file_secure,
+};
 
 use acts::{ConfigLog, Engine, EngineBuilder, KvStore};
 use acts_acl::{AclOptions, UserAcl};
@@ -386,28 +393,12 @@ lease = true
 # lease_renew_secs = 10
 # lease_owner = "acts-1"
 
-# snapshot-backed sealed-data targets.
-# Data is fed through the web/grpc/nats snapshot APIs and resolved into the
-# headless scope of each effect at its prepare. A seal is per effect and is
-# not durable run state (it is not recovered after a restart):
-#   policy     per_proc (default) = resolve at this effect's prepare
-#              per_task           = resolve at this effect's prepare
-#   scope      task param names whose values join with '/' into the scope
-#              key (default: one global scope per target)
-#   on_missing skip (default) | error
-#   ttl        how long an entry stays valid after its last refresh —
-#              suffixed duration ("2s", "5m", "3h", "1d") or bare seconds
-#              (default: never expire)
-[[snapshot]]
-name = "profile"
-policy = "per_proc"
-scope = ["uid"]
-
-[[snapshot]]
-name = "secrets"
-scope = ["uid"]
-policy = "per_task"
-ttl = "1h"
+# NOTE: there is no `[[snapshot]]` section — the deployment-side snapshot
+# registration was removed (0.26.1). A snapshot variable exists once its
+# provider package publishes it (`pack:publish` with `options.var`
+# metadata) or a feed's first `snap:upsert` auto-registers it (pure push).
+# A stale `[[snapshot]]` section in an old acts.toml is ignored with a
+# migration warning at startup.
 
 # grpc service — acts-plugin-grpc. Endpoint used by acts-cli and the
 # acts-channel client libraries.
@@ -570,6 +561,139 @@ port = 10082
 # type = "*"
 # state = "*"
 # uses = "*"
+
+# security — the one posture knob that presets every budget below, so a
+# deployment states its posture once and still keeps every fine-grained key.
+# Resolution: explicit key > the section's own `level` > [security].level >
+# standard. An unknown level word warns and falls back to standard.
+#
+#   |                          | permissive | standard | strict        |
+#   |--------------------------|------------|----------|---------------|
+#   | payload caps             | x4         | as shown | /4 (16 KiB floor) |
+#   | per-action inflight      | x2         | as shown | /2            |
+#   | ingress global_inflight  | 4096       | 1024     | 512           |
+#   | ingress parse_inflight   | 256        | 128      | 64            |
+#   | subscriptions global/subj/ip/rate | 20000/64/256/40 | 10000/32/128/20 | 2000/16/64/10 |
+#   | non-loopback plaintext   | warn only  | needs tls or plain_behind_proxy | needs tls |
+#   | [server] fs_strict       | false      | false    | true          |
+#
+# [security]
+# level = "standard"
+
+# ingress — the one shared admission budget (acts::Ingress) across the web,
+# gRPC and NATS transports. Requests are refused with a stable
+# `resource_exhausted` error instead of growing an unbounded queue, so load
+# sheds at the door rather than inside the scheduler.
+[ingress]
+# this section alone can sit tighter than the rest of the deployment
+# level = "strict"
+# actions admitted across all transports at once (0 selects the default).
+global_inflight = 1024
+# minimal-envelope parses admitted concurrently (0 selects the default).
+# A parse past the cap is refused before any body decode, so a burst of
+# large payloads cannot pin every worker in serde.
+parse_inflight = 128
+
+# Per-class overrides. The key is either a class (`auth`, `small`, `event`,
+# `snapshot`, `start`, `deploy`, `default`) or an exact action name
+# (`model:deploy`); an unknown class name applies to no class and logs a
+# warning (a key containing ':' is an action name). Defaults:
+#   auth     64 KiB  10 s  32    small    64 KiB   5 s 128
+#   event     1 MiB  15 s  64    snapshot 1 MiB  15 s  32
+#   start     2 MiB  30 s  32    deploy   8 MiB  60 s   4
+#   default 256 KiB  30 s  64
+# Clamps: bytes 16 KiB..256 MiB, deadline 1 s..1 h, inflight 1..65536;
+# `0` selects the default.
+# [ingress.profile."model:deploy"]
+# max_raw_bytes = 8388608
+# deadline_ms = 60000
+# max_inflight = 4
+
+# subscriptions — one registry shared by SSE and gRPC: a lease is taken
+# before any queue is allocated, so caps count across both transports and
+# the same (subject, client_id) can never ack one delivery twice.
+[subscriptions]
+# level = "strict"
+# subscriptions the whole server keeps (0 selects the default)
+global_max = 10000
+# subscribers per subject
+per_subject = 32
+# subscribers per client IP
+per_ip = 128
+# connections per client id — one: two connections to the same subject must
+# never ack the same delivery
+per_client = 1
+# new subscriptions per second (flood guard on the create path)
+create_rate_per_sec = 20
+
+# shutdown — graceful-stop budget.
+[shutdown]
+# how long the engine waits for admitted work to finish before plugin
+# shutdown proceeds (clamped to 100 ms..60 s). A transport is quiesced (new
+# requests refused) and then drained; the report names what remained when
+# the deadline passes.
+drain_timeout_ms = 5000
+
+# [web] / [grpc] hardening additions (the fields above stay as documented).
+#   max_concurrent          requests served at once
+#   max_concurrent_per_ip   requests served at once from one client IP
+#   rate_limit_per_min      requests per minute from one client IP
+#   trusted_proxy_cidrs     CIDR list of proxies whose X-Forwarded-For the
+#                           per-IP limits may trust (empty = never trust)
+#   plain_behind_proxy      accept a plain (no TLS) listener behind a proxy;
+#                           without it a non-loopback bind without [tls]
+#                           refuses the start
+# [web]
+# level = "strict"
+# max_concurrent = 256
+# max_concurrent_per_ip = 32
+# rate_limit_per_min = 600
+# trusted_proxy_cidrs = []
+# plain_behind_proxy = false
+#
+# TLS for the web listener. Without it the listener must stay on loopback
+# (or `plain_behind_proxy = true` behind a trusted proxy). cert/key are PEM
+# paths; client_ca optionally turns on client-certificate authentication.
+# [web.tls]
+# cert = "@ACTS_DIR@/tls/web.crt"
+# key = "@ACTS_DIR@/tls/web.key"
+# client_ca = "@ACTS_DIR@/tls/client-ca.crt"
+#
+# [grpc]
+# level = "strict"
+# max_concurrent = 256
+# max_concurrent_per_ip = 32
+# rate_limit_per_min = 600
+# trusted_proxy_cidrs = []
+# plain_behind_proxy = false
+# [grpc.tls]
+# cert = "@ACTS_DIR@/tls/grpc.crt"
+# key = "@ACTS_DIR@/tls/grpc.key"
+# client_ca = "@ACTS_DIR@/tls/client-ca.crt"
+
+# [nats] hardening additions (the fields above stay as documented).
+#   max_payload_bytes         raw size cap before any parse (a larger
+#                             message is refused without decoding it)
+#   tls_required              refuse to talk to a broker without TLS
+#   reject_jetstream_capture  refuse event forwarding to JetStream-enabled
+#                             subjects (capturing engine events in a stream
+#                             makes them replayable — opt in deliberately)
+# [nats]
+# max_payload_bytes = 1048576
+# tls_required = false
+# reject_jetstream_capture = true
+
+# [server] — the server process's own knobs.
+[server]
+# this section's own posture level (follows [security].level otherwise)
+# level = "strict"
+# refuse the start on a filesystem-hardening violation (a symlinked
+# config/log/store path, a server directory writable by group or other, a
+# world-writable parent without the sticky bit). Omitted follows the level
+# (true only under `strict`); the other levels log a warning and apply the
+# best-effort fix instead, so an upgrade cannot strand an operator over
+# something the server can repair itself.
+fs_strict = false
 "#;
 
 /// The acts-server config directory: `$ACTS_CONFIG_DIR`, else `~/.acts`
@@ -599,13 +723,13 @@ pub fn config_path(dir: &Path) -> PathBuf {
 /// default config there (its `data`/`log` paths point into the config
 /// directory, made absolute at write time). Returns the config file path.
 pub fn ensure_default_config(dir: &Path) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
+    fs_hardening::ensure_dir_secure(dir)?;
     let path = config_path(dir);
     if !path.exists() {
         let dir_text = dir.to_string_lossy().replace('\\', "/");
-        std::fs::write(
+        fs_hardening::ensure_file_secure(
             &path,
-            DEFAULT_ACTS_TOML.replace(CONFIG_DIR_MARKER, &dir_text),
+            &DEFAULT_ACTS_TOML.replace(CONFIG_DIR_MARKER, &dir_text),
         )?;
     }
     Ok(path)
@@ -625,11 +749,18 @@ const LOG_FILE_PREFIX: &str = "acts.log";
 /// The appender writes to the current hour's file as soon as it is built, so
 /// the file exists on disk before the first event is logged.
 pub fn log_file_appender(log: &ConfigLog) -> std::io::Result<RollingFileAppender> {
-    std::fs::create_dir_all(&log.dir).map_err(|err| {
+    let dir = Path::new(&log.dir);
+    fs_hardening::ensure_dir_secure(dir).map_err(|err| {
         std::io::Error::new(
             err.kind(),
             format!("failed to create log dir {}: {err}", log.dir),
         )
+    })?;
+    // Lenient: a warn-and-fix pass — strict mode is the startup pass's job
+    // (validate_startup_dirs), the appender itself must never hard-refuse a
+    // server whose only sin is a loose log dir it can fix.
+    fs_hardening::validate_dir_secure(dir, false).map_err(|err| {
+        std::io::Error::other(format!("log dir {} is not safe to use: {err}", log.dir))
     })?;
     let mut builder = RollingFileAppender::builder()
         .rotation(Rotation::HOURLY)
@@ -857,8 +988,80 @@ fn database_url(config_dir: &Path, db: &DbConfig, env_url: Option<&str>) -> acts
     )))
 }
 
-/// Create the parent directory of a file-backed store path. Connection
-/// URLs (`scheme://…`) and `:memory:` are left untouched.
+/// `[server]` — the server process's own knobs.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Refuse the start on a filesystem-hardening violation (a symlinked
+    /// config/log/store path, group/other-writable server directories, an
+    /// owner that is not us, a world-writable parent without the sticky
+    /// bit). Omitted follows the posture level: `strict` implies it, the
+    /// other levels log a warning and apply the best-effort fix instead, so
+    /// an upgrade does not strand an operator over something the server can
+    /// repair itself. An explicit key always wins over the level.
+    pub fs_strict: Option<bool>,
+    /// Posture level of this section alone (`permissive`/`standard`/
+    /// `strict`); omitted follows `[security].level`, which follows
+    /// `standard`.
+    pub level: Option<String>,
+}
+
+/// `[server].fs_strict` of `config`: the explicit key when set, else the
+/// level default (`true` only for `strict`).
+pub fn fs_strict(config: &Config) -> acts::Result<bool> {
+    if config.has("server") {
+        let server: ServerConfig = config.get::<ServerConfig>("server")?;
+        if let Some(fs_strict) = server.fs_strict {
+            return Ok(fs_strict);
+        }
+        return Ok(acts::resolve_level(server.level.as_deref(), config) == acts::Level::Strict);
+    }
+    Ok(acts::resolve_level(None, config) == acts::Level::Strict)
+}
+
+/// The directory the configured database stores in and the startup pass must
+/// validate: the URL itself for sled/rocksdb (a directory), its parent for
+/// sqlite (a file). Connection URLs (`scheme://…`) and `:memory:` store
+/// nowhere on this filesystem → `None`.
+pub fn store_dir(config_dir: &Path, db: &DbConfig) -> acts::Result<Option<PathBuf>> {
+    let env_url = std::env::var(ACTS_DATABASE_URL_ENV).ok();
+    let url = database_url(config_dir, db, env_url.as_deref())?;
+    if url.contains("://") || url == ":memory:" {
+        return Ok(None);
+    }
+    let path = PathBuf::from(url);
+    Ok(if db.kind == DbType::Sqlite {
+        path.parent().map(Path::to_path_buf)
+    } else {
+        Some(path)
+    })
+}
+
+/// Startup pass over every path the server owns: the config dir and its
+/// `acts.toml`, the `[log]` dir, and the store dir of the configured
+/// database. `strict` (i.e. `[server].fs_strict`) turns a violation into a
+/// refusing error; the default warns and fixes what fixing can fix — a
+/// symlink is never fixable and refuses in both modes.
+pub fn validate_startup_dirs(config_dir: &Path, config: &Config, strict: bool) -> acts::Result<()> {
+    fs_hardening::validate_dir_secure(config_dir, strict)?;
+    fs_hardening::validate_file_secure(&config_path(config_dir), strict)?;
+    let log_dir = PathBuf::from(config.log().dir);
+    fs_hardening::validate_dir_secure(&log_dir, strict)?;
+    let db = if config.has("db") {
+        config.get::<DbConfig>("db")?
+    } else {
+        DbConfig::default()
+    };
+    if let Some(dir) = store_dir(config_dir, &db)? {
+        fs_hardening::validate_dir_secure(&dir, strict)?;
+    }
+    Ok(())
+}
+
+/// Create the parent directory of a file-backed store path with the
+/// filesystem hardening applied, then validate it (lenient — the strict
+/// refusal is `validate_startup_dirs`' job). Connection URLs (`scheme://…`)
+/// and `:memory:` are left untouched.
 fn ensure_store_dir(url: &str) -> acts::Result<()> {
     if url.contains("://") || url == ":memory:" {
         return Ok(());
@@ -866,12 +1069,13 @@ fn ensure_store_dir(url: &str) -> acts::Result<()> {
     if let Some(parent) = Path::new(url).parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent).map_err(|err| {
+        fs_hardening::ensure_dir_secure(parent).map_err(|err| {
             acts::ActError::Store(format!(
                 "failed to create store directory {}: {err}",
                 parent.display()
             ))
         })?;
+        fs_hardening::validate_dir_secure(parent, false)?;
     }
     Ok(())
 }

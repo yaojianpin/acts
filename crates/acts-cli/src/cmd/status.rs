@@ -191,6 +191,16 @@ mod tests {
                 ],
             },
             config: json!({"tick_interval_secs": 15}),
+            metrics: [
+                (
+                    "acts_ingress_requests_total{action=proc:start,transport=web,result=ok}"
+                        .to_string(),
+                    12,
+                ),
+                ("acts_subscriptions_total".to_string(), 3),
+            ]
+            .into_iter()
+            .collect(),
         }
     }
 

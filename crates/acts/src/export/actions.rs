@@ -36,6 +36,13 @@ pub enum Error {
     /// The row the caller read moved before its conditional write landed —
     /// re-read and retry. Transports answer 409 / `aborted`.
     Conflict(String),
+    /// An ingress admission bound refused the dispatch (the engine-wide or
+    /// the action's inflight cap, parse pressure). Transports answer 429 /
+    /// `resource_exhausted`.
+    ResourceExhausted(String),
+    /// The engine cannot take work right now (shutting down, or the
+    /// database lease was lost). Transports answer 503 / `unavailable`.
+    Unavailable(String),
 }
 
 impl fmt::Display for Error {
@@ -47,6 +54,8 @@ impl fmt::Display for Error {
             Error::Unauthenticated(msg) => write!(f, "unauthenticated: {msg}"),
             Error::Denied(msg) => write!(f, "permission denied: {msg}"),
             Error::Conflict(msg) => write!(f, "conflict: {msg}"),
+            Error::ResourceExhausted(msg) => write!(f, "resource exhausted: {msg}"),
+            Error::Unavailable(msg) => write!(f, "unavailable: {msg}"),
         }
     }
 }
@@ -65,6 +74,18 @@ fn value<T: serde::Serialize>(r: crate::Result<T>) -> Ret {
         Ok(value) => serde_json::to_value(value).map_err(|e| Error::Internal(e.to_string())),
         Err(crate::ActError::Unauthenticated(msg)) => Err(Error::Unauthenticated(msg)),
         Err(crate::ActError::Denied(msg)) => Err(Error::Denied(msg)),
+        // The scheduler (or the store writer behind it) is at capacity: the
+        // durable work stays queued, the caller retries — this is load, not
+        // a failure.
+        Err(crate::ActError::QueueFull) => Err(Error::ResourceExhausted(
+            "scheduler queue is full".to_string(),
+        )),
+        Err(crate::ActError::Shutdown) => {
+            Err(Error::Unavailable("scheduler is shutting down".to_string()))
+        }
+        Err(crate::ActError::LeaseLost) => Err(Error::Unavailable(
+            "database lease lost: this instance no longer owns the database".to_string(),
+        )),
         Err(e) => Err(Error::Internal(e.to_string())),
     }
 }
@@ -101,6 +122,13 @@ fn acl_error(err: crate::ActError) -> Error {
         crate::ActError::Unauthenticated(msg) => Error::Unauthenticated(msg),
         crate::ActError::Denied(msg) => Error::Denied(msg),
         crate::ActError::Conflict(msg) => Error::Conflict(msg),
+        crate::ActError::QueueFull => {
+            Error::ResourceExhausted("scheduler queue is full".to_string())
+        }
+        crate::ActError::Shutdown => Error::Unavailable("scheduler is shutting down".to_string()),
+        crate::ActError::LeaseLost => Error::Unavailable(
+            "database lease lost: this instance no longer owns the database".to_string(),
+        ),
         other => Error::Internal(other.to_string()),
     }
 }

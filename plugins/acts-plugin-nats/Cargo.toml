@@ -12,10 +12,15 @@ edition.workspace = true
 [dependencies]
 acts = { workspace = true }
 async-nats = { workspace = true }
+# the inbound payload's type: the admitted task holds an owned `Bytes` clone
+# (a buffer share, not a copy) so the borrowed `data` extent survives the spawn
+bytes = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+# `raw_value`: the inbound `data` is pinned as a borrowed `RawValue`, so the
+# envelope parse validates it without decoding a byte of it
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

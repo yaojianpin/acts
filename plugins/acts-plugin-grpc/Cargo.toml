@@ -22,6 +22,14 @@ tokio = { workspace = true }
 # `net` wraps a pre-bound `std` listener into the incoming stream tonic serves.
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
+# message-size caps are enforced by the generated server; `bytes` carries the
+# external-error JSON in a status's raw details.
+bytes = { workspace = true }
+# `[grpc].tls`: the incoming stream is wrapped in a rustls acceptor; strict
+# mode refuses a non-loopback bind without it.
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 

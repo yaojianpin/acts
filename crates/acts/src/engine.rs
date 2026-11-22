@@ -65,6 +65,14 @@ pub struct Engine {
     config: Arc<Config>,
     runtime: Arc<Runtime>,
     acl: Arc<dyn AccessControl>,
+    /// The shared ingress budget: per-action profiles, the global and
+    /// per-action inflight permits, the parse permits, the cross-transport
+    /// subscription registry and the `acts_ingress_*` metrics. Built once
+    /// from the `[ingress]`/`[subscriptions]` config sections.
+    ingress: Arc<crate::ingress::Ingress>,
+    /// The running transports this engine started. `close` quiesces and
+    /// drains them before the plugins are shut down.
+    transports: Arc<parking_lot::Mutex<Vec<Arc<dyn crate::plugin::RunningTransport>>>>,
     /// The plugins this engine started, in prepare order. `close` shuts them
     /// down in reverse, and a failed start's rollback reports how many had
     /// started.
@@ -93,6 +101,21 @@ impl Engine {
     /// login and sessions.
     pub fn acl(&self) -> Arc<dyn AccessControl> {
         self.acl.clone()
+    }
+
+    /// The shared ingress budget: per-action profiles, inflight permits,
+    /// parse permits, the cross-transport subscription registry and the
+    /// `acts_ingress_*` metrics. Every transport talks to this one instance.
+    pub fn ingress(&self) -> Arc<crate::ingress::Ingress> {
+        self.ingress.clone()
+    }
+
+    /// Register a started transport with the engine. [`Engine::close`]
+    /// quiesces and drains every registered transport (in registration
+    /// order) before it shuts the plugins down, so a transport that
+    /// registers during its plugin's `start` gets a graceful close.
+    pub fn register_transport(&self, transport: Arc<dyn crate::plugin::RunningTransport>) {
+        self.transports.lock().push(transport);
     }
 
     /// The principal a caller that presents no token resolves to — the
@@ -275,6 +298,34 @@ impl Engine {
         tracing::info!(phase = "quiescing");
         self.runtime.shutdown_token().cancel();
 
+        // The transports quiesce (refuse new work) and drain (finish what
+        // they admitted) before the plugins are shut down: a request that
+        // was admitted gets its answer, a new one gets 503/UNAVAILABLE, and
+        // nothing is dropped mid-flight by a listener that dies under it.
+        let drain = self
+            .config
+            .get::<crate::plugin::ShutdownConfig>("shutdown")
+            .map(|config| config.timeout())
+            .unwrap_or_else(|_| crate::plugin::ShutdownConfig::default().timeout());
+        let transports = self.transports.lock().clone();
+        for transport in &transports {
+            transport.quiesce().await;
+            let report = transport.drain(drain).await;
+            if report.drained {
+                tracing::info!(
+                    transport = report.transport,
+                    "transport drained: every admitted request finished"
+                );
+            } else {
+                tracing::warn!(
+                    transport = report.transport,
+                    active_after = report.active_after,
+                    timeout_ms = drain.as_millis() as u64,
+                    "transport drain deadline passed with work still active"
+                );
+            }
+        }
+
         let plugins = self.plugins.lock().clone();
         let started = self
             .started_plugins
@@ -337,9 +388,11 @@ impl Engine {
         }
 
         Ok(Self {
-            config,
+            config: config.clone(),
             runtime,
             acl,
+            ingress: crate::ingress::Ingress::new(&config),
+            transports: Arc::new(parking_lot::Mutex::new(Vec::new())),
             plugins: Arc::new(parking_lot::Mutex::new(Vec::new())),
             started_plugins: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -538,5 +591,79 @@ mod tests {
             .insert("acl".to_string(), toml::Value::Table(toml::Table::new()));
         let engine = Engine::builder().set_config(&config).start().await.unwrap();
         assert!(engine.config().table.contains_key("acl"));
+    }
+
+    /// One registered transport that reports the shared inflight counter.
+    struct FakeTransport {
+        transport: &'static str,
+        counter: Arc<crate::plugin::InflightCounter>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::plugin::RunningTransport for FakeTransport {
+        fn transport(&self) -> &'static str {
+            self.transport
+        }
+
+        async fn quiesce(&self) {
+            self.counter.quiesce();
+        }
+
+        async fn drain(
+            &self,
+            deadline: std::time::Duration,
+        ) -> crate::plugin::TransportDrainReport {
+            self.counter.drain(self.transport, deadline).await
+        }
+    }
+
+    /// `close` quiesces and drains a registered transport, waits out the
+    /// `[shutdown].drain_timeout_ms` window for admitted work, and reports
+    /// the deadline it missed — in that order, before any plugin shutdown.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn close_drains_registered_transports() {
+        let mut config = Config::default();
+        config.table.insert(
+            "shutdown".to_string(),
+            toml::Value::Table(toml::from_str("drain_timeout_ms = 100").unwrap()),
+        );
+        let engine = Engine::builder().set_config(&config).start().await.unwrap();
+        let counter = Arc::new(crate::plugin::InflightCounter::new());
+        let held = counter.enter().expect("admitted");
+        engine.register_transport(Arc::new(FakeTransport {
+            transport: "fake",
+            counter: counter.clone(),
+        }));
+
+        let started = std::time::Instant::now();
+        engine.close().await;
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(90),
+            "the drain waits out its 100 ms window, took {:?}",
+            started.elapsed()
+        );
+        assert!(counter.is_quiescing(), "the transport was quiesced first");
+        assert_eq!(
+            counter.active(),
+            1,
+            "the admitted work kept the report honest"
+        );
+        drop(held);
+    }
+
+    /// A transport with nothing in flight drains inside the window and the
+    /// close returns without waiting the whole deadline out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn close_drains_an_idle_transport_at_once() {
+        let engine = Engine::builder().start().await.unwrap();
+        let counter = Arc::new(crate::plugin::InflightCounter::new());
+        engine.register_transport(Arc::new(FakeTransport {
+            transport: "fake",
+            counter: counter.clone(),
+        }));
+        let started = std::time::Instant::now();
+        engine.close().await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(counter.is_quiescing());
     }
 }
