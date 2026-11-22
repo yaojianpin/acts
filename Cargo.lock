@@ -8,7 +8,6 @@ version = "0.26.1"
 dependencies = [
  "acts-expr",
  "async-trait",
- "bitflags 2.13.2",
  "clap",
  "criterion",
  "croner",
@@ -103,7 +102,6 @@ dependencies = [
  "acts",
  "anyhow",
  "clap",
- "clap-cargo",
  "dialoguer",
  "serde",
  "serde_json",

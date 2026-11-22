@@ -236,7 +236,7 @@ fn validate_dir_permissions(path: &Path, strict: bool) -> Result<(), ActError> {
                     || {
                         let mut perms = fs::metadata(parent)?.permissions();
                         perms.set_mode(mode & !0o002);
-                        fs::set_permissions(parent, perms).map_err(io::Error::from)?;
+                        fs::set_permissions(parent, perms)?;
                         Ok(())
                     },
                 );

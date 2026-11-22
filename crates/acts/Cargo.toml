@@ -43,7 +43,6 @@ toml = { workspace = true }
 dashmap = "6.1.0"
 tokio-util = "0.7.18"
 parking_lot = { workspace = true }
-bitflags = { version = "2.13.1", features = ["serde"] }
 xxhash-rust = { workspace = true }
 
 [features]
