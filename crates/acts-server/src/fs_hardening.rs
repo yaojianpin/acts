@@ -138,7 +138,7 @@ pub fn validate_file_secure(path: &Path, strict: bool) -> Result<(), ActError> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = meta.permissions().mode();
         if mode & 0o077 != 0 {
             if strict {
