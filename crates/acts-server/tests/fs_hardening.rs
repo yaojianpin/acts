@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use acts_server::Config;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// Scratch dir for one case, wiped so it starts empty.
 fn scratch(name: &str) -> PathBuf {
@@ -28,7 +30,6 @@ fn scratch(name: &str) -> PathBuf {
 /// The unix mode of `path`.
 #[cfg(unix)]
 fn mode_of(path: &Path) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
