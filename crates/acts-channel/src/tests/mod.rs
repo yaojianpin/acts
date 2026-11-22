@@ -111,13 +111,21 @@ async fn serve(rx: Receiver<()>, disable_acl: bool) -> (Engine, u16) {
     let config_path = dir.join("acts.toml");
     // `[grpc] host` follows `server_addr()`: the plugin must bind the address
     // the client dials (its own default is loopback only), or the bridge
-    // setting dials an interface nothing listens on. The ACL is chosen on the
+    // setting dials an interface nothing listens on. An off-loopback bind
+    // (`SERVER_ADDR`, the CI docker bridge) then needs the standard level's
+    // plain-listener acknowledgement: these cases exercise the transport, not
+    // the posture rules, and the bridge is a private trusted network — the
+    // loopback default keeps the refusing default. The ACL is chosen on the
     // builder, not by a config section: `[acl]` is no longer read, and an
     // enabled ACL refuses the deploy/start these cases exercise to an
     // unauthenticated caller.
+    let plain_ack = match addr.parse::<std::net::IpAddr>() {
+        Ok(ip) if !ip.is_loopback() => "\nplain_behind_proxy = true",
+        _ => "",
+    };
     std::fs::write(
         &config_path,
-        format!("[grpc]\nhost = \"{addr}\"\nport = {port}\n"),
+        format!("[grpc]\nhost = \"{addr}\"\nport = {port}{plain_ack}\n"),
     )
     .expect("the test server's config file");
     let config = Config::create(&config_path).expect("the test server's config");
