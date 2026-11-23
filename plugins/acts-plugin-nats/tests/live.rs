@@ -181,12 +181,8 @@ async fn snapshot_actions_over_nats() {
         json!({"name": "no:such", "seq": "x"}),
     )
     .await;
-    assert!(
-        reply["err"]
-            .as_str()
-            .unwrap()
-            .contains("not found action 'no:such'")
-    );
+    assert_eq!(reply["ecode"], "not_found", "{reply}");
+    assert_eq!(reply["err"], "no:such", "{reply}");
     assert_eq!(reply["data"], JsonValue::Null);
 
     // remove
@@ -434,12 +430,13 @@ async fn acl_enforced_over_nats() {
         json!({ "name": "msg:clear", "seq": "req-anon", "data": {} }),
     )
     .await;
+    assert_eq!(reply["ecode"], "unauthenticated", "{reply}");
     assert!(
         reply["err"]
             .as_str()
             .unwrap_or_default()
-            .contains("unauthenticated"),
-        "a tokenless action must be refused: {reply}"
+            .contains("session token is required"),
+        "a tokenless action must be told to log in: {reply}"
     );
 
     let reply = request_action(
@@ -448,13 +445,7 @@ async fn acl_enforced_over_nats() {
         json!({ "name": "model:rm", "seq": "req-denied", "data": { "id": "x" }, "token": token }),
     )
     .await;
-    assert!(
-        reply["err"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("permission denied"),
-        "an action outside the user's grants must be denied: {reply}"
-    );
+    assert_eq!(reply["ecode"], "permission_denied", "{reply}");
 
     let reply = request_action(
         &client,
@@ -818,13 +809,7 @@ async fn unauthenticated_action_is_refused() {
         json!({"name": "model:ls", "seq": "req-anon"}),
     )
     .await;
-    assert!(
-        reply["err"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("unauthenticated"),
-        "an unauthenticated action must be refused: {reply}"
-    );
+    assert_eq!(reply["ecode"], "unauthenticated", "{reply}");
     assert_eq!(reply["ack"], "req-anon");
 
     // without one: the message is still consumed (a following request gets
