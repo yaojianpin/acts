@@ -1185,14 +1185,7 @@ mod coverage_tests {
             projector.project_proc_row(&snapshot).await.unwrap(),
             ProjectionReport::default()
         );
-        assert!(
-            store
-                .procs()
-                .find_opt("p-tombstone")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store.procs().find("p-tombstone").await.unwrap().is_none());
         projector.resume("p-tombstone");
         assert!(!projector.is_reclaimed("p-tombstone"));
     }
@@ -1226,8 +1219,8 @@ mod coverage_tests {
         let report = projector.project(&snapshot).await.unwrap();
         assert!(report.applied > 0, "the rest of the run projected");
         let row_id = crate::utils::Id::new("p-ghost", &ghost.wire("p-ghost")).id();
-        assert!(store.tasks().find_opt(&row_id).await.unwrap().is_none());
-        assert!(store.procs().find_opt("p-ghost").await.unwrap().is_some());
+        assert!(store.tasks().find(&row_id).await.unwrap().is_none());
+        assert!(store.procs().find("p-ghost").await.unwrap().is_some());
     }
 
     /// The projection reports its times, and an explicit repair may re-project
@@ -1258,7 +1251,7 @@ mod coverage_tests {
         assert!(report.applied > 0);
         let row_id =
             crate::utils::Id::new("p-repeat", &TaskId::new("s1", 0).unwrap().wire("p-repeat")).id();
-        let vars = store.vars().find_opt(&row_id).await.unwrap().unwrap();
+        let vars = store.vars().find(&row_id).await.unwrap().unwrap();
         assert!(vars.data.contains('v'), "{}", vars.data);
     }
 
@@ -1276,7 +1269,7 @@ mod coverage_tests {
         let report = projector.project(&snapshot).await.unwrap();
         assert!(report.applied > 0);
         let row_id = crate::utils::Id::new("p-terminal", &s1.wire("p-terminal")).id();
-        let row = _store.tasks().find_opt(&row_id).await.unwrap().unwrap();
+        let row = _store.tasks().find(&row_id).await.unwrap().unwrap();
         assert_eq!(row.state, "completed");
     }
 
@@ -1368,7 +1361,7 @@ mod coverage_tests {
             &TaskId::new("s1", 0).unwrap().wire("p-task-fail"),
         )
         .id();
-        assert!(store.tasks().find_opt(&row_id).await.unwrap().is_none());
+        assert!(store.tasks().find(&row_id).await.unwrap().is_none());
     }
 
     /// The claim is per row and version: an equal version is refused unless
@@ -1423,14 +1416,7 @@ mod coverage_tests {
 
         let report = projector.project(&snapshot).await.unwrap();
         assert!(report.applied > 0);
-        assert!(
-            store
-                .procs()
-                .find_opt("p-no-owner")
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(store.procs().find("p-no-owner").await.unwrap().is_some());
     }
 
     /// The prepared-model cache is bounded: the insert at the limit clears it.

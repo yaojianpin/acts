@@ -124,7 +124,7 @@ impl ProcRead {
 /// Load one process's projected rows. `None` when the process has no proc
 /// row — a settled run whose rows the sweeper already reclaimed.
 pub(crate) async fn load(store: &Store, pid: &str) -> Result<Option<ProcRead>> {
-    let Some(proc) = store.procs().find_opt(pid).await? else {
+    let Some(proc) = store.procs().find(pid).await? else {
         return Ok(None);
     };
     let model = Workflow::from_json(&proc.model)?;

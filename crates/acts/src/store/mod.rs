@@ -518,12 +518,12 @@ pub(crate) enum ConditionalWrite {
 pub trait DbCollection: Send + Sync {
     type Item;
     async fn exists(&self, id: &str) -> Result<bool>;
-    async fn find(&self, id: &str) -> Result<Self::Item>;
-    /// Like [`DbCollection::find`], but a missing row is `Ok(None)` instead of
-    /// an error. Only the explicit not-found case is normalized — a backend
-    /// failure is still an error, so callers can tell "no record" from "the
-    /// store is unavailable".
-    async fn find_opt(&self, id: &str) -> Result<Option<Self::Item>>;
+    /// A missing row is `Ok(None)` instead of an error. Only the explicit
+    /// not-found case is normalized — a backend failure is still an error,
+    /// so callers can tell "no record" from "the store is unavailable"; a
+    /// caller that must have the row maps the `None` onto its own
+    /// `ActError::NotFound`.
+    async fn find(&self, id: &str) -> Result<Option<Self::Item>>;
     /// One page of the matching documents — at most `query.limit` rows;
     /// `count` reports how many rows match in total.
     async fn query(&self, query: &Query) -> Result<PageData<Self::Item>>;
@@ -624,10 +624,10 @@ mod tests {
         assert!(rows.create(&row("a", 1)).await.unwrap());
         // the second insert is refused and the stored row is untouched
         assert!(!rows.create(&row("a", 2)).await.unwrap());
-        assert_eq!(rows.find("a").await.unwrap(), row("a", 1));
+        assert_eq!(rows.find("a").await.unwrap().unwrap(), row("a", 1));
         // upsert is the write that does replace
         assert!(rows.upsert(&row("a", 2)).await.unwrap());
-        assert_eq!(rows.find("a").await.unwrap(), row("a", 2));
+        assert_eq!(rows.find("a").await.unwrap().unwrap(), row("a", 2));
     }
 
     #[tokio::test]
@@ -642,7 +642,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(rows.find("a").await.unwrap(), row("a", 2));
+        assert_eq!(rows.find("a").await.unwrap().unwrap(), row("a", 2));
         // a write decided against the pre-update row is refused wholesale
         assert!(
             !rows
@@ -650,7 +650,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(rows.find("a").await.unwrap(), row("a", 2));
+        assert_eq!(rows.find("a").await.unwrap().unwrap(), row("a", 2));
     }
 
     #[tokio::test]

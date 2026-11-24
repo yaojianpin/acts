@@ -2435,9 +2435,9 @@ impl Workers {
         // the per-task validation above already decided the caller-correctable
         // refusals.
         if command.action.moves_assignment() {
-            ActionPlanner::validate_command(&command).map_err(runtime)?;
+            ActionPlanner::validate_command(&command).map_err(command_refusal)?;
         } else {
-            ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
+            ActionPlanner::plan(&snapshot, &command).map_err(command_refusal)?;
         }
         // A `Back` without the step it names is the legacy refusal, checked
         // before the durable intent: the rewind target is the client's own
@@ -2448,7 +2448,7 @@ impl Workers {
                 .iter()
                 .any(|(name, _)| name == crate::utils::consts::ACT_TO)
         {
-            return Err(ActError::Runtime(
+            return Err(ActError::Action(
                 "cannot find 'to' value in options".to_string(),
             ));
         }
@@ -2469,7 +2469,7 @@ impl Workers {
             crate::scheduler::core::plan::generation::Reenter::redo_closure(
                 &graph, &snapshot, &task_id, &to,
             )
-            .map_err(runtime)?;
+            .map_err(generation_refusal)?;
         }
         // A cancel rewinds the work *forward* of the step the client names:
         // the legacy handler refuses when there is no package step ahead to

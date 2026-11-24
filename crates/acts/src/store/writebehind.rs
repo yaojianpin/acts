@@ -757,7 +757,7 @@ mod tests {
     }
 
     async fn durable(store: &Store, pid: &str) -> bool {
-        store.messages().find(&message_id(pid)).await.is_ok()
+        matches!(store.messages().find(&message_id(pid)).await, Ok(Some(_)))
     }
 
     /// `flush` acks `Ok` only when every write queued before the barrier was

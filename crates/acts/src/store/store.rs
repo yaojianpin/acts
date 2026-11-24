@@ -219,7 +219,7 @@ impl Store {
 
         let hash = Self::package_hash(pack);
         let packages = self.packages();
-        match packages.find_opt(&pack.id).await? {
+        match packages.find(&pack.id).await? {
             Some(existing) => {
                 // A row written before the hash existed: recompute it from
                 // the stored content, which is what a republish compares
@@ -306,7 +306,7 @@ impl Store {
     ) -> Result<Vec<StoreBatchOp>> {
         let models = KvCollection::<Model>::new(StoreIden::Models.as_ref(), self.kv.clone());
         let text = serde_yaml::to_string(model).unwrap();
-        match self.models().find_opt(&model.id).await? {
+        match self.models().find(&model.id).await? {
             Some(m) => {
                 models
                     .update_ops(&Model {
@@ -399,7 +399,7 @@ impl Store {
         }
 
         for mut event in declared {
-            match events.find_opt(&event.id).await? {
+            match events.find(&event.id).await? {
                 Some(evt) => {
                     let changed = evt.name != event.name
                         || evt.kind != event.kind
@@ -547,7 +547,7 @@ impl Store {
     /// directory is reclaimed best-effort and a row that cannot answer must
     /// never be a reason to keep the process's rows alive.
     pub(crate) async fn proc_workdir(&self, pid: &str) -> Option<std::path::PathBuf> {
-        let proc = self.procs().find_opt(pid).await.ok()??;
+        let proc = self.procs().find(pid).await.ok()??;
         let env: serde_json::Value = serde_json::from_str(&proc.env).ok()?;
         Vars::from(env).get::<std::path::PathBuf>(utils::consts::PROC_WORKDIR)
     }
@@ -563,7 +563,7 @@ impl Store {
     /// for the sweeper.
     pub(crate) async fn try_mark_removable(&self, pid: &str) -> Result<bool> {
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
-        let Ok(proc) = procs.find(pid).await else {
+        let Ok(Some(proc)) = procs.find(pid).await else {
             return Ok(false);
         };
         let state = TaskState::parse(proc.state.as_str());
@@ -633,7 +633,7 @@ impl Store {
         let mut written = Vec::new();
         let mut ops = Vec::new();
         for id in ids {
-            let Some(stored) = deliveries.find_opt(id).await? else {
+            let Some(stored) = deliveries.find(id).await? else {
                 continue;
             };
             let Some(mut next) = f(stored) else {
@@ -738,7 +738,7 @@ impl Store {
         // dispatch must find the row it already created instead of minting a
         // second responsibility. A row under the same id with a different
         // message or channel is an id collision, not a duplicate.
-        if let Some(existing) = self.deliveries().find_opt(&delivery.id).await? {
+        if let Some(existing) = self.deliveries().find(&delivery.id).await? {
             if existing.msg_id != delivery.msg_id
                 || existing.chan_id != delivery.chan_id
                 || existing.pid != delivery.pid
@@ -763,7 +763,7 @@ impl Store {
                 // same identity, so accepting it is idempotence, not a lost
                 // write. A same-id row with another identity is a collision,
                 // never a silent success.
-                if let Some(existing) = self.deliveries().find_opt(&delivery.id).await? {
+                if let Some(existing) = self.deliveries().find(&delivery.id).await? {
                     if existing.msg_id == delivery.msg_id
                         && existing.chan_id == delivery.chan_id
                         && existing.pid == delivery.pid
@@ -794,7 +794,7 @@ impl Store {
     /// converges on the first attempt's row and a same-id/different-content
     /// write is reported as corruption.
     pub(crate) async fn store_canonical_message(&self, message: &data::Message) -> Result<()> {
-        if let Some(existing) = self.messages().find_opt(&message.id).await? {
+        if let Some(existing) = self.messages().find(&message.id).await? {
             if !existing.same_content(message) {
                 return Err(ActError::Store(format!(
                     "message id collision: '{}' names different content",
@@ -808,7 +808,7 @@ impl Store {
             Ok(false) | Err(_) => {
                 // Lost a create race: the winner's row is the canonical one,
                 // and it must agree with this attempt's content.
-                if let Some(existing) = self.messages().find_opt(&message.id).await? {
+                if let Some(existing) = self.messages().find(&message.id).await? {
                     if existing.same_content(message) {
                         return Ok(());
                     }
@@ -839,12 +839,15 @@ impl Store {
     /// itself.
     async fn task_closed(&self, pid: &str, tid: &str) -> Result<bool> {
         let id = utils::Id::new(pid, tid).id();
-        match self.tasks().find(&id).await {
-            Ok(task) => {
-                Ok(TaskState::parse(task.state.as_str()).is_some_and(TaskState::is_terminal))
-            }
-            Err(_) => Ok(false),
-        }
+        // a read the store cannot answer is not a closed task: the caller
+        // keeps the delivery instead of deleting on a guess
+        let task = match self.tasks().find(&id).await {
+            Ok(task) => task,
+            Err(_) => return Ok(false),
+        };
+        Ok(task.is_some_and(|task| {
+            TaskState::parse(task.state.as_str()).is_some_and(TaskState::is_terminal)
+        }))
     }
 
     /// Collect deliveries with no response: re-arm the ones that were handed
@@ -1191,7 +1194,7 @@ mod tests {
         );
 
         // the model row and every trigger row are visible
-        assert!(store.models().find("m1").await.is_ok());
+        assert!(store.models().find("m1").await.unwrap().is_some());
         let rows = event_rows(&store, "m1").await;
         assert_eq!(rows.len(), 2);
         let manual = rows.iter().find(|e| e.id == "m1:t-manual").unwrap();
@@ -1306,7 +1309,7 @@ mod tests {
             "deploy must not fall back to raw per-key writes"
         );
         assert!(
-            store.models().find("m1").await.is_ok(),
+            store.models().find("m1").await.unwrap().is_some(),
             "model row survives"
         );
         assert!(
@@ -1344,7 +1347,7 @@ mod tests {
             "rm must not fall back to raw per-key writes"
         );
         assert!(
-            store.models().find("m1").await.is_err(),
+            store.models().find("m1").await.unwrap().is_none(),
             "model row must be gone"
         );
         assert!(
@@ -1422,7 +1425,7 @@ mod tests {
                 .contains(&"p-acked".to_string()),
             "a process with an unclosed (Acked) delivery is not swept"
         );
-        assert!(store.procs().find("p-acked").await.is_ok());
+        assert!(store.procs().find("p-acked").await.unwrap().is_some());
 
         // Error needs manual handling: keeps the process alive
         seed_terminal_proc_with_delivery(
@@ -1440,7 +1443,7 @@ mod tests {
                 .contains(&"p-error".to_string())
         );
         assert!(
-            store.procs().find("p-error").await.is_ok(),
+            store.procs().find("p-error").await.unwrap().is_some(),
             "an errored delivery keeps its process alive for manual handling"
         );
 
@@ -1481,7 +1484,7 @@ mod tests {
         );
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", "p-completed".to_string())));
         assert!(store.remove_proc_rows("p-completed").await.unwrap());
-        assert!(store.procs().find("p-completed").await.is_err());
+        assert!(store.procs().find("p-completed").await.unwrap().is_none());
         assert!(store.messages().query(&q).await.unwrap().rows.is_empty());
         assert!(store.deliveries().query(&q).await.unwrap().rows.is_empty());
     }
@@ -1621,7 +1624,13 @@ mod tests {
         // the task is still running: the row waits for the client's ack
         assert!(store_delivery(&store, "t-run", "open").await.unwrap());
         assert_eq!(
-            store.deliveries().find("d-open").await.unwrap().status,
+            store
+                .deliveries()
+                .find("d-open")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             DeliveryStatus::Created
         );
 
@@ -1629,17 +1638,29 @@ mod tests {
         // settled, with the canonical message row it carries
         assert!(store_delivery(&store, "t-done", "late").await.unwrap());
         assert_eq!(
-            store.deliveries().find("d-late").await.unwrap().status,
+            store
+                .deliveries()
+                .find("d-late")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             DeliveryStatus::Completed
         );
-        assert!(store.messages().find("m-late").await.is_ok());
+        assert!(store.messages().find("m-late").await.unwrap().is_some());
 
         // no durable task row at all (a task admitted while the write path was
         // saturated has none yet): absence is not a close — the client is
         // still asked to ack
         assert!(store_delivery(&store, "t-unwritten", "new").await.unwrap());
         assert_eq!(
-            store.deliveries().find("d-new").await.unwrap().status,
+            store
+                .deliveries()
+                .find("d-new")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             DeliveryStatus::Created
         );
 
@@ -1662,15 +1683,21 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            store.deliveries().find("d-free").await.unwrap().status,
+            store
+                .deliveries()
+                .find("d-free")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             DeliveryStatus::Created
         );
 
         // the process's rows are gone: the message is not stored at all
         store.procs().delete("p-born").await.unwrap();
         assert!(!store_delivery(&store, "t-done", "ghost").await.unwrap());
-        assert!(store.deliveries().find("d-ghost").await.is_err());
-        assert!(store.messages().find("m-ghost").await.is_err());
+        assert!(store.deliveries().find("d-ghost").await.unwrap().is_none());
+        assert!(store.messages().find("m-ghost").await.unwrap().is_none());
     }
 
     /// The terminal delivery close settles the engine-owned rows of the task
@@ -1728,19 +1755,43 @@ mod tests {
         // closable state, `Delivered` is); neither the other task's row nor
         // the other process's row is touched
         assert_eq!(
-            store.deliveries().find("p-closed1").await.unwrap().status,
+            store
+                .deliveries()
+                .find("p-closed1")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             crate::store::data::DeliveryStatus::Error
         );
         assert_eq!(
-            store.deliveries().find("p-closed2").await.unwrap().status,
+            store
+                .deliveries()
+                .find("p-closed2")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             crate::store::data::DeliveryStatus::Completed
         );
         assert_eq!(
-            store.deliveries().find("p-closed3").await.unwrap().status,
+            store
+                .deliveries()
+                .find("p-closed3")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             crate::store::data::DeliveryStatus::Created
         );
         assert_eq!(
-            store.deliveries().find("p-closed4").await.unwrap().status,
+            store
+                .deliveries()
+                .find("p-closed4")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             crate::store::data::DeliveryStatus::Created
         );
         // the errored delivery keeps the process alive — no removable mark, no
@@ -1754,7 +1805,7 @@ mod tests {
                 .unwrap()
                 .contains(&"p-close".to_string())
         );
-        assert!(store.procs().find("p-close").await.is_ok());
+        assert!(store.procs().find("p-close").await.unwrap().is_some());
         assert!(store.clear_error_delivery("p-closed1").await.unwrap());
         store.close_deliveries("p-close", "t2").await.unwrap();
         assert!(store.try_mark_removable("p-close").await.unwrap());
@@ -1854,19 +1905,31 @@ mod tests {
         assert_eq!(ids, ["d-open"], "only the overdue open row is re-sent");
         assert_eq!(rearmed[0].retry_times, 1);
 
-        let d_max = store.deliveries().find("d-max").await.unwrap();
+        let d_max = store.deliveries().find("d-max").await.unwrap().unwrap();
         assert_eq!(d_max.status, DeliveryStatus::Error);
         assert_eq!(d_max.retry_times, 3, "an errored row keeps its retry count");
         assert_eq!(
-            store.deliveries().find("d-acked").await.unwrap().status,
+            store
+                .deliveries()
+                .find("d-acked")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             DeliveryStatus::Acked
         );
         assert_eq!(
-            store.deliveries().find("d-done").await.unwrap().status,
+            store
+                .deliveries()
+                .find("d-done")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             DeliveryStatus::Completed
         );
         // written a moment ago: neither re-armed nor re-sent
-        let fresh = store.deliveries().find("d-fresh").await.unwrap();
+        let fresh = store.deliveries().find("d-fresh").await.unwrap().unwrap();
         assert_eq!(fresh.status, DeliveryStatus::Delivered);
         assert_eq!(fresh.retry_times, 0);
     }
@@ -1914,7 +1977,7 @@ mod tests {
 
         assert_eq!(rearmed.len(), 1, "the pass re-armed the row it found open");
         assert_eq!(
-            store.deliveries().find("d1").await.unwrap().status,
+            store.deliveries().find("d1").await.unwrap().unwrap().status,
             DeliveryStatus::Completed,
             "the close decided on the stored row, so the finished task's delivery settles"
         );
@@ -1971,7 +2034,7 @@ mod tests {
             rearmed.is_empty(),
             "a row rewritten after the candidate scan is not re-armed from the stale view"
         );
-        let row = store.deliveries().find("d1").await.unwrap();
+        let row = store.deliveries().find("d1").await.unwrap().unwrap();
         assert_eq!(row.status, DeliveryStatus::Created);
         assert_eq!(row.retry_times, 1, "the pass left the rewritten row alone");
     }
@@ -2016,7 +2079,7 @@ mod tests {
         ack.await.unwrap().unwrap();
         close.await.unwrap().unwrap();
         assert_eq!(
-            store.deliveries().find("d1").await.unwrap().status,
+            store.deliveries().find("d1").await.unwrap().unwrap().status,
             DeliveryStatus::Completed
         );
     }
@@ -2326,7 +2389,7 @@ mod tests {
             store.publish(&base).await.unwrap(),
             "the first publish writes"
         );
-        let stored = store.packages().find("pack-hash").await.unwrap();
+        let stored = store.packages().find("pack-hash").await.unwrap().unwrap();
         assert!(!stored.content_hash.is_empty(), "the row carries its hash");
 
         // The start pass republishes every built-in on every boot: identical
@@ -2358,7 +2421,7 @@ mod tests {
             store.publish(&next).await.unwrap(),
             "a new version publishes"
         );
-        let stored = store.packages().find("pack-hash").await.unwrap();
+        let stored = store.packages().find("pack-hash").await.unwrap().unwrap();
         assert_eq!(stored.version, "2.0");
         assert_eq!(stored.content_hash, Store::package_hash(&next));
     }

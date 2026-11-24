@@ -167,7 +167,13 @@ impl ScheduleFixture {
     /// Make the row due in the past without recording a fire — the crash
     /// window between starting a process and rolling the row.
     pub(crate) async fn make_due(&self) {
-        let mut evt = self.store().events().find(&self.trigger_id).await.unwrap();
+        let mut evt = self
+            .store()
+            .events()
+            .find(&self.trigger_id)
+            .await
+            .unwrap()
+            .unwrap();
         evt.next_run = utils::time::time_millis() - 1000;
         self.store().events().upsert(&evt).await.unwrap();
     }

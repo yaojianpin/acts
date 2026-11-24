@@ -57,10 +57,18 @@ impl MessageExecutor {
     #[instrument(skip(self))]
     pub async fn get(&self, id: &str) -> Result<MessageInfo> {
         self.principal.check(GET)?;
-        let delivery = &self.runtime.store().deliveries().find(id).await?;
+        let delivery = &self
+            .runtime
+            .store()
+            .deliveries()
+            .find(id)
+            .await?
+            .ok_or_else(|| {
+                crate::ActError::NotFound(format!("cannot find deliveries by '{id}'"))
+            })?;
         match self.delivery_info(delivery).await? {
             Some(info) => Ok(info),
-            None => Err(crate::ActError::Store(format!(
+            None => Err(crate::ActError::NotFound(format!(
                 "cannot find message for delivery '{}'",
                 id
             ))),
@@ -69,10 +77,16 @@ impl MessageExecutor {
 
     /// Join a delivery row with its canonical message.
     async fn delivery_info(&self, delivery: &crate::data::Delivery) -> Result<Option<MessageInfo>> {
-        match self.runtime.store().messages().find(&delivery.msg_id).await {
-            Ok(message) => Ok(Some(MessageInfo::from_delivery(delivery, &message))),
-            Err(err) => {
-                debug!(delivery_id = %delivery.id, msg_id = %delivery.msg_id, error = %err, "orphan delivery row");
+        match self
+            .runtime
+            .store()
+            .messages()
+            .find(&delivery.msg_id)
+            .await?
+        {
+            Some(message) => Ok(Some(MessageInfo::from_delivery(delivery, &message))),
+            None => {
+                debug!(delivery_id = %delivery.id, msg_id = %delivery.msg_id, "orphan delivery row");
                 Ok(None)
             }
         }
@@ -89,7 +103,7 @@ impl MessageExecutor {
     pub async fn ack(&self, id: &str) -> Result<()> {
         self.principal.check(ACK)?;
         if !self.principal.is_unrestricted()
-            && let Ok(delivery) = self.runtime.store().deliveries().find(id).await
+            && let Ok(Some(delivery)) = self.runtime.store().deliveries().find(id).await
             && let Some((subject, _)) = delivery.chan_id.split_once('/')
             && subject != self.principal.subject()
         {
@@ -149,7 +163,7 @@ impl MessageExecutor {
                 .runtime
                 .store()
                 .messages()
-                .find_opt(&delivery.msg_id)
+                .find(&delivery.msg_id)
                 .await?
             {
                 Some(message) => {
@@ -267,7 +281,13 @@ mod tests {
         let error = executor.ack("bob-d").await.unwrap_err();
         assert!(matches!(error, crate::ActError::Denied(_)), "{error}");
         assert_eq!(
-            store.deliveries().find("bob-d").await.unwrap().status,
+            store
+                .deliveries()
+                .find("bob-d")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             DeliveryStatus::Created,
             "the refused ack must not move the row"
         );
@@ -319,7 +339,7 @@ mod tests {
 
         for id in ["d1", "d2"] {
             assert_eq!(
-                store.deliveries().find(id).await.unwrap().status,
+                store.deliveries().find(id).await.unwrap().unwrap().status,
                 DeliveryStatus::Created
             );
         }
@@ -338,7 +358,7 @@ mod tests {
 
         let executor = executor(&engine).await;
         executor.clear_delivery("d1").await.unwrap();
-        assert!(store.deliveries().find_opt("d1").await.unwrap().is_none());
+        assert!(store.deliveries().find("d1").await.unwrap().is_none());
         // an absent row is a no-op
         executor.clear_delivery("d1").await.unwrap();
     }

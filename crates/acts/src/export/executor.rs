@@ -7,10 +7,10 @@ pub(crate) mod package_executor;
 pub(crate) mod process_executor;
 pub(crate) mod task_executor;
 
-use crate::Principal;
 use crate::query::Query;
 use crate::scheduler::Runtime;
-use crate::store::{DbCollection, PageData};
+use crate::store::{DbCollection, DbCollectionIden, PageData};
+use crate::{ActError, Principal};
 use std::sync::Arc;
 
 /// The engine's operations, bound to one caller.
@@ -89,16 +89,21 @@ where
 }
 
 /// One collection row by id, in the API shape its collection publishes — the
-/// single-row counterpart of [`list_infos`].
+/// single-row counterpart of [`list_infos`]. A missing id is the caller's
+/// addressing mistake: the `NotFound` names the collection and the id.
 pub(super) async fn get_info<D, I>(
     collection: Arc<dyn DbCollection<Item = D>>,
     id: &str,
 ) -> crate::Result<I>
 where
+    D: DbCollectionIden,
     for<'a> &'a D: Into<I>,
 {
-    let row = collection.find(id).await?;
-    Ok((&row).into())
+    collection
+        .find(id)
+        .await?
+        .ok_or_else(|| ActError::NotFound(format!("cannot find {} by '{}'", D::iden(), id)))
+        .map(|row| (&row).into())
 }
 
 impl Executor {

@@ -128,7 +128,13 @@ async fn sch_timers_trigger_without_a_schedule_rolls_forward_to_zero() {
     let event = event(&workflow.id, None);
     runtime.store().events().create(&event).await.unwrap();
     fire_schedule(&runtime, &event).await.unwrap();
-    let stored = runtime.store().events().find(&event.id).await.unwrap();
+    let stored = runtime
+        .store()
+        .events()
+        .find(&event.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.next_run, 0, "no cron expression means not armed");
     assert!(stored.last_run > 0);
     runtime.close().await;
@@ -145,7 +151,13 @@ async fn sch_timers_trigger_with_a_schedule_arms_its_next_fire() {
     let event = event(&workflow.id, Some("* * * * * *"));
     runtime.store().events().create(&event).await.unwrap();
     fire_schedule(&runtime, &event).await.unwrap();
-    let stored = runtime.store().events().find(&event.id).await.unwrap();
+    let stored = runtime
+        .store()
+        .events()
+        .find(&event.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(stored.next_run > stored.last_run);
     runtime.close().await;
 }
@@ -199,7 +211,7 @@ async fn sch_timers_retry_drops_a_delivery_without_a_canonical_message() {
         runtime
             .store()
             .deliveries()
-            .find_opt(&delivery.id)
+            .find(&delivery.id)
             .await
             .unwrap()
             .is_none(),
@@ -260,7 +272,7 @@ async fn sch_timers_retry_keeps_a_delivery_when_the_message_read_fails() {
         runtime
             .store()
             .deliveries()
-            .find_opt(&delivery.id)
+            .find(&delivery.id)
             .await
             .unwrap()
             .is_some(),

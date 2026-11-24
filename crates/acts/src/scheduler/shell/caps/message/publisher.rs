@@ -107,7 +107,7 @@ impl DurableMessagePublisher {
         let Some(task) = self
             .store
             .tasks()
-            .find_opt(&crate::utils::Id::new(&message.pid, &message.tid).id())
+            .find(&crate::utils::Id::new(&message.pid, &message.tid).id())
             .await?
         else {
             let fallback = message.timestamp.max(1);
@@ -215,16 +215,22 @@ mod tests {
         let OutboxReceipt::DurableMessage(receipt) = receipt else {
             panic!("a durable handover must produce a durable receipt");
         };
-        let stored = store.messages().find("m1").await.unwrap();
+        let stored = store.messages().find("m1").await.unwrap().unwrap();
         assert_eq!(receipt.payload_hash, stored.content_hash());
         assert_eq!(receipt.delivery_count, 0);
 
-        let before = store.messages().find("m1").await.unwrap();
+        let before = store.messages().find("m1").await.unwrap().unwrap();
         let mut again = message("m1");
         let second = publisher.publish(&mut again).await.unwrap();
         assert_eq!(second, OutboxReceipt::durable(receipt));
         assert_eq!(
-            store.messages().find("m1").await.unwrap().content_hash(),
+            store
+                .messages()
+                .find("m1")
+                .await
+                .unwrap()
+                .unwrap()
+                .content_hash(),
             before.content_hash()
         );
         writer.close().await;
@@ -262,11 +268,23 @@ mod tests {
         let expected_a = msg.into_delivery("alice/c1", "{}").id;
         let expected_b = msg.into_delivery("bob/c2", "{}").id;
         assert_eq!(
-            store.deliveries().find(&expected_a).await.unwrap().status,
+            store
+                .deliveries()
+                .find(&expected_a)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             crate::data::DeliveryStatus::Created
         );
         assert_eq!(
-            store.deliveries().find(&expected_b).await.unwrap().status,
+            store
+                .deliveries()
+                .find(&expected_b)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             crate::data::DeliveryStatus::Created
         );
 

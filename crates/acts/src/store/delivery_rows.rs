@@ -131,7 +131,7 @@ impl Store {
     /// otherwise.
     pub async fn resend_error_delivery(&self, delivery_id: &str) -> Result<Option<data::Delivery>> {
         let collection = self.deliveries();
-        let Some(mut delivery) = collection.find_opt(delivery_id).await? else {
+        let Some(mut delivery) = collection.find(delivery_id).await? else {
             return Ok(None);
         };
         if delivery.status != DeliveryStatus::Error {
@@ -152,7 +152,7 @@ impl Store {
     /// was in error state and was deleted.
     pub async fn clear_error_delivery(&self, delivery_id: &str) -> Result<bool> {
         let collection = self.deliveries();
-        let Some(delivery) = collection.find_opt(delivery_id).await? else {
+        let Some(delivery) = collection.find(delivery_id).await? else {
             return Ok(false);
         };
         if delivery.status == DeliveryStatus::Error {
@@ -188,7 +188,7 @@ mod tests {
     }
 
     async fn find(store: &Store, id: &str) -> data::Delivery {
-        store.deliveries().find(id).await.unwrap()
+        store.deliveries().find(id).await.unwrap().unwrap()
     }
 
     #[tokio::test]
@@ -284,7 +284,7 @@ mod tests {
             .unwrap();
         assert_eq!(find(&store, "d1").await.status, DeliveryStatus::Completed);
         assert!(
-            store.procs().find("p1").await.unwrap().removable,
+            store.procs().find("p1").await.unwrap().unwrap().removable,
             "the last settled delivery must mark a finished process removable"
         );
     }
@@ -334,17 +334,17 @@ mod tests {
             .clear_error_deliveries(Some("p1".to_string()))
             .await
             .unwrap();
-        assert!(store.deliveries().find_opt("e1").await.unwrap().is_none());
+        assert!(store.deliveries().find("e1").await.unwrap().is_none());
         assert_eq!(
-            store.deliveries().find("e2").await.unwrap().status,
+            store.deliveries().find("e2").await.unwrap().unwrap().status,
             DeliveryStatus::Error,
             "another process's error row is kept"
         );
 
         // ... and then all of them.
         store.clear_error_deliveries(None).await.unwrap();
-        assert!(store.deliveries().find_opt("e2").await.unwrap().is_none());
-        assert!(store.deliveries().find_opt("ok").await.unwrap().is_some());
+        assert!(store.deliveries().find("e2").await.unwrap().is_none());
+        assert!(store.deliveries().find("ok").await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -378,10 +378,10 @@ mod tests {
 
         seed(&store, delivery("ok", "p1", DeliveryStatus::Acked)).await;
         assert!(!store.clear_error_delivery("ok").await.unwrap());
-        assert!(store.deliveries().find_opt("ok").await.unwrap().is_some());
+        assert!(store.deliveries().find("ok").await.unwrap().is_some());
 
         seed(&store, delivery("e1", "p1", DeliveryStatus::Error)).await;
         assert!(store.clear_error_delivery("e1").await.unwrap());
-        assert!(store.deliveries().find_opt("e1").await.unwrap().is_none());
+        assert!(store.deliveries().find("e1").await.unwrap().is_none());
     }
 }

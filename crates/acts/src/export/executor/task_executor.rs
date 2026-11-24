@@ -24,7 +24,7 @@ impl TaskExecutor {
     /// Join a task's scope vars row onto a durable lifecycle row — the vars
     /// collection holds the task's own data, keyed by the same composite id.
     async fn join_vars(&self, info: &mut TaskInfo) {
-        let Ok(vars) = self
+        let Ok(Some(vars)) = self
             .store
             .vars()
             .find(&Id::new(&info.pid, &info.id).id())
@@ -52,14 +52,18 @@ impl TaskExecutor {
     pub async fn get(&self, pid: &str, tid: &str) -> Result<TaskInfo> {
         self.principal.check(GET)?;
         let id = Id::new(pid, tid);
-        match self.store.clone().tasks().find(&id.id()).await {
-            Ok(t) => {
-                let mut info: TaskInfo = t.into();
-                self.join_vars(&mut info).await;
-                Ok(info)
-            }
-            Err(err) => Err(err),
-        }
+        let t = self
+            .store
+            .clone()
+            .tasks()
+            .find(&id.id())
+            .await?
+            .ok_or_else(|| {
+                crate::ActError::NotFound(format!("cannot find tasks by '{}'", id.id()))
+            })?;
+        let mut info: TaskInfo = t.into();
+        self.join_vars(&mut info).await;
+        Ok(info)
     }
 }
 

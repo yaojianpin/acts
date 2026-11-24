@@ -40,6 +40,13 @@ pub enum ActError {
     #[error("{0}")]
     Store(String),
 
+    /// The entity the caller addressed does not exist: its id names no row,
+    /// or the snapshot target was never registered. This is the caller's
+    /// addressing mistake, not an engine fault — the message may name the
+    /// id, and transports map it to `not_found`.
+    #[error("{0}")]
+    NotFound(String),
+
     #[error("{0}")]
     Action(String),
 

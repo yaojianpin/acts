@@ -203,7 +203,7 @@ macro_rules! gen_store_tests {
             workflow.id = longid();
             store.deploy(&workflow, None).await.unwrap();
 
-            let model = store.models().find(&workflow.id).await.unwrap();
+            let model = store.models().find(&workflow.id).await.unwrap().unwrap();
             assert_eq!(model.id, workflow.id);
         }
 
@@ -431,12 +431,12 @@ macro_rules! gen_store_tests {
             workflow.id = id.clone();
             store.deploy(&workflow, None).await.unwrap();
 
-            let model = store.models().find(&id).await;
-            assert!(model.is_ok());
+            let model = store.models().find(&id).await.unwrap();
+            assert!(model.is_some());
 
             store.models().delete(&id).await.unwrap();
-            let model = store.models().find(&id).await;
-            assert!(model.is_err());
+            let model = store.models().find(&id).await.unwrap();
+            assert!(model.is_none());
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -474,7 +474,7 @@ macro_rules! gen_store_tests {
             let workflow = create_workflow();
             let proc = create_proc(&id, "none", &workflow);
             store.procs().create(&proc).await.expect("create process");
-            let info = store.procs().find(&id).await.unwrap();
+            let info = store.procs().find(&id).await.unwrap().unwrap();
             assert_eq!(proc.id, info.id);
         }
 
@@ -698,7 +698,7 @@ macro_rules! gen_store_tests {
             proc.state = "running".to_string();
             store.procs().upsert(&proc).await.expect("update process");
 
-            let p = store.procs().find(&proc.id).await.unwrap();
+            let p = store.procs().find(&proc.id).await.unwrap().unwrap();
             assert_eq!(p.id, proc.id);
             assert_eq!(p.state, "running".to_string());
         }
@@ -714,12 +714,12 @@ macro_rules! gen_store_tests {
 
             store.procs().create(&proc).await.expect("create process");
 
-            let proc = store.procs().find(&id).await;
-            assert!(proc.is_ok());
+            let proc = store.procs().find(&id).await.unwrap();
+            assert!(proc.is_some());
 
             store.procs().delete(&id).await.unwrap();
-            let proc = store.procs().find(&id).await;
-            assert!(proc.is_err());
+            let proc = store.procs().find(&id).await.unwrap();
+            assert!(proc.is_none());
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -752,8 +752,8 @@ macro_rules! gen_store_tests {
             store.tasks().create(&task).await.expect("create task");
 
             let id = comp_id(&pid, &tid);
-            let ret = store.tasks().find(&id.id()).await;
-            assert!(ret.is_ok());
+            let ret = store.tasks().find(&id.id()).await.unwrap();
+            assert!(ret.is_some());
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1017,11 +1017,11 @@ macro_rules! gen_store_tests {
             store.tasks().create(&task).await.expect("create task");
 
             let id = comp_id(&pid, &tid);
-            let mut task = store.tasks().find(&id.id()).await.unwrap();
+            let mut task = store.tasks().find(&id.id()).await.unwrap().unwrap();
             task.state = "running".to_string();
             store.tasks().upsert(&task).await.unwrap();
 
-            let task2 = store.tasks().find(&id.id()).await.unwrap();
+            let task2 = store.tasks().find(&id.id()).await.unwrap().unwrap();
             assert_eq!(task.state, task2.state);
         }
 
@@ -1059,8 +1059,8 @@ macro_rules! gen_store_tests {
                 .await
                 .expect("remove process");
 
-            let ret = store.tasks().find(&task.id).await;
-            assert!(ret.is_err());
+            let ret = store.tasks().find(&task.id).await.unwrap();
+            assert!(ret.is_none());
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1093,8 +1093,8 @@ macro_rules! gen_store_tests {
             store.messages().create(&msg).await.expect("create message");
 
             let id = comp_id(&pid, &tid);
-            let ret = store.messages().find(&id.id()).await;
-            assert!(ret.is_ok());
+            let ret = store.messages().find(&id.id()).await.unwrap();
+            assert!(ret.is_some());
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1371,12 +1371,12 @@ macro_rules! gen_store_tests {
             store.messages().create(&msg).await.unwrap();
 
             let id = comp_id(&pid, &tid);
-            let mut msg = store.messages().find(&id.id()).await.unwrap();
+            let mut msg = store.messages().find(&id.id()).await.unwrap().unwrap();
             msg.state = MessageState::Completed;
             msg.name = "updated".to_string();
             store.messages().upsert(&msg).await.unwrap();
 
-            let msg2 = store.messages().find(&id.id()).await.unwrap();
+            let msg2 = store.messages().find(&id.id()).await.unwrap().unwrap();
             assert_eq!(msg2.state, MessageState::Completed);
             assert_eq!(msg2.name, "updated");
         }
@@ -1411,8 +1411,8 @@ macro_rules! gen_store_tests {
             store.messages().create(&msg).await.unwrap();
             store.messages().delete(&msg.id).await.unwrap();
 
-            let ret = store.messages().find(&msg.id).await;
-            assert!(ret.is_err());
+            let ret = store.messages().find(&msg.id).await.unwrap();
+            assert!(ret.is_none());
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1442,8 +1442,8 @@ macro_rules! gen_store_tests {
             };
 
             store.packages().create(&package).await.unwrap();
-            let ret = store.packages().find(&package.id).await;
-            assert!(ret.is_ok());
+            let ret = store.packages().find(&package.id).await.unwrap();
+            assert!(ret.is_some());
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1725,12 +1725,12 @@ macro_rules! gen_store_tests {
                 v: 0,
             };
             store.packages().create(&package).await.unwrap();
-            let mut p = store.packages().find(&package.id).await.unwrap();
+            let mut p = store.packages().find(&package.id).await.unwrap().unwrap();
             p.desc = "my desc".to_string();
             p.version = "0.2.0".to_string();
             store.packages().upsert(&p).await.unwrap();
 
-            let p2 = store.packages().find(&package.id).await.unwrap();
+            let p2 = store.packages().find(&package.id).await.unwrap().unwrap();
             assert_eq!(p2.desc, "my desc");
             assert_eq!(p2.version, "0.2.0");
         }
@@ -1763,8 +1763,8 @@ macro_rules! gen_store_tests {
             store.packages().create(&package).await.unwrap();
             store.packages().delete(&package.id).await.unwrap();
 
-            let ret = store.packages().find(&package.id).await;
-            assert!(ret.is_err());
+            let ret = store.packages().find(&package.id).await.unwrap();
+            assert!(ret.is_none());
         }
 
         // ========== upcast version migration tests ==========
@@ -1789,7 +1789,7 @@ macro_rules! gen_store_tests {
             store.models().create(&model).await.expect("create model");
 
             // find goes through upcast
-            let found = store.models().find(&model.id).await.unwrap();
+            let found = store.models().find(&model.id).await.unwrap().unwrap();
             assert_eq!(found.id, model.id);
             assert_eq!(found.v, 0);
 
@@ -1818,7 +1818,7 @@ macro_rules! gen_store_tests {
             };
             store.vars().create(&vars).await.expect("create task vars");
 
-            let found = store.vars().find(&vars.id).await.unwrap();
+            let found = store.vars().find(&vars.id).await.unwrap().unwrap();
             assert_eq!(found.id, vars.id);
             assert_eq!(found.pid, pid);
             assert_eq!(found.tid, "t1");
@@ -1894,7 +1894,7 @@ macro_rules! gen_store_tests {
             updated.sealed = json!({"s": 1}).to_string();
             store.vars().upsert(&updated).await.expect("update task vars");
 
-            let found = store.vars().find(&vars.id).await.unwrap();
+            let found = store.vars().find(&vars.id).await.unwrap().unwrap();
             assert_eq!(found.data, updated.data);
             assert_eq!(found.sealed, updated.sealed);
 
@@ -1923,7 +1923,7 @@ macro_rules! gen_store_tests {
             store.vars().create(&vars).await.expect("create task vars");
 
             assert!(store.vars().delete(&vars.id).await.unwrap());
-            assert!(store.vars().find(&vars.id).await.is_err());
+            assert!(store.vars().find(&vars.id).await.unwrap().is_none());
 
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
@@ -1949,7 +1949,7 @@ macro_rules! gen_store_tests {
             store.vars().create(&vars).await.expect("create task vars");
 
             // find goes through upcast
-            let found = store.vars().find(&vars.id).await.unwrap();
+            let found = store.vars().find(&vars.id).await.unwrap().unwrap();
             assert_eq!(found.id, vars.id);
             assert_eq!(found.v, 0);
 
@@ -1984,7 +1984,7 @@ macro_rules! gen_store_tests {
             store.procs().create(&proc).await.expect("create proc");
 
             // find goes through upcast
-            let found = store.procs().find(&proc.id).await.unwrap();
+            let found = store.procs().find(&proc.id).await.unwrap().unwrap();
             assert_eq!(found.id, proc.id);
             assert_eq!(found.v, 0);
 
@@ -2024,7 +2024,7 @@ macro_rules! gen_store_tests {
             store.tasks().create(&task).await.expect("create task");
 
             // find goes through upcast
-            let found = store.tasks().find(&task.id).await.unwrap();
+            let found = store.tasks().find(&task.id).await.unwrap().unwrap();
             assert_eq!(found.id, task.id);
             assert_eq!(found.v, 0);
 
@@ -2063,7 +2063,7 @@ macro_rules! gen_store_tests {
             store.messages().create(&msg).await.expect("create message");
 
             // find goes through upcast
-            let found = store.messages().find(&msg.id).await.unwrap();
+            let found = store.messages().find(&msg.id).await.unwrap().unwrap();
             assert_eq!(found.id, msg.id);
             assert_eq!(found.v, 3);
 
@@ -2106,7 +2106,7 @@ macro_rules! gen_store_tests {
                 .expect("create package");
 
             // find goes through upcast
-            let found = store.packages().find(&package.id).await.unwrap();
+            let found = store.packages().find(&package.id).await.unwrap().unwrap();
             assert_eq!(found.id, package.id);
             assert_eq!(found.v, 0);
 

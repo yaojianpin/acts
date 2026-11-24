@@ -61,7 +61,9 @@ impl EventExecutor {
     pub async fn start(&self, event_id: &str, params: &JsonValue) -> Result<Option<Vars>> {
         self.principal.check(START)?;
         let store = self.runtime.store();
-        let event = store.events().find(event_id).await?;
+        let event = store.events().find(event_id).await?.ok_or_else(|| {
+            crate::ActError::NotFound(format!("cannot find events by '{event_id}'"))
+        })?;
 
         let kind = TriggerKind::parse(&event.kind);
         match kind {
@@ -124,7 +126,15 @@ impl EventExecutor {
     }
 
     async fn workflow(&self, event: &data::Event) -> Result<Workflow> {
-        let model = self.runtime.store().models().find(&event.mid).await?;
+        let model = self
+            .runtime
+            .store()
+            .models()
+            .find(&event.mid)
+            .await?
+            .ok_or_else(|| {
+                crate::ActError::NotFound(format!("cannot find models by '{}'", event.mid))
+            })?;
         let model: crate::ModelInfo = model.into();
         let workflow = model.workflow()?;
         // Firing a trigger starts the model's run, so the model's resource
@@ -321,7 +331,12 @@ mod tests {
         // Corrupt the stored params: the null payload then asks the executor
         // to deserialize them, and the failure is reported as input.
         let store = engine.runtime().store();
-        let mut event = store.events().find("evt-probe:event1").await.unwrap();
+        let mut event = store
+            .events()
+            .find("evt-probe:event1")
+            .await
+            .unwrap()
+            .unwrap();
         event.params = "not json".to_string();
         store.events().upsert(&event).await.unwrap();
 

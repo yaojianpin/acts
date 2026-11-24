@@ -506,7 +506,7 @@ impl Runtime {
                 return;
             }
         };
-        let row_version = match self.store().procs().find_opt(pid).await {
+        let row_version = match self.store().procs().find(pid).await {
             Ok(Some(row)) => {
                 crate::scheduler::core::model::transition_plan::ProcessVersion::decode(
                     &row.source_revision,

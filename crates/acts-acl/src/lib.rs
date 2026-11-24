@@ -768,7 +768,7 @@ impl UserAcl {
             return Some(user);
         }
         let store = self.store()?;
-        match store.collection::<AclUser>().find_opt(name).await {
+        match store.collection::<AclUser>().find(name).await {
             Ok(Some(row)) => {
                 let compiled = match row
                     .policy()
@@ -817,7 +817,7 @@ impl UserAcl {
             self.sessions.write().remove(access_hash);
         }
         let store = self.store()?;
-        match store.collection::<AclSession>().find_opt(access_hash).await {
+        match store.collection::<AclSession>().find(access_hash).await {
             Ok(Some(row)) => {
                 self.sessions
                     .write()
@@ -988,7 +988,7 @@ impl UserAcl {
             .store()
             .ok_or_else(|| ActError::Store("the acl is not bound to a store".to_string()))?;
         let col = store.collection::<AclUser>();
-        let Some(expected) = col.find_opt(name).await? else {
+        let Some(expected) = col.find(name).await? else {
             return Ok(false);
         };
         let mut row = expected.clone();
@@ -1150,7 +1150,11 @@ impl AccessControl for UserAcl {
                 );
             } else {
                 // another instance won the first-start race: serve its row
-                let existing = col.find(ADMIN_USER).await?;
+                let Some(existing) = col.find(ADMIN_USER).await? else {
+                    return Err(ActError::Store(format!(
+                        "the builtin '{ADMIN_USER}' row vanished during first start"
+                    )));
+                };
                 let principal = Principal::from_policy(&existing.policy()?)?;
                 users.insert(
                     existing.id.clone(),
@@ -1478,7 +1482,7 @@ impl AccessControl for UserAcl {
             .ok_or_else(|| ActError::Store("the acl is not bound to a store".to_string()))
             .ok()?;
         let col = store.collection::<AclUser>();
-        let row = col.find_opt(subject.trim()).await.ok()??;
+        let row = col.find(subject.trim()).await.ok()??;
         if !row.enabled {
             return None;
         }
@@ -1507,7 +1511,7 @@ impl AccessControl for UserAcl {
             .store()
             .ok_or_else(|| ActError::Store("the acl is not bound to a store".to_string()))?;
         let col = store.collection::<AclUser>();
-        let stored = col.find_opt(&name).await?;
+        let stored = col.find(&name).await?;
 
         // compute the next row against the stored one
         let mut row = match &stored {
@@ -1629,7 +1633,7 @@ impl AccessControl for UserAcl {
             .ok_or_else(|| ActError::Store("the acl is not bound to a store".to_string()))?;
         let col = store.collection::<AclUser>();
         let stored = col
-            .find_opt(name)
+            .find(name)
             .await?
             .ok_or_else(|| ActError::Config(format!("acl user '{name}' does not exist")))?;
 
@@ -2312,7 +2316,12 @@ mod tests {
             },
         )
         .await;
-        let row = store.collection::<AclUser>().find("op").await.unwrap();
+        let row = store
+            .collection::<AclUser>()
+            .find("op")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.passwords.len(), 1);
         assert!(row.passwords[0].starts_with("$argon2id$"));
     }
@@ -2854,7 +2863,7 @@ mod tests {
         assert!(
             store
                 .collection::<AclSession>()
-                .find_opt(&expired.id)
+                .find(&expired.id)
                 .await
                 .unwrap()
                 .is_none()

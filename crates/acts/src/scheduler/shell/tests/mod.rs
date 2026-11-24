@@ -2172,12 +2172,7 @@ async fn assert_parked(host: &Workers, cache: &Arc<crate::store::Store>, pid: &s
     );
 
     let store = cache.clone();
-    let proc_row = store
-        .procs()
-        .find_opt(pid)
-        .await
-        .unwrap()
-        .expect("proc row");
+    let proc_row = store.procs().find(pid).await.unwrap().expect("proc row");
     assert_eq!(
         proc_row.state,
         "none".to_string(),
@@ -2185,7 +2180,7 @@ async fn assert_parked(host: &Workers, cache: &Arc<crate::store::Store>, pid: &s
     );
     let root_row = store
         .tasks()
-        .find_opt(&crate::utils::Id::new(pid, &tid_of(pid, "$", 0)).id())
+        .find(&crate::utils::Id::new(pid, &tid_of(pid, "$", 0)).id())
         .await
         .unwrap()
         .expect("root task row");
@@ -2640,15 +2635,7 @@ async fn kernel_engine_projects_the_legacy_read_model() {
     }
     sweep_until_gone(&runtime, &pid).await;
     assert!(!dir.exists(), "the sweeper reclaims the run's directory");
-    assert!(
-        runtime
-            .store()
-            .procs()
-            .find_opt(&pid)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(runtime.store().procs().find(&pid).await.unwrap().is_none());
     assert!(runtime.read_proc(&pid).await.unwrap().is_none());
     // A11: the durable record and every derived index are gone too, so the
     // pid is reusable and nothing of the run survives as an index orphan.
@@ -2717,13 +2704,7 @@ async fn kernel_engine_refuses_a_pid_until_the_run_is_reclaimed_and_then_reuses_
     // workdir; only then is the pid free.
     sweep_until_gone(&runtime, pid).await;
     assert!(
-        runtime
-            .store()
-            .procs()
-            .find_opt(pid)
-            .await
-            .unwrap()
-            .is_none(),
+        runtime.store().procs().find(pid).await.unwrap().is_none(),
         "the settled run's rows must be swept"
     );
     assert!(
@@ -2796,14 +2777,7 @@ async fn sweep_until_gone(runtime: &Arc<crate::scheduler::Runtime>, pid: &str) {
     for _ in 0..200 {
         runtime.workers().refresh_projection(pid).await;
         runtime.sweep_removable().await.unwrap();
-        if runtime
-            .store()
-            .procs()
-            .find_opt(pid)
-            .await
-            .unwrap()
-            .is_none()
-        {
+        if runtime.store().procs().find(pid).await.unwrap().is_none() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -2819,10 +2793,7 @@ async fn assert_no_row_families(store: &crate::store::Store, pid: &str) {
     use crate::store::query::{Expr, Filter, Query};
 
     let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-    assert!(
-        store.procs().find_opt(pid).await.unwrap().is_none(),
-        "proc row"
-    );
+    assert!(store.procs().find(pid).await.unwrap().is_none(), "proc row");
     assert!(
         store.tasks().query(&q).await.unwrap().rows.is_empty(),
         "tasks"
@@ -2868,13 +2839,7 @@ async fn kernel_engine_finishes_an_interrupted_terminal_cleanup() {
     host.refresh_projection(&pid).await;
     let store = runtime.store();
     assert!(
-        store
-            .procs()
-            .find_opt(&pid)
-            .await
-            .unwrap()
-            .unwrap()
-            .removable,
+        store.procs().find(&pid).await.unwrap().unwrap().removable,
         "the run must be marked before the authoritative deletion"
     );
     let dir = root.join(&pid);
@@ -2889,7 +2854,7 @@ async fn kernel_engine_finishes_an_interrupted_terminal_cleanup() {
     );
     assert!(!host.exists(&pid).await.unwrap());
     assert!(
-        store.procs().find_opt(&pid).await.unwrap().is_some(),
+        store.procs().find(&pid).await.unwrap().is_some(),
         "the crash leaves the rows behind"
     );
     assert!(dir.is_dir(), "the crash leaves the directory behind");
@@ -3028,13 +2993,7 @@ async fn a_retained_run_does_not_starve_the_cleanup_cycle() {
         .unwrap();
     assert_eq!(reclaimed, 1, "the reclaimable run must be reached");
     assert!(
-        runtime
-            .store()
-            .procs()
-            .find_opt(&pid)
-            .await
-            .unwrap()
-            .is_none(),
+        runtime.store().procs().find(&pid).await.unwrap().is_none(),
         "the reclaimable run's rows are gone"
     );
     for index in 0..4 {
@@ -3043,7 +3002,7 @@ async fn a_retained_run_does_not_starve_the_cleanup_cycle() {
             runtime
                 .store()
                 .procs()
-                .find_opt(&retained)
+                .find(&retained)
                 .await
                 .unwrap()
                 .is_some(),
@@ -3138,7 +3097,7 @@ async fn kernel_engine_keeps_a_run_with_an_open_delivery() {
         host.exists(&pid).await.unwrap(),
         "an open delivery must keep the aggregate"
     );
-    assert!(store.procs().find_opt(&pid).await.unwrap().is_some());
+    assert!(store.procs().find(&pid).await.unwrap().is_some());
     assert!(dir.is_dir(), "an open delivery must keep the workdir");
 
     store
@@ -3146,7 +3105,13 @@ async fn kernel_engine_keeps_a_run_with_an_open_delivery() {
         .await
         .unwrap();
     assert_eq!(
-        store.deliveries().find(&delivery_id).await.unwrap().status,
+        store
+            .deliveries()
+            .find(&delivery_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
         DeliveryStatus::Completed
     );
     assert!(!store.has_unsettled_deliveries(&pid).await.unwrap());
@@ -3172,7 +3137,7 @@ async fn kernel_engine_keeps_a_run_with_an_open_delivery() {
     );
     sweep_until_gone(&runtime, &pid).await;
     assert!(!host.exists(&pid).await.unwrap());
-    assert!(store.procs().find_opt(&pid).await.unwrap().is_none());
+    assert!(store.procs().find(&pid).await.unwrap().is_none());
     assert!(!dir.exists());
 
     std::fs::remove_dir_all(&root).ok();
@@ -3330,6 +3295,7 @@ async fn effect_outputs_are_the_only_package_write_back() {
         .procs()
         .find(&pid)
         .await
+        .unwrap()
         .expect("the proc row");
     assert!(
         !row.env.contains("GREETING"),
@@ -3505,7 +3471,7 @@ async fn kernel_task_and_act_messages_are_emitted() {
             let state = runtime
                 .store()
                 .procs()
-                .find_opt(&pid)
+                .find(&pid)
                 .await
                 .unwrap()
                 .map(|row| row.state);
@@ -7934,6 +7900,7 @@ async fn durable_forwarder_stores_the_message_before_confirming() {
                     .messages()
                     .find(&receipt.message_id)
                     .await
+                    .unwrap()
                     .expect("the receipt's canonical message must exist");
                 assert_eq!(message.content_hash(), receipt.payload_hash);
                 receipts += 1;
@@ -9329,7 +9296,7 @@ async fn an_older_projection_cannot_overwrite_a_newer_one() {
         .unwrap();
     let wire = root.wire(PID);
     let row_id = crate::utils::Id::new(PID, &wire).id();
-    let base_row = store.tasks().find_opt(&row_id).await.unwrap().unwrap();
+    let base_row = store.tasks().find(&row_id).await.unwrap().unwrap();
     assert_eq!(base_row.source_revision, base.version.encode());
 
     // The row a concurrent, newer projection would have committed.
@@ -9352,7 +9319,7 @@ async fn an_older_projection_cannot_overwrite_a_newer_one() {
     );
     gated.wait_entered().await;
 
-    let row = store.tasks().find_opt(&row_id).await.unwrap().unwrap();
+    let row = store.tasks().find(&row_id).await.unwrap().unwrap();
     assert_eq!(row.source_revision, new.version.encode());
     assert_eq!(row.state, "completed", "the older row must not win");
 
@@ -9360,7 +9327,7 @@ async fn an_older_projection_cannot_overwrite_a_newer_one() {
     // still enough to refuse the older snapshot.
     let restarted = RowProjector::new(store.clone(), writer, None);
     restarted.project(&mid).await.unwrap();
-    let row = store.tasks().find_opt(&row_id).await.unwrap().unwrap();
+    let row = store.tasks().find(&row_id).await.unwrap().unwrap();
     assert_eq!(row.source_revision, new.version.encode());
     assert_eq!(row.state, "completed");
     assert!(
@@ -9399,7 +9366,7 @@ async fn a_restart_catches_up_only_the_rows_that_lag() {
     let snapshot = host.snapshot(PID).await.unwrap().unwrap();
     let current = snapshot.version.encode();
     let s1_id = crate::utils::Id::new(PID, &tid_of(PID, "s1", 0)).id();
-    let mut row = store.tasks().find_opt(&s1_id).await.unwrap().unwrap();
+    let mut row = store.tasks().find(&s1_id).await.unwrap().unwrap();
     assert_eq!(row.source_revision, current);
     // Simulate a crash between a commit and its projection: the row is stale
     // and reads a state the aggregate left behind.
@@ -9412,7 +9379,7 @@ async fn a_restart_catches_up_only_the_rows_that_lag() {
     restarted.attach_row_projector(Arc::new(RowProjector::new(store.clone(), writer, None)));
     restarted.recover(SystemClock.now_ms()).await.unwrap();
 
-    let row = store.tasks().find_opt(&s1_id).await.unwrap().unwrap();
+    let row = store.tasks().find(&s1_id).await.unwrap().unwrap();
     assert_eq!(
         row.source_revision, current,
         "the boot catch-up must restore the row's source revision"
@@ -9455,7 +9422,7 @@ async fn a_reused_pid_projects_its_own_model() {
         .await
         .unwrap();
     assert_eq!(
-        store.procs().find_opt(PID).await.unwrap().unwrap().name,
+        store.procs().find(PID).await.unwrap().unwrap().name,
         "model-a"
     );
 
@@ -9472,12 +9439,12 @@ async fn a_reused_pid_projects_its_own_model() {
     projector.project(&snapshot).await.unwrap();
 
     assert_eq!(
-        store.procs().find_opt(PID).await.unwrap().unwrap().name,
+        store.procs().find(PID).await.unwrap().unwrap().name,
         "model-b",
         "the cached declaration must be keyed by the durable model"
     );
     let b_id = crate::utils::Id::new(PID, &tid_of(PID, "b", 0)).id();
-    let row = store.tasks().find_opt(&b_id).await.unwrap().unwrap();
+    let row = store.tasks().find(&b_id).await.unwrap().unwrap();
     assert_eq!(row.name, "");
     assert!(
         row.node_data.contains("\"id\":\"b\""),
@@ -9551,7 +9518,7 @@ async fn a_projection_failure_is_repaired_before_the_completion_event() {
     let metrics = host.projection_metrics();
     assert!(metrics.repaired > 0, "{metrics:?}");
     assert_eq!(metrics.lag, 0, "{metrics:?}");
-    let proc = store.procs().find_opt(PID).await.unwrap().unwrap();
+    let proc = store.procs().find(PID).await.unwrap().unwrap();
     let aggregate = host.snapshot(PID).await.unwrap().unwrap();
     assert_eq!(proc.source_revision, aggregate.version.encode());
 }
@@ -9586,13 +9553,7 @@ async fn a_proc_read_reprojects_a_lagging_row() {
 
     let snapshot = runtime.workers().snapshot(&pid).await.unwrap().unwrap();
     let current = snapshot.version.encode();
-    let mut row = runtime
-        .store()
-        .procs()
-        .find_opt(&pid)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut row = runtime.store().procs().find(&pid).await.unwrap().unwrap();
     row.state = "running".into();
     row.source_revision = "1.0.0".into();
     runtime.store().procs().upsert(&row).await.unwrap();
@@ -9607,13 +9568,7 @@ async fn a_proc_read_reprojects_a_lagging_row() {
         Some(crate::TaskState::Completed),
         "the strong read must serve the aggregate's state"
     );
-    let restored = runtime
-        .store()
-        .procs()
-        .find_opt(&pid)
-        .await
-        .unwrap()
-        .unwrap();
+    let restored = runtime.store().procs().find(&pid).await.unwrap().unwrap();
     assert_eq!(
         restored.source_revision, current,
         "the strong read must restore the row's source revision"

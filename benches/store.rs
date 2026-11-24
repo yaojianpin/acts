@@ -221,7 +221,7 @@ fn store_update_qps(c: &mut Criterion) {
                     let start = std::time::Instant::now();
                     for i in 0..iters {
                         let idx = (i as usize) % ids.len();
-                        let mut proc = procs.find(&ids[idx]).await.unwrap();
+                        let mut proc = procs.find(&ids[idx]).await.unwrap().unwrap();
                         proc.state = "completed".to_string();
                         proc.mid = update_mid.clone();
                         procs.upsert(&proc).await.unwrap();
@@ -292,7 +292,7 @@ fn store_mixed_qps(c: &mut Criterion) {
                         // Find
                         let _ = procs.find(&id).await.unwrap();
                         // Update
-                        let mut p = procs.find(&id).await.unwrap();
+                        let mut p = procs.find(&id).await.unwrap().unwrap();
                         p.state = "completed".to_string();
                         procs.upsert(&p).await.unwrap();
                         // Find again

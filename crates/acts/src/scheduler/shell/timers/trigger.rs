@@ -18,7 +18,12 @@ use crate::{ActError, Result, Vars, data};
 /// persisted after the start, so a crash between start and state roll may
 /// re-fire the trigger on recovery (at-least-once).
 pub(crate) async fn fire_schedule(runtime: &Arc<Runtime>, event: &data::Event) -> Result<()> {
-    let model = runtime.store().models().find(&event.mid).await?;
+    let model = runtime
+        .store()
+        .models()
+        .find(&event.mid)
+        .await?
+        .ok_or_else(|| ActError::NotFound(format!("cannot find models by '{}'", event.mid)))?;
     let model: crate::ModelInfo = model.into();
     let workflow = model.workflow()?;
 

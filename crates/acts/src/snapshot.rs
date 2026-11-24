@@ -391,7 +391,7 @@ impl SnapshotManager {
         let store = self
             .runtime
             .snapshot_store(name)
-            .ok_or_else(|| ActError::Runtime(format!("snapshot '{name}' is not registered")))?;
+            .ok_or_else(|| ActError::NotFound(format!("snapshot '{name}' is not registered")))?;
         store.remove(scope);
         Ok(())
     }

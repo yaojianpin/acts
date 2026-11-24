@@ -72,7 +72,11 @@ impl SchemaCache {
             return Ok(package.clone());
         }
 
-        let package = store.packages().find(uses).await?;
+        let package = store
+            .packages()
+            .find(uses)
+            .await?
+            .ok_or_else(|| ActError::NotFound(format!("cannot find packages by '{uses}'")))?;
         let schema = serde_json::from_str::<JsonValue>(&package.schema)?;
         // The cache key is the exact serialized schema rather than a hash.
         // Serialization is still cheaper than compilation, and it cannot reuse

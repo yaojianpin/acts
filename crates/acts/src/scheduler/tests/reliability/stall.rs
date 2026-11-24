@@ -512,7 +512,14 @@ async fn sweep_finished_run(engine: &Engine, pid: &str) {
     let reclaimed = poll_settle(
         || async {
             let _ = engine.runtime().sweep_removable().await;
-            engine.runtime().store().procs().find(pid).await.is_err()
+            engine
+                .runtime()
+                .store()
+                .procs()
+                .find(pid)
+                .await
+                .unwrap()
+                .is_none()
         },
         200,
     )
@@ -549,6 +556,8 @@ async fn sweep_finished_run(engine: &Engine, pid: &str) {
         .procs()
         .find(pid)
         .await
+        .ok()
+        .flatten()
         .map(|row| row.removable)
         .unwrap_or(true);
     assert!(

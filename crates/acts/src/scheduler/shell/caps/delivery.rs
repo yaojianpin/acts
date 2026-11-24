@@ -181,7 +181,7 @@ pub(crate) async fn delivered_receipts_verified(
         };
         match receipt {
             OutboxReceipt::DurableMessage(receipt) => {
-                let Some(message) = store.messages().find_opt(&receipt.message_id).await? else {
+                let Some(message) = store.messages().find(&receipt.message_id).await? else {
                     tracing::error!(
                         pid = %record.id.process_id,
                         key = %record.id.key,

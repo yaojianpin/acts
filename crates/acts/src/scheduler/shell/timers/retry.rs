@@ -39,7 +39,7 @@ impl TimerGuider {
         {
             Ok(rearmed) => {
                 for d in rearmed {
-                    match store.messages().find_opt(&d.msg_id).await {
+                    match store.messages().find(&d.msg_id).await {
                         Ok(Some(message)) => {
                             let mut msg: crate::event::Message = message.into();
                             msg.delivery_id = Some(d.id.clone());

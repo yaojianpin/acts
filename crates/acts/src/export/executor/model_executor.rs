@@ -56,28 +56,27 @@ impl ModelExecutor {
     #[instrument(skip(self), fields(id = %id))]
     pub async fn get(&self, id: &str, fmt: &str) -> Result<ModelInfo> {
         self.principal.check(GET)?;
-        match self.store.clone().models().find(id).await {
-            Ok(m) => {
-                let mut model: ModelInfo = m.into();
-                match fmt {
-                    "tree" => {
-                        let workflow = Workflow::from_yml(&model.data)?;
-                        model.data = workflow.tree_output();
-                    }
-                    "yaml" => {
-                        let workflow = Workflow::from_yml(&model.data)?;
-                        model.data = workflow.to_yml()?;
-                    }
-                    _ => {
-                        let workflow = Workflow::from_yml(&model.data)?;
-                        model.data = workflow.to_json()?;
-                    }
-                }
-
-                Ok(model)
+        let m =
+            self.store.clone().models().find(id).await?.ok_or_else(|| {
+                crate::ActError::NotFound(format!("cannot find models by '{id}'"))
+            })?;
+        let mut model: ModelInfo = m.into();
+        match fmt {
+            "tree" => {
+                let workflow = Workflow::from_yml(&model.data)?;
+                model.data = workflow.tree_output();
             }
-            Err(err) => Err(err),
+            "yaml" => {
+                let workflow = Workflow::from_yml(&model.data)?;
+                model.data = workflow.to_yml()?;
+            }
+            _ => {
+                let workflow = Workflow::from_yml(&model.data)?;
+                model.data = workflow.to_json()?;
+            }
         }
+
+        Ok(model)
     }
 
     #[instrument(skip(self), fields(id = %id))]

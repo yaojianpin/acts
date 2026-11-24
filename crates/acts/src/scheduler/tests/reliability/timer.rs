@@ -178,8 +178,9 @@ async fn message_retry_survives_store_outage_and_rearms_on_heal_inner() {
                 .deliveries()
                 .find(&frozen.id)
                 .await
-                .map(|d| d.retry_times > frozen.retry_times)
-                .unwrap_or(false)
+                .ok()
+                .flatten()
+                .is_some_and(|d| d.retry_times > frozen.retry_times)
         },
         || async { String::new() },
     )
@@ -195,6 +196,7 @@ async fn message_retry_survives_store_outage_and_rearms_on_heal_inner() {
         .deliveries()
         .find(&frozen.id)
         .await
+        .unwrap()
         .expect("the delivery row survives the outage");
     assert_eq!(healed.msg_id, frozen.msg_id);
     assert_eq!(healed.chan_id, frozen.chan_id);
@@ -266,7 +268,12 @@ async fn message_retry_resumes_after_restart_and_errored_stays_dead_inner() {
         config.max_message_retry_times(),
         "the row must have exhausted exactly its retry budget"
     );
-    let errored_msg = store1.messages().find(&errored.msg_id).await.unwrap();
+    let errored_msg = store1
+        .messages()
+        .find(&errored.msg_id)
+        .await
+        .unwrap()
+        .unwrap();
     let errored_deliveries = deliveries_of(&store1, &pid1).await.len();
 
     // a second process whose delivery is still open when the engine dies
@@ -301,8 +308,9 @@ async fn message_retry_resumes_after_restart_and_errored_stays_dead_inner() {
                 .deliveries()
                 .find(&live.id)
                 .await
-                .map(|row| row.retry_times > live.retry_times)
-                .unwrap_or(false)
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.retry_times > live.retry_times)
         },
         || dump_state(&engine2, &pid2),
     )
@@ -320,7 +328,12 @@ async fn message_retry_resumes_after_restart_and_errored_stays_dead_inner() {
 
     // the errored delivery stays dead: same status, same retry state, no new
     // delivery of its message, and nothing of its process re-delivered
-    let dead = store2.deliveries().find(&errored.id).await.unwrap();
+    let dead = store2
+        .deliveries()
+        .find(&errored.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         dead.status,
         DeliveryStatus::Error,
@@ -333,7 +346,12 @@ async fn message_retry_resumes_after_restart_and_errored_stays_dead_inner() {
         errored_deliveries,
         "the restart must not create another delivery of the errored message"
     );
-    let dead_msg = store2.messages().find(&errored.msg_id).await.unwrap();
+    let dead_msg = store2
+        .messages()
+        .find(&errored.msg_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(dead_msg.id, errored_msg.id);
     assert_eq!(dead_msg.pid, errored_msg.pid);
     assert!(
@@ -432,6 +450,7 @@ async fn an_unacked_delivery_is_re_sent_with_its_own_row_inner() {
         .messages()
         .find(&first.id)
         .await
+        .unwrap()
         .expect("the canonical message row");
     assert_eq!(message.r#type, "step");
     assert_eq!(message.pid, pid);
@@ -453,6 +472,7 @@ async fn an_unacked_delivery_is_re_sent_with_its_own_row_inner() {
         .deliveries()
         .find(&delivery_id)
         .await
+        .unwrap()
         .expect("the delivery row");
     assert_eq!(delivery.status, DeliveryStatus::Delivered);
     assert!(
@@ -527,7 +547,12 @@ async fn an_unacked_delivery_exhausts_its_retries_into_error_inner() {
     );
     assert!(delivery.create_time > 0);
     assert!(delivery.update_time > 0);
-    let message = store.messages().find(&delivery.msg_id).await.unwrap();
+    let message = store
+        .messages()
+        .find(&delivery.msg_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(message.pid, pid);
     assert_eq!(message.state, MessageState::Created);
 
@@ -539,7 +564,12 @@ async fn an_unacked_delivery_exhausts_its_retries_into_error_inner() {
         re_sends,
         "an errored delivery must not be re-sent"
     );
-    let after = store.deliveries().find(&delivery.id).await.unwrap();
+    let after = store
+        .deliveries()
+        .find(&delivery.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(after.status, DeliveryStatus::Error);
     assert_eq!(after.retry_times, delivery.retry_times);
     assert_eq!(after.update_time, delivery.update_time);
@@ -661,14 +691,16 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
             .deliveries()
             .find(&delivery_id)
             .await
-            .map(|row| row.status == DeliveryStatus::Acked)
-            .unwrap_or(false)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.status == DeliveryStatus::Acked)
     })
     .await;
     let acked = store
         .deliveries()
         .find(&delivery_id)
         .await
+        .unwrap()
         .expect("channel a's delivery row");
     assert_eq!(acked.status, DeliveryStatus::Acked);
 
@@ -677,6 +709,7 @@ async fn a_redelivery_reaches_only_its_owning_channel_inner() {
         .deliveries()
         .find(&delivery_id)
         .await
+        .unwrap()
         .expect("channel a's delivery row");
     assert_eq!(settled.status, DeliveryStatus::Acked);
     assert_eq!(
@@ -849,7 +882,12 @@ async fn a_delivery_stored_after_its_task_closed_is_born_settled_inner() {
         !delivery_id.is_empty(),
         "the straggler of an ack channel must be stored as a delivery"
     );
-    let delivery = store.deliveries().find(&delivery_id).await.unwrap();
+    let delivery = store
+        .deliveries()
+        .find(&delivery_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         delivery.status,
         DeliveryStatus::Completed,

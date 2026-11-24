@@ -111,12 +111,15 @@ fn test_app_error_from_str_into_response() {
     assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+/// `ActError::Action` is a caller-correctable payload problem (a missing
+/// `uses`, an empty pid), so the web transport answers `400`, not the `500`
+/// a server-side failure deserves.
 #[test]
 fn test_app_error_from_act_error_into_response() {
     let act_err = acts::ActError::Action("action failed".to_string());
     let err = AppError::from(act_err);
     let resp = err.into_response();
-    assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
 }
 
 #[test]
@@ -1021,10 +1024,12 @@ async fn routes_cover_the_hook_route() {
             body,
         )
         .await;
-        // the trigger does not exist, but the request was translated and run
+        // the trigger does not exist, but the request was translated and run:
+        // the addressed entity answers `not_found` (404), not the `500` a
+        // server-side failure deserves
         assert_eq!(
             resp.err().map(|err| err.into_response().status()),
-            Some(StatusCode::INTERNAL_SERVER_ERROR)
+            Some(StatusCode::NOT_FOUND)
         );
     }
 

@@ -142,6 +142,11 @@ impl ExternalError {
                 (ExternalCode::Unauthenticated, safe_text(msg, 256))
             }
             EngineError::Denied(msg) => (ExternalCode::PermissionDenied, safe_text(msg, 256)),
+            // The entity the caller named does not exist: its id, its refusal.
+            EngineError::NotFound(msg) => (ExternalCode::NotFound, safe_text(msg, 256)),
+            // A caller-correctable payload problem (a missing `uses`, an
+            // empty pid): the message is written for the caller.
+            EngineError::Action(msg) => (ExternalCode::Invalid, safe_text(msg, 1024)),
             EngineError::Conflict(msg) => (ExternalCode::Conflict, safe_text(msg, 256)),
             EngineError::QueueFull => (
                 ExternalCode::ResourceExhausted,
@@ -385,6 +390,8 @@ mod tests {
             ),
             (crate::ActError::Denied("d".into()), "permission_denied"),
             (crate::ActError::Conflict("c".into()), "conflict"),
+            (crate::ActError::NotFound("gone".into()), "not_found"),
+            (crate::ActError::Action("bad".into()), "invalid_argument"),
         ] {
             let external = ExternalError::from_act(&err, "cid");
             assert_eq!(external.code, code, "{err}");

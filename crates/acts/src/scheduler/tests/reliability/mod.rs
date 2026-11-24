@@ -437,11 +437,11 @@ pub(crate) async fn dump_state(engine: &Engine, pid: &str) -> String {
     // The raw proc row: `removable` is what the sweeper selects on, and a
     // lost projection write is visible here as a stale flag.
     match store.procs().find(pid).await {
-        Ok(row) => out.push_str(&format!(
+        Ok(Some(row)) => out.push_str(&format!(
             " proc-row={}/removable={}",
             row.state, row.removable
         )),
-        Err(_) => out.push_str(" proc-row=gone"),
+        _ => out.push_str(" proc-row=gone"),
     }
     // The run's own outbox records — the family a stalled or unconfirmed
     // delivery lives in, and the one `removable` is decided from. Coarse tags
@@ -509,7 +509,7 @@ pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
     poll_until_within(
         &what,
         || async {
-            if store.procs().find(pid).await.is_err()
+            if store.procs().find(pid).await.unwrap().is_none()
                 || retained_for_reconciliation(engine, pid).await
             {
                 return true;
@@ -523,7 +523,7 @@ pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
     .await;
     if retained_for_reconciliation(engine, pid).await {
         assert!(
-            store.procs().find(pid).await.is_ok(),
+            store.procs().find(pid).await.unwrap().is_some(),
             "a retained run keeps its proc row"
         );
         assert!(
@@ -538,7 +538,7 @@ pub(crate) async fn sweep_until_gone(engine: &Engine, pid: &str) {
         return;
     }
     assert!(
-        store.procs().find(pid).await.is_err(),
+        store.procs().find(pid).await.unwrap().is_none(),
         "the finished run's proc row must be removed"
     );
     assert!(

@@ -957,13 +957,7 @@ where
         self.kv.one(&key).await.map(|v| v.is_some())
     }
 
-    async fn find(&self, id: &str) -> crate::Result<Self::Item> {
-        self.find_opt(id)
-            .await?
-            .ok_or_else(|| ActError::Store(format!("cannot find {} by '{}'", self.prefix, id)))
-    }
-
-    async fn find_opt(&self, id: &str) -> crate::Result<Option<Self::Item>> {
+    async fn find(&self, id: &str) -> crate::Result<Option<Self::Item>> {
         Ok(self.find_with_bytes(id).await?.map(|(row, _)| row))
     }
 
@@ -2457,7 +2451,7 @@ mod tests {
             "create must not fall back to raw per-key writes"
         );
         // the data row exists and the index answers queries
-        assert_eq!(col.find("d1").await.unwrap().timestamp, 5);
+        assert_eq!(col.find("d1").await.unwrap().unwrap().timestamp, 5);
         let page = query(&col, Filter::and().expr(Expr::eq("state", "idle"))).await;
         assert_eq!(ids(&page), vec!["d1"]);
     }
@@ -2493,7 +2487,7 @@ mod tests {
                 .count,
             0
         );
-        assert_eq!(col.find("d1").await.unwrap().timestamp, 9);
+        assert_eq!(col.find("d1").await.unwrap().unwrap().timestamp, 9);
     }
 
     /// `query_all` is the exhaustive read: `query` bounds its rows by the page
@@ -2555,8 +2549,8 @@ mod tests {
         );
         assert_eq!(ids_of(&col, "state", json!("idle")).await, vec!["d1"]);
         assert_eq!(ids_of(&col, "timestamp", json!(1)).await, vec!["d1"]);
-        assert!(col.find("d2").await.is_err());
-        assert!(col.find("d3").await.is_err());
+        assert!(col.find("d2").await.unwrap().is_none());
+        assert!(col.find("d3").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2579,7 +2573,10 @@ mod tests {
             (0, 0),
             "delete must not fall back to raw per-key writes"
         );
-        assert!(col.find("d1").await.is_err(), "data row must be gone");
+        assert!(
+            col.find("d1").await.unwrap().is_none(),
+            "data row must be gone"
+        );
         for filter in ["state", "timestamp"] {
             let page = query(&col, Filter::and().expr(Expr::eq(filter, "idle"))).await;
             assert_eq!(page.count, 0, "no index row may survive the delete");
@@ -2770,7 +2767,7 @@ mod tests {
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
 
-        let row = col.find("d1").await.unwrap();
+        let row = col.find("d1").await.unwrap().unwrap();
         assert_eq!(
             ids_of(&col, "state", json!(row.state)).await,
             vec!["d1"],
@@ -2824,8 +2821,8 @@ mod tests {
         deleter.await.unwrap().unwrap();
         updater.await.unwrap().unwrap();
 
-        match col.find("d1").await {
-            Ok(row) => {
+        match col.find("d1").await.unwrap() {
+            Some(row) => {
                 assert_eq!(
                     ids_of(&col, "state", json!(row.state)).await,
                     vec!["d1"],
@@ -2853,7 +2850,7 @@ mod tests {
                     );
                 }
             }
-            Err(_) => {
+            None => {
                 for (field, value) in [
                     ("state", json!("a")),
                     ("state", json!("b")),
@@ -2901,7 +2898,7 @@ mod tests {
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
 
-        let row = col.find("d1").await.unwrap();
+        let row = col.find("d1").await.unwrap().unwrap();
         for (field, value) in [
             ("state", json!("a")),
             ("state", json!("b")),
@@ -3336,7 +3333,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome, ConditionalWrite::Applied);
-        assert_eq!(col.find("a").await.unwrap().state, "changed");
+        assert_eq!(col.find("a").await.unwrap().unwrap().state, "changed");
     }
 
     #[tokio::test]

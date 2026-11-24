@@ -1935,7 +1935,8 @@ async fn export_message_store_with_emit_id() {
         .deliveries()
         .find(&ret.delivery_id.clone().unwrap())
         .await
-        .unwrap();
+        .unwrap()
+        .expect("delivery row");
     assert_eq!(delivery.msg_id, "1");
     assert_eq!(delivery.chan_id, "my_emit_id");
 }
@@ -1974,7 +1975,8 @@ async fn export_message_store_with_emit_id_and_options() {
         .deliveries()
         .find(&ret.delivery_id.clone().unwrap())
         .await
-        .unwrap();
+        .unwrap()
+        .expect("delivery row");
     let pattern = serde_json::from_str::<Vars>(&delivery.chan_pattern).unwrap();
     assert_eq!(delivery.msg_id, msg.id);
     assert_eq!(delivery.chan_id, "my_emit_id");
@@ -1994,7 +1996,7 @@ async fn wait_for_delivery(
 ) -> data::Delivery {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        let row = store.deliveries().find(delivery_id).await.unwrap();
+        let row = store.deliveries().find(delivery_id).await.unwrap().unwrap();
         if row.status == status || tokio::time::Instant::now() >= deadline {
             return row;
         }
@@ -2079,7 +2081,7 @@ async fn export_message_multi_channels_share_message_single_delivery_each() {
         .await
         .unwrap();
 
-    let row_a = store.deliveries().find(&delivery_a).await.unwrap();
+    let row_a = store.deliveries().find(&delivery_a).await.unwrap().unwrap();
     assert_eq!(row_a.status, data::DeliveryStatus::Acked);
     // Channel b received the message but never acked it: its delivery was
     // handed over (`Delivered`) and stays pending. The handover is recorded
@@ -2180,7 +2182,8 @@ async fn export_message_clear_error_messages_by_none() {
         .deliveries()
         .find(&delivery.id)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("delivery row");
     assert_eq!(ret.status, data::DeliveryStatus::Error);
     engine
         .executor(&crate::Principal::unrestricted())
@@ -2277,7 +2280,8 @@ async fn export_message_resend_error_messages() {
         .deliveries()
         .find(&delivery.id)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("delivery row");
     assert_eq!(ret.status, data::DeliveryStatus::Error);
     engine
         .executor(&crate::Principal::unrestricted())
@@ -2292,7 +2296,8 @@ async fn export_message_resend_error_messages() {
         .deliveries()
         .find(&delivery.id)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("delivery row");
     assert_eq!(ret.status, data::DeliveryStatus::Created);
     assert_eq!(ret.retry_times, 0);
 }
@@ -2619,7 +2624,13 @@ impl crate::package::ActPackage for TriggerTestPackage {
                 "cannot find '{}' in options",
                 consts::MODEL_ID
             )))?;
-        let model: crate::ModelInfo = rt.store().models().find(&mid).await?.into();
+        let model: crate::ModelInfo = rt
+            .store()
+            .models()
+            .find(&mid)
+            .await?
+            .ok_or_else(|| crate::ActError::NotFound(format!("cannot find models by '{mid}'")))?
+            .into();
         let workflow = model.workflow()?;
         let start_params = serde_json::from_value::<Vars>(params.clone()).map_err(|e| {
             crate::ActError::Package(format!("invalid trigger package params: {e}"))

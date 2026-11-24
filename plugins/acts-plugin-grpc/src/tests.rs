@@ -942,7 +942,7 @@ async fn test_action_status_maps_each_error_kind() {
         (
             "model:get",
             Some(br#"{"id":"missing-model"}"#.to_vec()),
-            tonic::Code::Internal,
+            tonic::Code::NotFound,
         ),
     ];
     for (name, data, expected) in cases {

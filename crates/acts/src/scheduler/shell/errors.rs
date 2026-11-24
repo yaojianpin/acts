@@ -78,6 +78,53 @@ pub(super) fn runtime(error: impl std::fmt::Display) -> ActError {
     ActError::Runtime(error.to_string())
 }
 
+/// Map a command-planner refusal onto its engine error kind. The variants the
+/// caller's own request can trigger — a decided task, an unknown one, a bad
+/// input name — keep their text for the caller: the action protocol maps
+/// `Action` onto `invalid_argument` and `NotFound` onto `not_found`, so the
+/// refusal travels to the client instead of dying as an internal fault. A
+/// race (`ForeignSourceOperation`) or an engine bug (`InvalidPlan`) stays an
+/// internal fault.
+pub(super) fn command_refusal(
+    error: crate::scheduler::core::commit::command::CommandError,
+) -> ActError {
+    use crate::scheduler::core::commit::command::CommandError as C;
+    match error {
+        C::TaskNotFound(_) => ActError::NotFound(error.to_string()),
+        C::ActionNotAllowed { .. }
+        | C::EmptyInputName
+        | C::DuplicateInput(_)
+        | C::ReservedErrorInput => ActError::Action(error.to_string()),
+        C::WrongProcess { .. }
+        | C::ForeignSourceOperation(_)
+        | C::SourceOperationTargetsDifferentTask
+        | C::SequenceOverflow
+        | C::InvalidPlan(_) => runtime(error),
+    }
+}
+
+/// Map a rewind-planner refusal onto its engine error kind, with the same
+/// split as [`command_refusal`]: the `to` the client named (empty, never
+/// instantiated, beside or ahead of the source) and a source whose state
+/// cannot re-enter are the client's own input, so their text travels to the
+/// caller; a race or an engine bug stays an internal fault.
+pub(super) fn generation_refusal(
+    error: crate::scheduler::core::plan::generation::GenerationError,
+) -> ActError {
+    use crate::scheduler::core::plan::generation::GenerationError as G;
+    match error {
+        G::TaskNotFound(_) => ActError::NotFound(error.to_string()),
+        G::SourceNotReenterable { .. }
+        | G::EmptyTargetTaskId
+        | G::TargetNeverInstantiated(_)
+        | G::SourceOutsideRedoClosure { .. } => ActError::Action(error.to_string()),
+        G::WrongProcess
+        | G::SourceOperationTargetsDifferentTask
+        | G::GenerationOverflow
+        | G::InvalidPlan(_) => runtime(error),
+    }
+}
+
 /// A lost compare-and-swap: retryable, unlike a caller-correctable refusal.
 pub(super) fn conflict(message: impl Into<String>) -> ActError {
     ActError::Exception {

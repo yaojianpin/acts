@@ -761,7 +761,14 @@ async fn engine_set_store_custom() {
 
     // reads must go through the custom store
     let store = engine.runtime().store();
-    assert!(store.models().find("custom_store_model").await.is_ok());
+    assert!(
+        store
+            .models()
+            .find("custom_store_model")
+            .await
+            .unwrap()
+            .is_some()
+    );
     let page = store
         .models()
         .query(&crate::query::Query::new())
@@ -903,7 +910,7 @@ async fn snapshot_manager_remove_requires_registration() {
 
     // a target the engine never registered is a wiring error, not a no-op
     let err = engine.snapshot().remove("missing", "").unwrap_err();
-    assert!(matches!(err, crate::ActError::Runtime(_)), "got: {err}");
+    assert!(matches!(err, crate::ActError::NotFound(_)), "got: {err}");
     assert!(err.to_string().contains("missing"), "got: {err}");
 
     engine.close().await;

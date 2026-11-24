@@ -198,7 +198,7 @@ impl TimerGuider {
 async fn sweep_pids(runtime: &Arc<Runtime>, pids: &[String]) -> Result<usize> {
     let mut rows = Vec::with_capacity(pids.len());
     for pid in pids {
-        let Some(row) = runtime.store().procs().find_opt(pid).await? else {
+        let Some(row) = runtime.store().procs().find(pid).await? else {
             // The run was removed (or its pid reused and settled again)
             // between the cycle scan and this read; the next cycle re-reads
             // the set.
@@ -214,7 +214,7 @@ async fn sweep_pids(runtime: &Arc<Runtime>, pids: &[String]) -> Result<usize> {
         // reclaim decision — the proc row alone carries `removable`, so the
         // sweep does not rewrite the run's task and vars rows to decide it.
         runtime.workers().refresh_proc_row(pid).await;
-        if let Some(row) = runtime.store().procs().find_opt(pid).await? {
+        if let Some(row) = runtime.store().procs().find(pid).await? {
             rows.push(row);
         }
     }
@@ -262,7 +262,7 @@ async fn sweep_rows(runtime: &Arc<Runtime>, rows: Vec<crate::store::data::Proc>)
     // rows disappeared anyway (the batch applied, an operator cleaned up),
     // clear the mark so the pid is not blocked forever.
     for pid in runtime.workers().reclaiming_pids() {
-        if let Ok(None) = runtime.store().procs().find_opt(&pid).await {
+        if let Ok(None) = runtime.store().procs().find(&pid).await {
             runtime.workers().finish_reclaim(&pid);
         }
     }
@@ -360,7 +360,7 @@ async fn cleanup_process(
         // reported a failure. The proc row is deleted atomically with every
         // other row of the process, so its absence proves the removal;
         // keep the mark only when residue may still be there.
-        match runtime.store().procs().find_opt(pid).await {
+        match runtime.store().procs().find(pid).await {
             Ok(None) => {
                 runtime.workers().finish_reclaim(pid);
                 return Ok(true);

@@ -65,7 +65,14 @@ impl ProcessExecutor {
         // accepted from them) and is popped by `Runtime::start` so it cannot
         // leak into the workflow's user vars.
         options.set(consts::PROC_OWNER, owner);
-        let model: ModelInfo = self.runtime.store().models().find(mid).await?.into();
+        let model: ModelInfo = self
+            .runtime
+            .store()
+            .models()
+            .find(mid)
+            .await?
+            .ok_or_else(|| crate::ActError::NotFound(format!("cannot find models by '{mid}'")))?
+            .into();
         let workflow = model.workflow()?;
         // The model's resource must be within the owner's grants — the same
         // check a deploy runs, carried by the sealed policy so a subflow
@@ -125,8 +132,14 @@ impl ProcessExecutor {
     pub async fn get(&self, pid: &str) -> Result<ProcInfo> {
         self.principal.check(GET)?;
         // The row query answers with the stored task rows; a missing proc row
-        // is the same store error it has always been.
-        let proc = self.runtime.store().procs().find(pid).await?;
+        // is the caller's addressing mistake, not a store fault.
+        let proc = self
+            .runtime
+            .store()
+            .procs()
+            .find(pid)
+            .await?
+            .ok_or_else(|| crate::ActError::NotFound(format!("cannot find procs by '{pid}'")))?;
         let mut info: ProcInfo = (&proc).into();
 
         if let Some(read) = self.runtime.read_proc(pid).await? {

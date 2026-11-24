@@ -22,7 +22,8 @@ use std::fmt;
 /// Action dispatch failure.
 #[derive(Debug)]
 pub enum Error {
-    /// Unknown action name.
+    /// The name the caller addressed resolves to nothing: an unknown action,
+    /// an unknown user, a missing entity id.
     NotFound(String),
     /// Malformed or missing payload fields.
     Invalid(String),
@@ -48,7 +49,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::NotFound(msg) => write!(f, "not found action '{msg}'"),
+            Error::NotFound(msg) => write!(f, "not found: {msg}"),
             Error::Invalid(msg) => f.write_str(msg),
             Error::Internal(msg) => f.write_str(msg),
             Error::Unauthenticated(msg) => write!(f, "unauthenticated: {msg}"),
@@ -74,6 +75,11 @@ fn value<T: serde::Serialize>(r: crate::Result<T>) -> Ret {
         Ok(value) => serde_json::to_value(value).map_err(|e| Error::Internal(e.to_string())),
         Err(crate::ActError::Unauthenticated(msg)) => Err(Error::Unauthenticated(msg)),
         Err(crate::ActError::Denied(msg)) => Err(Error::Denied(msg)),
+        // The entity the caller named does not exist: its id, its refusal.
+        Err(crate::ActError::NotFound(msg)) => Err(Error::NotFound(msg)),
+        // A caller-correctable payload problem (a missing `uses`, an empty
+        // pid): the same mapping the ACL management calls use.
+        Err(crate::ActError::Action(msg)) => Err(Error::Invalid(msg)),
         // The scheduler (or the store writer behind it) is at capacity: the
         // durable work stays queued, the caller retries — this is load, not
         // a failure.
@@ -817,7 +823,7 @@ mod tests {
         let engine = open_engine().await;
         let err = apply(&engine, "no:such", Vars::new()).await.unwrap_err();
         assert!(matches!(err, Error::NotFound(_)));
-        assert_eq!(err.to_string(), "not found action 'no:such'");
+        assert_eq!(err.to_string(), "not found: no:such");
     }
 
     /// `sys:status` answers the engine's own vitals: the version, a healthy
@@ -943,7 +949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_remove_unknown_target_is_internal() {
+    async fn snapshot_remove_unknown_target_is_not_found() {
         let engine = open_engine().await;
         let err = apply(
             &engine,
@@ -952,7 +958,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, Error::Internal(_)), "got: {err}");
+        assert!(matches!(err, Error::NotFound(_)), "got: {err}");
         assert!(err.to_string().contains("none"), "got: {err}");
     }
 
@@ -1219,6 +1225,7 @@ mod tests {
                 .deliveries()
                 .find(&delivery_id)
                 .await
+                .unwrap()
                 .unwrap()
                 .status,
             crate::data::DeliveryStatus::Acked
@@ -1758,10 +1765,7 @@ mod tests {
 
     #[test]
     fn every_error_variant_displays_its_wire_kind() {
-        assert_eq!(
-            Error::NotFound("x".to_string()).to_string(),
-            "not found action 'x'"
-        );
+        assert_eq!(Error::NotFound("x".to_string()).to_string(), "not found: x");
         assert_eq!(Error::Invalid("bad".to_string()).to_string(), "bad");
         assert_eq!(Error::Internal("boom".to_string()).to_string(), "boom");
         assert_eq!(
@@ -1789,6 +1793,14 @@ mod tests {
         assert!(matches!(
             value::<()>(Err(crate::ActError::Store("s".to_string()))).unwrap_err(),
             Error::Internal(_)
+        ));
+        assert!(matches!(
+            value::<()>(Err(crate::ActError::NotFound("gone".to_string()))).unwrap_err(),
+            Error::NotFound(_)
+        ));
+        assert!(matches!(
+            value::<()>(Err(crate::ActError::Action("bad".to_string()))).unwrap_err(),
+            Error::Invalid(_)
         ));
     }
 
@@ -2216,7 +2228,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, Error::Internal(_)), "got: {err}");
+        assert!(matches!(err, Error::NotFound(_)), "got: {err}");
         let err = apply(&engine, "task:get", Vars::new().with("pid", "gone"))
             .await
             .unwrap_err();
