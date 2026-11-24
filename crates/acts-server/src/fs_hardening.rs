@@ -57,8 +57,10 @@ pub fn ensure_dir_secure(path: &Path) -> io::Result<()> {
 /// being a symlink (`symlink_metadata` per component — never following one),
 /// plus, on unix: group/other write on the directory itself, an owner that
 /// is not the current user, and a world-writable parent without the sticky
-/// bit. `strict` turns violations into a refusing `ActError::Config`; the
-/// default warns and applies the best-effort fix (chmod 0700 on the
+/// bit. A missing directory validates: it does not exist yet on a first
+/// start (log dir, store dir) and the caller creates it safely right after
+/// the pass. `strict` turns violations into a refusing `ActError::Config`;
+/// the default warns and applies the best-effort fix (chmod 0700 on the
 /// directory, other-write removed from world-writable parents).
 pub fn validate_dir_secure(path: &Path, strict: bool) -> Result<(), ActError> {
     check_symlink_components(path)?;
@@ -180,44 +182,53 @@ pub fn validate_file_secure(path: &Path, strict: bool) -> Result<(), ActError> {
 fn validate_dir_permissions(path: &Path, strict: bool) -> Result<(), ActError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    // A missing directory is not a violation: the caller creates it safely
+    // right after this pass (`ensure_dir_secure` sets the mode at creation,
+    // and on a first start the log dir and store dir do not exist until the
+    // log appender and the store open make them). Only what exists can be a
+    // symlink target or carry loose modes, so the leaf checks below are
+    // skipped for it — the parent checks still run.
     let meta = match fs::metadata(path) {
-        Ok(meta) => meta,
+        Ok(meta) => Some(meta),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => return Err(io_err(path, err)),
     };
-    let mode = meta.permissions().mode();
-    if !meta.is_dir() {
-        return Err(ActError::Config(format!(
-            "{} is not a directory",
-            path.display()
-        )));
-    }
-    if mode & 0o022 != 0 {
-        if strict {
+    if let Some(meta) = &meta {
+        let mode = meta.permissions().mode();
+        if !meta.is_dir() {
             return Err(ActError::Config(format!(
-                "{} is writable by group or other (mode {:o}); set fs_strict = false \
-                 to fix it automatically",
-                path.display(),
-                mode & 0o777
+                "{} is not a directory",
+                path.display()
             )));
         }
-        tracing::warn!(
-            path = %path.display(),
-            mode = format_args!("{:o}", mode & 0o777),
-            "server directory is group/other writable; restricting to 0700"
-        );
-        set_dir_mode(path, 0o700)?;
-    }
-    if meta.uid() != current_uid() {
-        return violation(
-            strict,
-            &format!(
-                "{} is owned by uid {} but the server runs as uid {}",
-                path.display(),
-                meta.uid(),
-                current_uid()
-            ),
-            || set_dir_mode(path, 0o700).map(|_| ()),
-        );
+        if mode & 0o022 != 0 {
+            if strict {
+                return Err(ActError::Config(format!(
+                    "{} is writable by group or other (mode {:o}); set fs_strict = false \
+                     to fix it automatically",
+                    path.display(),
+                    mode & 0o777
+                )));
+            }
+            tracing::warn!(
+                path = %path.display(),
+                mode = format_args!("{:o}", mode & 0o777),
+                "server directory is group/other writable; restricting to 0700"
+            );
+            set_dir_mode(path, 0o700)?;
+        }
+        if meta.uid() != current_uid() {
+            return violation(
+                strict,
+                &format!(
+                    "{} is owned by uid {} but the server runs as uid {}",
+                    path.display(),
+                    meta.uid(),
+                    current_uid()
+                ),
+                || set_dir_mode(path, 0o700).map(|_| ()),
+            );
+        }
     }
     // A world-writable parent without the sticky bit lets any local account
     // rename or replace our directories out from under the server (the

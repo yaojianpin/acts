@@ -765,7 +765,7 @@ impl<T> KvCollection<T> {
                     ));
                 }
             }
-            ExprOp::In if !expr.value.as_array().is_some_and(|a| !a.is_empty()) => {
+            ExprOp::In if expr.value.as_array().is_none_or(|a| a.is_empty()) => {
                 return Err(ActError::Store(
                     "In operator requires a non-empty array".to_string(),
                 ));

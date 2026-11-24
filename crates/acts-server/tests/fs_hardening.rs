@@ -105,6 +105,9 @@ fn world_writable_parent_without_sticky_is_flagged() {
     let parent = dir.join("parent");
     let child = parent.join("data");
     fs::create_dir_all(&child).unwrap();
+    // Pin the child's own mode so the strict passes below test the parent
+    // handling regardless of the runner's umask.
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
 
     let err = validate_dir_secure(&child, true).unwrap_err();
@@ -113,7 +116,7 @@ fn world_writable_parent_without_sticky_is_flagged() {
     // The lenient pass removes the other-write bit from the parent (keeping
     // the rest of the mode), and then everything validates.
     validate_dir_secure(&child, false).unwrap();
-    assert_eq!(mode_of(&parent), 0o770);
+    assert_eq!(mode_of(&parent), 0o775);
     validate_dir_secure(&child, true).unwrap();
     let _ = fs::remove_dir_all(&dir);
 }
@@ -125,6 +128,7 @@ fn world_writable_parent_with_sticky_bit_passes() {
     let parent = dir.join("parent");
     let child = parent.join("data");
     fs::create_dir_all(&child).unwrap();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o1777)).unwrap();
     validate_dir_secure(&child, true).unwrap();
     let _ = fs::remove_dir_all(&dir);
