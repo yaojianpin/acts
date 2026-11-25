@@ -57,21 +57,35 @@ pub fn ensure_dir_secure(path: &Path) -> io::Result<()> {
 /// being a symlink (`symlink_metadata` per component — never following one),
 /// plus, on unix: group/other write on the directory itself, an owner that
 /// is not the current user, and a world-writable parent without the sticky
-/// bit. A missing directory validates: it does not exist yet on a first
-/// start (log dir, store dir) and the caller creates it safely right after
-/// the pass. `strict` turns violations into a refusing `ActError::Config`;
-/// the default warns and applies the best-effort fix (chmod 0700 on the
-/// directory, other-write removed from world-writable parents).
+/// bit. A path that exists but is not a directory is refused on every
+/// platform and in both modes. A missing directory validates: it does not
+/// exist yet on a first start (log dir, store dir) and the caller creates it
+/// safely right after the pass. `strict` turns violations into a refusing
+/// `ActError::Config`; the default warns and applies the best-effort fix
+/// (chmod 0700 on the directory, other-write removed from world-writable
+/// parents).
 pub fn validate_dir_secure(path: &Path, strict: bool) -> Result<(), ActError> {
     check_symlink_components(path)?;
+    // A file occupying the path (a swapped leaf, a misconfigured dir) is a
+    // hard error on every platform and in both modes: the path already points
+    // somewhere else, so there is nothing to fix — same rule as a symlink.
+    match fs::metadata(path) {
+        Ok(meta) if !meta.is_dir() => {
+            return Err(ActError::Config(format!(
+                "{} is not a directory",
+                path.display()
+            )));
+        }
+        _ => {}
+    }
     #[cfg(unix)]
     validate_dir_permissions(path, strict)?;
     #[cfg(windows)]
     {
         // The DACL applied by `ensure_dir_secure` is always re-applied before
         // this runs (same startup pass); windows exposes no cheap equivalent
-        // of the unix mode checks, so symlink rejection is the validation
-        // there.
+        // of the unix mode checks, so symlink and non-directory rejection is
+        // the validation there.
         let _ = strict;
     }
     Ok(())
@@ -195,12 +209,6 @@ fn validate_dir_permissions(path: &Path, strict: bool) -> Result<(), ActError> {
     };
     if let Some(meta) = &meta {
         let mode = meta.permissions().mode();
-        if !meta.is_dir() {
-            return Err(ActError::Config(format!(
-                "{} is not a directory",
-                path.display()
-            )));
-        }
         if mode & 0o022 != 0 {
             if strict {
                 return Err(ActError::Config(format!(

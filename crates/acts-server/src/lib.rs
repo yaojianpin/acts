@@ -1046,14 +1046,16 @@ pub fn validate_startup_dirs(config_dir: &Path, config: &Config, strict: bool) -
     fs_hardening::validate_dir_secure(config_dir, strict)?;
     fs_hardening::validate_file_secure(&config_path(config_dir), strict)?;
     let log_dir = PathBuf::from(config.log().dir);
-    fs_hardening::validate_dir_secure(&log_dir, strict)?;
+    fs_hardening::validate_dir_secure(&log_dir, strict)
+        .map_err(|err| acts::ActError::Config(format!("[log] dir: {err}")))?;
     let db = if config.has("db") {
         config.get::<DbConfig>("db")?
     } else {
         DbConfig::default()
     };
     if let Some(dir) = store_dir(config_dir, &db)? {
-        fs_hardening::validate_dir_secure(&dir, strict)?;
+        fs_hardening::validate_dir_secure(&dir, strict)
+            .map_err(|err| acts::ActError::Config(format!("[db] store dir: {err}")))?;
     }
     Ok(())
 }

@@ -62,8 +62,10 @@ fn run_server(dir: &Path, config_dir: &Path) -> anyhow::Result<String> {
 #[test]
 fn unusable_log_dir_fails_without_panicking() -> anyhow::Result<()> {
     let dir = scratch("bad-log-dir")?;
-    // A regular file can never be a log directory: `create_dir_all` rejects it
-    // with "already exists" / ENOTDIR instead of the server dying on a panic.
+    // A regular file can never be a log directory: the startup pass
+    // (`validate_startup_dirs`) rejects it with "[log] dir: … is not a
+    // directory" before the appender is ever built, so the server never dies
+    // on a panic.
     let blocker = dir.join("blocker");
     std::fs::write(&blocker, b"")
         .with_context(|| format!("failed to write {}", blocker.display()))?;
@@ -76,7 +78,7 @@ fn unusable_log_dir_fails_without_panicking() -> anyhow::Result<()> {
 
     let stderr = run_server(&dir, &config_dir)?;
     assert!(
-        stderr.contains("failed to create log dir"),
+        stderr.contains("[log] dir") && stderr.contains("is not a directory"),
         "no diagnostic for the unusable log dir in stderr: {stderr}"
     );
     assert!(
